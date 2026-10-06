@@ -247,9 +247,9 @@ step on the Undo list. A plugin that is not signed by a key this program was
 built with is refused by the server and again by every seat. See
 `docs/plugins.md`.
 
-Mesa Fab's own checks — scales, sizes read off the drawing, missed members,
-takeoff coverage and connections — are the first one, in
-`plugins/mesafab-estimating`, built on its own and never part of the program.
+An office's own checks — scales, sizes read off the drawing, missed members,
+takeoff coverage, connections — are what a plugin is for: each is built on its
+own, kept by the office that wrote it, and never part of the program.
 
 ## Excalibur View Office: the license
 
@@ -311,7 +311,7 @@ one and brings its takeoff across, marked for checking — watches a stamp that
 moves when the takeoff does, and reads the takeoff back from
 `/api/v1/projects/{id}/markuplist` in the shape its Bluebeam importer already
 reads, with exact counts beside it. A finished bid is archived, never deleted.
-See `docs/fabwire-integration.md`.
+See `docs/integrating.md`.
 
 ## The four things Revu does not have
 

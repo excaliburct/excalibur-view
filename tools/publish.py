@@ -22,9 +22,9 @@ never goes anywhere else. Standard library plus `cryptography` for Ed25519.
 publish. The three commands above it are its parts, for when one of them has
 to be done on its own.
     python3 publish.py make-key    --name excalibur-plugins-2026 --out plugin-signing.key
-    python3 publish.py sign-plugin --key plugin-signing.key --id mesafab-estimating \\
-                                --version 1.0.0 --name "Mesa Fab Estimating" \\
-                                mesafab_estimating.wasm
+    python3 publish.py sign-plugin --key plugin-signing.key --id acme-estimating \\
+                                --version 1.0.0 --name "Acme Estimating" \\
+                                acme_estimating.wasm
 
 A release goes up as `preview` first — a GitHub prerelease, which only an
 office set to "get them early" takes — and is promoted to `stable` once it has

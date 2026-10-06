@@ -16,7 +16,7 @@ fn manifest() -> plugin_api::Manifest { /* id, name, version, commands, settings
 fn run(input: plugin_api::Input) -> Result<plugin_api::Output, String> { /* ... */ }
 ```
 
-`plugins/mesafab-estimating` is a whole one.
+That is a whole one: it needs nothing from this repository but the contract.
 
 ### What it is handed
 
@@ -108,17 +108,17 @@ that will sign with it and prints the line for `trust.rs`.
 ## Building and signing
 
 ```sh
-plugins/mesafab-estimating/build.sh          # -> target/mesafab_estimating.wasm
+cargo build --release --target wasm32-unknown-unknown   # -> target/wasm32-unknown-unknown/release/acme_estimating.wasm
 ```
 
 On the publisher's PC, beside the signing key:
 
 ```powershell
-py -3 publish.py sign-plugin --key plugin-signing.key --id mesafab-estimating `
-      --version 1.0.0 --name "Mesa Fab Estimating" mesafab_estimating.wasm
+py -3 publish.py sign-plugin --key plugin-signing.key --id acme-estimating `
+      --version 1.0.0 --name "Acme Estimating" acme_estimating.wasm
 ```
 
-That writes `mesafab-estimating-1.0.0.hvplugin`. An administrator adds it
+That writes `acme-estimating-1.0.0.hvplugin`. An administrator adds it
 with **Plugins → Add Plugin…**; it goes to the office server, which checks
 the signature and hands it to every seat within a few minutes. A newer
 version with the same id replaces the older.

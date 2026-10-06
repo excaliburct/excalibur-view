@@ -45,7 +45,7 @@ pub const ABI: u32 = 1;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Manifest {
-    /// Short and permanent: `mesafab-estimating`. Letters, digits and dashes.
+    /// Short and permanent: `acme-estimating`. Letters, digits and dashes.
     pub id: String,
     /// What the Plugins menu calls it.
     pub name: String,
