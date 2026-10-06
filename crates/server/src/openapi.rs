@@ -218,6 +218,18 @@ other way: every drawing, markup and quantity stays. `{\"archived\": false}` bri
                 "responses": ok("Project")
             }
         },
+        "/projects/{id}/place": {
+            "post": {
+                "summary": "Move a project in the Studio's list.",
+                "description": "A place is folders written with `/`: `Bids/2026`, `Active Jobs`, \
+`Past Jobs/2025`. The Studio shows projects on those shelves, as an office keeps its files; a \
+program moves one there as a bid is won or lost and a job finishes. Empty or null puts it back \
+with the other projects. Nothing else about it changes.",
+                "parameters": [path_param("id", "The project.")],
+                "requestBody": body("Placing"),
+                "responses": ok("Project")
+            }
+        },
         "/projects/{id}/stamp": {
             "get": {
                 "summary": "Whether anything has changed, without reading it.",
@@ -281,11 +293,12 @@ that files its jobs here by its own id can push as often as it likes.",
         "/sets": {
             "post": {
                 "summary": "Upload a drawing set.",
-                "description": "Multipart: `project`, `name` and the PDF as `file`. \
-The sheets are read out of it on the way in. Bytes the project already holds answer with \
-the set that holds them (`already_here`). A drawing with the same name as a current set \
-supersedes it; with `carry_forward=1` that set's markups are brought across, sheet for \
-sheet, marked `Carried forward — check`.",
+                "description": "Multipart: `project`, `name`, optionally `folder`, and the PDF as \
+`file`. The sheets are read out of it on the way in. Bytes the project already holds answer \
+with the set that holds them (`already_here`). A drawing with the same name as a current set \
+in the same folder supersedes it; with `carry_forward=1` that set's markups are brought \
+across, sheet for sheet, marked `Carried forward — check`. The same name in another folder is \
+another drawing.",
                 "requestBody": {
                     "required": true,
                     "content": {
@@ -297,6 +310,7 @@ sheet, marked `Carried forward — check`.",
                                     "project": { "type": "string" },
                                     "name": { "type": "string" },
                                     "carry_forward": { "type": "string", "description": "1 brings the markups on the issue this replaces across." },
+                                    "folder": { "type": "string", "description": "The folder it came from in the job's own files, as folders written with `/`: 10 SHOP DRAWINGS/10.4 FOR FABRICATION." },
                                     "file": { "type": "string", "format": "binary" }
                                 }
                             }
@@ -777,12 +791,15 @@ fn schemas() -> Value {
             ("sets", "integer", "How many drawing sets, not counting ones replaced by a newer issue."),
             ("reference", "string", "Who this project is in another program: fabwire:bid:2630."),
             ("archived", "string", "When it was put away. Absent while it is in use."),
+            ("place", "string", "Where it sits in the Studio's list: Bids/2026, Active Jobs. Absent: with the other projects."),
         ]),
         "NewProject": object(&[
             ("number", "string", ""),
             ("name", "string", ""),
             ("reference", "string", "Optional. The same reference always answers with the same project."),
+            ("place", "string", "Optional. Where it goes in the Studio's list; with a reference already filed, it moves there. Left out, it stays where it is."),
         ]),
+        "Placing": object(&[("place", "string", "Folders written with /. Empty or null: with the other projects.")]),
         "Archiving": object(&[("archived", "boolean", "False brings it back. True if left out.")]),
         "Stamp": object(&[
             ("project", "string", ""),
@@ -846,6 +863,7 @@ fn schemas() -> Value {
             ("already_here", "boolean", "The upload was bytes this project already had; this is that set."),
             ("carried_forward", "integer", "Markups brought across from the set this replaced."),
             ("carry_note", "string", "Why some were not."),
+            ("folder", "string", "The folder it came from in the job's own files. Absent: the project's own."),
         ]),
         "Sheet": object(&[
             ("page", "integer", "Zero-based, the way the file counts."),

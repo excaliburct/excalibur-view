@@ -585,6 +585,11 @@ fn upgrade(db: &Connection) -> Result<()> {
     // takeoff on a revised sheet is not lost and is plainly marked as needing
     // a look.
     add_column(db, "markups", "carried_from", "TEXT")?;
+    // Where a project sits in the Studio's list (`Bids/2026`, `Active Jobs`),
+    // and the folder a drawing came from in the job's own files. Both are the
+    // other program's to say; none is where everything was before.
+    add_column(db, "projects", "place", "TEXT")?;
+    add_column(db, "sets", "folder", "TEXT")?;
     db.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS projects_by_reference
              ON projects(reference) WHERE reference IS NOT NULL;

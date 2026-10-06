@@ -634,6 +634,7 @@ misconfigured server pushing anything it likes onto six machines.
 | `GET /health` | is this a Hyperview server, and what does it speak |
 | `POST /auth/token` | sign in |
 | `GET /projects`, `POST /projects` | jobs |
+| `POST /projects/{id}/place` | where a job sits in the Studio: `Bids/2026`, `Active Jobs`, `Past Jobs/2025` |
 | `POST /sets` | upload a drawing set; the sheets are read on the way in |
 | `GET /sets/{id}/file` | the PDF, with `If-None-Match` so six seats do not download it six times |
 | `GET /sets/{id}/sheets` | sizes and scales; a null scale is not a scale of zero |

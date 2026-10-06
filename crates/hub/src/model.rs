@@ -85,6 +85,12 @@ pub struct Project {
     /// drawing, markup and quantity; it is only left off the list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived: Option<String>,
+    /// Where it sits in the Studio's list, as folders: `Bids/2026`,
+    /// `Active Jobs`, `Past Jobs/2025`. The program it belongs to says, and
+    /// moves it as a bid is won or lost and a job finishes. None: with the
+    /// other projects, as every project was before places.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -93,6 +99,10 @@ pub struct NewProject {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
+    /// Where it goes in the Studio's list; asked for again with the same
+    /// reference, it moves there. Left out, it stays where it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<String>,
 }
 
 /// A drawing set: one PDF, however many sheets.
@@ -130,6 +140,12 @@ pub struct DrawingSet {
     /// Why some were not, in words, when some were not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub carry_note: Option<String>,
+    /// The folder it came from in the job's own files, as folders:
+    /// `10 SHOP DRAWINGS/10.4 FOR FABRICATION`. The Studio shows a project's
+    /// sets in these, and a drawing issued again replaces only the one of the
+    /// same name in the same folder. None: the project's own, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {

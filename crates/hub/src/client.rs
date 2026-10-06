@@ -555,6 +555,7 @@ impl Client {
             number: number.to_string(),
             name: name.to_string(),
             reference: None,
+            place: None,
         }))
     }
 

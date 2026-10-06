@@ -228,6 +228,27 @@ can read it with any PDF library. Everything beside it in the API — subject,
 author, quantity, the custom columns — is derived, and is there so you never
 have to parse PDF to filter and total.
 
+### Where a job sits, and its drawings' folders
+
+Since 0.6.14 a project has a **place** and a drawing set a **folder**, so the
+Studio can show an office's jobs the way it keeps its files: shelves such as
+**Active Jobs**, **Bids/2026**, **Lost Bids/2026** and **Past Jobs/2025**, each
+folded with how many are on it, and inside a project its drawings in the
+folders they came from in the job's own files. A program that keeps jobs (an
+estimating or ERP system) says where each one sits and moves it as a bid is
+won or lost and a job finishes; the office never moves them by hand.
+
+| | |
+|---|---|
+| `POST /projects` with `place` | `Bids/2026`. Asked again with the same `reference` and a place, the project moves there; without one, it stays where it is. |
+| `POST /projects/{id}/place` | `{"place": "Active Jobs"}` moves it. Null puts it back with the other projects. Nothing on it changes. |
+| `POST /sets` with `folder` | The folder the drawing came from, written with `/`. A drawing issued again replaces only the one of the same name **in the same folder** (case and spacing aside), so `S-101` in `10.1 FOR APPROVAL` and in `10.4 FOR FABRICATION` are two drawings. |
+
+A place or folder is folder names between slashes (a backslash counts as one),
+none empty, none `.` or `..`, at most 260 characters and twelve deep. A project
+with no place is under **Other projects**, and a server where nothing has a
+place shows the list it always did.
+
 ### Being told instead of asking
 
 Studio → Office → Change notices, or `POST /notices` with a `url`, and the
@@ -337,6 +358,14 @@ Excalibur View keeps the columns with the chest, so this cannot happen.
 - A tool chest is JSON you can read.
 - The API describes itself at `/openapi.json`, and the build fails if a route
   is missing from it.
+- **The API only grows.** A route that is in `/api/v1` stays, under the same
+  method and path, and a field that is in it keeps its name and its type. New
+  routes and new fields are added; nothing you use is renamed, retyped or
+  taken away. The server reads fields it does not know and leaves them, so a
+  program written for a later server still talks to an earlier one. A change
+  that cannot be made by adding goes into `/api/v2`, beside v1, never in place
+  of it. `crates/server/api-v1.json` lists everything v1 has promised, and a
+  test fails the build of any release that drops or changes one of them.
 - The plugin ABI is versioned. A plugin built for a later contract than the
   program knows is refused with a reason rather than run and misread.
 - It all runs on your server. Nothing here needs us to be online, or to exist.

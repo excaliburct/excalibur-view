@@ -63,6 +63,7 @@ pub mod sync;
 pub mod textedit;
 pub mod trust;
 pub mod serverui;
+pub mod shelves;
 pub mod scale;
 pub mod seal;
 pub mod units;

@@ -1164,27 +1164,37 @@ impl App {
                                     .size(11.0),
                             );
                         }
-                        for project in &self.standing.projects {
-                            let response = ui.add(
-                                egui::Button::new(RichText::new(how_it_reads(
-                                    &project.number,
-                                    &project.name,
-                                )))
-                                .frame(false)
-                                .min_size(egui::vec2(ui.available_width(), 22.0)),
-                            );
-                            if response.clicked() {
-                                open_project = Some(project.id.clone());
+                        // As the office keeps its files: the active jobs, the
+                        // bids by year, the lost ones, the finished jobs by
+                        // year, each where the program it belongs to put it.
+                        // A server where nothing has a place shows the list
+                        // it always did.
+                        let tree = crate::shelves::shelve(
+                            &self.standing.projects,
+                            |p| p.place.as_deref(),
+                            crate::shelves::OFFICE,
+                        );
+                        if tree.shelves.is_empty() {
+                            for project in &tree.items {
+                                project_row(ui, theme, project, &mut open_project);
                             }
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} drawing set{}",
-                                    project.sets,
-                                    if project.sets == 1 { "" } else { "s" }
-                                ))
-                                .color(theme.faint)
-                                .size(10.0),
-                            );
+                        } else {
+                            for shelf in &tree.shelves {
+                                project_shelf(ui, theme, shelf, &mut open_project);
+                            }
+                            if !tree.items.is_empty() {
+                                egui::CollapsingHeader::new(
+                                    RichText::new(format!("Other projects ({})", tree.items.len()))
+                                        .size(12.0),
+                                )
+                                .id_salt("shelf:")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    for project in &tree.items {
+                                        project_row(ui, theme, project, &mut open_project);
+                                    }
+                                });
+                            }
                         }
 
                         if !self.standing.chests.is_empty() || is_admin {
@@ -1289,42 +1299,18 @@ impl App {
                                     .size(11.0),
                             );
                         }
-                        for set in &self.standing.sets {
-                            let response = ui.add(
-                                egui::Button::new(RichText::new(&set.name))
-                                    .frame(false)
-                                    .min_size(egui::vec2(ui.available_width(), 22.0)),
-                            );
-                            if response.clicked() {
-                                open_set = Some((set.id.clone(), set.name.clone()));
-                            }
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{} sheets · {:.1} MB · {}",
-                                        set.sheets,
-                                        set.bytes as f64 / 1_048_576.0,
-                                        set.uploaded_by
-                                    ))
-                                    .color(theme.faint)
-                                    .size(10.0),
-                                );
-                                // Nobody takes off on the set everybody else
-                                // is reading. One button, and no upload: the
-                                // copy points at the same file.
-                                if ui
-                                    .small_button("Take off on a copy")
-                                    .on_hover_text(
-                                        "A copy of this set to mark up, with the sheet numbers and \
-                                         the scales already on it. The issued set stays clean, and \
-                                         nothing is uploaded.",
-                                    )
-                                    .clicked()
-                                {
-                                    copy_set = Some((set.id.clone(), set.name.clone()));
-                                }
-                            });
-                            ui.separator();
+                        // A drawing in the folder it came from in the job's
+                        // own files, the ones with none at the top.
+                        let folders = crate::shelves::shelve(
+                            &self.standing.sets,
+                            |s| s.folder.as_deref(),
+                            &[],
+                        );
+                        for set in &folders.items {
+                            set_row(ui, theme, set, &mut open_set, &mut copy_set);
+                        }
+                        for shelf in &folders.shelves {
+                            set_shelf(ui, theme, shelf, &mut open_set, &mut copy_set);
                         }
                     }
                 }
@@ -1932,6 +1918,119 @@ fn people_section(
     if cancel_new {
         office.new_person = None;
     }
+}
+
+/// A project in the Studio's list: its number and name, and how many drawings.
+fn project_row(
+    ui: &mut egui::Ui,
+    theme: ui::chrome::Theme,
+    project: &hub::Project,
+    open_project: &mut Option<String>,
+) {
+    let response = ui.add(
+        egui::Button::new(RichText::new(how_it_reads(&project.number, &project.name)))
+            .frame(false)
+            .min_size(egui::vec2(ui.available_width(), 22.0)),
+    );
+    if response.clicked() {
+        *open_project = Some(project.id.clone());
+    }
+    ui.label(
+        RichText::new(format!(
+            "{} drawing set{}",
+            project.sets,
+            if project.sets == 1 { "" } else { "s" }
+        ))
+        .color(theme.faint)
+        .size(10.0),
+    );
+}
+
+/// A shelf of projects -- `Bids`, and `2026` in it -- folded, with how many
+/// are in it; the active jobs and the bids start open.
+fn project_shelf(
+    ui: &mut egui::Ui,
+    theme: ui::chrome::Theme,
+    shelf: &crate::shelves::Shelf<'_, hub::Project>,
+    open_project: &mut Option<String>,
+) {
+    egui::CollapsingHeader::new(RichText::new(format!("{} ({})", shelf.name, shelf.count())).size(12.0))
+        .id_salt(format!("shelf:{}", shelf.path))
+        .default_open(crate::shelves::opens(&shelf.path))
+        .show(ui, |ui| {
+            for inner in &shelf.shelves {
+                project_shelf(ui, theme, inner, open_project);
+            }
+            for project in &shelf.items {
+                project_row(ui, theme, project, open_project);
+            }
+        });
+}
+
+/// A drawing set in an open project: open it, or take off on a copy.
+fn set_row(
+    ui: &mut egui::Ui,
+    theme: ui::chrome::Theme,
+    set: &hub::DrawingSet,
+    open_set: &mut Option<(String, String)>,
+    copy_set: &mut Option<(String, String)>,
+) {
+    let response = ui.add(
+        egui::Button::new(RichText::new(&set.name))
+            .frame(false)
+            .min_size(egui::vec2(ui.available_width(), 22.0)),
+    );
+    if response.clicked() {
+        *open_set = Some((set.id.clone(), set.name.clone()));
+    }
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!(
+                "{} sheets · {:.1} MB · {}",
+                set.sheets,
+                set.bytes as f64 / 1_048_576.0,
+                set.uploaded_by
+            ))
+            .color(theme.faint)
+            .size(10.0),
+        );
+        // Nobody takes off on the set everybody else
+        // is reading. One button, and no upload: the
+        // copy points at the same file.
+        if ui
+            .small_button("Take off on a copy")
+            .on_hover_text(
+                "A copy of this set to mark up, with the sheet numbers and \
+                 the scales already on it. The issued set stays clean, and \
+                 nothing is uploaded.",
+            )
+            .clicked()
+        {
+            *copy_set = Some((set.id.clone(), set.name.clone()));
+        }
+    });
+    ui.separator();
+}
+
+/// A folder of a project's drawings, as it is in the job's own files.
+fn set_shelf(
+    ui: &mut egui::Ui,
+    theme: ui::chrome::Theme,
+    shelf: &crate::shelves::Shelf<'_, hub::DrawingSet>,
+    open_set: &mut Option<(String, String)>,
+    copy_set: &mut Option<(String, String)>,
+) {
+    egui::CollapsingHeader::new(RichText::new(format!("{} ({})", shelf.name, shelf.count())).size(12.0))
+        .id_salt(format!("folder:{}", shelf.path))
+        .default_open(true)
+        .show(ui, |ui| {
+            for inner in &shelf.shelves {
+                set_shelf(ui, theme, inner, open_set, copy_set);
+            }
+            for set in &shelf.items {
+                set_row(ui, theme, set, open_set, copy_set);
+            }
+        });
 }
 
 fn office_section(

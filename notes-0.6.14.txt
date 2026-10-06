@@ -1,0 +1,31 @@
+The Studio shows the office's jobs as the office keeps its files.
+
+STUDIO
+
+Projects another program sends through the API sit on shelves: Active Jobs, Bids by year,
+Lost Bids by year and Past Jobs by year, a cancelled job in its year's
+Cancelled. Each shelf folds away and says how many are in it; the active
+jobs and the bids start open. A bid moves to Active Jobs when it is won,
+to Lost Bids when it is lost, and a job to Past Jobs when it is finished,
+without anybody moving it. Projects nobody placed are under Other
+projects, and a server where nothing has a place shows the list it always
+did.
+
+Inside a project the drawings are in the folders they came from in the
+job's own files, such as 01 Drawings or 10 SHOP DRAWINGS, and nothing
+else from the share comes with them.
+
+A drawing issued again replaces only the one of the same name in the same
+folder, so a shop drawing for approval and the same sheet for fabrication
+are kept as two drawings.
+
+FOR OTHER PROGRAMS
+
+A program that keeps an office's jobs can now say where each one sits
+(POST /projects with a place, or POST /projects/{id}/place) and which
+folder each drawing came from (POST /sets with a folder). See Building on
+Excalibur View, on the website or in docs/integrating.md.
+
+The API only grows: a route or field a program uses is never renamed,
+retyped or taken away, and every release is checked for it before it is
+built.

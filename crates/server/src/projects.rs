@@ -45,9 +45,40 @@ pub const CARRIED: &str = "Carried forward — check";
 /// The longest reference a program may file a project under.
 const LONGEST_REFERENCE: usize = 200;
 
+/// The longest place or folder, all of it, and the most folders deep.
+const LONGEST_PLACE: usize = 260;
+const DEEPEST_PLACE: usize = 12;
+
 const PROJECT_COLUMNS: &str = "p.id, p.number, p.name, p.created,
      (SELECT count(*) FROM sets WHERE sets.project = p.id AND sets.superseded_by IS NULL),
-     p.reference, p.archived";
+     p.reference, p.archived, p.place";
+
+/// A place in the Studio's list, or a drawing's folder, as folders written
+/// with `/` (a `\` is taken as one): each folder's name trimmed, none empty,
+/// none `.` or `..`, nothing that is not printable. Empty is none: the
+/// project's own, as before places. `what` names it in the refusal.
+pub fn folders(text: &str, what: &str) -> Result<Option<String>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let parts: Vec<&str> = text.split(['/', '\\']).map(str::trim).collect();
+    if parts.iter().any(|p| p.is_empty() || *p == "." || *p == "..") {
+        return Err(format!(
+            "{what} is folders' names between slashes, none of them empty: \"{text}\" isn't."
+        ));
+    }
+    if parts.iter().any(|p| p.chars().any(char::is_control)) {
+        return Err(format!("{what} can't hold a control character."));
+    }
+    let joined = parts.join("/");
+    if joined.chars().count() > LONGEST_PLACE || parts.len() > DEEPEST_PLACE {
+        return Err(format!(
+            "{what} can be at most {LONGEST_PLACE} characters and {DEEPEST_PLACE} folders deep."
+        ));
+    }
+    Ok(Some(joined))
+}
 
 fn project_from_row(r: &rusqlite::Row) -> rusqlite::Result<Project> {
     Ok(Project {
@@ -58,6 +89,7 @@ fn project_from_row(r: &rusqlite::Row) -> rusqlite::Result<Project> {
         sets: r.get::<_, i64>(4)? as usize,
         reference: r.get(5)?,
         archived: r.get(6)?,
+        place: r.get(7)?,
     })
 }
 
@@ -140,6 +172,12 @@ pub async fn create(
             "A project's reference can be at most {LONGEST_REFERENCE} characters."
         )));
     }
+    // Asked for with a place, it goes (or moves) there; without one, a new
+    // project is with the others and one already there stays where it is.
+    let place = match body.place.as_deref() {
+        None => None,
+        Some(text) => Some(folders(text, "A project's place").map_err(Denied::wrong)?),
+    };
     let project = server
         .store
         .with(|db| {
@@ -147,18 +185,19 @@ pub async fn create(
                 if let Some(there) = by_reference(db, reference)? {
                     db.execute(
                         "UPDATE projects SET archived = NULL, number = ?1,
-                                name = CASE WHEN ?2 = '' THEN name ELSE ?2 END
+                                name = CASE WHEN ?2 = '' THEN name ELSE ?2 END,
+                                place = CASE WHEN ?4 THEN ?5 ELSE place END
                          WHERE id = ?3",
-                        params![number, name, there.id],
+                        params![number, name, there.id, place.is_some(), place.clone().flatten()],
                     )?;
                     return Ok(read_project(db, &there.id)?.unwrap_or(there));
                 }
             }
             let id = fresh_id("prj");
             db.execute(
-                "INSERT INTO projects (id, number, name, created, reference)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id, number, name, now(), reference],
+                "INSERT INTO projects (id, number, name, created, reference, place)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, number, name, now(), reference, place.flatten()],
             )?;
             read_project(db, &id)?.ok_or_else(|| anyhow::anyhow!("the project just made is not there"))
         })
@@ -267,6 +306,41 @@ pub async fn change_who_is_on(
         tracing::info!("{id} has nobody named on it now, so it is everybody's again");
     }
     Ok(Json(now))
+}
+
+#[derive(Deserialize)]
+pub struct Placing {
+    /// Folders written with `/`; empty or null puts it back with the others.
+    #[serde(default)]
+    pub place: Option<String>,
+}
+
+/// `POST /projects/{id}/place` — moves it in the Studio's list: a bid won
+/// goes to `Active Jobs`, a lost one to `Lost Bids/2026`. Its drawings,
+/// markups and takeoff are as they were.
+pub async fn place(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Placing>,
+) -> Answer<Json<Project>> {
+    let who = writer(&server, &headers)?;
+    crate::api::may_reach_project(&server, &who, &id)?;
+    let place = folders(body.place.as_deref().unwrap_or(""), "A project's place")
+        .map_err(Denied::wrong)?;
+    server
+        .store
+        .with(|db| {
+            let changed =
+                db.execute("UPDATE projects SET place = ?1 WHERE id = ?2", params![place, id])?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            Ok(read_project(db, &id)?)
+        })
+        .map_err(|e| Denied::broke("move that project", e))?
+        .map(Json)
+        .ok_or_else(|| Denied::missing("project"))
 }
 
 #[derive(Deserialize)]
@@ -394,6 +468,21 @@ pub(crate) fn same_drawing(
     .optional()
 }
 
+/// Whether two folders are the same folder: case and spacing aside, as a
+/// share's folders are; none is only none.
+pub fn same_folder(a: Option<&str>, b: Option<&str>) -> bool {
+    fn plain(f: &str) -> Vec<String> {
+        f.split('/')
+            .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase())
+            .collect()
+    }
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => plain(a) == plain(b),
+        _ => false,
+    }
+}
+
 /// How two names for a drawing are compared: case, spacing and a trailing
 /// `.pdf` do not make it a different drawing.
 pub fn same_name(a: &str, b: &str) -> bool {
@@ -405,22 +494,32 @@ pub fn same_name(a: &str, b: &str) -> bool {
     plain(a) == plain(b)
 }
 
-/// The current set this project already has under the same name: the issue a
-/// new upload of that drawing replaces.
+/// The current set this project already has under the same name in the same
+/// folder: the issue a new upload of that drawing replaces. A drawing of the
+/// same name in another folder (`10.1 FOR APPROVAL` and `10.4 FOR
+/// FABRICATION`) is another drawing. A drawing sent from a folder with none
+/// there replaces the one of its name sent before folders were, so a takeoff
+/// made on that one comes with it.
 pub(crate) fn issued_before(
     db: &Connection,
     project: &str,
     name: &str,
+    folder: Option<&str>,
 ) -> rusqlite::Result<Option<DrawingSet>> {
     let mut statement = db.prepare(&format!(
         "SELECT {SET_COLUMNS} FROM sets WHERE project = ?1 AND superseded_by IS NULL
          ORDER BY uploaded DESC"
     ))?;
-    let found = statement
+    let current = statement
         .query_map(params![project], set_from_row)?
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .find(|s| same_name(&s.name, name));
+        .collect::<Result<Vec<_>, _>>()?;
+    let found = current
+        .iter()
+        .find(|s| same_name(&s.name, name) && same_folder(s.folder.as_deref(), folder))
+        .or_else(|| {
+            folder.and(current.iter().find(|s| s.folder.is_none() && same_name(&s.name, name)))
+        })
+        .cloned();
     Ok(found)
 }
 

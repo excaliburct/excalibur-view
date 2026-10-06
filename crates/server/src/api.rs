@@ -239,6 +239,7 @@ pub fn router(server: Shared) -> Router {
             get(crate::projects::who_is_on).post(crate::projects::change_who_is_on),
         )
         .route("/projects/:id/archive", post(crate::projects::archive))
+        .route("/projects/:id/place", post(crate::projects::place))
         .route("/projects/:id/stamp", get(crate::projects::stamp))
         .route("/projects/:id/sets", get(sets_of))
         .route("/sets", post(upload_set))
@@ -317,6 +318,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/projects"),
     ("GET", "/projects/{id}"),
     ("POST", "/projects/{id}/archive"),
+    ("POST", "/projects/{id}/place"),
     ("GET", "/projects/{id}/stamp"),
     ("GET", "/projects/{id}/sets"),
     ("POST", "/sets"),
@@ -873,7 +875,7 @@ async fn change_fleet(
 /// The columns a drawing set is read from, in the order [`set_from_row`]
 /// takes them.
 pub(crate) const SET_COLUMNS: &str = "id, project, name, filename, digest, bytes, sheets, uploaded, \
-                                      uploaded_by, revision, supersedes, superseded_by";
+                                      uploaded_by, revision, supersedes, superseded_by, folder";
 
 pub(crate) fn set_from_row(r: &rusqlite::Row) -> rusqlite::Result<DrawingSet> {
     Ok(DrawingSet {
@@ -892,6 +894,7 @@ pub(crate) fn set_from_row(r: &rusqlite::Row) -> rusqlite::Result<DrawingSet> {
         already_here: false,
         carried_forward: 0,
         carry_note: None,
+        folder: r.get(12)?,
     })
 }
 
@@ -1006,6 +1009,7 @@ async fn upload_set(
     let mut filename = String::new();
     let mut bytes: Vec<u8> = Vec::new();
     let mut carry = false;
+    let mut folder = String::new();
 
     while let Some(field) = form
         .next_field()
@@ -1015,6 +1019,7 @@ async fn upload_set(
         match field.name().unwrap_or("") {
             "project" => project = field.text().await.unwrap_or_default(),
             "name" => name = field.text().await.unwrap_or_default(),
+            "folder" => folder = field.text().await.unwrap_or_default(),
             "carry_forward" => {
                 let said = field.text().await.unwrap_or_default();
                 carry = matches!(said.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes");
@@ -1040,6 +1045,7 @@ async fn upload_set(
              file of record.",
         ));
     }
+    let folder = crate::projects::folders(&folder, "A drawing's folder").map_err(Denied::wrong)?;
     let known = server
         .store
         .with(|db| {
@@ -1108,6 +1114,7 @@ async fn upload_set(
         already_here: false,
         carried_forward: 0,
         carry_note: None,
+        folder,
     };
 
     let settled = server
@@ -1125,12 +1132,19 @@ async fn upload_set(
                 return Ok(there);
             }
             // The same drawing issued again: it takes the old one's place.
-            let before = crate::projects::issued_before(db, &set.project, &set.name)?;
+            let before =
+                crate::projects::issued_before(db, &set.project, &set.name, set.folder.as_deref())?;
             set.supersedes = before.as_ref().map(|b| b.id.clone());
+            // The issue before it named its folder first: the new one keeps
+            // that spelling, so a folder doesn't show twice for its case. One
+            // sent before folders were takes the new one's.
+            if let Some(folder) = before.as_ref().and_then(|b| b.folder.clone()) {
+                set.folder = Some(folder);
+            }
             db.execute(
                 "INSERT INTO sets (id, project, name, filename, digest, bytes, sheets,
-                                   uploaded, uploaded_by, revision, supersedes)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)",
+                                   uploaded, uploaded_by, revision, supersedes, folder)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11)",
                 params![
                     set.id,
                     set.project,
@@ -1141,7 +1155,8 @@ async fn upload_set(
                     set.sheets as i64,
                     set.uploaded,
                     set.uploaded_by,
-                    set.supersedes
+                    set.supersedes,
+                    set.folder
                 ],
             )?;
             for sheet in &sheets {
@@ -2818,8 +2833,8 @@ async fn copy_set(
             };
             db.execute(
                 "INSERT INTO sets (id, project, name, filename, digest, bytes, sheets,
-                                   uploaded, uploaded_by, revision)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0)",
+                                   uploaded, uploaded_by, revision, folder)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)",
                 params![
                     copy.id,
                     copy.project,
@@ -2830,6 +2845,7 @@ async fn copy_set(
                     copy.sheets as i64,
                     copy.uploaded,
                     copy.uploaded_by,
+                    copy.folder,
                 ],
             )?;
             // The sheets come across with their numbers, titles and — the

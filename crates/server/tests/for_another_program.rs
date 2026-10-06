@@ -102,6 +102,18 @@ impl Running {
     }
 
     fn upload(&self, project: &str, name: &str, bytes: &[u8], carry: bool) -> hub::DrawingSet {
+        self.upload_in(project, name, None, bytes, carry).expect("upload")
+    }
+
+    /// An upload from one of the job's own folders; what the server said when it refused one.
+    fn upload_in(
+        &self,
+        project: &str,
+        name: &str,
+        folder: Option<&str>,
+        bytes: &[u8],
+        carry: bool,
+    ) -> Result<hub::DrawingSet, (u16, String)> {
         let boundary = "----hyperviewprogram";
         let mut body: Vec<u8> = Vec::new();
         let mut field = |k: &str, v: &str| {
@@ -112,6 +124,9 @@ impl Running {
         };
         field("project", project);
         field("name", name);
+        if let Some(folder) = folder {
+            field("folder", folder);
+        }
         if carry {
             field("carry_forward", "1");
         }
@@ -124,13 +139,27 @@ impl Running {
         );
         body.extend_from_slice(bytes);
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-        ureq::post(&format!("{}/api/v1/sets", self.base))
+        match ureq::post(&format!("{}/api/v1/sets", self.base))
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", &format!("multipart/form-data; boundary={boundary}"))
             .send_bytes(&body)
-            .expect("upload")
-            .into_json()
-            .expect("a drawing set")
+        {
+            Ok(answer) => Ok(answer.into_json().expect("a drawing set")),
+            Err(ureq::Error::Status(code, answer)) => Err((code, answer.into_string().unwrap_or_default())),
+            Err(e) => panic!("upload: {e}"),
+        }
+    }
+
+    /// A POST the server refuses: its status and what it said.
+    fn refused(&self, path: &str, body: Value) -> (u16, String) {
+        match ureq::post(&format!("{}/api/v1{path}", self.base))
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .send_json(body)
+        {
+            Ok(_) => panic!("POST {path} was taken"),
+            Err(ureq::Error::Status(code, answer)) => (code, answer.into_string().unwrap_or_default()),
+            Err(e) => panic!("POST {path}: {e}"),
+        }
     }
 
     fn push(&self, set: &str, markups: &[String]) {
@@ -530,4 +559,84 @@ fn a_notice_address_has_to_be_a_web_address() {
         .set("Authorization", &format!("Bearer {}", server.token))
         .send_json(json!({ "url": "file:///etc/passwd" }));
     assert!(refused.is_err());
+}
+
+#[test]
+fn a_bid_goes_where_the_office_keeps_it_and_moves_when_it_is_won_or_lost() {
+    let server = start();
+    let bid = server.post(
+        "/projects",
+        json!({ "number": "B-7", "name": "Hangar", "reference": "erp:bid:7", "place": "Bids/2026" }),
+    );
+    assert_eq!(bid["place"], "Bids/2026");
+    let id = bid["id"].as_str().unwrap().to_string();
+    let again = server.post("/projects", json!({ "number": "B-7", "name": "Hangar", "reference": "erp:bid:7" }));
+    assert_eq!((again["id"].as_str(), again["place"].as_str()), (Some(id.as_str()), Some("Bids/2026")), "asked again without a place, it stays");
+    let won = server.post(
+        "/projects",
+        json!({ "number": "2640", "name": "Hangar", "reference": "erp:bid:7", "place": "Active Jobs" }),
+    );
+    assert_eq!((won["id"].as_str(), won["place"].as_str()), (Some(id.as_str()), Some("Active Jobs")), "a bid won moves to the jobs");
+    let finished = server.post(&format!("/projects/{id}/place"), json!({ "place": "  Past Jobs \\ 2026 / Cancelled " }));
+    assert_eq!(finished["place"], "Past Jobs/2026/Cancelled", "a backslash is a folder too, and spaces around a name don't count");
+    let listed = server.get("/projects");
+    assert_eq!(listed.as_array().unwrap().iter().find(|p| p["id"] == id.as_str()).unwrap()["place"], "Past Jobs/2026/Cancelled");
+    let plain = server.post("/projects", json!({ "number": "2641", "name": "Shed" }));
+    assert!(plain.get("place").is_none(), "a project nobody placed is with the others");
+    let back = server.post(&format!("/projects/{id}/place"), json!({ "place": null }));
+    assert!(back.get("place").is_none(), "no place puts it back with the others");
+    let set = server.upload(&id, "S-101", &a_drawing(3024, 2160, "a"), false);
+    server.push(&set.id, &[a_beam(720.0, 1.0)]);
+    server.post(&format!("/projects/{id}/place"), json!({ "place": "Lost Bids/2026" }));
+    assert_eq!(every_markup(&server.get(&format!("/projects/{id}/markuplist"))).len(), 1, "moving it changes nothing on it");
+
+    for bad in ["Bids//2026", "Bids/../Active Jobs", "./Bids", "Bids/\u{7}2026"] {
+        let (code, said) = server.refused(&format!("/projects/{id}/place"), json!({ "place": bad }));
+        assert_eq!(code, 400, "{bad} was taken");
+        assert!(said.contains("place"), "{said}");
+    }
+    let (code, _) = server.refused("/projects", json!({ "number": "B-8", "name": "Annex", "place": "Bids/" }));
+    assert_eq!(code, 400);
+    let deep = vec!["a"; 13].join("/");
+    assert_eq!(server.refused(&format!("/projects/{id}/place"), json!({ "place": deep })).0, 400, "thirteen folders deep");
+    assert_eq!(server.refused("/projects/prj_none/place", json!({ "place": "Bids" })).0, 404);
+}
+
+#[test]
+fn a_drawing_keeps_its_folder_and_one_issued_again_replaces_only_the_one_in_the_same_folder() {
+    let server = start();
+    let project = server.post("/projects", json!({ "number": "2633", "name": "Depot", "place": "Active Jobs" }));
+    let id = project["id"].as_str().unwrap();
+    let approval = "10 SHOP DRAWINGS/10.1 FOR APPROVAL";
+    let first = server.upload_in(id, "S-101", Some(approval), &a_drawing(3024, 2160, "approval"), false).unwrap();
+    assert_eq!(first.folder.as_deref(), Some(approval));
+    let fabrication =
+        server.upload_in(id, "S-101", Some("10 SHOP DRAWINGS\\10.4 FOR FABRICATION"), &a_drawing(3024, 2160, "fab"), false).unwrap();
+    assert_eq!(fabrication.folder.as_deref(), Some("10 SHOP DRAWINGS/10.4 FOR FABRICATION"));
+    assert_eq!(fabrication.supersedes, None, "the same name in another folder is another drawing");
+    let revised =
+        server.upload_in(id, "s-101.pdf", Some(" 10 shop drawings /10.1  for approval"), &a_drawing(3024, 2160, "rev 1"), true).unwrap();
+    assert_eq!(revised.supersedes.as_deref(), Some(first.id.as_str()), "the same folder, whatever its case: the issue before");
+    assert_eq!(revised.folder.as_deref(), Some(approval), "and in the folder as it was first written");
+    let loose = server.upload_in(id, "S-101", None, &a_drawing(3024, 2160, "loose"), false).unwrap();
+    assert_eq!((loose.supersedes, loose.folder), (None, None), "no folder: the project's own");
+
+    let sets = server.get(&format!("/projects/{id}/sets"));
+    let mut folders: Vec<String> = sets.as_array().unwrap().iter().map(|s| s["folder"].as_str().unwrap_or("").to_string()).collect();
+    folders.sort();
+    assert_eq!(folders, ["", approval, "10 SHOP DRAWINGS/10.4 FOR FABRICATION"]);
+    let again = server.upload_in(id, "S-101", Some("Somewhere else"), &a_drawing(3024, 2160, "fab"), false).unwrap();
+    assert!(again.already_here, "the same bytes are the drawing already here, wherever they were sent from");
+    assert_eq!(again.id, fabrication.id);
+
+    // A drawing sent before folders were is the one a drawing of its name
+    // from a folder replaces, its takeoff with it.
+    let old = server.upload(id, "A-101", &a_drawing(3024, 2160, "before folders"), false);
+    server.push(&old.id, &[a_beam(720.0, 1.0)]);
+    let foldered = server.upload_in(id, "A-101", Some("01 Drawings"), &a_drawing(3024, 2160, "a-101 rev 1"), true).unwrap();
+    assert_eq!((foldered.supersedes.as_deref(), foldered.folder.as_deref(), foldered.carried_forward), (Some(old.id.as_str()), Some("01 Drawings"), 1));
+
+    let (code, said) = server.upload_in(id, "S-102", Some("10 SHOP DRAWINGS//10.1"), &a_drawing(3024, 2160, "x"), false).unwrap_err();
+    assert_eq!(code, 400);
+    assert!(said.contains("folder"), "{said}");
 }
