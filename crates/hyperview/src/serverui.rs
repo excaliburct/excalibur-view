@@ -4,6 +4,7 @@
 use egui::{Color32, RichText};
 
 use crate::app::App;
+use crate::updatebox;
 use crate::server::{Ask, Standing, Told};
 
 /// Where somebody is up to in getting connected.
@@ -1507,15 +1508,17 @@ impl App {
         }
     }
 
-    /// A newer version, said as soon as it is known about.
+    /// A newer version, said as soon as it is known about, in a box in the
+    /// middle of the window with what is new in it (see [`crate::updatebox`]).
     ///
-    /// In place: a button restarts into it, and "Later" leaves it to take
-    /// over at the next start. Being fetched: said, so nobody wonders. Out,
-    /// but this copy cannot put it in place itself — a copy run from a
-    /// download folder, or one whose update was refused — a button opens the
-    /// page to get it from, with why. Nothing ever restarts on its own: a
-    /// takeoff half done is never interrupted.
-    pub fn update_banner(&mut self, ctx: &egui::Context) {
+    /// In place: Restart now, or Later leaves it to take over at the next
+    /// start. Being fetched: a small card in the corner says so, so nobody
+    /// wonders, and the box opens when it is ready. Out, but this copy cannot
+    /// put it in place itself — a copy run from a download folder, or one whose
+    /// update was refused — Download opens the page to get it from, with why.
+    /// Nothing ever restarts on its own: a takeoff half done is never
+    /// interrupted.
+    pub fn update_box(&mut self, ctx: &egui::Context) {
         let running = env!("CARGO_PKG_VERSION");
         let offered = self
             .standing
@@ -1528,166 +1531,76 @@ impl App {
             .clone()
             .filter(|v| hub::update::newer(v, running));
         let version = match (&ready, &offered) {
-            (Some(v), _) => v.clone(),
-            (None, Some(r)) => r.version.clone(),
-            (None, None) => return self.update_answer(ctx),
-        };
-        if self.dismissed_update.as_deref() == Some(version.as_str()) {
-            return;
+            (Some(v), _) => Some(v.clone()),
+            (None, Some(r)) => Some(r.version.clone()),
+            (None, None) => None,
         }
-        enum Say {
-            Ready,
-            Getting,
-            Get(Option<String>),
-        }
-        let say = if ready.is_some() {
-            Say::Ready
-        } else if let Some(why) = self.standing.update_refused.clone() {
-            Say::Get(Some(why))
-        } else if !self.updates_itself {
-            Say::Get(None)
-        } else {
-            Say::Getting
-        };
-        let notes = offered
-            .as_ref()
-            .filter(|r| r.version == version)
-            .map(|r| r.notes.clone())
-            .unwrap_or_default();
+        .filter(|v| self.dismissed_update.as_deref() != Some(v.as_str()));
         let theme = self.chrome.theme;
-        let mut dismiss = false;
-        let mut restart = false;
-        let mut get = false;
-        egui::TopBottomPanel::top("update")
-            .frame(
-                egui::Frame::new()
-                    .fill(theme.accent.gamma_multiply(0.55))
-                    .inner_margin(egui::Margin::symmetric(10, 6)),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    let headline = match &say {
-                        Say::Ready => format!("Excalibur View {version} is ready."),
-                        Say::Getting => format!("Excalibur View {version} is out — getting it now…"),
-                        Say::Get(_) => format!("Excalibur View {version} is out."),
-                    };
-                    ui.label(RichText::new(headline).strong());
-                    if !notes.trim().is_empty() {
-                        ui.label(RichText::new(&notes).color(theme.faint).size(11.0));
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        match &say {
-                            Say::Ready => {
-                                if ui.small_button("Later").clicked() {
-                                    dismiss = true;
-                                }
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new("Restart now").strong().color(egui::Color32::WHITE),
-                                        )
-                                        .fill(theme.accent),
-                                    )
-                                    .on_hover_text(
-                                        "Saves what is open, restarts, and opens it all again.",
-                                    )
-                                    .clicked()
-                                {
-                                    restart = true;
-                                }
-                                ui.label(
-                                    RichText::new("Or it takes over the next time Excalibur View opens.")
-                                        .color(theme.faint)
-                                        .size(11.0),
-                                );
-                            }
-                            Say::Getting => {
-                                if ui.small_button("Hide").clicked() {
-                                    dismiss = true;
-                                }
-                                ui.spinner();
-                            }
-                            Say::Get(why) => {
-                                if ui.small_button("Later").clicked() {
-                                    dismiss = true;
-                                }
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new("Download").strong().color(egui::Color32::WHITE),
-                                        )
-                                        .fill(theme.accent),
-                                    )
-                                    .clicked()
-                                {
-                                    get = true;
-                                }
-                                let why = match why {
-                                    Some(why) => format!("It could not be installed here: {why}"),
-                                    None => "This copy is not the installed one, so it does \
-                                             not update itself."
-                                        .into(),
-                                };
-                                ui.label(RichText::new(why).color(theme.faint).size(11.0));
+        let open_id = egui::Id::new("update-box-open");
+        let was_open = ctx.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+        let mut open = false;
+        if let Some(version) = version {
+            let notes = offered
+                .as_ref()
+                .filter(|r| r.version == version)
+                .map(|r| r.notes.clone())
+                .unwrap_or_default();
+            let refused = self.standing.update_refused.clone();
+            let offer = if ready.is_some() {
+                Some(updatebox::Offer::Ready)
+            } else if let Some(why) = refused.as_deref() {
+                Some(updatebox::Offer::Download { why: Some(why) })
+            } else if !self.updates_itself {
+                Some(updatebox::Offer::Download { why: None })
+            } else {
+                None
+            };
+            match offer {
+                Some(offer) if updatebox::may_open(ctx, was_open) => {
+                    open = true;
+                    match updatebox::show(ctx, theme, &version, running, &notes, offer).0 {
+                        updatebox::Choice::Open => {}
+                        updatebox::Choice::Later => self.dismissed_update = Some(version),
+                        updatebox::Choice::Download => {
+                            self.dismissed_update = Some(version);
+                            if let Some(page) = hub::web::download_page(crate::trust::HOME_FEED) {
+                                ctx.open_url(egui::OpenUrl::new_tab(page));
                             }
                         }
-                    });
-                });
-            });
-        if dismiss {
-            self.dismissed_update = Some(version);
-        }
-        if get {
-            if let Some(page) = hub::web::download_page(crate::trust::HOME_FEED) {
-                ctx.open_url(egui::OpenUrl::new_tab(page));
+                        updatebox::Choice::Restart => self.restart_into_update(ctx),
+                    }
+                }
+                // Waiting for a mouse button to be let go.
+                Some(_) => {}
+                // Still being fetched. Hiding the card hides the card only:
+                // the box still opens when it is ready.
+                None => {
+                    let hidden = egui::Id::new(("update-getting-hidden", version.as_str()));
+                    if !ctx.data(|d| d.get_temp::<bool>(hidden)).unwrap_or(false)
+                        && updatebox::getting(ctx, theme, &version)
+                    {
+                        ctx.data_mut(|d| d.insert_temp(hidden, true));
+                    }
+                }
             }
         }
-        if restart {
-            self.restart_into_update(ctx);
+        ctx.data_mut(|d| d.insert_temp(open_id, open));
+        if !open {
+            self.update_answer(ctx);
         }
     }
 
     /// "Check for Updates" being answered, or its answer when there is
-    /// nothing to install.
+    /// nothing to install; also what Connect AI Assistant has to say.
     fn update_answer(&mut self, ctx: &egui::Context) {
         if !self.checking_for_update && self.update_note.is_none() {
             return;
         }
-        let theme = self.chrome.theme;
-        let mut done = false;
-        egui::TopBottomPanel::top("update")
-            .frame(
-                egui::Frame::new()
-                    .fill(theme.chrome)
-                    .inner_margin(egui::Margin::symmetric(10, 6)),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| match self.update_note.as_deref() {
-                    None => {
-                        ui.spinner();
-                        ui.label("Checking for updates…");
-                    }
-                    Some(note) => {
-                        // Wrapped, so a long note is read to the end rather
-                        // than running off the side of the window.
-                        let room = (ui.available_width() - 56.0).max(200.0);
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(room, 0.0),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                ui.set_max_width(room);
-                                ui.add(egui::Label::new(note).wrap());
-                            },
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                            if ui.small_button("OK").clicked() {
-                                done = true;
-                            }
-                        });
-                    }
-                });
-            });
-        if done {
+        if updatebox::answer(ctx, self.chrome.theme, self.update_note.as_deref()) {
+            // Closed while still asking: the answer is still said when it
+            // comes.
+            self.checking_for_update = false;
             self.update_note = None;
         }
     }

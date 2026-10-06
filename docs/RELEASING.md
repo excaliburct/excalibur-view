@@ -2,7 +2,7 @@
 
 ## The short version
 
-1. **github.com/cngmoney88/excalibur-view** → Actions. Run **Windows build**
+1. **github.com/excaliburct/excalibur-view** → Actions. Run **Windows build**
    and **Mac build**, both on the commit you are releasing. About twenty
    minutes, most of the Mac's share being Apple.
 2. On the PC, double-click **Release Excalibur View**.

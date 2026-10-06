@@ -17,7 +17,7 @@ update is safe to install* to every copy of Excalibur View in the world, and
 every seat installs what it vouches for by itself. It cannot be revoked and it
 cannot be taken back. It stays on the Windows PC and it is used there.
 
-They go on **`cngmoney88/excalibur-view`**, which is the public repository.
+They go on **`excaliburct/excalibur-view`**, which is the public repository.
 
 That used to say the opposite, in bold, and it is worth saying why it changed
 rather than quietly editing it. The old advice assumed a private repository was
@@ -75,7 +75,7 @@ base64 -i ~/private/AuthKey_*.p8 | tr -d '\n' | pbcopy
 
 Go to:
 
-**github.com/cngmoney88/excalibur-view** → **Settings** → **Secrets and variables**
+**github.com/excaliburct/excalibur-view** → **Settings** → **Secrets and variables**
 → **Actions** → **New repository secret**
 
 Add these five, one at a time. The name has to match exactly.
@@ -102,7 +102,7 @@ copy for the trip.
 
 ## Then, to make a release
 
-1. **github.com/cngmoney88/excalibur-view** → **Actions** → **Mac build** → **Run
+1. **github.com/excaliburct/excalibur-view** → **Actions** → **Mac build** → **Run
    workflow**.
    About twenty minutes, most of it Apple. You do not have to watch it.
 2. On the PC, double-click **Release Excalibur View**.

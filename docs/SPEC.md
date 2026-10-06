@@ -419,7 +419,8 @@ named by digest, so opening the same set on Tuesday costs nothing. A shared tool
 chest pulled with one click lands in the `profiles` folder and takes effect
 without a restart — the whole window rearranges into the office's own layout.
 The Author column follows the seat, so six people's markups are told apart. An
-update waiting is a quiet banner that says it installs next time, never now.
+update waiting is a box in the middle of the window with what is new in it;
+Later leaves it to install next time, and it never restarts on its own.
 
 Verified end to end: signed in, pulled the 1,533-tool chest, browsed the job,
 downloaded the 12-sheet stamped set and opened it — all from the panel.

@@ -62,6 +62,7 @@ pub mod spell;
 pub mod sync;
 pub mod textedit;
 pub mod trust;
+pub mod updatebox;
 pub mod serverui;
 pub mod shelves;
 pub mod scale;

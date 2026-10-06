@@ -92,7 +92,7 @@ pub const PLUGIN_KEYS: &[(&str, &str)] = &[];
 ///
 /// Empty means a loose seat simply never looks, which is what a build does
 /// until somebody fills this in.
-pub const HOME_FEED: &str = "https://api.github.com/repos/cngmoney88/hyperview-releases/releases";
+pub const HOME_FEED: &str = "https://api.github.com/repos/excaliburct/hyperview-releases/releases";
 
 /// The channel a copy follows when nobody has said otherwise.
 pub const HOME_CHANNEL: &str = "stable";

@@ -61,7 +61,7 @@ A plugin doesn't need this repository, only the contract:
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-plugin-api = { git = "https://github.com/cngmoney88/excalibur-view", branch = "main", features = ["guest"] }
+plugin-api = { git = "https://github.com/excaliburct/excalibur-view", branch = "main", features = ["guest"] }
 serde_json = "1"
 ```
 

@@ -41,11 +41,12 @@ minutes old; it checks each new build against the signing key compiled into
 it, offers the viewer to every seat — each of which checks it again before
 installing — and replaces itself. A seat asks its server every quarter of an
 hour (a seat with no server asks the feed hourly), fetches a new version in
-the background, and says so in a bar across the top: **Restart now**, or it
-takes over the next time Hyperview opens. Nothing restarts on its own in the
-middle of anybody's work. **Help → Check for Updates** asks there and then.
+the background, and says so in a box in the middle of the window with what
+is new in it: **Restart now**, or **Later** and it takes over the next time
+Hyperview opens. Nothing restarts on its own in the middle of anybody's
+work. **Help → Check for Updates** asks there and then.
 
-If a seat cannot put a new version in place itself, the bar says why and
+If a seat cannot put a new version in place itself, the box says why and
 **Download** opens the releases page. What each seat did is written to
 `hyperview.log` in `%LOCALAPPDATA%\Excalibur Hyperview`.
 
@@ -106,7 +107,7 @@ python3 publish.py sign    --key hyperview-signing.key --version 0.5.1 \
                            --channel preview --notes-file notes.txt \
                            --app Hyperview.exe --server Hyperview-Server.exe
 python3 publish.py upload  --token-file github-token.txt \
-                           --repo cngmoney88/hyperview-releases --version 0.5.1 \
+                           --repo excaliburct/hyperview-releases --version 0.5.1 \
                            --notes-file notes.txt \
                            release.json Hyperview.exe Hyperview-Server.exe
 ```
@@ -117,7 +118,7 @@ whose administrator chose "get them early". Once it has been tried there:
 ```
 python3 publish.py promote --key hyperview-signing.key \
                            --token-file github-token.txt \
-                           --repo cngmoney88/hyperview-releases --version 0.5.1
+                           --repo excaliburct/hyperview-releases --version 0.5.1
 ```
 
 and every office takes it. The channel is part of what is signed, so a

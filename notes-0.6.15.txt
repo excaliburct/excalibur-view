@@ -1,0 +1,59 @@
+A new version now says so in a box in the middle of the window, with what
+is new in it. This carries 0.6.13 and 0.6.14 with it, so the Studio shows
+the office's jobs as the office keeps its files.
+
+UPDATES
+
+When a new version is ready, a box in the middle of the window says which
+one and what is new in it, laid out as it was written, with Restart now
+and Later. It used to be a bar across the top with every word of the
+notes run together on one line. Nothing restarts on its own, and the box
+waits for a mouse button to be let go, so a markup being dragged is
+finished first. Later, or Escape, leaves the new version to take over the
+next time Excalibur View opens, and Help, Check for Updates brings the
+box back.
+
+While a new version is being fetched, a small card in the corner says so.
+Check for Updates answers in a small box in the middle of the window too.
+
+STUDIO
+
+Projects another program sends through the API sit on shelves: Active
+Jobs, Bids by year, Lost Bids by year and Past Jobs by year, a cancelled
+job in its year's Cancelled. Each shelf folds away and says how many are
+in it; the active jobs and the bids start open. A bid moves to Active
+Jobs when it is won, to Lost Bids when it is lost, and a job to Past Jobs
+when it is finished, without anybody moving it. Projects nobody placed
+are under Other projects, and a server where nothing has a place shows
+the list it always did.
+
+Inside a project the drawings are in the folders they came from in the
+job's own files, such as 01 Drawings or 10 SHOP DRAWINGS, and nothing
+else from the share comes with them.
+
+A drawing issued again replaces only the one of the same name in the same
+folder, so a shop drawing for approval and the same sheet for fabrication
+are kept as two drawings.
+
+HELP MENU
+
+The two commands for a desktop AI assistant are now Connect AI Assistant
+and Test AI Assistant Connection. They work the same as before, and an
+assistant that was already connected stays connected. The connection test
+keeps its report in assistant-check.txt beside the program, and its log in
+assistant-bridge.log.
+
+FOR OTHER PROGRAMS
+
+A program that keeps an office's jobs can now say where each one sits
+(POST /projects with a place, or POST /projects/{id}/place) and which
+folder each drawing came from (POST /sets with a folder). See Building on
+Excalibur View, on the website or in docs/integrating.md.
+
+The API only grows: a route or field a program uses is never renamed,
+retyped or taken away, and every release is checked for it before it is
+built.
+
+The source and the releases are now at github.com/excaliburct. The old
+addresses forward there, so copies already installed keep finding their
+updates.

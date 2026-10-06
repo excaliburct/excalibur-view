@@ -119,9 +119,9 @@ mod tests {
     #[test]
     fn the_download_page_is_the_feed_in_a_browser() {
         assert_eq!(
-            download_page("https://api.github.com/repos/cngmoney88/hyperview-releases/releases")
+            download_page("https://api.github.com/repos/excaliburct/hyperview-releases/releases")
                 .as_deref(),
-            Some("https://github.com/cngmoney88/hyperview-releases/releases/latest")
+            Some("https://github.com/excaliburct/hyperview-releases/releases/latest")
         );
         assert_eq!(download_page("https://example.com/releases.json"), None);
         assert_eq!(download_page("https://api.github.com/repos/x/releases"), None);

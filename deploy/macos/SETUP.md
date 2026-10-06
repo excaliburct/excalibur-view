@@ -19,7 +19,7 @@ than the generic blank sheet.
 
 ```
 cd ~/dev
-git clone https://github.com/cngmoney88/excalibur-view.git
+git clone https://github.com/excaliburct/excalibur-view.git
 cd excalibur
 ```
 

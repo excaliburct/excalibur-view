@@ -29,9 +29,9 @@ ROOT = os.path.dirname(HERE)
 # Where things have actually been kept, in the order worth looking.
 KEY_NAMES = ("hyperview-signing.key",)
 TOKEN_NAMES = ("github-token.txt", "github-token.txt.txt")
-REPO = "cngmoney88/hyperview-releases"
+REPO = "excaliburct/hyperview-releases"
 # Where the Mac build happens, so this does not have to happen on a Mac.
-SOURCE_REPO = "cngmoney88/excalibur-view"
+SOURCE_REPO = "excaliburct/excalibur-view"
 
 
 def bold(text):

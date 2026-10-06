@@ -2065,7 +2065,7 @@ impl eframe::App for App {
 
         self.menus(ctx);
         crate::bench::mark(&mut marks, "menus");
-        self.update_banner(ctx);
+        self.update_box(ctx);
         self.tool_bars(ctx);
         crate::bench::mark(&mut marks, "toolbars");
         self.tabs(ctx);
