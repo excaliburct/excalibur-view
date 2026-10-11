@@ -69,6 +69,7 @@ import urllib.request
 APP_PLATFORM = "windows-x64"
 SERVER_PLATFORM = "windows-x64-server"
 MAC_PLATFORM = "macos-universal"
+LINUX_PLATFORM = "linux-x64"
 # What each program is called on the release. Every installed copy finds its
 # update by the name in release.json, not by a name of its own, so these are
 # also the names the website's download buttons look for. (Up to 0.6.1 they
@@ -89,7 +90,10 @@ MAC_FILE = "ExcaliburView-mac.zip"
 # is a name that has to be edited every release or the download disappears.
 MAC_DMG_FILE = "ExcaliburView-mac.dmg"
 MAC_DISK_IMAGE = "ExcaliburView-mac.dmg"
-FILES = {APP_PLATFORM: APP_FILE, SERVER_PLATFORM: SERVER_FILE, MAC_PLATFORM: MAC_FILE}
+# Linux gets the program itself, as Windows does: run once, it installs itself
+# for that person, and an update replaces that one file.
+LINUX_FILE = "ExcaliburView-linux"
+FILES = {APP_PLATFORM: APP_FILE, SERVER_PLATFORM: SERVER_FILE, MAC_PLATFORM: MAC_FILE, LINUX_PLATFORM: LINUX_FILE}
 MANIFEST = "release.json"
 
 # Under every release on the page, for whoever downloads from it.
@@ -102,6 +106,8 @@ HOW_TO = """
 **ExcaliburView-Server.exe**: the Office server. Double-click it once on the computer that should hold the company's drawings. Windows asks for permission once. After that it runs by itself, and keeps itself and every copy of Excalibur View in the office up to date.
 
 **ExcaliburView-mac.dmg**: the Mac version. Open it and drag Excalibur View into Applications. It is the whole program, not a viewer — Apple Silicon and Intel in one download.
+
+**ExcaliburView-linux**: the Linux version (Intel and AMD, 64-bit). Mark it as a program (right-click, Properties, Allow executing; or `chmod +x ExcaliburView-linux`) and run it once. It installs itself for that person, on the applications menu, and finds the office's server by itself.
 
 The first person to open Excalibur View after the server is up sets it up and gets a join code for everybody else."""
 
@@ -188,6 +194,8 @@ def cmd_sign(a):
     apps = [signed(a.app, APP_PLATFORM)]
     if a.mac:
         apps.append(signed(a.mac, MAC_PLATFORM))
+    if getattr(a, "linux", None):
+        apps.append(signed(a.linux, LINUX_PLATFORM))
 
     # `app` is the Windows build and stays exactly where it has always been.
     # Every copy of Excalibur View installed before there was a Mac build reads
@@ -634,7 +642,7 @@ def cmd_release(a):
             "One of them is wrong, and a release whose program reports a different "
             "version from its manifest is one nobody can diagnose later.")
 
-    for name, path in (("--mac-zip", a.mac_zip), ("--mac-dmg", a.mac_dmg)):
+    for name, path in (("--mac-zip", a.mac_zip), ("--mac-dmg", a.mac_dmg), ("--linux", a.linux)):
         if path and not os.path.exists(path):
             raise SystemExit(f"{name} {path} is not there.")
     if bool(a.mac_zip) != bool(a.mac_dmg):
@@ -686,7 +694,7 @@ def cmd_release(a):
     manifest = os.path.join(root, MANIFEST)
     cmd_sign(argparse.Namespace(
         key=a.key, version=version, channel=a.channel, notes_file=a.notes_file,
-        app=app, mac=a.mac_zip, server=server, out=manifest,
+        app=app, mac=a.mac_zip, linux=a.linux, server=server, out=manifest,
         published=None, min_api=a.min_api))
 
     if a.sign_only:
@@ -695,7 +703,7 @@ def cmd_release(a):
 
     # 4. Up it goes, as a draft until every file is there whole.
     print("\n== uploading ==")
-    files = [manifest, app, server] + ([a.mac_zip] if a.mac_zip else [])
+    files = [manifest, app, server] + ([a.mac_zip] if a.mac_zip else []) + ([a.linux] if a.linux else [])
     cmd_upload(argparse.Namespace(
         token_file=a.token_file, repo=a.repo, version=version,
         notes_file=a.notes_file, files=files,
@@ -757,6 +765,7 @@ def main():
     s.add_argument("--notes-file")
     s.add_argument("--app", required=True, help="the Windows program")
     s.add_argument("--mac", help="the Mac program, zipped by deploy/macos/build.sh")
+    s.add_argument("--linux", help="the Linux program, built by the Linux build workflow")
     s.add_argument("--server")
     s.add_argument("--out", default=MANIFEST)
     s.add_argument("--published")
@@ -785,6 +794,7 @@ def main():
     rel.add_argument("--server", help="ExcaliburView-Server.exe, already built")
     rel.add_argument("--mac-zip", help="ExcaliburView-mac.zip from deploy/macos/build.sh")
     rel.add_argument("--mac-dmg", help="the .dmg from the same build")
+    rel.add_argument("--linux", help="ExcaliburView-linux, built by the Linux build workflow")
     rel.add_argument("--min-api", type=int, default=1)
     rel.add_argument("--skip-build", action="store_true", help="use what is in target/release already")
     rel.add_argument("--skip-tests", action="store_true")

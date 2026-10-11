@@ -1,0 +1,86 @@
+# Builds and tests the Linux program, for the PC that holds the signing key to
+# sign and publish with the Windows and Mac halves (docs/RELEASING.md).
+#
+# Like the Windows build it holds no credentials at all: the program it makes
+# is unsigned until the release signs it, and every copy checks that signature
+# against the keys compiled into itself before installing anything.
+#
+# Built on the oldest Ubuntu GitHub still runs, so the program starts on any
+# Linux desktop at least that new; it carries the PDF engine inside it, as the
+# Windows one does, and needs nothing installed beside it.
+
+name: Linux build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: What a Linux desktop program is built against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libwayland-dev libxkbcommon-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+
+      # The PDF engine is a third-party binary and is not in this repository.
+      # The version is pinned by third_party/pdfium/embedded/VERSION.
+      - name: The PDF engine
+        run: |
+          set -euo pipefail
+          build="$(grep '^BUILD=' third_party/pdfium/embedded/VERSION | cut -d= -f2)"
+          url="https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F$build/pdfium-linux-x64.tgz"
+          echo "PDFium $build: $url"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "$url" -o pdfium.tgz
+          mkdir -p unpacked
+          tar -xzf pdfium.tgz -C unpacked
+          found="$(find unpacked -name 'libpdfium.so' | head -1)"
+          test -n "$found" || { echo "no libpdfium.so in that archive" >&2; exit 1; }
+          cp "$found" third_party/pdfium/embedded/libpdfium.so
+          ls -l third_party/pdfium/embedded/libpdfium.so
+
+      - name: The whole test suite
+        run: cargo test --workspace
+
+      - name: Build the program
+        run: cargo build --release -p hyperview
+
+      - name: Name it the way it ships
+        id: files
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          mkdir -p out
+          cp target/release/hyperview out/ExcaliburView-linux
+          chmod 755 out/ExcaliburView-linux
+          ls -l out
+          sha256sum out/ExcaliburView-linux
+
+      # The one file the PC picks up, named for the version, the way the
+      # Windows and Mac halves are.
+      - name: Hand it over
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ steps.files.outputs.version }}
+          path: out/ExcaliburView-linux
+          if-no-files-found: error
+          retention-days: 30

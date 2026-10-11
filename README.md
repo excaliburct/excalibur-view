@@ -1,6 +1,6 @@
 # Excalibur View
 
-A native Windows and macOS drawing viewer, markup and takeoff program, by
+A native Windows, macOS and Linux drawing viewer, markup and takeoff program, by
 Excalibur Construction Technologies. Free for one person; offices add
 Excalibur View Office for the server that lets their people work together.
 
@@ -57,6 +57,12 @@ If a seat cannot put a new version in place itself, the box says why and
   server with no graphics card draws with Windows' own software Direct3D
   rather than failing to start. Each person on a Remote Desktop server gets
   their own copy, their own window and their own settings.
+- **ExcaliburView-linux**: 64-bit Linux desktops (Intel and AMD) at least as
+  new as Ubuntu 22.04, on X11 or Wayland. Mark it as a program and run it once:
+  it installs itself for that person in `~/.local/share`, on the applications
+  menu, opening `hyperview://` links and offered for PDFs, licenses and tool
+  chests, and keeps itself up to date like the Windows one. It talks to the
+  office's server wherever that runs.
 - **Hyperview-Server.exe**: the same, plus Server Core — it is a console
   program and a service, and needs no desktop.
 - Neither needs PowerShell, which a hardened server or a Remote Desktop host

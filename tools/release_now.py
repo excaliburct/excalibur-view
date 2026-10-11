@@ -336,6 +336,24 @@ def mac_build_from_github(version, token, any_commit=False):
     return zip_path, dmg_path
 
 
+def linux_build_from_github(version, token, any_commit=False):
+    """The Linux program GitHub built and tested for this version, or None.
+
+    Like the Windows one it is a single file that installs itself, so there is
+    nothing to it but the program. A release without it is a release for
+    Windows and the Mac, as every one before 0.6.16 was.
+    """
+    into = artifact_from_github(f"linux-{version}", token, any_commit,
+                                into_name="linux-from-github")
+    if not into:
+        return None
+    for name in os.listdir(into):
+        if name == "ExcaliburView-linux":
+            return os.path.join(into, name)
+    say(f"  That artifact did not hold the Linux program: {os.listdir(into)}")
+    return None
+
+
 def version_in_cargo():
     with open(os.path.join(ROOT, "Cargo.toml"), encoding="utf-8") as f:
         for line in f:
@@ -430,6 +448,18 @@ def main():
             say(f"  {age_of(mac_zip)}")
 
     say()
+    say(bold("Getting the Linux build"))
+    linux = linux_build_from_github(version, the_token, any_commit) if the_token else None
+    if not linux:
+        linux = find_by_suffix("ExcaliburView-linux")
+        if linux:
+            say("  Using the Linux program found on this computer instead.")
+            say(f"  {age_of(linux)}")
+        else:
+            say("  None for this version. On GitHub, open the Linux build workflow and press")
+            say("  Run workflow to include Linux; this release goes out without it otherwise.")
+
+    say()
     say(bold(f"Excalibur View {version}"))
     say()
     say(f"  signing key    {shorten(key)}")
@@ -439,6 +469,7 @@ def main():
     say(f"  Windows server {shorten(server)}")
     say(f"  Mac update     {shorten(mac_zip)}{'  (from this computer)' if from_disk else ''}")
     say(f"  Mac download   {shorten(mac_dmg)}")
+    say(f"  Linux          {shorten(linux)}")
     say()
 
     if promote:
@@ -496,6 +527,8 @@ def main():
         args += ["--app", app, "--server", server]
     if mac_zip:
         args += ["--mac-zip", mac_zip, "--mac-dmg", mac_dmg]
+    if linux:
+        args += ["--linux", linux]
 
     if run(args) != 0:
         stop("The release stopped before publishing.",

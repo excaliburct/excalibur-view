@@ -280,6 +280,14 @@ pub fn swap_in(program: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     let fresh = program.with_extension("new");
     let old = program.with_extension("old");
     std::fs::write(&fresh, bytes)?;
+    // On Linux (and anywhere else files carry permissions) the new build is a
+    // program the moment it takes the old one's name, as the old one was.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(program).map(|m| m.permissions().mode()).unwrap_or(0o755) | 0o700;
+        std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(mode))?;
+    }
     // A leftover from the last update. If an older copy is somehow still
     // running from it this fails, and the rename below replaces it instead.
     let _ = std::fs::remove_file(&old);
@@ -613,6 +621,21 @@ mod tests {
         assert_eq!(std::fs::read(&program).unwrap(), b"newer build");
         tidy_after_update(&program);
         assert!(!program.with_extension("old").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_build_swapped_in_on_linux_is_still_a_program() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hv-swap-mode-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let program = dir.join("hyperview");
+        std::fs::write(&program, b"old build").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        swap_in(&program, b"new build").unwrap();
+        assert_eq!(std::fs::read(&program).unwrap(), b"new build");
+        assert_eq!(std::fs::metadata(&program).unwrap().permissions().mode() & 0o777, 0o755);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

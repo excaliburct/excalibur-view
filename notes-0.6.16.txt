@@ -1,0 +1,22 @@
+Excalibur View now runs on Linux too, the same program as on Windows and
+the Mac, and keeps itself up to date there the same way.
+
+LINUX
+
+ExcaliburView-linux is the whole program in one file, for 64-bit Linux
+desktops (Intel and AMD) at least as new as Ubuntu 22.04, on X11 or
+Wayland. Mark it as a program (right-click, Properties, Allow executing)
+and run it once. It installs itself for that person in their own
+~/.local/share, with no administrator and nothing in /usr: it goes on the
+applications menu with its icon, opens hyperview:// links, and is offered
+in Open With for PDFs, Excalibur View Office licenses and tool chests.
+Running an older download later opens the newer copy instead of going
+backwards.
+
+It finds the office's server by itself, wherever the server runs, and
+takes each new version the way a Windows seat does: fetched in the
+background, checked against the signing key built into it, and in use
+the next time it opens. Printing goes to the computer's own printers.
+Right-click it on the applications menu and Uninstall Excalibur View
+takes it, its menu entry and its icon away again; drawings and markups
+are not touched.

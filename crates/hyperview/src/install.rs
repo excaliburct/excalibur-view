@@ -8,6 +8,12 @@
 //! Program Files, no script. Double-clicking an older copy later does not
 //! install it over a newer one; it just opens the newer one.
 //!
+//! On Linux it is the same as Windows, the freedesktop way: whoever runs the
+//! one file gets the program in their own `~/.local/share`, on the
+//! applications menu with its icon, opening `hyperview://` links and offered
+//! for PDFs, the program's licenses and tool chests. No administrator, nothing
+//! in `/usr`, no package manager.
+//!
 //! On a Mac none of that happens, on purpose. A Mac program is dragged from a
 //! disk image into Applications by the person, which is what every Mac user
 //! already expects, and a program that moved itself there would be the odd one
@@ -29,15 +35,26 @@ use hub::update::{Release, Trusted};
 /// The folder it installs into, under the person's own app data.
 pub const FOLDER: &str = "Excalibur Hyperview";
 /// What it is called once installed.
+#[cfg(windows)]
 pub const PROGRAM: &str = "Hyperview.exe";
+/// What it is called once installed: a Linux program has no extension.
+#[cfg(not(windows))]
+pub const PROGRAM: &str = "hyperview";
 
 /// Keeps the version readable off the file itself.
 pub static BUILD_MARK: &str = hub::build_mark!();
 
 /// Where this program keeps what belongs to it rather than to the person.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", all(unix, not(any(target_os = "android", target_os = "ios"))))))]
 pub fn home() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join(FOLDER))
+}
+
+/// Linux's equivalent of `%LOCALAPPDATA%`: the person's own data folder,
+/// `$XDG_DATA_HOME` or `~/.local/share`.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android", target_os = "ios"))))]
+pub fn home() -> Option<PathBuf> {
+    linux_desktop::data_home().map(|base| base.join(FOLDER))
 }
 
 /// The place a Mac keeps this sort of thing. Not inside the bundle: an update
@@ -87,7 +104,7 @@ pub fn is_installed_copy() -> bool {
 /// build, a build for a platform that has no answer for this, and a copy
 /// somebody asked to keep portable do not.
 fn manages_itself() -> bool {
-    (cfg!(windows) || cfg!(target_os = "macos"))
+    (cfg!(windows) || cfg!(target_os = "macos") || cfg!(target_os = "linux"))
         && crate::edition::updates_itself()
         && !cfg!(debug_assertions)
         && std::env::var_os("HYPERVIEW_PORTABLE").is_none()
@@ -164,7 +181,14 @@ fn copy_in(me: &Path, target: &Path) -> std::io::Result<()> {
     if target.exists() {
         hub::update::swap_in(target, &bytes)
     } else {
-        std::fs::write(target, &bytes)
+        std::fs::write(target, &bytes)?;
+        // A file written fresh on Linux is not a program until it is marked as one.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755))?;
+        }
+        Ok(())
     }
 }
 
@@ -195,8 +219,122 @@ fn register(target: &Path) {
             }
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "android", target_os = "ios"))))]
+    if linux_desktop::register(target) {
+        if let Some(home) = home() {
+            let _ = std::fs::write(home.join("installed-version.txt"), env!("CARGO_PKG_VERSION"));
+        }
+    }
+    #[cfg(not(any(windows, all(unix, not(any(target_os = "macos", target_os = "android", target_os = "ios"))))))]
     let _ = target;
+}
+
+/// The applications menu, the icon, `hyperview://` links and the file types on
+/// Linux, the way every Linux desktop reads them: a `.desktop` entry, an icon
+/// and a MIME package under the person's own data folder. Each step is asked of
+/// the desktop's own tools where it has them and simply left when it does not:
+/// a desktop without `update-desktop-database` still reads the entry.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android", target_os = "ios"))))]
+pub(crate) mod linux_desktop {
+    use std::path::{Path, PathBuf};
+
+    pub const ENTRY: &str = "excalibur-view.desktop";
+    const ICON_FILE: &str = "excalibur-view.png";
+    const MIME_FILE: &str = "excalibur-view.xml";
+    const LICENSE_TYPE: &str = "application/x-excalibur-view-license";
+    const CHEST_TYPE: &str = "application/x-excalibur-view-chest";
+    /// The same mark the Windows icon is made from, at full size.
+    static ICON: &[u8] = include_bytes!("../../../assets/icon-1024.png");
+
+    pub fn data_home() -> Option<PathBuf> {
+        std::env::var_os("XDG_DATA_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+    }
+
+    /// The menu entry for the program at `target`, its icon at `icon`, with
+    /// Uninstall on its right-click menu as Windows has it in Settings → Apps.
+    /// The path is quoted because the program's folder has a space in it.
+    pub fn entry(target: &Path, icon: &Path) -> String {
+        let exe = target.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+        format!(
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Name=Excalibur View\n\
+             GenericName=Drawing viewer, markup and takeoff\n\
+             Comment=View, mark up and take off construction drawings\n\
+             Exec=\"{exe}\" %U\n\
+             Icon={icon}\n\
+             Terminal=false\n\
+             Categories=Graphics;Viewer;Office;\n\
+             MimeType=x-scheme-handler/hyperview;application/pdf;{LICENSE_TYPE};{CHEST_TYPE};\n\
+             StartupWMClass=hyperview\n\
+             Actions=uninstall;\n\
+             \n\
+             [Desktop Action uninstall]\n\
+             Name=Uninstall Excalibur View\n\
+             Exec=\"{exe}\" --uninstall\n",
+            icon = icon.display(),
+        )
+    }
+
+    /// The program's own two file types, by extension, so a license or a tool
+    /// chest sent in an email opens in it.
+    pub fn mime_package() -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <mime-info xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\">\n\
+             \x20 <mime-type type=\"{LICENSE_TYPE}\"><comment>Excalibur View Office license</comment><glob pattern=\"*.{license}\"/></mime-type>\n\
+             \x20 <mime-type type=\"{CHEST_TYPE}\"><comment>Excalibur View tool chest</comment><glob pattern=\"*.{chest}\"/></mime-type>\n\
+             </mime-info>\n",
+            license = hub::license::EXTENSION,
+            chest = chest::native::EXTENSION,
+        )
+    }
+
+    fn quietly(program: &str, args: &[&str]) {
+        let _ = std::process::Command::new(program)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    pub fn register(target: &Path) -> bool {
+        let Some(data) = data_home() else { return false };
+        let apps = data.join("applications");
+        let icons = data.join("icons");
+        let mime = data.join("mime");
+        let icon = icons.join(ICON_FILE);
+        let made = (|| -> std::io::Result<()> {
+            std::fs::create_dir_all(&apps)?;
+            std::fs::create_dir_all(&icons)?;
+            std::fs::create_dir_all(mime.join("packages"))?;
+            std::fs::write(&icon, ICON)?;
+            std::fs::write(mime.join("packages").join(MIME_FILE), mime_package())?;
+            std::fs::write(apps.join(ENTRY), entry(target, &icon))
+        })();
+        if let Err(e) = made {
+            log::warn!("could not put Excalibur View on the applications menu: {e}");
+            return false;
+        }
+        let (apps, mime) = (apps.display().to_string(), mime.display().to_string());
+        quietly("update-mime-database", &[&mime]);
+        quietly("update-desktop-database", &[&apps]);
+        // Its own links are its to open; PDFs stay with whatever opens them now.
+        quietly("xdg-mime", &["default", ENTRY, "x-scheme-handler/hyperview"]);
+        true
+    }
+
+    pub fn unregister() {
+        let Some(data) = data_home() else { return };
+        let _ = std::fs::remove_file(data.join("applications").join(ENTRY));
+        let _ = std::fs::remove_file(data.join("icons").join(ICON_FILE));
+        let _ = std::fs::remove_file(data.join("mime").join("packages").join(MIME_FILE));
+        quietly("update-mime-database", &[&data.join("mime").display().to_string()]);
+        quietly("update-desktop-database", &[&data.join("applications").display().to_string()]);
+    }
 }
 
 #[cfg(windows)]
@@ -514,6 +652,20 @@ pub fn uninstall() {
                 .spawn();
         }
     }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        linux_desktop::unregister();
+        // The folder goes a moment after this program has exited, the same as
+        // on Windows, so the running program is never pulled out from under itself.
+        if let Some(home) = home() {
+            let _ = std::process::Command::new("sh")
+                .args(["-c", "sleep 2; rm -rf -- \"$1\"", "sh"])
+                .arg(&home)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+    }
 }
 
 // ---- updates ---------------------------------------------------------------
@@ -680,5 +832,43 @@ fn same_file(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
+    }
+}
+
+#[cfg(all(test, unix, not(any(target_os = "macos", target_os = "android", target_os = "ios"))))]
+mod linux_tests {
+    use super::linux_desktop;
+    use std::path::Path;
+
+    #[test]
+    fn the_menu_entry_starts_the_installed_program_with_what_was_opened_and_offers_its_own_types() {
+        let entry = linux_desktop::entry(
+            Path::new("/home/sam/.local/share/Excalibur Hyperview/hyperview"),
+            Path::new("/home/sam/.local/share/icons/excalibur-view.png"),
+        );
+        assert!(entry.starts_with("[Desktop Entry]\nType=Application\n"));
+        assert!(entry.contains("\nExec=\"/home/sam/.local/share/Excalibur Hyperview/hyperview\" %U\n"));
+        assert!(entry.contains("\nIcon=/home/sam/.local/share/icons/excalibur-view.png\n"));
+        assert!(entry.contains("x-scheme-handler/hyperview;application/pdf;"));
+        assert!(entry.ends_with("[Desktop Action uninstall]\nName=Uninstall Excalibur View\nExec=\"/home/sam/.local/share/Excalibur Hyperview/hyperview\" --uninstall\n"));
+        let mime = linux_desktop::mime_package();
+        assert!(mime.contains(&format!("pattern=\"*.{}\"", hub::license::EXTENSION)));
+        assert!(mime.contains(&format!("pattern=\"*.{}\"", chest::native::EXTENSION)));
+    }
+
+    #[test]
+    fn a_new_copy_installs_into_the_persons_own_data_folder_as_a_program() {
+        let base = std::env::temp_dir().join(format!("hv-linux-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let me = base.join("ExcaliburView-linux");
+        std::fs::write(&me, b"a program").unwrap();
+        let target = base.join("Excalibur Hyperview").join(super::PROGRAM);
+        super::copy_in(&me, &target).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(std::fs::read(&target).unwrap(), b"a program");
+        assert_eq!(mode & 0o111, 0o111, "it runs, for anybody who may read it");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

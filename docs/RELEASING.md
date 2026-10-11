@@ -2,8 +2,8 @@
 
 ## The short version
 
-1. **github.com/excaliburct/excalibur-view** → Actions. Run **Windows build**
-   and **Mac build**, both on the commit you are releasing. About twenty
+1. **github.com/excaliburct/excalibur-view** → Actions. Run **Windows build**,
+   **Mac build** and **Linux build**, all on the commit you are releasing. About twenty
    minutes, most of the Mac's share being Apple.
 2. On the PC, double-click **Release Excalibur View**.
 3. Try it on one seat.
@@ -40,6 +40,7 @@ Setting the Mac half up for the first time: `docs/SETUP-THE-MAC-BUILD.md`.
 |---|---|---|---|
 | Windows build | `windows-latest` | `windows-<version>` | `ExcaliburView.exe`, `ExcaliburView-Server.exe` |
 | Mac build | `macos-14` | `mac-<version>` | `ExcaliburView-<version>.dmg`, `ExcaliburView-mac.zip` |
+| Linux build | `ubuntu-22.04` | `linux-<version>` | `ExcaliburView-linux` |
 
 Both run the whole test suite first. A release that does not pass its own
 tests is not a release, and the build somebody is about to sign and hand to

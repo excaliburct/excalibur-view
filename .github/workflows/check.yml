@@ -34,6 +34,8 @@ jobs:
             name: Windows
           - os: macos-14
             name: macOS
+          - os: ubuntu-22.04
+            name: Linux
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -50,6 +52,12 @@ jobs:
       # and a red cross on work that is perfectly fine. The download address is
       # made of the pinned build number and the file's name, so it can be
       # written out here and needs nobody's permission.
+      - name: What a Linux desktop program is built against
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libwayland-dev libxkbcommon-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
       - name: The PDF engine
         shell: bash
         run: |
