@@ -148,6 +148,15 @@ keeps everything it prints in `publish-log.txt` beside it.
 `crates/hub/tests/signed_by_the_publishing_script.rs` checks a manifest the
 script really made, so the script and the programs cannot drift apart.
 
+The release key can also be kept on a hardware security key (a YubiKey)
+instead of in a file. Then a release is signed in two halves, either side of
+the computer the key is plugged into: `release_now.py --prepare --slot SLOT`
+gets everything ready and writes down exactly what is to be signed, the key
+signs it on its own computer, and `release_now.py --finish` checks what came
+back against the key every installed copy trusts and publishes. What is
+signed, and how a seat checks it, do not change at all. The steps are in
+`docs/RELEASING.md`, under "Signing on a hardware key".
+
 ## Building it
 
 You need Rust (https://rustup.rs). From Linux, `cargo build --release --target
@@ -173,10 +182,13 @@ set `PDFIUM_DIR` to the folder holding `libpdfium.so`.
 
 ```
 cargo test --release --workspace
+python3 tools/test_yubikey_signing.py
+python3 tools/test_money_path.py
 ```
 
 Everything should pass. If something does not, that is the bug — the tests are
-the specification.
+the specification. The two Python checks need Python 3 with `cryptography`
+installed, as `tools/publish.py` does.
 
 ## Running it
 

@@ -12,6 +12,10 @@
 That is the whole job. The rest of this file is what those four steps are
 doing and why, for whoever has to change one of them later.
 
+If the release key is on a hardware key (a YubiKey) rather than in a file,
+steps 2 and 4 are each done in two halves, either side of the computer the key
+is plugged into. See [Signing on a hardware key](#signing-on-a-hardware-key-a-yubikey).
+
 **The shape of it: GitHub builds both halves. The PC signs and publishes.**
 
 GitHub builds because building is not the thing that has to happen on one
@@ -133,6 +137,16 @@ hyperview-release check  Hyperview-1.5.0-Setup.exe manifest.json
 `check` verifies against the keys **the program** trusts, not against whatever
 signed it, so it says what a seat will say.
 
+With the key on a hardware key, `sign` is done as `prepare` and `finish`
+(see the next section but one):
+
+```
+hyperview-release prepare --slot SLOT --version 1.5.0 --platform windows-x64 \
+                          --notes "Dynamic Fill." Hyperview-1.5.0-Setup.exe
+hyperview-release finish  --request hyperview-1.5.0-release-windows-x64/hyperview-1.5.0-release-windows-x64.sign-request.json \
+                          --signatures hyperview-1.5.0-release-windows-x64.signatures.json
+```
+
 ## The key
 
 Generated on the publisher's own machine, by the publisher. It is the only copy.
@@ -148,6 +162,102 @@ The public half goes in `crates/hyperview/src/trust.rs`. An empty list there
 means the build refuses every update and says so, which is the right way round:
 a program that installs anything when it has been told to trust nothing is worse
 than one that installs nothing.
+
+## Signing on a hardware key (a YubiKey)
+
+The release key can be kept on a hardware security key instead of in
+`hyperview-signing.key`. A hardware key never hands its key over: it stays
+plugged into one computer and signs short messages there, and nothing can copy
+the key off it. So a release is signed in two halves, either side of that
+computer.
+
+**1. Prepare**, on the computer that cuts the release:
+
+```
+python3 tools/release_now.py --prepare --slot SLOT
+```
+
+`SLOT` is the two hex digits of the slot on the hardware key that holds the
+release key. This does everything a release does up to signing: gets the
+latest code, fetches and checks the programs GitHub built, and shows what it
+found. Then, where the key file would sign, it writes down the exact bytes to
+be signed, in a **signing request**. The request, the unsigned `release.json`
+and a copy of every program are kept together in a new folder,
+`dist/hyperview-VERSION-release/`, which nothing ever writes over. Nothing is
+signed or published yet.
+
+**2. Sign**, on the computer the hardware key is plugged into. Copy the
+request, `hyperview-VERSION-release.sign-request.json`, across (it is a few
+kilobytes of text) and sign it with the signing script there. It shows, in
+words, what each message vouches for before the key signs it, and writes
+`hyperview-VERSION-release.signatures.json`. Bring that file back.
+
+**3. Finish**, back on the first computer:
+
+```
+python3 tools/release_now.py --finish dist/hyperview-VERSION-release/hyperview-VERSION-release.sign-request.json --signatures hyperview-VERSION-release.signatures.json
+```
+
+This checks what came back and, only if all of it holds, writes `release.json`
+into the kept folder and uploads and publishes the programs kept there, exactly
+as a key-file release does. Then try it on one seat.
+
+**Handing it to everyone** is the same three steps with `--promote`:
+`release_now.py --promote --prepare --slot SLOT`, sign
+`hyperview-VERSION-promote.sign-request.json`, then
+`release_now.py --promote --finish ... --signatures ...`.
+
+### What finish checks
+
+It reads the release's **own** kept request, never the copy that went to the
+other computer, and refuses, saying why, unless every one of these holds:
+
+- the signatures file is in the right format and is for this product, version,
+  step and commit;
+- it has exactly one signature for each thing asked, none missing and none
+  extra;
+- each signature is over this release's message (its SHA-256 matches);
+- each signature checks out against the release key **the program trusts**:
+  `KEYS` in `crates/hyperview/src/trust.rs`, read from the file the program is
+  compiled from. The key the signatures file names has to be that one too, but
+  it is never taken on its word;
+- the programs kept at prepare are unchanged, and the request still matches
+  the release kept beside it. For a promotion, `release.json` on the release
+  must be what it was at prepare.
+
+A refusal publishes nothing. Prepare again and sign the new request.
+
+### What does not change
+
+What is signed is the same seven lines as ever (see "What is signed" above),
+one message per program, each under 200 bytes whatever the size of the program,
+which is in it only as its SHA-256. The key is the same key, and Ed25519 always
+makes the same signature from the same key over the same bytes, so a release
+finished this way is byte for byte the release the key file would have made.
+Every installed copy checks it exactly as before and needs nothing new.
+
+The key file keeps working (`--key`, and plain `release_now.py`) until it is
+retired.
+
+### Underneath
+
+`release_now.py` hands these to `tools/publish.py`, where `sign`, `release`
+and `promote` each take `--prepare --slot SLOT` or
+`--finish REQUEST --signatures FILE` in place of `--key`. `publish.py sign
+--finish` writes `release.json` and stops, for a release uploaded by hand.
+
+The two files are JSON. The request (`excalibur-sign-request/1`) carries the
+product (`hyperview`), version, step (`release` or `promote`), the commit
+built, when it was made, the slot, the trusted public key (raw 32 bytes,
+base64), and one item per program: an id (its platform), a line saying what it
+is, and the message (base64). The signatures file (`excalibur-signatures/1`)
+repeats product, version, step, commit and public key, and gives each id the
+SHA-256 of its message and the 64-byte Ed25519 signature (base64).
+
+`python3 tools/test_yubikey_signing.py` and `cargo test -p hyperview-release`
+prove all of this with a throwaway key standing in for the hardware key: a
+release prepared and finished is byte for byte the key file's, and every
+refusal above has its own test.
 
 ## What the server already does
 

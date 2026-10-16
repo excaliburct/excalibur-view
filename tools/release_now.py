@@ -10,6 +10,17 @@ publish — and says in plain words what happened.
 
 The signing key is read here and used here. That is the reason this runs on
 this computer rather than somewhere more convenient.
+
+When the release key is on a hardware security key (a YubiKey) instead of in
+a file, a release is two runs of this, either side of signing on the computer
+the key is plugged into:
+
+    python3 tools/release_now.py --prepare --slot SLOT
+    python3 tools/release_now.py --finish REQUEST --signatures SIGNATURES
+
+and the same with --promote for handing a release to every office. The first
+does everything up to signing and keeps what it made; the second checks the
+signatures and publishes. See "Signing on a hardware key" in docs/RELEASING.md.
 """
 
 import io
@@ -373,17 +384,70 @@ def run(args):
     return subprocess.call(args, cwd=ROOT)
 
 
+def given(argv, flag):
+    """The value typed after `flag`, or None."""
+    if flag in argv:
+        at = argv.index(flag)
+        if at + 1 < len(argv) and not argv[at + 1].startswith("--"):
+            return argv[at + 1]
+        return ""
+    return None
+
+
+def finish_on_hardware_key(promote, request, signatures):
+    """The second half of a release signed on a hardware key: publish.py
+    checks the signatures against the key the program trusts, and publishes
+    the programs kept when the release was prepared. Nothing is downloaded or
+    built again, because what was signed is what was kept."""
+    say(bold("Finishing what the hardware key signed"))
+    token = find_file(TOKEN_NAMES)
+    if not token:
+        stop("The GitHub token is not where this expects it.",
+             "It should be github-token.txt, in dev\\ExcaliburSigning.")
+    args = [sys.executable, os.path.join("tools", "publish.py"), "promote" if promote else "release",
+            "--finish", os.path.abspath(request), "--signatures", os.path.abspath(signatures),
+            "--token-file", token, "--repo", REPO]
+    if run(args) != 0:
+        stop("That did not go through. The message above says why.",
+             "If it was refused, nothing was published; prepare again and sign the new request.")
+    say()
+    if promote:
+        say(bold("Every office now takes this version."))
+    else:
+        say(bold("Published."))
+        say()
+        say("  When you have run it on one seat and it was fine, hand it to everyone:")
+        say("  run this again with --promote --prepare and the same --slot.")
+    wait_to_close()
+
+
 def main():
-    promote = "--promote" in sys.argv[1:]
+    argv = sys.argv[1:]
+    promote = "--promote" in argv
     # For the case where the Mac build is a commit or two behind and every
     # one of them is a note or a workflow. It has to be typed out, because
     # the point of the check is that nobody talks themselves past it by
     # accident.
-    any_commit = "--mac-from-any-commit" in sys.argv[1:]
+    any_commit = "--mac-from-any-commit" in argv
+    # The release key on a hardware key rather than in a file: prepare,
+    # sign on the computer the key is plugged into, then finish.
+    prepare = "--prepare" in argv
+    slot = given(argv, "--slot")
+    finish = given(argv, "--finish")
+    signatures = given(argv, "--signatures")
 
     say()
     say(bold("   Excalibur View — publishing a release"))
     say()
+
+    if prepare and not slot:
+        stop("--prepare needs --slot: the two hex digits of the slot on the",
+             "hardware key that holds the release key.")
+    if finish is not None and not (finish and signatures):
+        stop("--finish needs the signing request this kept when it prepared the",
+             "release, and --signatures with the file that came back signed.")
+    if finish:
+        return finish_on_hardware_key(promote, finish, signatures)
 
     # The code first. Publishing something older than what is on GitHub is a
     # mistake that is invisible until somebody reports a fixed bug.
@@ -396,13 +460,17 @@ def main():
     key = find_file(KEY_NAMES)
     token = find_file(TOKEN_NAMES)
     notes = find_file((f"notes-{version}.txt", "notes.txt"), extra_dirs=[ROOT])
-    if not key:
+    if prepare:
+        key = None  # the key is on the hardware key; nothing here signs
+    elif not key:
         stop("The signing key is not where this expects it.",
              "It is looked for by name, hyperview-signing.key, beside this",
              "folder or in an ExcaliburSigning folder next to it — so it",
              "follows you to another computer without anything being edited.",
              "Without it nothing can be signed, and an unsigned build is one",
-             "no copy of Excalibur View anywhere will install.")
+             "no copy of Excalibur View anywhere will install.",
+             "If the release key is on a hardware key, run this with",
+             "--prepare --slot and the slot that holds it.")
     if not token:
         stop("The GitHub token is not where this expects it.",
              "It should be github-token.txt, in dev\\ExcaliburSigning.")
@@ -462,7 +530,7 @@ def main():
     say()
     say(bold(f"Excalibur View {version}"))
     say()
-    say(f"  signing key    {shorten(key)}")
+    say(f"  signing key    {f'on the hardware key, slot {slot}' if prepare else shorten(key)}")
     say(f"  GitHub token   {shorten(token)}")
     say(f"  release notes  {shorten(notes)}")
     say(f"  Windows app    {shorten(app)}")
@@ -479,13 +547,18 @@ def main():
             say("\nLeft as it was.")
             wait_to_close()
             return
-        code = run([sys.executable, os.path.join("tools", "publish.py"), "promote",
-                    "--key", key, "--token-file", token, "--repo", REPO,
-                    "--version", version])
+        code = run([sys.executable, os.path.join("tools", "publish.py"), "promote"]
+                   + (["--prepare", "--slot", slot] if prepare else ["--key", key])
+                   + ["--token-file", token, "--repo", REPO, "--version", version])
         if code != 0:
             stop("That did not go through. The message above says why.")
         say()
-        say(bold(f"{version} is now the version every office takes."))
+        if prepare:
+            say(bold("Ready to sign on the hardware key. Nothing has changed on the release yet."))
+            say("  Sign the request on the computer the key is plugged into, bring the")
+            say("  signatures file back, and run this again with --promote --finish.")
+        else:
+            say(bold(f"{version} is now the version every office takes."))
         wait_to_close()
         return
 
@@ -503,7 +576,10 @@ def main():
             return
         mac_zip = mac_dmg = None
 
-    if app:
+    if prepare:
+        say("This will get everything ready to sign on the hardware key, and keep it")
+        say("together in one folder. Nothing is signed or published until you finish.")
+    elif app:
         say("This will sign everything with your key and publish it as an early")
         say("release. GitHub built and tested both halves; the signing is the")
         say("part only this computer can do.")
@@ -518,9 +594,9 @@ def main():
         wait_to_close()
         return
 
-    args = [sys.executable, os.path.join("tools", "publish.py"), "release",
-            "--key", key, "--token-file", token, "--repo", REPO,
-            "--version", version]
+    args = [sys.executable, os.path.join("tools", "publish.py"), "release"]
+    args += ["--prepare", "--slot", slot] if prepare else ["--key", key]
+    args += ["--token-file", token, "--repo", REPO, "--version", version]
     if notes:
         args += ["--notes-file", notes]
     if app and server:
@@ -534,6 +610,17 @@ def main():
         stop("The release stopped before publishing.",
              "Whatever went wrong is in the message above. Running this again",
              "is safe — it finishes what it started rather than starting over.")
+
+    if prepare:
+        say()
+        say(bold("Ready to sign on the hardware key. Nothing has been published."))
+        say()
+        say("  Sign the request named above on the computer the key is plugged into,")
+        say("  bring the signatures file back, and finish with the command above, or:")
+        say()
+        say("      python3 tools/release_now.py --finish REQUEST --signatures SIGNATURES")
+        wait_to_close()
+        return
 
     say()
     say(bold("Published."))

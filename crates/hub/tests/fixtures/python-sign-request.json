@@ -1,0 +1,27 @@
+{
+  "format": "excalibur-sign-request/1",
+  "product": "hyperview",
+  "version": "9.4.0",
+  "step": "release",
+  "commit": "",
+  "made": "2026-09-23T12:00:00Z",
+  "slot": "9d",
+  "publicKey": "GX9rI+FshTLGq8g4+s1ep4m+DHaykgM0A5v6iz02jWE=",
+  "items": [
+    {
+      "id": "windows-x64",
+      "what": "Excalibur View 9.4.0, the desktop app for Windows (preview channel): ExcaliburView.exe, 23 bytes, SHA-256 38bc94a183218f70",
+      "message": "aHlwZXJ2aWV3LXJlbGVhc2UtdjEKdmVyc2lvbj05LjQuMApjaGFubmVsPXByZXZpZXcKcGxhdGZvcm09d2luZG93cy14NjQKYnl0ZXM9MjMKZGlnZXN0PTM4YmM5NGExODMyMThmNzAwM2YzZDg2MmIxMWZhZjdhNjhkZDViYmFlYTRmNmNiYzZiYWQ0NDkzNzMzNmQ3YjIKbWluaW11bV9hcGlfdmVyc2lvbj0xCg=="
+    },
+    {
+      "id": "windows-x64-server",
+      "what": "Excalibur View 9.4.0, the office server for Windows (preview channel): ExcaliburView-Server.exe, 23 bytes, SHA-256 7f864a2efad5c301",
+      "message": "aHlwZXJ2aWV3LXJlbGVhc2UtdjEKdmVyc2lvbj05LjQuMApjaGFubmVsPXByZXZpZXcKcGxhdGZvcm09d2luZG93cy14NjQtc2VydmVyCmJ5dGVzPTIzCmRpZ2VzdD03Zjg2NGEyZWZhZDVjMzAxZjkxYzU0ZmUxOTk4MWQxNWE2OGJiZjMyYTM1ZjEzMjBmZDc0ZjMwY2MwNzliOTkyCm1pbmltdW1fYXBpX3ZlcnNpb249MQo="
+    },
+    {
+      "id": "macos-universal",
+      "what": "Excalibur View 9.4.0, the Mac app (preview channel): ExcaliburView-mac.zip, 23 bytes, SHA-256 a583c455ff15c60b",
+      "message": "aHlwZXJ2aWV3LXJlbGVhc2UtdjEKdmVyc2lvbj05LjQuMApjaGFubmVsPXByZXZpZXcKcGxhdGZvcm09bWFjb3MtdW5pdmVyc2FsCmJ5dGVzPTIzCmRpZ2VzdD1hNTgzYzQ1NWZmMTVjNjBiYTczNTU0Njc2YzcwYTBlZDVhZGVmMWM4MTA1YTc3ZTY1NTExNDRkZTgxZjhmOWVhCm1pbmltdW1fYXBpX3ZlcnNpb249MQo="
+    }
+  ]
+}

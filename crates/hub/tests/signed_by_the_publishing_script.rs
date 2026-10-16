@@ -125,3 +125,53 @@ fn and_the_viewers_signature_cannot_be_passed_off_as_the_servers() {
         Err(Refusal::BadSignature)
     );
 }
+
+/// What a hardware key (a YubiKey) is asked to sign, when the release key is
+/// on one rather than in a file.
+///
+/// `publish.py sign --prepare` wrote this request for the very release in
+/// `python-signed-two-platforms.json`, and `tools/test_yubikey_signing.py`
+/// checks that it still writes the same. Here, in the code a seat runs, each
+/// message must be exactly `signing_payload` of the build it names, and the
+/// throwaway key signing those bytes must make exactly the signature the key
+/// file put in the manifest. That is the whole of "signing on a hardware key
+/// changes nothing a seat can see".
+#[test]
+fn what_a_hardware_key_is_asked_to_sign_is_what_a_seat_checks() {
+    use base64::Engine;
+    use ed25519_dalek::Signer;
+
+    let decode = |value: &serde_json::Value| {
+        base64::engine::general_purpose::STANDARD
+            .decode(value.as_str().expect("base64 text"))
+            .expect("base64")
+    };
+    let request: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/python-sign-request.json")).unwrap();
+    assert_eq!(request["format"], "excalibur-sign-request/1");
+    assert_eq!(request["product"], "hyperview");
+    let key = SigningKey::from_bytes(&[42u8; 32]);
+    assert_eq!(decode(&request["publicKey"]), key.verifying_key().to_bytes());
+
+    // A Windows release whatever machine this runs on, so read against the
+    // Windows names rather than this build's own.
+    let published = two_platforms();
+    let items = request["items"].as_array().unwrap();
+    let ids: Vec<&str> = items.iter().map(|item| item["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["windows-x64", "windows-x64-server", "macos-universal"]);
+    for item in items {
+        let platform = item["id"].as_str().unwrap();
+        let release = if platform == "windows-x64-server" {
+            published.server.as_ref().unwrap()
+        } else {
+            published.app_for(platform).unwrap()
+        };
+        let message = decode(&item["message"]);
+        assert_eq!(message, release.signing_payload(), "{platform}");
+        assert_eq!(
+            hub::update::hex(&key.sign(&message).to_bytes()),
+            release.signature,
+            "{platform}"
+        );
+    }
+}

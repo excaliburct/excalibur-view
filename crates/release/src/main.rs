@@ -18,6 +18,13 @@
 //!                           --notes "Dynamic Fill." Hyperview-Setup.exe
 //!   hyperview-release check Hyperview-Setup.exe manifest.json
 //! ```
+//!
+//! With the key on a hardware security key (a YubiKey) instead of in a file,
+//! `sign` is done in two halves either side of the computer the key is plugged
+//! into: `prepare` (everything but the signature) and `finish` (the signature
+//! checked and the manifest written). See [`hardware_key`].
+
+mod hardware_key;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -32,6 +39,8 @@ fn main() -> ExitCode {
     let result = match args.first().map(|s| s.as_str()) {
         Some("keygen") => keygen(&args[1..]),
         Some("sign") => sign(&args[1..]),
+        Some("prepare") => prepare(&args[1..]),
+        Some("finish") => finish(&args[1..]),
         Some("check") => check(&args[1..]),
         Some("bundle") => bundle(&args[1..]),
         Some("public") => public(&args[1..]),
@@ -74,6 +83,16 @@ fn usage() {
                   [--platform windows-x64] [--channel stable] [--notes \"...\"]\n\
                   [--out manifest.json] <installer>\n\
            check  <installer> <manifest.json>  verify one, the way a seat will.\n\
+         \n\
+         With the key on a hardware key (a YubiKey):\n\
+           prepare --slot <slot> --version <v> sign, up to the signature: writes a signing\n\
+                  [--platform ...] [--channel ...]  request, kept with the installer in a new\n\
+                  [--notes \"...\"] [--out-dir .]    folder, for the computer the key is in.\n\
+                  [--commit <id>] <installer>\n\
+           finish --request <kept request>     check what came back signed and write the\n\
+                  --signatures <file>          manifest, exactly as sign would have.\n\
+                  [--out manifest.json]\n\
+         \n\
            bundle --version <v> <installer> <manifest.json>\n\
                   [--note \"...\"] [--wave stable] [--out <file>.avpkg]\n\
                                                wrap a signed release as a Fleet package,\n\
@@ -296,8 +315,17 @@ fn load_key(args: &[String]) -> Result<(String, SigningKey), String> {
 
 // ---- signing --------------------------------------------------------------
 
-fn sign(args: &[String]) -> Result<(), String> {
-    let (name, signing) = load_key(args)?;
+/// What `sign` and `prepare` are asked to sign, read off the command line.
+struct ToSign {
+    version: String,
+    platform: String,
+    channel: Channel,
+    notes: String,
+    installer: String,
+    bytes: Vec<u8>,
+}
+
+fn what_to_sign(args: &[String]) -> Result<ToSign, String> {
     let version = value(args, "--version")
         .ok_or("say which version this is: --version 1.5.0")?;
     if hub::update::compare(&version, "0.0.0") == std::cmp::Ordering::Equal
@@ -314,7 +342,6 @@ fn sign(args: &[String]) -> Result<(), String> {
         Some(other) => return Err(format!("'{other}' is not a channel. Use stable or preview.")),
     };
     let notes = value(args, "--notes").unwrap_or_default();
-    let out = value(args, "--out").unwrap_or_else(|| "manifest.json".into());
 
     let installer = positional(args)
         .first()
@@ -325,20 +352,38 @@ fn sign(args: &[String]) -> Result<(), String> {
     if bytes.is_empty() {
         return Err(format!("{installer} is empty"));
     }
+    Ok(ToSign { version, platform, channel, notes, installer, bytes })
+}
 
-    let mut release = Release {
+/// The manifest for an installer, complete but for its signature.
+fn describe(asked: &ToSign, published: String, key: &str) -> Release {
+    let (version, platform) = (&asked.version, &asked.platform);
+    Release {
         version: version.clone(),
-        channel,
+        channel: asked.channel,
         platform: platform.clone(),
-        published: stamp(),
-        notes,
+        published,
+        notes: asked.notes.clone(),
         download: format!("/api/v1/update/{version}/download?platform={platform}"),
-        bytes: bytes.len() as u64,
-        digest: hex(&Sha256::digest(&bytes)),
+        bytes: asked.bytes.len() as u64,
+        digest: hex(&Sha256::digest(&asked.bytes)),
         signature: String::new(),
-        key: name.clone(),
+        key: key.to_string(),
         minimum_api_version: hub::API_VERSION,
-    };
+    }
+}
+
+/// How a signed manifest is written, whichever way it was signed.
+fn manifest_text(release: &Release) -> Result<String, String> {
+    serde_json::to_string_pretty(release).map_err(|e| e.to_string())
+}
+
+fn sign(args: &[String]) -> Result<(), String> {
+    let (name, signing) = load_key(args)?;
+    let asked = what_to_sign(args)?;
+    let out = value(args, "--out").unwrap_or_else(|| "manifest.json".into());
+
+    let mut release = describe(&asked, stamp(), &name);
     release.signature = hex(&signing.sign(&release.signing_payload()).to_bytes());
 
     // Check our own work before anybody else has to.
@@ -346,14 +391,20 @@ fn sign(args: &[String]) -> Result<(), String> {
         keys: vec![(name.clone(), signing.verifying_key().to_bytes())],
     };
     trusted
-        .check(&release, &bytes)
+        .check(&release, &asked.bytes)
         .map_err(|e| format!("the signature this just made does not check out: {e}"))?;
 
-    let text = serde_json::to_string_pretty(&release).map_err(|e| e.to_string())?;
+    let text = manifest_text(&release)?;
     std::fs::write(&out, text).map_err(|e| format!("could not write {out}: {e}"))?;
 
     println!();
-    println!("  Signed {version} for {platform} with '{name}'.");
+    println!("  Signed {} for {} with '{name}'.", release.version, release.platform);
+    how_to_publish(&release, &out, &asked.installer);
+    Ok(())
+}
+
+fn how_to_publish(release: &Release, out: &str, installer: &str) {
+    let (version, platform) = (&release.version, &release.platform);
     println!("    {} bytes", release.bytes);
     println!("    sha256 {}", release.digest);
     println!("    manifest {out}");
@@ -371,7 +422,97 @@ fn sign(args: &[String]) -> Result<(), String> {
     println!("           -H 'Content-Type: application/json' \\");
     println!("           -d '{{\"platform\":\"{platform}\",\"ready\":true}}'");
     println!();
+}
+
+/// `sign`, stopped where the key file would sign. See [`hardware_key`].
+fn prepare(args: &[String]) -> Result<(), String> {
+    let asked = what_to_sign(args)?;
+    let slot = value(args, "--slot").ok_or(
+        "say which slot on the hardware key holds the release key: --slot, as two hex digits",
+    )?;
+    let commit = value(args, "--commit").unwrap_or_else(commit_here);
+    let out_dir = value(args, "--out-dir").unwrap_or_else(|| ".".into());
+    let installer_name = Path::new(&asked.installer)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("that installer has no usable file name")?
+        .to_string();
+    let trusted = trusted_keys()?;
+    let made = stamp();
+    let key_name = value(args, "--key-name");
+    let prepared = hardware_key::prepare(
+        &trusted,
+        &hardware_key::How {
+            slot: &slot,
+            key_name: key_name.as_deref(),
+            commit: &commit,
+            made: &made,
+            out_dir: Path::new(&out_dir),
+        },
+        describe(&asked, made.clone(), ""),
+        &installer_name,
+        &asked.bytes,
+    )?;
+
+    let request_name = prepared
+        .request
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    println!();
+    println!(
+        "  Prepared {} for {}. Nothing is signed yet.",
+        asked.version, asked.platform
+    );
+    println!("    kept in  {}", prepared.folder.display());
+    println!("    request  {request_name}");
+    println!();
+    println!("  Copy the request to the computer the hardware key is plugged into and");
+    println!("  sign it there. Then, with the signatures file that comes back:");
+    println!();
+    println!(
+        "      hyperview-release finish --request \"{}\" --signatures {}",
+        prepared.request.display(),
+        request_name.replace(".sign-request.json", ".signatures.json")
+    );
+    println!();
     Ok(())
+}
+
+/// The manifest `sign` would have written, from a kept request and the
+/// signatures that came back for it.
+fn finish(args: &[String]) -> Result<(), String> {
+    let request = value(args, "--request")
+        .ok_or("say which signing request prepare kept: --request")?;
+    let signatures = value(args, "--signatures")
+        .ok_or("say which signatures file came back: --signatures")?;
+    let trusted = trusted_keys()?;
+    let finished =
+        hardware_key::finish(&trusted, Path::new(&request), Path::new(&signatures))?;
+    let out = value(args, "--out")
+        .unwrap_or_else(|| finished.folder.join("manifest.json").display().to_string());
+    let text = manifest_text(&finished.release)?;
+    std::fs::write(&out, text).map_err(|e| format!("could not write {out}: {e}"))?;
+
+    println!();
+    println!(
+        "  Signed {} for {} with '{}', on the hardware key.",
+        finished.release.version, finished.release.platform, finished.release.key
+    );
+    how_to_publish(&finished.release, &out, &finished.installer.display().to_string());
+    Ok(())
+}
+
+/// The commit being built, in full, or "" when git cannot say.
+fn commit_here() -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_lowercase())
+        .unwrap_or_default()
 }
 
 /// Wraps a signed release as a package the Excalibur Fleet can deliver.
