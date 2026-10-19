@@ -110,7 +110,10 @@ fn open(e: &quick_xml::events::BytesStart) -> Node {
         .map(|a| {
             (
                 String::from_utf8_lossy(a.key.as_ref()).into_owned(),
-                a.unescape_value()
+                // WHAT: the attribute's value with &amp; and the like turned back into characters, read as XML 1.0.
+                // WHY: quick-xml 0.41 renamed `unescape_value` to this (the old name now calls it); a tab or line
+                // break inside a value reads as a space, as the XML standard says it should.
+                a.normalized_value(quick_xml::XmlVersion::Implicit1_0)
                     .map(|v| v.into_owned())
                     .unwrap_or_default(),
             )
