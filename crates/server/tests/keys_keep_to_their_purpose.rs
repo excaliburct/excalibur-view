@@ -448,3 +448,45 @@ fn a_person_cannot_reach_a_job_they_are_not_on_by_uploading_into_it_or_filing_un
     let (status, _) = ask(&office, "GET", &format!("/api/v1/projects/{private}"), &estimator, None); // WHAT: and by id. WHY: to show the two agree.
     assert_eq!(status, 404); // WHAT: the same answer. WHY: one rule.
 }
+
+// ---- review of connector-hub-0 (2026-10-20): two ways a key still reached past its purpose -----
+
+#[test]
+fn an_integration_key_cannot_change_the_password_of_the_person_who_made_it() {
+    // WHAT: an administrator's integration key asks POST /me/password with the right current password.
+    // WHY:  /me/password takes any caller, keys included, and has no limit on wrong tries (sign-in has one). A stolen
+    //       key can guess the administrator's password there as fast as the server answers, and the right guess
+    //       changes it: the thief then signs in as the administrator, which is the power keys were meant to lose.
+    let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
+    let admin = session(&office, "sam@example.com"); // WHAT: the administrator's session. WHY: makes the key.
+    let key = a_key(&office, &admin, "integration", "Other program"); // WHAT: an administrator's integration key. WHY: the key a program holds.
+    let (status, said) = ask(&office, "POST", "/api/v1/me/password", &key, Some(json!({ "current": PASSWORD, "new": "a-new-password-chosen-by-a-thief" }))); // WHAT: the right guess, with the key. WHY: a guess that lands must not change anything.
+    assert_eq!(status, 403, "a key changed its maker's password: {said}"); // WHAT: refused. WHY: changing a password is a person's, signed in, never a program's.
+    let (status, _) = ask(&office, "POST", "/api/v1/me/password", &key, Some(json!({ "current": "a-wrong-guess-at-it-42", "new": "a-new-password-chosen-by-a-thief" }))); // WHAT: a wrong guess with the key. WHY: must not even be weighed, or the route is a guessing oracle.
+    assert_eq!(status, 403, "a key's wrong guess was weighed rather than refused as a key"); // WHAT: refused as a key, not 401 "not your current password". WHY: no answer that says whether the guess was right.
+}
+
+#[test]
+fn a_sync_key_stops_reaching_every_programs_project_when_its_maker_is_no_longer_an_administrator() {
+    // WHAT: a sync key made by an administrator who is later made an estimator again.
+    // WHY:  sync_may_reach lets a sync key into every project filed under a reference, on the ground that its maker is
+    //       an administrator. Nothing checks that when the key is used: after the maker is demoted, the key still reads
+    //       and writes jobs with other people named on them, which the maker no longer may.
+    let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
+    let db = rusqlite::Connection::open(office.scratch.0.join("hyperview.sqlite")).unwrap(); // WHAT: the office's database. WHY: a second administrator, so one can be demoted.
+    db.execute("UPDATE people SET role = 'admin' WHERE id = ?1", params![ESTIMATOR]).unwrap(); // WHAT: Eve is an administrator for now. WHY: she makes the sync key.
+    let eve = session(&office, "eve@example.com"); // WHAT: Eve signed in. WHY: makes the key.
+    let key = a_key(&office, &eve, "sync", "Eve's program"); // WHAT: her sync key. WHY: the key under test.
+    let admin = session(&office, "sam@example.com"); // WHAT: Sam, the other administrator. WHY: makes the private job and demotes Eve.
+    let (_, kept) = ask(&office, "POST", "/api/v1/projects", &admin, Some(json!({ "number": "26-909", "name": "Kept", "reference": "program:bid:9" }))); // WHAT: a program's job. WHY: a sync key's kind of project.
+    let kept = kept["id"].as_str().unwrap().to_string(); // WHAT: its id. WHY: asked for below.
+    ask(&office, "POST", &format!("/api/v1/projects/{kept}/people"), &admin, Some(json!({ "person": ADMIN }))); // WHAT: only Sam on it. WHY: Eve, once an estimator, may not reach it.
+    let (status, _) = ask(&office, "POST", &format!("/api/v1/people/{ESTIMATOR}/role"), &admin, Some(json!({ "role": "estimator" }))); // WHAT: Eve made an estimator again. WHY: the moment her key should shrink with her.
+    assert_eq!(status, 200); // WHAT: demoted. WHY: the rest depends on it.
+    let (status, _) = ask(&office, "GET", &format!("/api/v1/projects/{kept}"), &eve, None); // WHAT: Eve herself asks for the job. WHY: shows what she may now reach.
+    assert_eq!(status, 404); // WHAT: refused. WHY: she is not on it and no longer an administrator.
+    let (status, said) = ask(&office, "GET", &format!("/api/v1/projects/{kept}/markuplist"), &key, None); // WHAT: her old sync key reads its markups. WHY: must not reach more than she can.
+    assert_ne!(status, 200, "a demoted administrator's sync key still read a job she is not on: {said}"); // WHAT: refused. WHY: a key acts as its maker, never as she used to be.
+    let (status, said) = upload(&office, &key, &kept, "after-demotion"); // WHAT: and puts a drawing into it. WHY: writing is worse than reading.
+    assert_ne!(status, 200, "a demoted administrator's sync key still wrote into a job she is not on: {said}"); // WHAT: refused. WHY: the same.
+}
