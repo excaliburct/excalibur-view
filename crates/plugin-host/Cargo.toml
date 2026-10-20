@@ -8,4 +8,6 @@ description = "The sandbox a plugin runs in, the same on a seat and on the offic
 [dependencies]
 plugin-api = { path = "../plugin-api" }
 serde_json = "1"
-wasmi = { version = "0.42", default-features = false, features = ["std"] }
+# WHAT: the plugin interpreter, 1.x. WHY: 0.42 has a use-after-free in its linear memory (GHSA-g4v2-cjqp-rfmq,
+# high); 1.0.1 and later fix it, and 1.x is the line still maintained.
+wasmi = { version = "1.1", default-features = false, features = ["std"] }

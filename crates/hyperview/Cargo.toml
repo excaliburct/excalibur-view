@@ -69,7 +69,9 @@ directories = "6"
 memmap2 = "0.9"
 sha2 = "0.10"
 base64 = "0.22"
-rust_xlsxwriter = { version = "0.90", default-features = false }
+# WHAT: the Excel writer, 0.100. WHY: it is the first release built on zip 9, and zip before 9.0.0 has three
+# advisories (RUSTSEC-2026-0367, -0368, -0369, up to critical) about unpacking archives.
+rust_xlsxwriter = { version = "0.100", default-features = false }
 
 # wgpu is not a renderer until a *backend* is turned on, and eframe deliberately
 # turns none on — it leaves that to whoever is building the program, because the

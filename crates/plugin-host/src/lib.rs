@@ -59,9 +59,10 @@ fn instantiate(wasm: &[u8], fuel: u64) -> Result<(wasmi::Store<Host>, wasmi::Ins
         .set_fuel(fuel)
         .map_err(|e| format!("The plugin's budget could not be set: {e}"))?;
     let linker = wasmi::Linker::<Host>::new(&engine);
+    // WHAT: makes the plugin's instance and runs its start function, in one call.
+    // WHY: wasmi 1.x joined the two steps (`instantiate` then `start`) into this one.
     let instance = linker
-        .instantiate(&mut store, &module)
-        .and_then(|pre| pre.start(&mut store))
+        .instantiate_and_start(&mut store, &module)
         .map_err(|e| explain(&e))?;
     Ok((store, instance))
 }
