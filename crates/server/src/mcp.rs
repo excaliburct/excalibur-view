@@ -250,29 +250,32 @@ fn call(server: &crate::api::Server, headers: &HeaderMap, body: &Value) -> Resul
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
     // Same token as the rest of the API. An assistant gets exactly what the
-    // person whose token it is would get, and nothing else.
-    crate::api::mcp_caller(server, headers)
+    // person whose token it is would get, and nothing else: the person is
+    // kept and handed to every tool, which applies the API's own project gate.
+    let who = crate::api::mcp_caller(server, headers) // WHAT: whoever the token belongs to. WHY: kept, not thrown away: every answer is filtered by it.
         .map_err(|_| Trouble::refused(
             "this server does not know who is asking. Put an Excalibur View access token \
              in an Authorization: Bearer header.",
         ))?;
 
     let said = match name {
-        "list_projects" => crate::api::mcp_projects(server),
-        "list_sets" => crate::api::mcp_sets(server, args.get("project").and_then(|p| p.as_str())),
-        "takeoff" => crate::api::mcp_takeoff(server, need(&args, "set")?),
+        "list_projects" => crate::api::mcp_projects(server, &who), // WHAT: the jobs this person may see. WHY: never every job on the server.
+        "list_sets" => crate::api::mcp_sets(server, &who, args.get("project").and_then(|p| p.as_str())), // WHAT: sets on jobs this person may see. WHY: the same rule as the list.
+        "takeoff" => crate::api::mcp_takeoff(server, &who, need(&args, "set")?), // WHAT: a set's takeoff, gated. WHY: as GET /sets/{id}/takeoff is.
         "shop_list" => crate::api::mcp_shop_list(
             server,
+            &who, // WHAT: the person asking. WHY: the cut list is gated like the takeoff it comes from.
             need(&args, "set")?,
             args.get("stock_length_feet").and_then(|v| v.as_f64()),
         ),
-        "counted_twice" => crate::api::mcp_doubles(server, need(&args, "set")?),
+        "counted_twice" => crate::api::mcp_doubles(server, &who, need(&args, "set")?), // WHAT: doubles on a set, gated. WHY: reading markups is reading the set.
         "revision_cost" => crate::api::mcp_revision(
             server,
+            &who, // WHAT: the person asking. WHY: both sets compared are gated.
             need(&args, "was_bid")?,
             need(&args, "arrived")?,
         ),
-        "sheets" => crate::api::mcp_sheets(server, need(&args, "set")?),
+        "sheets" => crate::api::mcp_sheets(server, &who, need(&args, "set")?), // WHAT: a set's sheets, gated. WHY: as GET /sets/{id}/sheets is.
         other => return Err(Trouble::bad(format!("there is no tool called {other}"))),
     };
 

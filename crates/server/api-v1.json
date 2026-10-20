@@ -1,5 +1,6 @@
 {
   "fields": {
+    "ApiKey.expires": "string",
     "ApiKey.id": "string",
     "ApiKey.key": "string",
     "ApiKey.last_used": "string",
@@ -86,6 +87,13 @@
     "Markup.subject": "string",
     "MarkupPage.markups": "array of Markup",
     "MarkupPage.revision": "integer",
+    "Me.email": "string",
+    "Me.id": "string",
+    "Me.key": "object",
+    "Me.may_administer": "boolean",
+    "Me.name": "string",
+    "Me.role": "string",
+    "NewKey.expires_in_days": "integer",
     "NewKey.name": "string",
     "NewKey.purpose": "string",
     "NewLicense.license": "string",

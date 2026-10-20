@@ -2202,24 +2202,34 @@ fn office_section(
             ui.label(RichText::new("Other programs").strong().size(12.0));
             ui.label(
                 RichText::new(
-                    "A key lets another system — FabWire — create projects, put drawing sets \
-                     up and read back the markups, as you. It does not expire; take it back \
-                     here when it is no longer wanted.",
+                    "A key lets another system create projects, put drawing sets up and read \
+                     back the markups, as you. No key can run this server: people, roles, keys \
+                     and remote access need you signed in. Take a key back here when it is no \
+                     longer wanted.",
                 )
                 .color(theme.faint)
                 .size(10.0),
             );
-            for key in office.keys.iter().filter(|k| k.purpose == "integration" || k.purpose == "assistant") {
+            // WHAT: every kind of key, sync keys included. WHY: an administrator has to be able to see and take back each one a program holds.
+            for key in office.keys.iter().filter(|k| ["integration", "assistant", "sync"].contains(&k.purpose.as_str())) {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&key.name).size(11.0));
                     ui.label(
                         RichText::new(format!(
-                            "{} · {}{}",
-                            if key.purpose == "assistant" { "AI assistant" } else { "program" },
+                            "{} · {}{}{}",
+                            match key.purpose.as_str() {
+                                "assistant" => "AI assistant",
+                                "sync" => "program, sync only", // WHAT: a sync key's own words. WHY: tells it apart from a full integration key when deciding which to take back.
+                                _ => "program",
+                            },
                             key.person,
                             key.last_used
                                 .as_deref()
                                 .map(|u| format!(" · used {}", u.get(..10).unwrap_or(u)))
+                                .unwrap_or_default(),
+                            key.expires
+                                .as_deref()
+                                .map(|e| format!(" · ends {}", e.get(..10).unwrap_or(e))) // WHAT: the day a key with an end stops. WHY: so nobody is surprised when it does.
                                 .unwrap_or_default()
                         ))
                         .color(theme.faint)

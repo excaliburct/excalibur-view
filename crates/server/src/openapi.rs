@@ -130,7 +130,13 @@ to do when somebody leaves.",
             }
         },
         "/me": {
-            "get": { "summary": "Who this token belongs to.", "responses": ok("User") }
+            "get": {
+                "summary": "Who this token belongs to.",
+                "description": "With a key, also which key it is and what it was made for, so a \
+program can refuse to run on a key with more power than it needs. `may_administer` is true \
+only for an administrator signed in with their password: no key ever administers.",
+                "responses": ok("Me")
+            }
         },
         "/me/password": {
             "post": {
@@ -159,10 +165,16 @@ is signed out.",
             "post": {
                 "summary": "Make a key for a program.",
                 "description": "`assistant` reads the takeoffs over MCP at `/mcp` and nothing \
-else. `integration` uses this API as you — for another system such as FabWire \
-— and only an administrator can make one. Send it as `Authorization: Bearer <key>`. \
-The key is in this answer and never again. Asking again with the same name \
-replaces the old key. A key cannot make a key.",
+else. `integration` uses this API as you — for another system — and only an \
+administrator can make one. `sync` is narrower still, for a program that keeps its \
+own projects in step: `GET /me`, `POST /projects` (under a reference), \
+`POST /projects/{id}/archive`, `POST /sets`, `GET /projects/{id}/stamp` and \
+`GET /projects/{id}/markuplist`, on projects filed under a reference, and nothing \
+else; only an administrator can make one. No key of any purpose can administer the \
+server, whoever made it. `expires_in_days` gives a key an end (1 to 3650); left out, \
+it never runs out. Send it as `Authorization: Bearer <key>`. \
+The key is in this answer and never again. Asking again with the same name and \
+purpose replaces the old key. A key cannot make a key.",
                 "requestBody": body("NewKey"),
                 "responses": ok("ApiKey")
             }
@@ -752,15 +764,25 @@ fn schemas() -> Value {
         "ApiKey": object(&[
             ("id", "string", ""),
             ("name", "string", "What it was called when it was made."),
-            ("purpose", "string", "assistant or integration."),
-            ("person", "string", "Whose it is. It can do what they can, no more."),
+            ("purpose", "string", "assistant, integration or sync."),
+            ("person", "string", "Whose it is. It can do what they can, no more, and never administer."),
             ("made", "string", ""),
             ("last_used", "string", ""),
             ("key", "string", "Only in the answer that made it."),
+            ("expires", "string", "When it stops working by itself. Absent: never."),
         ]),
         "NewKey": object(&[
-            ("purpose", "string", "assistant or integration."),
-            ("name", "string", "e.g. FabWire, or the assistant on the estimator's PC."),
+            ("purpose", "string", "assistant, integration or sync."),
+            ("name", "string", "e.g. the program's name, or the assistant on the estimator's PC."),
+            ("expires_in_days", "integer", "Optional: stop working this many days from now (1 to 3650). Left out, never."),
+        ]),
+        "Me": object(&[
+            ("id", "string", ""),
+            ("name", "string", "What goes in a markup's Author column."),
+            ("email", "string", ""),
+            ("role", "string", "viewer, estimator or admin. A sync key made by an administrator says estimator: that is all it acts as."),
+            ("may_administer", "boolean", "True only for an administrator signed in with their password. Never for a key."),
+            ("key", "object", "The key this request came with: id, name, purpose (assistant, integration or sync) and expires. Absent for a signed-in person."),
         ]),
         "FleetAccess": object(&[
             ("on", "boolean", ""),

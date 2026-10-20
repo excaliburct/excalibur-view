@@ -490,12 +490,15 @@ impl Client {
     }
 
     /// Makes a key for a program. `purpose` is `assistant` (reads the
-    /// takeoffs over MCP, nothing else) or `integration` (the whole API, as
-    /// this person; administrators only). The key is in the answer, once.
+    /// takeoffs over MCP, nothing else), `integration` (the API as this
+    /// person, never their administrator's power; administrators only) or
+    /// `sync` (only the routes a program keeping projects in step needs;
+    /// administrators only). The key is in the answer, once.
     pub fn make_key(&self, purpose: &str, name: &str) -> Answer<crate::ApiKey> {
         Self::read(self.post("/me/keys").send_json(crate::NewKey {
             purpose: purpose.to_string(),
             name: name.to_string(),
+            expires_in_days: None, // WHAT: no end asked for. WHY: this call keeps making the keys it always made.
         }))
     }
 

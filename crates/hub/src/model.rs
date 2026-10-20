@@ -533,7 +533,7 @@ pub struct ApiKey {
     pub id: String,
     /// What somebody called it: "the assistant on the estimator's PC", "FabWire".
     pub name: String,
-    /// `assistant` or `integration`.
+    /// `assistant`, `integration` or `sync`.
     pub purpose: String,
     /// Whose it is: it can do what they can do, and no more.
     pub person: String,
@@ -543,6 +543,9 @@ pub struct ApiKey {
     /// The key itself, only in the answer that made it, and never again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// When it stops working by itself; absent for a key that never does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<String>, // WHAT: the key's end, if it was given one. WHY: an older server never sends it, so it is optional both ways.
 }
 
 /// Asking for a key.
@@ -550,6 +553,10 @@ pub struct ApiKey {
 pub struct NewKey {
     pub purpose: String,
     pub name: String,
+    /// Stop working this many days from now. Left out, the key never runs out
+    /// on its own, which is how every key worked before keys could end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_days: Option<u32>, // WHAT: an optional lifetime for the new key. WHY: off unless asked, so no program that already makes keys is changed.
 }
 
 /// A person changing their own password.

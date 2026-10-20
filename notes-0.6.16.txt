@@ -20,3 +20,27 @@ the next time it opens. Printing goes to the computer's own printers.
 Right-click it on the applications menu and Uninstall Excalibur View
 takes it, its menu entry and its icon away again; drawings and markups
 are not touched.
+
+KEYS FOR PROGRAMS
+
+No key can run the server any more, whoever made it. Adding people,
+changing roles, invitations, remote access, updates, plugins, tool chests,
+the license and the audit log all take an administrator signed in with
+their password. A key that asks is refused, and says why.
+
+There is a new, narrower kind of key, a sync key, for a program that only
+keeps its own projects in step with the server: it files projects under its
+own reference, puts drawings up, archives them and reads the markups back,
+and nothing else. It never sees a project somebody made by hand. Make one
+for such a program and take its old key back in Studio, Office, Keys.
+
+A key can now be given an end date when it is made. Keys made without one
+never run out, as before.
+
+AN ASSISTANT SEES WHAT ITS PERSON MAY SEE
+
+An assistant connected to the server now sees only the jobs its person may
+see. Before, an assistant key read every job on the server, even ones with
+people named on them that its person was not one of. The same check now
+guards putting a drawing into a job, and finding a job by another
+program's reference.

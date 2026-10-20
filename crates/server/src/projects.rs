@@ -155,7 +155,7 @@ pub async fn create(
     headers: HeaderMap,
     Json(body): Json<NewProject>,
 ) -> Answer<Json<Project>> {
-    writer(&server, &headers)?;
+    let who = writer(&server, &headers)?; // WHAT: who is asking, if they may change drawings. WHY: kept, so the project found by its reference is checked against them below.
     let number = body.number.trim().to_string();
     let name = body.name.trim().to_string();
     if number.is_empty() {
@@ -167,6 +167,10 @@ pub async fn create(
         .map(str::trim)
         .filter(|r| !r.is_empty())
         .map(str::to_string);
+    if reference.is_none() && who.is_key(crate::auth::purpose::SYNC) {
+        // WHAT: a sync key files every project under its own reference. WHY: a project without one is a hand-made job, which a sync key can neither make nor reach.
+        return Err(Denied::wrong("A program keeping its projects in step files each one under its own reference."));
+    }
     if reference.as_ref().is_some_and(|r| r.chars().count() > LONGEST_REFERENCE) {
         return Err(Denied::wrong(format!(
             "A project's reference can be at most {LONGEST_REFERENCE} characters."
@@ -178,6 +182,16 @@ pub async fn create(
         None => None,
         Some(text) => Some(folders(text, "A project's place").map_err(Denied::wrong)?),
     };
+    if let Some(reference) = &reference {
+        let there = server
+            .store
+            .with(|db| Ok(by_reference(db, reference)?)) // WHAT: the project already filed under this reference, if any. WHY: renaming or moving it is reaching it.
+            .map_err(|e| Denied::broke("find that project", e))?;
+        if let Some(there) = there {
+            // WHAT: the same project gate as every other route. WHY: asking by a reference must not reach a job its id would be refused.
+            crate::api::may_reach_project(&server, &who, &there.id)?;
+        }
+    }
     let project = server
         .store
         .with(|db| {

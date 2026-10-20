@@ -590,6 +590,9 @@ fn upgrade(db: &Connection) -> Result<()> {
     // other program's to say; none is where everything was before.
     add_column(db, "projects", "place", "TEXT")?;
     add_column(db, "sets", "folder", "TEXT")?;
+    // When a key stops working, for a key given an end. None is never, which
+    // is every key made before keys could end, so none of them is broken.
+    add_column(db, "keys", "expires", "TEXT")?; // WHAT: the optional end of a key. WHY: a key for a program can be made to run out on its own.
     db.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS projects_by_reference
              ON projects(reference) WHERE reference IS NOT NULL;

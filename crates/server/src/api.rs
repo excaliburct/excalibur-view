@@ -93,6 +93,16 @@ impl Denied {
         )
     }
 
+    /// A key asked for something its purpose does not cover. Not the
+    /// account's fault and not an administrator's to change: the key is the
+    /// wrong kind for the job, so it says so.
+    pub(crate) fn not_with_this_key(what: &str) -> Denied {
+        Denied(
+            StatusCode::FORBIDDEN, // WHAT: 403. WHY: the key is known and good; this one thing is outside what it was made for.
+            Problem::new("key_not_allowed", format!("A key cannot {what}. {KEY_LIMITS}")), // WHAT: a stable short name and a sentence. WHY: the program on the other end can tell this apart from a missing account power.
+        )
+    }
+
     pub(crate) fn missing(what: &str) -> Denied {
         Denied(
             StatusCode::NOT_FOUND,
@@ -144,8 +154,14 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
 }
 
 pub(crate) fn caller(server: &Server, headers: &HeaderMap) -> Answer<Who> {
-    caller_as(server, headers, &[auth::purpose::INTEGRATION])
+    // WHAT: a session, an integration key or a sync key. WHY: the sync key's narrower list is held by `keys_keep_to_their_purpose` before any route runs.
+    caller_as(server, headers, &[auth::purpose::INTEGRATION, auth::purpose::SYNC])
 }
+
+/// What every key refusal ends with: what keys are for.
+const KEY_LIMITS: &str = "Keys are for programs. Running the server — people, roles, keys, \
+                          remote access, updates, plugins, tool chests, the license and the \
+                          audit log — takes an administrator signed in with their password.";
 
 /// Who is asking: a signed-in person, or a key of one of `purposes` acting as
 /// the person who made it.
@@ -191,10 +207,78 @@ pub(crate) fn sharing(server: &Server) -> Answer<()> {
 
 pub(crate) fn administrator(server: &Server, headers: &HeaderMap) -> Answer<Who> {
     let who = caller(server, headers)?;
+    if who.key.is_some() {
+        // WHAT: no key of any purpose administers, whoever made it. WHY: a program's stolen key must never be able to add people, change roles or open the server to the internet.
+        return Err(Denied::not_with_this_key("administer this server"));
+    }
     if !who.role.may_administer() {
         return Err(Denied::forbidden("administer this server"));
     }
     Ok(who)
+}
+
+/// Everything a `sync` key may ask for, as the router names the routes. It is
+/// the whole of what a program needs to keep its own projects in step:
+///
+/// - `GET /me` — whose key it is and what kind, checked when it connects;
+/// - `POST /projects` — the project for its reference, made or found, renamed
+///   and moved to its place;
+/// - `POST /projects/:id/archive` — put away, or brought back;
+/// - `POST /sets` — a drawing put up into one of its projects;
+/// - `GET /projects/:id/stamp` — whether anything changed, without pulling;
+/// - `GET /projects/:id/markuplist` — the markups, to read the takeoff back.
+///
+/// Every other route refuses a sync key before it runs, whoever made the key.
+/// Adding a route here is giving every sync key in every office a new power,
+/// so it is a change made on purpose, with a test.
+pub const SYNC_ROUTES: &[(&str, &str)] = &[
+    ("GET", "/me"), // WHAT: who the key is. WHY: a program checks its key is a sync key before trusting it.
+    ("POST", "/projects"), // WHAT: make or find a project by its reference. WHY: how a program files its own records here.
+    ("POST", "/projects/:id/archive"), // WHAT: put a project away or bring it back. WHY: a deleted or restored record follows here.
+    ("POST", "/sets"), // WHAT: upload a drawing. WHY: the program's drawings go up into its projects.
+    ("GET", "/projects/:id/stamp"), // WHAT: the project's change stamp. WHY: a cheap "did anything change?" before a pull.
+    ("GET", "/projects/:id/markuplist"), // WHAT: the project's markups. WHY: the takeoff read back into the program.
+];
+
+/// Holds every key to what it was made for, before any route runs. A `sync`
+/// key reaches `SYNC_ROUTES` and nothing else. Sessions and other keys pass
+/// straight through to the route's own checks.
+async fn keys_keep_to_their_purpose(
+    State(server): State<Shared>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let token = bearer(request.headers()); // WHAT: the bearer token, if any. WHY: only a key can be a sync key.
+    let Some(token) = token.filter(|t| t.starts_with(auth::KEY_PREFIX)) else {
+        return next.run(request).await; // WHAT: no key: a session, or nobody. WHY: the route's own checks decide those, as always.
+    };
+    let purpose = server.store.with(|db| auth::purpose_of(db, &token)); // WHAT: what this key was made for. WHY: decides whether the list applies.
+    let (purpose, maker) = match purpose {
+        Ok(Some(found)) => found, // WHAT: the purpose and whose key it is. WHY: the purpose decides; the maker goes on the audit line.
+        Ok(None) => return next.run(request).await, // WHAT: no such key. WHY: the route refuses it as nobody, exactly as before.
+        Err(e) => return Denied::broke("check that key", e).into_response(), // WHAT: a database failure. WHY: refused, never waved through.
+    };
+    if purpose != auth::purpose::SYNC {
+        return next.run(request).await; // WHAT: not a sync key. WHY: assistant and integration keys keep the checks they always had.
+    }
+    let path = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_string()) // WHAT: the route as the router names it (`/projects/:id/stamp`). WHY: compared with the list, never with the raw address, so an id cannot dress one route up as another.
+        .unwrap_or_default();
+    let path = path.strip_prefix(API_ROOT).unwrap_or(&path).to_string(); // WHAT: without `/api/v1`. WHY: the list names routes the way the router does inside the API.
+    let method = request.method().as_str().to_string(); // WHAT: GET, POST... WHY: a route is its method and its path together.
+    if SYNC_ROUTES.iter().any(|(m, p)| *m == method && *p == path) {
+        return next.run(request).await; // WHAT: on the list. WHY: the route's own checks still apply (writer, project gate).
+    }
+    // WHAT: refused before the route runs, and written to the audit log. WHY: a sync key asking for anything else is either a bug or somebody misusing it, and either is worth a line.
+    record(
+        &server,
+        crate::audit::Entry::new(crate::audit::action::KEY_REFUSED, &maker) // WHAT: under the email of whoever made the key. WHY: so the line says whose key strayed.
+            .about(format!("{method} {path}"))
+            .saying(auth::purpose::SYNC.to_string()),
+    );
+    Denied::not_with_this_key(&format!("{method} {path} with a sync key: it is for keeping a program's own projects in step")).into_response()
 }
 
 pub fn now() -> String {
@@ -270,6 +354,8 @@ pub fn router(server: Shared) -> Router {
         .route("/admin/releases/:version/ready", post(release_ready))
         .route("/update/latest", get(update_latest))
         .route("/update/:version/download", get(update_download))
+        // WHAT: every matched route first checks that a key keeps to its purpose. WHY: one gate in front of all of them, so a new route is closed to sync keys unless it is put on SYNC_ROUTES on purpose.
+        .route_layer(axum::middleware::from_fn_with_state(server.clone(), keys_keep_to_their_purpose))
         .layer(DefaultBodyLimit::max(limit))
         // Who is connected, for the Fleet's board. Sees every API request,
         // records the signed-in ones, refuses nothing (crate::presence).
@@ -632,8 +718,33 @@ async fn sign_in(
     }))
 }
 
-async fn me(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<User>> {
-    Ok(Json(caller(&server, &headers)?.as_user()))
+/// `GET /me`: the person, and — when the request came with a key — which key
+/// and what it may do, so a program can refuse to run on a key with more
+/// power than it needs.
+#[derive(serde::Serialize)]
+struct Me {
+    #[serde(flatten)]
+    user: User, // WHAT: id, name, email and role, as before. WHY: every program already reads these; they stay where they were.
+    may_administer: bool, // WHAT: whether this token can run the server. WHY: a program checks it and refuses a token that can; a key never can.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<MeKey>, // WHAT: the key acting, absent for a signed-in person. WHY: so a program can see it holds the kind of key it asked for.
+}
+
+/// The key a request came with, as `/me` describes it. Never the key itself.
+#[derive(serde::Serialize)]
+struct MeKey {
+    id: String, // WHAT: the key's id. WHY: the one to find in the list and take back.
+    name: String, // WHAT: what it was called. WHY: how a person recognises it.
+    purpose: String, // WHAT: assistant, integration or sync. WHY: what it was made to do.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires: Option<String>, // WHAT: when it stops working, if ever. WHY: so a program can warn before it does.
+}
+
+async fn me(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<Me>> {
+    let who = caller(&server, &headers)?; // WHAT: whoever is asking, by session or by key. WHY: /me answers both.
+    let may_administer = who.key.is_none() && who.role.may_administer(); // WHAT: true only for a signed-in administrator. WHY: the same rule `administrator()` applies.
+    let key = who.key.clone().map(|k| MeKey { id: k.id, name: k.name, purpose: k.purpose, expires: k.expires }); // WHAT: the key's description. WHY: never the secret, only what it is.
+    Ok(Json(Me { user: who.as_user(), may_administer, key })) // WHAT: the answer. WHY: a superset of what /me always said.
 }
 
 async fn change_password(
@@ -906,6 +1017,9 @@ pub(crate) fn set_from_row(r: &rusqlite::Row) -> rusqlite::Result<DrawingSet> {
 /// when somebody may not is the same "not found" they would get for a project
 /// that does not exist, so nobody learns a job exists by being refused it.
 pub(crate) fn may_reach_project(server: &Server, who: &Who, project: &str) -> Answer<()> {
+    if who.is_key(auth::purpose::SYNC) {
+        return sync_may_reach(server, project); // WHAT: a sync key's own, narrower rule. WHY: it keeps a program's own projects in step and has no business with anybody else's.
+    }
     let allowed = server
         .store
         .may_see(project, &who.id, who.role == Role::Admin)
@@ -914,6 +1028,30 @@ pub(crate) fn may_reach_project(server: &Server, who: &Who, project: &str) -> An
         Ok(())
     } else {
         Err(Denied::missing("project"))
+    }
+}
+
+/// A sync key reaches a project only when a program filed it under a
+/// reference (`fabwire:bid:2630`): the projects programs keep in step, never a
+/// job somebody made by hand. Its maker is an administrator, so this is always
+/// less than they could reach themselves. Refused as "not found", the same as
+/// every other refusal of a project.
+fn sync_may_reach(server: &Server, project: &str) -> Answer<()> {
+    let filed = server
+        .store
+        .with(|db| {
+            Ok(db
+                .query_row(
+                    "SELECT reference IS NOT NULL FROM projects WHERE id = ?1", // WHAT: whether the project carries a program's reference. WHY: that is what marks it as a program's to keep in step.
+                    params![project],
+                    |r| r.get::<_, bool>(0),
+                )
+                .optional()?)
+        })
+        .map_err(|e| Denied::broke("check that project", e))?; // WHAT: a database failure said plainly. WHY: never read as "allowed".
+    match filed {
+        Some(true) => Ok(()), // WHAT: a program's project. WHY: exactly what a sync key is for.
+        _ => Err(Denied::missing("project")), // WHAT: missing, or made by hand. WHY: indistinguishable from outside, so nobody learns a job exists.
     }
 }
 
@@ -1062,6 +1200,8 @@ async fn upload_set(
     if !known {
         return Err(Denied::missing("project"));
     }
+    // WHAT: the same project gate every other route uses. WHY: putting a drawing into a job you may not see was the one door this check was missing.
+    may_reach_project(&server, &who, &project)?;
 
     // Read the sheets out of the drawing now, so a client that only wants the
     // list does not have to download sixty megabytes to get it.
@@ -1700,7 +1840,25 @@ async fn make_key(
             }
             auth::purpose::INTEGRATION
         }
-        _ => return Err(Denied::wrong("A key is for an `assistant` or an `integration`.")),
+        p if p == auth::purpose::SYNC => {
+            if !who.role.may_administer() {
+                // WHAT: only an administrator makes a sync key. WHY: it reaches every program-filed project, which only an administrator can already reach.
+                return Err(Denied::forbidden("make a key for another system"));
+            }
+            auth::purpose::SYNC // WHAT: the narrow program key. WHY: what a program that only keeps projects in step should hold.
+        }
+        _ => return Err(Denied::wrong("A key is for an `assistant`, an `integration` or a `sync`.")),
+    };
+    let expires = match asked.expires_in_days {
+        None => None, // WHAT: no end asked for. WHY: the default stays "never", so no program that makes keys today is changed.
+        Some(days) if (1..=auth::LONGEST_KEY_DAYS).contains(&days) => auth::days_from(&now(), days), // WHAT: the end, that many days from now. WHY: a key a program holds can be made to run out on its own.
+        Some(_) => {
+            // WHAT: zero, or more than the longest. WHY: zero is a key dead on arrival and a huge number is "never" said badly; both are refused rather than guessed at.
+            return Err(Denied::wrong(format!(
+                "A key's end is between 1 and {} days from now; leave it out for a key that never runs out.",
+                auth::LONGEST_KEY_DAYS
+            )));
+        }
     };
     let name = asked.name.trim();
     if name.is_empty() {
@@ -1719,8 +1877,8 @@ async fn make_key(
                 params![who.id, purpose, name],
             )?;
             db.execute(
-                "INSERT INTO keys (id, digest, person, purpose, name, made) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![id, digest, who.id, purpose, name, made],
+                "INSERT INTO keys (id, digest, person, purpose, name, made, expires) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", // WHAT: the new key, with its end if it has one. WHY: the end is checked on every use.
+                params![id, digest, who.id, purpose, name, made, expires],
             )?;
             Ok(())
         })
@@ -1741,6 +1899,7 @@ async fn make_key(
         made,
         last_used: None,
         key: Some(key),
+        expires, // WHAT: the end it was given, if any. WHY: so whoever made it can see when it will stop.
     }))
 }
 
@@ -1751,7 +1910,7 @@ async fn list_keys(State(server): State<Shared>, headers: HeaderMap) -> Answer<J
         .store
         .with(|db| {
             let mut statement = db.prepare(
-                "SELECT keys.id, keys.name, keys.purpose, people.name, keys.made, keys.last_used
+                "SELECT keys.id, keys.name, keys.purpose, people.name, keys.made, keys.last_used, keys.expires
                  FROM keys JOIN people ON people.id = keys.person
                  WHERE ?1 OR keys.person = ?2
                  ORDER BY keys.made DESC",
@@ -1766,6 +1925,7 @@ async fn list_keys(State(server): State<Shared>, headers: HeaderMap) -> Answer<J
                         made: r.get(4)?,
                         last_used: r.get(5)?,
                         key: None,
+                        expires: r.get(6)?, // WHAT: the key's end, if any. WHY: the list shows which keys will stop by themselves.
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -3798,8 +3958,10 @@ async fn upload_chest(
 //
 // Every one of them is read-only. Nothing in this section writes.
 
-/// Who is asking, for the MCP endpoint. Any signed-in person; the answers are
-/// exactly what that person would get from the API.
+/// Who is asking, for the MCP endpoint. Any signed-in person, or their
+/// assistant or integration key; never a sync key, which is for its own list
+/// of routes. The answers are exactly what that person would get from the API:
+/// every tool below takes this Who and applies the same project gate.
 pub fn mcp_caller(server: &Server, headers: &HeaderMap) -> Result<Who, ()> {
     caller_as(
         server,
@@ -3813,18 +3975,33 @@ fn broke(what: &str, e: impl std::fmt::Display) -> String {
     format!("Could not {what}: {e}")
 }
 
-pub fn mcp_projects(server: &Server) -> Result<String, String> {
+/// The projects a person may see, as SQL over `p`, the projects table:
+/// `?1` is whether they see everything (an administrator), `?2` who they are.
+/// The same rule as `Store::may_see` and the project list, written once for
+/// the listings that filter in the query rather than one project at a time.
+const SEEN_BY: &str = "(?1
+        OR NOT EXISTS (SELECT 1 FROM project_people m WHERE m.project = p.id)
+        OR EXISTS (SELECT 1 FROM project_people m WHERE m.project = p.id AND m.person = ?2))"; // WHAT: everybody's job, or one they are named on, or an administrator. WHY: an assistant sees exactly what its person would.
+
+/// Whether the person behind an assistant may read a drawing set; refused in
+/// the same words as a set that does not exist, so nobody learns it does.
+fn mcp_may_read_set(server: &Server, who: &Who, id: &str) -> Result<(), String> {
+    may_reach_set(server, who, id).map_err(|_| format!("There is no drawing set called {id} on this server.")) // WHAT: the REST routes' own gate. WHY: one rule for both doors; a refusal reads as "not here".
+}
+
+pub fn mcp_projects(server: &Server, who: &Who) -> Result<String, String> {
+    let everything = who.role == hub::Role::Admin; // WHAT: whether this person sees every job. WHY: the same administrator rule as the project list.
     let list: Vec<(String, String, String, i64, Option<String>)> = server
         .store
         .with(|db| {
-            let mut statement = db.prepare(
+            let mut statement = db.prepare(&format!(
                 "SELECT p.id, p.number, p.name,
                         (SELECT count(*) FROM sets WHERE sets.project = p.id AND sets.superseded_by IS NULL),
                         p.archived
-                 FROM projects p ORDER BY p.archived IS NOT NULL, p.number",
-            )?;
+                 FROM projects p WHERE {SEEN_BY} ORDER BY p.archived IS NOT NULL, p.number"
+            ))?; // WHAT: only the jobs this person may see. WHY: an assistant key must never list a job its person is not on.
             let rows = statement
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+                .query_map(params![everything, who.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
         })
@@ -3849,26 +4026,28 @@ pub fn mcp_projects(server: &Server) -> Result<String, String> {
 /// drawing replaced is marked so, because its quantities are not the job's
 /// any more; so is takeoff carried forward onto a new issue and not yet
 /// checked.
-pub fn mcp_sets(server: &Server, project: Option<&str>) -> Result<String, String> {
+pub fn mcp_sets(server: &Server, who: &Who, project: Option<&str>) -> Result<String, String> {
     type Row = (String, String, String, i64, i64, Option<String>, Option<String>, i64);
+    let everything = who.role == hub::Role::Admin; // WHAT: whether this person sees every job. WHY: the same administrator rule as everywhere else.
     let list: Vec<Row> = server
         .store
         .with(|db| {
             // The job by its id, its number (26-114) or another program's
             // reference to it: whichever the person or the assistant has to hand.
-            let mut statement = db.prepare(
+            let mut statement = db.prepare(&format!(
                 "SELECT s.id, s.name, s.uploaded, s.sheets, s.revision,
                         (SELECT n.name FROM sets n WHERE n.id = s.superseded_by),
                         s.superseded_by,
                         (SELECT count(*) FROM markups m
                           WHERE m.set_id = s.id AND m.removed = 0 AND m.carried_from IS NOT NULL)
                  FROM sets s
-                 WHERE (?1 IS NULL OR s.project = ?1
-                        OR s.project IN (SELECT id FROM projects WHERE number = ?1 OR reference = ?1))
-                 ORDER BY s.superseded_by IS NOT NULL, s.uploaded DESC",
-            )?;
+                 WHERE (?3 IS NULL OR s.project = ?3
+                        OR s.project IN (SELECT id FROM projects WHERE number = ?3 OR reference = ?3))
+                   AND s.project IN (SELECT p.id FROM projects p WHERE {SEEN_BY})
+                 ORDER BY s.superseded_by IS NOT NULL, s.uploaded DESC"
+            ))?; // WHAT: only sets on jobs this person may see. WHY: a job they are not on reads as having no sets, the same as one that does not exist.
             let rows = statement
-                .query_map(params![project], |r| {
+                .query_map(params![everything, who.id, project], |r| {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -3909,8 +4088,10 @@ pub fn mcp_sets(server: &Server, project: Option<&str>) -> Result<String, String
 /// The measurements on a set, and the sheets they were measured against.
 fn mcp_gather(
     server: &Server,
+    who: &Who,
     id: &str,
 ) -> Result<(Vec<takeoff::Row>, Vec<quantities::SheetScale>), String> {
+    mcp_may_read_set(server, who, id)?; // WHAT: the project gate, before anything is read. WHY: every tool that reads a set comes through here.
     let (_, markups, sheets) =
         gather(server, id).map_err(|_| format!("There is no drawing set called {id} on this server."))?;
     Ok((quantities::rows_of(&markups, &sheets), sheets))
@@ -3942,8 +4123,8 @@ fn mcp_short_by(rows: &[takeoff::Row], sheets: &[quantities::SheetScale]) -> Str
     )
 }
 
-pub fn mcp_takeoff(server: &Server, id: &str) -> Result<String, String> {
-    let (rows, sheets) = mcp_gather(server, id)?;
+pub fn mcp_takeoff(server: &Server, who: &Who, id: &str) -> Result<String, String> {
+    let (rows, sheets) = mcp_gather(server, who, id)?; // WHAT: the set's measurements, if this person may read it. WHY: the gate lives in mcp_gather.
     if rows.is_empty() {
         return Ok(format!("Nothing has been taken off {id} yet."));
     }
@@ -3991,10 +4172,11 @@ pub fn mcp_takeoff(server: &Server, id: &str) -> Result<String, String> {
 
 pub fn mcp_shop_list(
     server: &Server,
+    who: &Who,
     id: &str,
     stock_feet: Option<f64>,
 ) -> Result<String, String> {
-    let (rows, sheets) = mcp_gather(server, id)?;
+    let (rows, sheets) = mcp_gather(server, who, id)?; // WHAT: the set's measurements, if this person may read it. WHY: the gate lives in mcp_gather.
     let list = takeoff::shoplist::build(
         &rows,
         quantities::WEIGHTS,
@@ -4077,8 +4259,8 @@ pub fn mcp_shop_list(
     Ok(out)
 }
 
-pub fn mcp_doubles(server: &Server, id: &str) -> Result<String, String> {
-    let (rows, sheets) = mcp_gather(server, id)?;
+pub fn mcp_doubles(server: &Server, who: &Who, id: &str) -> Result<String, String> {
+    let (rows, sheets) = mcp_gather(server, who, id)?; // WHAT: the set's measurements, if this person may read it. WHY: the gate lives in mcp_gather.
     let found = takeoff::doubles::find(&rows, takeoff::doubles::HowClose::default());
     if !found.found_anything() {
         return Ok(format!(
@@ -4120,9 +4302,9 @@ pub fn mcp_doubles(server: &Server, id: &str) -> Result<String, String> {
     Ok(out)
 }
 
-pub fn mcp_revision(server: &Server, was_bid: &str, arrived: &str) -> Result<String, String> {
-    let (before, _) = mcp_gather(server, was_bid)?;
-    let (after, _) = mcp_gather(server, arrived)?;
+pub fn mcp_revision(server: &Server, who: &Who, was_bid: &str, arrived: &str) -> Result<String, String> {
+    let (before, _) = mcp_gather(server, who, was_bid)?; // WHAT: the set that was bid, if this person may read it. WHY: both sides are gated.
+    let (after, _) = mcp_gather(server, who, arrived)?; // WHAT: the set that arrived, likewise. WHY: comparing against a set you may not see would leak it.
     let revision = takeoff::revision::compare(&before, &after, quantities::WEIGHTS);
     let mut out = format!(
         "{was_bid} → {arrived}\n\n{}\n\n",
@@ -4151,7 +4333,8 @@ pub fn mcp_revision(server: &Server, was_bid: &str, arrived: &str) -> Result<Str
     Ok(out)
 }
 
-pub fn mcp_sheets(server: &Server, id: &str) -> Result<String, String> {
+pub fn mcp_sheets(server: &Server, who: &Who, id: &str) -> Result<String, String> {
+    mcp_may_read_set(server, who, id)?; // WHAT: the project gate. WHY: the sheet list of a set is part of the set.
     let (_, _, sheets) =
         gather(server, id).map_err(|_| format!("There is no drawing set called {id} on this server."))?;
     if sheets.is_empty() {
