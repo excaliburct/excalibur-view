@@ -2263,6 +2263,30 @@ impl From<String> for Trouble {
     }
 }
 
+/// What to tell the user when pdfium will not open a file, from its
+/// `FPDF_GetLastError` code: 1 unknown, 2 file, 3 format, 4 password,
+/// 5 security. Only 4 means a password would help. A file that is not a
+/// PDF at all (a bid file, a spreadsheet) comes back as 3.
+fn open_trouble(code: std::os::raw::c_ulong, password_given: bool) -> Trouble {
+    match code {
+        2 => Trouble::from("the file could not be read".to_string()),
+        3 => Trouble::from(
+            "this file is not a PDF, or it is damaged and pdfium could not repair it".to_string(),
+        ),
+        // 4 is "no" to a password: none was given, or the one given was wrong.
+        4 => Trouble {
+            said: if password_given {
+                "that password was not accepted".to_string()
+            } else {
+                "this drawing set is locked".to_string()
+            },
+            wants_password: true,
+        },
+        5 => Trouble::from("this PDF uses a kind of protection pdfium does not support".to_string()),
+        _ => Trouble::from(format!("pdfium could not open the file (error {code})")),
+    }
+}
+
 impl From<Trouble> for String {
     fn from(trouble: Trouble) -> String {
         trouble.said
@@ -5734,23 +5758,7 @@ impl Engine {
         };
         if doc.is_null() {
             let code = unsafe { self.bindings.FPDF_GetLastError() };
-            return Err(match code {
-                1 => Trouble::from("this file is not a PDF".to_string()),
-                2 => Trouble::from(
-                    "the file is damaged and pdfium could not repair it".to_string(),
-                ),
-                // 3 and 4 are both "no" to a password: 3 when none was given,
-                // 4 when the one given was wrong. Either way the window asks.
-                3 | 4 => Trouble {
-                    said: if password.is_empty() {
-                        "this drawing set is locked".to_string()
-                    } else {
-                        "that password was not accepted".to_string()
-                    },
-                    wants_password: true,
-                },
-                _ => Trouble::from(format!("pdfium could not open the file (error {code})")),
-            });
+            return Err(open_trouble(code, !password.is_empty()));
         }
         let count = unsafe { self.bindings.FPDF_GetPageCount(doc) }.max(0) as u32;
         let mut sizes = Vec::with_capacity(count as usize);
@@ -7170,6 +7178,27 @@ fn same_picture(a: &egui::ColorImage, b: &egui::ColorImage) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_that_is_not_a_pdf_is_never_called_locked() {
+        // pdfium says 3 (format) for a bid file or anything else that isn't a PDF.
+        let t = open_trouble(3, false);
+        assert!(!t.wants_password);
+        assert!(t.said.contains("not a PDF"), "{}", t.said);
+        assert!(!open_trouble(1, false).wants_password);
+        assert!(!open_trouble(2, false).wants_password);
+        assert!(!open_trouble(5, false).wants_password);
+    }
+
+    #[test]
+    fn only_a_password_error_asks_for_a_password() {
+        let none = open_trouble(4, false);
+        assert!(none.wants_password);
+        assert_eq!(none.said, "this drawing set is locked");
+        let wrong = open_trouble(4, true);
+        assert!(wrong.wants_password);
+        assert_eq!(wrong.said, "that password was not accepted");
+    }
 
     const LETTER: PageSize = PageSize { width: 612.0, height: 792.0 };
 
