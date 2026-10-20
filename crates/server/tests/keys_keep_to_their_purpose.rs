@@ -444,7 +444,7 @@ fn a_person_cannot_reach_a_job_they_are_not_on_by_uploading_into_it_or_filing_un
     let (status, _) = upload(&office, &estimator, &private, "sneak"); // WHAT: a drawing pushed into it. WHY: the upload had no project gate.
     assert_eq!(status, 404); // WHAT: refused as "not found". WHY: the same gate as every other route.
     let (status, _) = ask(&office, "POST", "/api/v1/projects", &estimator, Some(json!({ "number": "26-707", "name": "Renamed", "reference": "program:bid:7" }))); // WHAT: renaming it through its reference. WHY: the other door.
-    assert_eq!(status, 404); // WHAT: refused as "not found". WHY: a reference must not reach what an id would not.
+    assert_eq!(status, 403); // WHAT: refused, as for any reference an estimator files under (fix V5 of the review). WHY: a reference must not reach what an id would not, nor say whether it exists.
     let (status, _) = ask(&office, "GET", &format!("/api/v1/projects/{private}"), &estimator, None); // WHAT: and by id. WHY: to show the two agree.
     assert_eq!(status, 404); // WHAT: the same answer. WHY: one rule.
 }
@@ -489,4 +489,130 @@ fn a_sync_key_stops_reaching_every_programs_project_when_its_maker_is_no_longer_
     assert_ne!(status, 200, "a demoted administrator's sync key still read a job she is not on: {said}"); // WHAT: refused. WHY: a key acts as its maker, never as she used to be.
     let (status, said) = upload(&office, &key, &kept, "after-demotion"); // WHAT: and puts a drawing into it. WHY: writing is worse than reading.
     assert_ne!(status, 200, "a demoted administrator's sync key still wrote into a job she is not on: {said}"); // WHAT: refused. WHY: the same.
+}
+
+// ---- the review's fixes (2026-10-20): each door shut, and shut the same way every time ------------
+
+#[test]
+fn a_wrong_current_password_counts_against_the_same_limit_as_signing_in() {
+    // WHAT: a signed-in person guessing their own current password at POST /me/password.
+    // WHY:  a stolen session must not be a faster way to guess a password than the sign-in page: the same count, the same wait.
+    let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
+    let admin = session(&office, "sam@example.com"); // WHAT: the administrator's session. WHY: the caller.
+    for _ in 0..5 {
+        let (status, _) = ask(&office, "POST", "/api/v1/me/password", &admin, Some(json!({ "current": "a-wrong-guess-at-it-42", "new": "another-long-password-1" }))); // WHAT: a wrong guess. WHY: the five sign-in allows for free.
+        assert_eq!(status, 401); // WHAT: refused as wrong. WHY: inside the free tries.
+    }
+    let (status, said) = ask(&office, "POST", "/api/v1/me/password", &admin, Some(json!({ "current": PASSWORD, "new": "another-long-password-1" }))); // WHAT: the right one, straight after. WHY: must wait, or the limit is no limit.
+    assert_eq!((status, said["error"].as_str()), (429, Some("too_many")), "{said}"); // WHAT: told to wait, before the password is weighed. WHY: the same answer sign-in gives.
+    let answer = ureq::post(&format!("{}/api/v1/auth/token", office.base)).send_json(json!({ "email": "sam@example.com", "password": PASSWORD })); // WHAT: signing in now. WHY: the two doors share one count.
+    assert!(matches!(answer, Err(ureq::Error::Status(429, _))), "sign-in did not see the wrong tries made at /me/password"); // WHAT: waits too. WHY: one account, one count.
+}
+
+#[test]
+fn a_sync_key_is_rechecked_against_its_maker_on_every_use_and_a_removed_makers_key_is_nobody() {
+    // WHAT: a sync key whose maker is demoted, promoted again, and then removed.
+    // WHY:  the maker's role is read on every use, not once: the key works exactly while its maker is an administrator.
+    let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
+    let db = rusqlite::Connection::open(office.scratch.0.join("hyperview.sqlite")).unwrap(); // WHAT: the office's database. WHY: a second administrator.
+    db.execute("UPDATE people SET role = 'admin' WHERE id = ?1", params![ESTIMATOR]).unwrap(); // WHAT: Eve an administrator. WHY: she makes the key.
+    let eve = session(&office, "eve@example.com"); // WHAT: Eve signed in. WHY: makes the key.
+    let key = a_key(&office, &eve, "sync", "Eve's program"); // WHAT: her sync key. WHY: under test.
+    let admin = session(&office, "sam@example.com"); // WHAT: Sam. WHY: changes Eve's role and removes her.
+    let (status, _) = ask(&office, "GET", "/api/v1/me", &key, None); // WHAT: the key while Eve is an administrator. WHY: works.
+    assert_eq!(status, 200); // WHAT: works. WHY: its maker may make sync keys.
+    ask(&office, "POST", &format!("/api/v1/people/{ESTIMATOR}/role"), &admin, Some(json!({ "role": "viewer" }))); // WHAT: Eve made a viewer. WHY: any role but administrator.
+    let (status, said) = ask(&office, "GET", "/api/v1/me", &key, None); // WHAT: the key now. WHY: must be nobody.
+    let (missing, nobody) = ask(&office, "GET", "/api/v1/me", "hvk_000000000000000000000000000000000000000000000000", None); // WHAT: a key that never existed. WHY: the answer to match.
+    assert_eq!((status, &said), (missing, &nobody), "a demoted maker's sync key must answer like no key at all"); // WHAT: the same status and body. WHY: refused as nobody.
+    let (status, said) = ask(&office, "GET", "/api/v1/people", &key, None); // WHAT: a route off the sync list. WHY: the gate must not tell it apart either.
+    let (missing, nobody) = ask(&office, "GET", "/api/v1/people", "hvk_000000000000000000000000000000000000000000000000", None); // WHAT: the same with no such key. WHY: the answer to match.
+    assert_eq!((status, &said), (missing, &nobody), "off the list, a demoted maker's sync key must still answer like no key"); // WHAT: the same. WHY: nothing to recognise.
+    ask(&office, "POST", &format!("/api/v1/people/{ESTIMATOR}/role"), &admin, Some(json!({ "role": "admin" }))); // WHAT: Eve an administrator again. WHY: the check is on every use.
+    let (status, _) = ask(&office, "GET", "/api/v1/me", &key, None); // WHAT: the key again. WHY: works again.
+    assert_eq!(status, 200); // WHAT: works. WHY: read fresh, not decided once.
+    let (status, _) = ask(&office, "POST", &format!("/api/v1/people/{ESTIMATOR}/remove"), &admin, Some(json!({}))); // WHAT: Eve removed. WHY: a person who has left.
+    assert_eq!(status, 200); // WHAT: removed. WHY: the rest depends on it.
+    let (status, _) = ask(&office, "GET", "/api/v1/me", &key, None); // WHAT: her key after. WHY: must be nobody.
+    assert_eq!(status, 401); // WHAT: refused as nobody. WHY: a removed person's keys go with them.
+}
+
+#[test]
+fn a_key_is_never_told_what_only_a_signed_in_administrator_is_told_about_the_license() {
+    // WHAT: GET /license asked by an administrator's session, their integration key, and an estimator.
+    // WHY:  /me says a key may not administer; /license must agree and give a key only what anyone signed in is told.
+    let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
+    let db = rusqlite::Connection::open(office.scratch.0.join("hyperview.sqlite")).unwrap(); // WHAT: the office's database. WHY: out of founding, into a trial, where an administrator is told more.
+    db.execute("DELETE FROM settings WHERE key = 'founding_install'", []).unwrap(); // WHAT: no longer a founding install. WHY: a trial says different things to an administrator.
+    let admin = session(&office, "sam@example.com"); // WHAT: the administrator. WHY: told everything.
+    let key = a_key(&office, &admin, "integration", "Other program"); // WHAT: their integration key. WHY: under test.
+    let estimator = session(&office, "eve@example.com"); // WHAT: an estimator. WHY: what anyone signed in is told.
+    let (_, as_admin) = ask(&office, "GET", "/api/v1/license", &admin, None); // WHAT: the administrator's answer. WHY: the one with more in it.
+    let (status, as_key) = ask(&office, "GET", "/api/v1/license", &key, None); // WHAT: the key's answer. WHY: under test.
+    let (_, as_anyone) = ask(&office, "GET", "/api/v1/license", &estimator, None); // WHAT: an estimator's answer. WHY: what a key should match.
+    assert_eq!(status, 200); // WHAT: answered. WHY: the office's standing is everybody's to read.
+    assert_ne!(as_admin, as_anyone, "the test needs a state where an administrator is told more: {as_admin}"); // WHAT: the two differ. WHY: the test's own footing.
+    assert_eq!(as_key, as_anyone, "an administrator's key was told what only a signed-in administrator is: {as_key}"); // WHAT: the key is told what anyone is. WHY: no key administers.
+}
+
+#[test]
+fn an_expired_key_answers_exactly_like_a_key_that_does_not_exist() {
+    // WHAT: a sync key past its end, asked on and off its list, beside a key that never existed.
+    // WHY:  an expired key that answers differently is still recognisable, and could still write refusal lines to the log.
+    let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
+    let admin = session(&office, "sam@example.com"); // WHAT: the administrator. WHY: makes the key.
+    let (_, made) = ask(&office, "POST", "/api/v1/me/keys", &admin, Some(json!({ "purpose": "sync", "name": "Ends", "expires_in_days": 30 }))); // WHAT: a sync key with an end. WHY: under test.
+    let key = made["key"].as_str().unwrap().to_string(); // WHAT: the key. WHY: used below.
+    let db = rusqlite::Connection::open(office.scratch.0.join("hyperview.sqlite")).unwrap(); // WHAT: the office's database. WHY: to put its end in the past.
+    db.execute("UPDATE keys SET expires = '2020-01-01T00:00:00Z' WHERE name = 'Ends'", []).unwrap(); // WHAT: run out. WHY: the case under test.
+    let before: i64 = db.query_row("SELECT count(*) FROM audit", [], |r| r.get(0)).unwrap(); // WHAT: lines in the log now. WHY: an expired key must add none.
+    let nobody = "hvk_000000000000000000000000000000000000000000000000"; // WHAT: a key that never existed. WHY: the answer to match.
+    for (method, path) in [("GET", "/api/v1/me"), ("GET", "/api/v1/people"), ("GET", "/api/v1/projects"), ("POST", "/api/v1/signout")] {
+        let body = (method == "POST").then(|| json!({})); // WHAT: a body for the write. WHY: so the refusal is the key's.
+        let expired = ask(&office, method, path, &key, body.clone()); // WHAT: the expired key's answer. WHY: under test.
+        let missing = ask(&office, method, path, nobody, body); // WHAT: the missing key's answer. WHY: what it must equal.
+        assert_eq!(expired, missing, "{method} {path}: an expired key answered unlike a missing one"); // WHAT: the same status and body. WHY: nothing to tell them apart by.
+    }
+    let after: i64 = db.query_row("SELECT count(*) FROM audit", [], |r| r.get(0)).unwrap(); // WHAT: lines in the log after. WHY: compared.
+    assert_eq!(after, before, "an expired key wrote to the audit log"); // WHAT: none added. WHY: no key, no refusal line.
+}
+
+#[test]
+fn a_straying_sync_key_writes_at_most_one_refusal_line_a_minute() {
+    // WHAT: a live sync key asking for routes off its list again and again.
+    // WHY:  each refusal used to write an audit line, so a misused key could fill the log as fast as it could ask.
+    let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
+    let admin = session(&office, "sam@example.com"); // WHAT: the administrator. WHY: makes the key.
+    let key = a_key(&office, &admin, "sync", "Program"); // WHAT: a sync key. WHY: under test.
+    for _ in 0..5 {
+        let (status, said) = ask(&office, "GET", "/api/v1/people", &key, None); // WHAT: off its list. WHY: refused each time.
+        assert_eq!((status, said["error"].as_str()), (403, Some("key_not_allowed")), "{said}"); // WHAT: refused every time. WHY: the limit is on the log, not on the refusal.
+    }
+    let db = rusqlite::Connection::open(office.scratch.0.join("hyperview.sqlite")).unwrap(); // WHAT: the office's database. WHY: to count the lines.
+    let lines: i64 = db
+        .query_row("SELECT count(*) FROM audit WHERE action = ?1", params![hyperview_server::audit::action::KEY_REFUSED], |r| r.get(0))
+        .unwrap(); // WHAT: refusal lines written. WHY: compared.
+    assert_eq!(lines, 1, "five refusals in a row wrote {lines} lines"); // WHAT: one line. WHY: enough to see, never a flood.
+}
+
+#[test]
+fn filing_under_a_reference_answers_the_same_whether_or_not_it_exists() {
+    // WHAT: an estimator files under a reference somebody else's job has, and under a fresh one.
+    // WHY:  "not found" for one and "made" for the other said whether a reference (a guessable `program:bid:N`) exists.
+    let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
+    let admin = session(&office, "sam@example.com"); // WHAT: the administrator. WHY: files the existing job.
+    let (_, kept) = ask(&office, "POST", "/api/v1/projects", &admin, Some(json!({ "number": "26-808", "name": "Kept", "reference": "program:bid:8" }))); // WHAT: a job under a reference. WHY: the one to probe for.
+    ask(&office, "POST", &format!("/api/v1/projects/{}/people", kept["id"].as_str().unwrap()), &admin, Some(json!({ "person": ADMIN }))); // WHAT: only Sam on it. WHY: the estimator can't reach it.
+    let estimator = session(&office, "eve@example.com"); // WHAT: an estimator, not on it. WHY: the prober.
+    let there = ask(&office, "POST", "/api/v1/projects", &estimator, Some(json!({ "number": "26-808", "name": "Probe", "reference": "program:bid:8" }))); // WHAT: the existing reference. WHY: under test.
+    let fresh = ask(&office, "POST", "/api/v1/projects", &estimator, Some(json!({ "number": "26-809", "name": "Probe", "reference": "program:bid:9" }))); // WHAT: a reference nobody has. WHY: under test.
+    assert_eq!(there, fresh, "the answer said whether the reference exists"); // WHAT: the same status and body. WHY: nothing learned.
+    assert_eq!(there.0, 403, "{:?}", there.1); // WHAT: both refused. WHY: filing under a program's reference is an administrator's or a sync key's.
+    let (_, listed) = ask(&office, "GET", "/api/v1/projects", &admin, None); // WHAT: every project. WHY: nothing was made by the refusal.
+    assert!(!listed.to_string().contains("program:bid:9"), "a refused filing made a project: {listed}"); // WHAT: no new project. WHY: refused means nothing changed.
+    let (status, _) = ask(&office, "POST", "/api/v1/projects", &estimator, Some(json!({ "number": "26-810", "name": "By hand" }))); // WHAT: an ordinary job, no reference. WHY: estimators still make jobs.
+    assert_eq!(status, 200); // WHAT: made. WHY: only filing under a reference changed.
+    let key = a_key(&office, &admin, "integration", "Other program"); // WHAT: an administrator's integration key. WHY: the key older connections hold.
+    let (status, again) = ask(&office, "POST", "/api/v1/projects", &key, Some(json!({ "number": "26-808", "name": "Kept", "reference": "program:bid:8" }))); // WHAT: it files under the reference. WHY: existing programs keep working.
+    assert_eq!((status, again["id"].as_str()), (200, kept["id"].as_str()), "{again}"); // WHAT: the same project found. WHY: unchanged for an administrator's key.
 }

@@ -496,6 +496,7 @@ mod tests {
                 tunnel: Default::default(),
                 manifests: Default::default(),
                 notices: Default::default(),
+                key_refusals_logged: Default::default(), // WHAT: none written. WHY: the new field, empty as on every start.
             },
             dir,
         )

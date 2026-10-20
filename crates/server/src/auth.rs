@@ -252,6 +252,10 @@ pub fn whose_key(db: &Connection, key: &str, purposes: &[&str], now: &str) -> Re
             _ => return Ok(None), // WHAT: run out, or a date nobody can read. WHY: refused exactly like a key that does not exist.
         }
     }
+    if purpose == purpose::SYNC && who.role != Role::Admin {
+        // WHAT: a sync key whose maker is no longer an administrator is nobody, read fresh from the people table on every use. WHY: a sync key reaches every program's project because only an administrator may make one; demoted, its maker's key must not keep that reach.
+        return Ok(None);
+    }
     if purpose == purpose::SYNC && who.role == Role::Admin {
         who.role = Role::Estimator; // WHAT: a sync key made by an administrator acts as an estimator. WHY: it may write drawings, never run the server or see every job.
     }
@@ -259,17 +263,39 @@ pub fn whose_key(db: &Connection, key: &str, purposes: &[&str], now: &str) -> Re
     Ok(Some(who))
 }
 
-/// What a key was made for, and the email of whoever made it, without using
-/// it: nothing is written and nobody is signed in by asking. None when there
-/// is no such key.
-pub fn purpose_of(db: &Connection, key: &str) -> Result<Option<(String, String)>> {
-    Ok(db
+/// A key as `purpose_of` finds it: what it was made for, whose it is, and its id.
+pub struct KeyFound {
+    pub purpose: String, // WHAT: what the key was made for. WHY: decides whether the sync list applies.
+    pub maker: String, // WHAT: the email of whoever made it. WHY: goes on the audit line.
+    pub id: String, // WHAT: the key's own id, never the key. WHY: refusals are written to the log at most once a minute per key.
+}
+
+/// What a key was made for, whose it is and its id, without using it:
+/// nothing is written and nobody is signed in by asking. None when there is
+/// no such key, and also when it has run out or its end cannot be read, so
+/// an expired key is answered exactly like one that does not exist.
+pub fn purpose_of(db: &Connection, key: &str, now: &str) -> Result<Option<KeyFound>> {
+    let found: Option<(KeyFound, Option<String>, Role)> = db
         .query_row(
-            "SELECT keys.purpose, people.email FROM keys JOIN people ON people.id = keys.person WHERE keys.digest = ?1", // WHAT: looked up by digest, as every key is. WHY: the key itself is never stored.
+            "SELECT keys.purpose, people.email, keys.id, keys.expires, people.role FROM keys JOIN people ON people.id = keys.person WHERE keys.digest = ?1", // WHAT: looked up by digest, as every key is. WHY: the key itself is never stored.
             params![token_hash(key)],
-            |r| Ok((r.get(0)?, r.get(1)?)), // WHAT: the purpose and the maker's email. WHY: the purpose decides; the email goes on the audit line.
+            |r| Ok((KeyFound { purpose: r.get(0)?, maker: r.get(1)?, id: r.get(2)? }, r.get(3)?, role_from(&r.get::<_, String>(4)?))), // WHAT: the purpose, the maker's email, the id, its end and the maker's role now. WHY: the end and the role are checked just below.
         )
-        .optional()?) // WHAT: None for a key that is not there. WHY: the route then refuses it as nobody, as before.
+        .optional()?; // WHAT: None for a key that is not there. WHY: the route then refuses it as nobody, as before.
+    let Some((found, ends, role)) = found else {
+        return Ok(None); // WHAT: no such key. WHY: nobody.
+    };
+    if found.purpose == purpose::SYNC && role != Role::Admin {
+        return Ok(None); // WHAT: a sync key whose maker is no longer an administrator. WHY: `whose_key` refuses it, so it must look like a missing key here too.
+    }
+    if let Some(ends) = ends {
+        // WHAT: the same end check as `whose_key`. WHY: a key past its end, or with an end nobody can read, must look exactly like a missing one.
+        match (parse_time(&ends), parse_time(now)) {
+            (Some(ends_at), Some(now_at)) if now_at < ends_at => {} // WHAT: still inside its time. WHY: treated as the key it is.
+            _ => return Ok(None), // WHAT: run out, or unreadable. WHY: answered as nobody.
+        }
+    }
+    Ok(Some(found)) // WHAT: a live key. WHY: the gate decides on its purpose.
 }
 
 /// The moment `days` from `now`, written the way every other time here is.

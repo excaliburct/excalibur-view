@@ -176,6 +176,10 @@ pub async fn create(
             "A project's reference can be at most {LONGEST_REFERENCE} characters."
         )));
     }
+    if reference.is_some() && who.role != hub::Role::Admin && !who.is_key(crate::auth::purpose::SYNC) {
+        // WHAT: filing under a program's reference is for an administrator (signed in, or a key they made) or a sync key, before anything is looked up. WHY: those reach every program's project; anybody else would learn from the answer whether a reference (`fabwire:bid:2630`) exists.
+        return Err(Denied::forbidden("file a project under another program's reference"));
+    }
     // Asked for with a place, it goes (or moves) there; without one, a new
     // project is with the others and one already there stays where it is.
     let place = match body.place.as_deref() {

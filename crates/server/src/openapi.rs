@@ -141,8 +141,9 @@ only for an administrator signed in with their password: no key ever administers
         "/me/password": {
             "post": {
                 "summary": "Change your own password.",
-                "description": "Needs the current one. Every other place you are signed in \
-is signed out.",
+                "description": "Needs the current one, and a person signed in: a key is \
+refused (403 key_not_allowed). Wrong tries count against the same limit as signing in (429 \
+too_many). Every other place you are signed in is signed out.",
                 "requestBody": body("ChangePassword"),
                 "responses": ok("Changed")
             }
@@ -288,7 +289,9 @@ anybody else does.",
                 "summary": "Start a project.",
                 "description": "With a `reference` that another project already has, answers \
 with that project instead of making a second — brought back if it was archived. A program \
-that files its jobs here by its own id can push as often as it likes.",
+that files its jobs here by its own id can push as often as it likes. Filing under a \
+`reference` takes an administrator (signed in, or a key they made) or a sync key; anybody \
+else is refused (403) whether or not the reference exists.",
                 "requestBody": body("NewProject"),
                 "responses": ok("Project")
             }
@@ -538,7 +541,7 @@ another drawing.",
                 "summary": "Where this office stands with Excalibur View Office.",
                 "description": "founding, licensed, trial or unlicensed, with users, the date \
                                 updates run through and one sentence to show. Anybody signed in \
-                                may ask; an administrator is also told the license id. With no \
+                                may ask; an administrator signed in (never a key) is also told the license id. With no \
                                 license after the trial, reading and exporting carry on and \
                                 writes answer 403 license_needed.",
                 "responses": ok("Standing")

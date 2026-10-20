@@ -43,6 +43,10 @@ pub struct Server {
     pub notices: crate::notices::Pending,
     /// Each plugin's manifest, by the plugin file's digest, read once.
     pub manifests: std::sync::Mutex<std::collections::HashMap<String, Option<plugin_api::Manifest>>>,
+    /// When each key last had a refusal written to the audit log, by the
+    /// key's id. In memory, like `patience`: a refused key writes at most one
+    /// line a minute, so a misused key cannot fill the log.
+    pub key_refusals_logged: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 impl Server {
@@ -55,6 +59,7 @@ impl Server {
             tunnel: crate::tunnel::Tunnel::default(),
             manifests: Default::default(),
             notices: Default::default(),
+            key_refusals_logged: Default::default(), // WHAT: no refusals written yet. WHY: empty on every start, as patience is.
         };
         crate::license::begin(&server);
         server
@@ -252,10 +257,11 @@ async fn keys_keep_to_their_purpose(
     let Some(token) = token.filter(|t| t.starts_with(auth::KEY_PREFIX)) else {
         return next.run(request).await; // WHAT: no key: a session, or nobody. WHY: the route's own checks decide those, as always.
     };
-    let purpose = server.store.with(|db| auth::purpose_of(db, &token)); // WHAT: what this key was made for. WHY: decides whether the list applies.
-    let (purpose, maker) = match purpose {
-        Ok(Some(found)) => found, // WHAT: the purpose and whose key it is. WHY: the purpose decides; the maker goes on the audit line.
-        Ok(None) => return next.run(request).await, // WHAT: no such key. WHY: the route refuses it as nobody, exactly as before.
+    let now = now(); // WHAT: the time, once. WHY: a key past its end is looked up as no key.
+    let purpose = server.store.with(|db| auth::purpose_of(db, &token, &now)); // WHAT: what this key was made for, if it is live. WHY: decides whether the list applies.
+    let auth::KeyFound { purpose, maker, id } = match purpose {
+        Ok(Some(found)) => found, // WHAT: the purpose, whose key it is and its id. WHY: the purpose decides; the maker and id go on the audit line.
+        Ok(None) => return next.run(request).await, // WHAT: no such key, or one run out. WHY: the route refuses it as nobody, exactly as a key that never existed.
         Err(e) => return Denied::broke("check that key", e).into_response(), // WHAT: a database failure. WHY: refused, never waved through.
     };
     if purpose != auth::purpose::SYNC {
@@ -271,14 +277,36 @@ async fn keys_keep_to_their_purpose(
     if SYNC_ROUTES.iter().any(|(m, p)| *m == method && *p == path) {
         return next.run(request).await; // WHAT: on the list. WHY: the route's own checks still apply (writer, project gate).
     }
-    // WHAT: refused before the route runs, and written to the audit log. WHY: a sync key asking for anything else is either a bug or somebody misusing it, and either is worth a line.
-    record(
-        &server,
-        crate::audit::Entry::new(crate::audit::action::KEY_REFUSED, &maker) // WHAT: under the email of whoever made the key. WHY: so the line says whose key strayed.
-            .about(format!("{method} {path}"))
-            .saying(auth::purpose::SYNC.to_string()),
-    );
+    // WHAT: refused before the route runs, and written to the audit log at most once a minute per key. WHY: a sync key asking for anything else is either a bug or somebody misusing it, worth a line, but not a way to fill the log.
+    if refusal_worth_a_line(&server, &id) {
+        record(
+            &server,
+            crate::audit::Entry::new(crate::audit::action::KEY_REFUSED, &maker) // WHAT: under the email of whoever made the key. WHY: so the line says whose key strayed.
+                .about(format!("{method} {path}"))
+                .saying(auth::purpose::SYNC.to_string()),
+        );
+    }
     Denied::not_with_this_key(&format!("{method} {path} with a sync key: it is for keeping a program's own projects in step")).into_response()
+}
+
+/// How long a key's refusals go unwritten after one is written.
+const KEY_REFUSAL_QUIET: std::time::Duration = std::time::Duration::from_secs(60); // WHAT: one minute. WHY: enough to see a key straying, never enough lines to fill the disk.
+
+/// Whether a refusal of key `id` should be written now: the first one, then
+/// at most one a minute. Notes the time when it says yes.
+fn refusal_worth_a_line(server: &Server, id: &str) -> bool {
+    let Ok(mut logged) = server.key_refusals_logged.lock() else {
+        return true; // WHAT: the lock is poisoned. WHY: writing the line is the safe way round; losing it is not.
+    };
+    let at = std::time::Instant::now(); // WHAT: now. WHY: compared with the last line written.
+    if logged.get(id).is_some_and(|last| at.duration_since(*last) < KEY_REFUSAL_QUIET) {
+        return false; // WHAT: one written less than a minute ago. WHY: this is the flood the limit is for.
+    }
+    if logged.len() >= 4096 {
+        logged.retain(|_, last| at.duration_since(*last) < KEY_REFUSAL_QUIET); // WHAT: forget the quiet ones. WHY: the map stays small; only live keys ever reach it anyway.
+    }
+    logged.insert(id.to_string(), at); // WHAT: this line's time. WHY: the next minute's refusals are quiet.
+    true
 }
 
 pub fn now() -> String {
@@ -752,7 +780,17 @@ async fn change_password(
     headers: HeaderMap,
     Json(body): Json<hub::ChangePassword>,
 ) -> Answer<Json<serde_json::Value>> {
-    let who = caller(&server, &headers)?;
+    if bearer(&headers).is_some_and(|t| t.starts_with(auth::KEY_PREFIX)) {
+        // WHAT: any key refused before anything is weighed. WHY: changing a password is a person's, signed in; a stolen key must not be a way to guess or change its maker's password.
+        return Err(Denied::not_with_this_key("change a password"));
+    }
+    let who = caller(&server, &headers)?; // WHAT: the signed-in person. WHY: only a session gets this far.
+    let email = who.email.trim().to_lowercase(); // WHAT: the account, spelt the way sign-in counts it. WHY: wrong tries here and at sign-in add up against the same account.
+    let from = seen_from(&headers); // WHAT: where the request came from. WHY: counted too, as sign-in does.
+    if let Some(owed) = server.patience.wait_for_any(crate::patience::SIGNING_IN, &[email.as_str(), from.as_str()]) {
+        // WHAT: too many wrong current passwords lately: refused before the password is checked. WHY: the same limit as sign-in, so this door is no faster for guessing.
+        return Err(Denied(StatusCode::TOO_MANY_REQUESTS, Problem::new("too_many", &crate::patience::refusal(owed))));
+    }
     if body.new.chars().count() < 12 {
         return Err(Denied::wrong("A password needs twelve characters at the very least."));
     }
@@ -767,11 +805,15 @@ async fn change_password(
         })
         .map_err(|e| Denied::broke("look you up", e))?;
     if !auth::password_matches(&body.current, &stored) {
+        server.patience.wrong(&email); // WHAT: a wrong try counted against the account. WHY: the same count sign-in keeps.
+        server.patience.wrong(&from); // WHAT: and against the address. WHY: likewise.
         return Err(Denied(
             StatusCode::UNAUTHORIZED,
             Problem::new("unauthorised", "That is not your current password."),
         ));
     }
+    server.patience.right(&email); // WHAT: the right password clears the account's count. WHY: as a right sign-in does.
+    server.patience.right(&from); // WHAT: and the address's. WHY: likewise.
     let hashed = auth::hash_password(&body.new).map_err(|e| Denied::broke("keep that password", e))?;
     // Every other place this person is signed in stops working: changing a
     // password is very often what somebody does because they think somebody
@@ -2906,8 +2948,9 @@ async fn read_license(
     State(server): State<Shared>,
     headers: HeaderMap,
 ) -> Answer<Json<hub::license::Standing>> {
-    let who = caller(&server, &headers)?;
-    Ok(Json(crate::license::standing(&server, who.role.may_administer())))
+    let who = caller(&server, &headers)?; // WHAT: anybody signed in, or a key. WHY: the office's standing is everybody's to read.
+    let administers = who.key.is_none() && who.role.may_administer(); // WHAT: a signed-in administrator only, never a key. WHY: the same rule as `administrator()` and /me's may_administer; a key is never told the license id.
+    Ok(Json(crate::license::standing(&server, administers)))
 }
 
 #[derive(Deserialize)]

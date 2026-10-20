@@ -35,7 +35,24 @@ and nothing else. It never sees a project somebody made by hand. Make one
 for such a program and take its old key back in Studio, Office, Keys.
 
 A key can now be given an end date when it is made. Keys made without one
-never run out, as before.
+never run out, as before. A key past its end is answered exactly as a key
+that does not exist.
+
+A sync key works only while the person who made it is an administrator.
+Make them an estimator or a viewer and their sync keys stop working; make
+them an administrator again and they work again.
+
+Changing a password takes the person signed in; no key can do it. Wrong
+tries at the current password count against the same limit as signing in.
+
+A key is told about the license only what anybody signed in is told.
+
+Only an administrator, a key an administrator made, or a sync key can file
+a project under another program's reference. Anybody else gets the same
+refusal whether or not that reference is already in use.
+
+When a sync key asks for something it is not for, the audit log gets one
+line about it a minute at most, however often it asks.
 
 AN ASSISTANT SEES WHAT ITS PERSON MAY SEE
 
