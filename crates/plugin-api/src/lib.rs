@@ -131,6 +131,7 @@ pub enum SettingKind {
 }
 
 impl Setting {
+    #[must_use] // WHAT: a caller that drops the value gets a warning. WHY: asking for a default and ignoring it is always a mistake.
     pub fn default_value(&self) -> serde_json::Value {
         match &self.kind {
             SettingKind::Number { default, .. } => serde_json::json!(default),
@@ -165,20 +166,23 @@ pub struct Input {
 }
 
 impl Input {
+    #[must_use] // WHAT: a caller that drops the number gets a warning. WHY: reading a setting has no other effect.
     pub fn number(&self, setting: &str, otherwise: f64) -> f64 {
         self.settings
             .get(setting)
-            .and_then(|v| v.as_f64())
+            .and_then(serde_json::Value::as_f64) // WHAT: the setting as a number, if it is one. WHY: names the method straight, no closure in between.
             .unwrap_or(otherwise)
     }
 
+    #[must_use] // WHAT: a caller that drops the answer gets a warning. WHY: reading a setting has no other effect.
     pub fn toggle(&self, setting: &str, otherwise: bool) -> bool {
         self.settings
             .get(setting)
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool) // WHAT: the setting as on or off, if it is one. WHY: names the method straight, no closure in between.
             .unwrap_or(otherwise)
     }
 
+    #[must_use] // WHAT: a caller that drops the text gets a warning. WHY: reading a setting has no other effect.
     pub fn text(&self, setting: &str) -> String {
         self.settings
             .get(setting)
@@ -187,6 +191,7 @@ impl Input {
             .to_string()
     }
 
+    #[must_use] // WHAT: a caller that drops the sheet gets a warning. WHY: looking a sheet up has no other effect.
     pub fn sheet(&self, page: u32) -> Option<&Sheet> {
         self.sheets.iter().find(|s| s.page == page)
     }
@@ -225,6 +230,7 @@ pub struct Scale {
 
 impl Scale {
     /// Feet of building per point of paper.
+    #[must_use] // WHAT: a caller that drops the figure gets a warning. WHY: working it out has no other effect.
     pub fn feet_per_point(&self) -> f64 {
         self.ratio / 72.0 / 12.0
     }
@@ -255,6 +261,7 @@ pub struct Line {
 }
 
 impl Line {
+    #[must_use] // WHAT: a caller that drops the length gets a warning. WHY: measuring has no other effect.
     pub fn length(&self) -> f64 {
         ((self.b[0] - self.a[0]).powi(2) + (self.b[1] - self.a[1]).powi(2)).sqrt()
     }
@@ -316,7 +323,19 @@ const PACKED: &[u8; 4] = b"HVIN";
 /// interpreter, and an interpreter reads a number from four bytes about
 /// twenty times faster than from text — which, for a sheet with a hundred
 /// thousand lines on it, is the difference between a moment and a wait.
+///
+/// An input too big to count in the packed form's four-byte lengths goes as
+/// plain JSON instead, words and lines and all, which [`unpack`] reads as it
+/// stands: slower, but whole.
+#[must_use] // WHAT: a caller that drops the bytes gets a warning. WHY: packing has no other effect.
 pub fn pack(input: &Input) -> Vec<u8> {
+    // WHAT: the packed form, or plain JSON when a count does not fit. WHY: a length that doesn't fit four bytes must never be cut down, or the plugin would read the rest of the input as garbage.
+    packed(input).unwrap_or_else(|| serde_json::to_vec(input).unwrap_or_default())
+}
+
+/// [`pack`]'s packed form, or `None` when a length does not fit in the four
+/// bytes the form gives it.
+fn packed(input: &Input) -> Option<Vec<u8>> {
     let light = Input {
         command: input.command.clone(),
         drawing: input.drawing.clone(),
@@ -347,31 +366,76 @@ pub fn pack(input: &Input) -> Vec<u8> {
         .sum();
     let mut out = Vec::with_capacity(8 + json.len() + bulk);
     out.extend_from_slice(PACKED);
-    out.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    // WHAT: a length written as four bytes, or None when it is past what four bytes hold. WHY: a checked conversion, so a length is never silently cut down.
+    let count = |out: &mut Vec<u8>, n: usize| -> Option<()> {
+        out.extend_from_slice(&u32::try_from(n).ok()?.to_le_bytes()); // WHAT: the length, little-endian. WHY: the order unpack reads it in.
+        Some(()) // WHAT: it fitted. WHY: the caller goes on.
+    };
+    count(&mut out, json.len())?; // WHAT: how long the JSON part is. WHY: unpack takes exactly that many bytes as JSON.
     out.extend_from_slice(&json);
-    let f = |out: &mut Vec<u8>, v: f64| out.extend_from_slice(&(v as f32).to_le_bytes());
+    let f = |out: &mut Vec<u8>, v: f64| out.extend_from_slice(&narrow(v).to_le_bytes()); // WHAT: one number as four bytes. WHY: the packed form carries numbers as f32; narrow rounds to the nearest one rather than chopping.
     for sheet in &input.sheets {
-        out.extend_from_slice(&(sheet.words.len() as u32).to_le_bytes());
+        count(&mut out, sheet.words.len())?; // WHAT: how many words the sheet has. WHY: unpack reads that many.
         for w in &sheet.words {
             for v in w.area {
                 f(&mut out, v);
             }
             f(&mut out, w.size);
-            out.extend_from_slice(&(w.text.len() as u32).to_le_bytes());
+            count(&mut out, w.text.len())?; // WHAT: how many bytes the word's text is. WHY: unpack takes that many as its text.
             out.extend_from_slice(w.text.as_bytes());
         }
-        out.extend_from_slice(&(sheet.lines.len() as u32).to_le_bytes());
+        count(&mut out, sheet.lines.len())?; // WHAT: how many lines the sheet has. WHY: unpack reads that many.
         for l in &sheet.lines {
             for v in [l.a[0], l.a[1], l.b[0], l.b[1], l.width] {
                 f(&mut out, v);
             }
-            out.push(l.dashed as u8);
+            out.push(u8::from(l.dashed)); // WHAT: dashed as one byte, 1 or 0. WHY: From says it can't go wrong, where `as` would not.
         }
     }
-    out
+    Some(out) // WHAT: the packed input. WHY: every length fitted.
+}
+
+/// The nearest f32 to `v`, ties to even, the way the hardware rounds. A
+/// finite number past f32's range comes out as f32's largest of that sign,
+/// not as infinity: a point off the edge of everything is still a point.
+/// Infinity stays infinity, and not-a-number stays not-a-number.
+fn narrow(v: f64) -> f32 {
+    if v.is_nan() { // WHAT: not-a-number. WHY: it has no bits worth rounding.
+        return f32::NAN; // WHAT: not-a-number in, not-a-number out. WHY: there is nothing nearer to round it to.
+    }
+    let bits = v.to_bits(); // WHAT: the number's 64 bits. WHY: it is rounded by its parts, with no lossy cast anywhere.
+    let sign = if bits >> 63 == 1 { 0x8000_0000u32 } else { 0 }; // WHAT: the sign bit, in f32's place. WHY: rounding works on the size; the sign goes back on at the end.
+    let field = (bits >> 52) & 0x7ff; // WHAT: the 11-bit exponent field. WHY: says how big the number is.
+    if field == 0x7ff { // WHAT: the exponent field all ones. WHY: that is infinity or not-a-number, never an ordinary number.
+        return f32::from_bits(sign | f32::INFINITY.to_bits()); // WHAT: infinity keeps its sign. WHY: NaN was handled above, so all-ones here is infinity.
+    }
+    if field == 0 { // WHAT: the exponent field all zeros. WHY: zero, or an f64 subnormal, far below the smallest f32.
+        return f32::from_bits(sign); // WHAT: zero, or an f64 too tiny for any f32. WHY: below about 1e-308 the nearest f32 is zero.
+    }
+    let exp = i64::try_from(field).unwrap_or(0) - 1023; // WHAT: the power of two, unbiased. WHY: an 11-bit field always fits; the fallback is never taken.
+    let sig = (1u64 << 52) | (bits & ((1u64 << 52) - 1)); // WHAT: the 53-bit significand with its leading one. WHY: what gets rounded down to f32's 24 bits.
+    // WHAT: where the f32 exponent starts, and how many low bits to round away. WHY: a normal f32 keeps 24 bits; below f32's smallest normal it keeps fewer, the way subnormals work.
+    let (base, shift) = if exp >= -126 { (u64::try_from(exp + 126).unwrap_or(u64::MAX) << 23, 29) } else { (0, u32::try_from(-97 - exp).unwrap_or(63).min(63)) };
+    if exp > 127 { // WHAT: past f32's largest power of two. WHY: no f32 is that big.
+        return f32::from_bits(sign | f32::MAX.to_bits()); // WHAT: too big for an f32: its largest instead. WHY: a coordinate turned to infinity would break every sum it touches.
+    }
+    let kept = sig >> shift; // WHAT: the bits that stay. WHY: the f32's significand before rounding.
+    let rest = sig & ((1u64 << shift) - 1); // WHAT: the bits that go. WHY: decide which way to round.
+    let half = 1u64 << (shift - 1); // WHAT: exactly half of the last kept bit. WHY: the line between rounding down and up.
+    let up = rest > half || (rest == half && kept & 1 == 1); // WHAT: whether to round up. WHY: nearest, ties to even, as IEEE 754 says.
+    let total = base + kept + u64::from(up); // WHAT: the f32's bits without the sign. WHY: a carry out of the significand bumps the exponent by itself.
+    match u32::try_from(total) { // WHAT: the bits as a u32, checked. WHY: f32::from_bits takes a u32, and the check doubles as the overflow test.
+        Ok(b) if b < f32::INFINITY.to_bits() => f32::from_bits(sign | b), // WHAT: the rounded number. WHY: it is in range.
+        _ => f32::from_bits(sign | f32::MAX.to_bits()), // WHAT: it rounded up past the largest f32: the largest instead. WHY: the same as too big above.
+    }
 }
 
 /// The other way round. Plain JSON is read as it stands.
+///
+/// # Errors
+///
+/// Why the input could not be read: it is cut short, or its JSON does not
+/// read.
 pub fn unpack(bytes: &[u8]) -> Result<Input, String> {
     if !bytes.starts_with(PACKED) {
         return serde_json::from_slice(bytes).map_err(|e| e.to_string());
@@ -389,11 +453,11 @@ pub fn unpack(bytes: &[u8]) -> Result<Input, String> {
     };
     let f32_at = |at: &mut usize| -> Result<f64, String> {
         let b = take(at, 4)?;
-        Ok(f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64)
+        Ok(f64::from(f32::from_le_bytes([b[0], b[1], b[2], b[3]]))) // WHAT: the four bytes as a number, widened to f64. WHY: From says it can never lose anything, where `as` would not.
     };
     let json_len = u32_at(&mut at)? as usize;
     let mut input: Input = serde_json::from_slice(take(&mut at, json_len)?).map_err(|e| e.to_string())?;
-    for sheet in input.sheets.iter_mut() {
+    for sheet in &mut input.sheets { // WHAT: each sheet, to fill in its words and lines. WHY: the same loop, written the plain way.
         let words = u32_at(&mut at)? as usize;
         sheet.words.reserve(words);
         for _ in 0..words {
@@ -476,21 +540,25 @@ impl Finding {
         }
     }
 
+    #[must_use] // WHAT: a caller that drops the finding gets a warning. WHY: it takes the finding and hands back a new one with the sheet added, so dropping it loses the finding.
     pub fn on(mut self, page: u32) -> Finding {
         self.page = Some(page);
         self
     }
 
+    #[must_use] // WHAT: a caller that drops the finding gets a warning. WHY: it takes the finding and hands back a new one with the place added, so dropping it loses the finding.
     pub fn at(mut self, area: [f64; 4]) -> Finding {
         self.area = Some(area);
         self
     }
 
+    #[must_use] // WHAT: a caller that drops the finding gets a warning. WHY: it takes the finding and hands back a new one with the markup added, so dropping it loses the finding.
     pub fn about(mut self, markup: impl Into<String>) -> Finding {
         self.markups.push(markup.into());
         self
     }
 
+    #[must_use] // WHAT: a caller that drops the finding gets a warning. WHY: it takes the finding and hands back a new one with the button added, so dropping it loses the finding.
     pub fn fix(mut self, label: impl Into<String>, actions: Vec<Action>) -> Finding {
         self.fixes.push(Fix {
             label: label.into(),
@@ -548,6 +616,7 @@ pub struct Table {
 
 impl Table {
     /// The table as CSV, for a spreadsheet.
+    #[must_use] // WHAT: a caller that drops the CSV gets a warning. WHY: writing it has no other effect.
     pub fn to_csv(&self) -> String {
         let quote = |s: &String| {
             if s.contains([',', '"', '\n']) {
@@ -663,12 +732,19 @@ pub struct Header {
 
 /// The exact bytes a plugin's signature is over. `publish.py sign-plugin`
 /// builds the same string; a test holds the two together.
+#[must_use] // WHAT: a caller that drops the bytes gets a warning. WHY: building them has no other effect.
 pub fn signing_payload(id: &str, version: &str, sha256: &str) -> Vec<u8> {
     format!("hyperview-plugin/1\n{id}\n{version}\n{}\n", sha256.to_lowercase()).into_bytes()
 }
 
 /// Splits a plugin file into its header and its WebAssembly. Checks the
 /// shape only; whether to believe it is [`hub::plugin`]'s question.
+///
+/// # Errors
+///
+/// The reason, in words for the person, when the file is not a plugin file,
+/// is cut short, holds more than its header says, or has a header that does
+/// not read.
 pub fn open(file: &[u8]) -> Result<(Header, &[u8]), String> {
     let first = file
         .iter()
@@ -685,16 +761,17 @@ pub fn open(file: &[u8]) -> Result<(Header, &[u8]), String> {
     let header: Header = serde_json::from_slice(&rest[..second])
         .map_err(|e| format!("The plugin file's header could not be read: {e}"))?;
     let wasm = &rest[second + 1..];
-    if wasm.len() as u64 != header.bytes {
-        return Err(format!(
-            "The plugin file is {} bytes short of what it says it holds.",
-            header.bytes as i64 - wasm.len() as i64
-        ));
+    let held = u64::try_from(wasm.len()).unwrap_or(u64::MAX); // WHAT: how many bytes of WebAssembly the file holds, as the header counts them. WHY: a checked conversion; a size past u64 (which no file can be) reads as the largest, so it still never matches.
+    if held != header.bytes { // WHAT: the file holds a different amount than its header says. WHY: a file cut short or added to is refused before anything trusts it.
+        // WHAT: which way it is off, and by how much. WHY: the difference is counted without signs, so a file longer than it says can't wrap round into a nonsense number.
+        let (by, which) = if held < header.bytes { (header.bytes - held, "short of") } else { (held - header.bytes, "more than") };
+        return Err(format!("The plugin file is {by} bytes {which} what it says it holds.")); // WHAT: the refusal, in words. WHY: says plainly what is wrong with the file.
     }
     Ok((header, wasm))
 }
 
 /// Puts a plugin file together. What the signing tools write.
+#[must_use] // WHAT: a caller that drops the file gets a warning. WHY: putting it together has no other effect.
 pub fn seal(header: &Header, wasm: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(wasm.len() + 512);
     out.extend_from_slice(MAGIC.as_bytes());
@@ -768,6 +845,47 @@ mod tests {
         assert!(unpack(&pack(&input)[..30]).is_err());
         // Plain JSON still reads.
         assert_eq!(unpack(br#"{"command":"x"}"#).unwrap().command, "x");
+    }
+
+    #[test]
+    fn a_number_narrows_to_the_nearest_f32() {
+        // WHAT: numbers whose nearest f32 Rust's own parser gives exactly. WHY: an independent answer to check the rounding against.
+        for v in [0.0, -0.0, 1.0, 1.4, -1.4, 0.1, 2592.0, 100.5, 1e-40, -1e-44, 3.4e38, 1.0 + f64::EPSILON, 123_456_789.123] {
+            assert_eq!(narrow(v).to_bits(), v.to_string().parse::<f32>().unwrap().to_bits(), "{v}"); // WHAT: bit for bit the same. WHY: rounding, sign and subnormals all right.
+        }
+        let one = f64::from(f32::from_bits(0x3f80_0000)); // WHAT: 1.0. WHY: the start of the ties below.
+        let ulp = f64::from(f32::EPSILON); // WHAT: one f32 step at 1.0. WHY: the ties sit half a step past it.
+        assert_eq!(narrow(one + ulp / 2.0).to_bits(), 0x3f80_0000); // WHAT: a tie goes to the even neighbour, down here. WHY: ties to even, not always up.
+        assert_eq!(narrow(one + ulp * 1.5).to_bits(), 0x3f80_0002); // WHAT: a tie goes to the even neighbour, up here. WHY: the same rule the other way.
+        assert_eq!(narrow(f64::from(f32::from_bits(1))).to_bits(), 1); // WHAT: the smallest f32 survives. WHY: subnormals are kept, not flushed.
+    }
+
+    #[test]
+    fn a_number_past_f32_saturates_and_the_specials_stay() {
+        assert_eq!(narrow(1e300), f32::MAX); // WHAT: too big gives the largest f32. WHY: not infinity, which would break sums.
+        assert_eq!(narrow(-1e300), f32::MIN); // WHAT: the same on the negative side. WHY: the sign is kept.
+        assert_eq!(narrow(f64::from(f32::MAX) * (1.0 + f64::EPSILON)), f32::MAX); // WHAT: just past the largest still gives the largest. WHY: rounding up past the top saturates too.
+        assert_eq!(narrow(f64::INFINITY), f32::INFINITY); // WHAT: infinity stays infinity. WHY: it was never a finite point.
+        assert_eq!(narrow(f64::NEG_INFINITY), f32::NEG_INFINITY); // WHAT: and keeps its sign. WHY: the same.
+        assert!(narrow(f64::NAN).is_nan()); // WHAT: not-a-number stays so. WHY: there is nothing to round it to.
+        assert_eq!(narrow(1e-300).to_bits(), 0); // WHAT: far too tiny gives zero. WHY: the nearest f32.
+    }
+
+    #[test]
+    fn the_plain_json_pack_falls_back_to_reads_back() {
+        let input = Input { command: "x".into(), ..Default::default() }; // WHAT: a small input. WHY: one that packs.
+        assert!(pack(&input).starts_with(PACKED)); // WHAT: packs in the fast form. WHY: everything fits.
+        assert_eq!(unpack(&serde_json::to_vec(&input).unwrap()).unwrap().command, "x"); // WHAT: the fallback form reads back. WHY: what pack sends when a length won't fit.
+    }
+
+    #[test]
+    fn a_plugin_file_longer_than_it_says_is_refused_without_a_negative_count() {
+        let wasm = b"\0asm\x01\0\0\0"; // WHAT: eight bytes of WebAssembly. WHY: a small plugin.
+        let mut file = seal(&header(wasm), wasm); // WHAT: a sealed file. WHY: one that opens.
+        file.extend_from_slice(b"xyz"); // WHAT: three bytes too many. WHY: the case that used to give a negative number.
+        assert_eq!(open(&file).unwrap_err(), "The plugin file is 3 bytes more than what it says it holds."); // WHAT: says by how much, the right way round. WHY: no wrapped or negative count.
+        file.truncate(file.len() - 5); // WHAT: now two bytes too few. WHY: the other way.
+        assert_eq!(open(&file).unwrap_err(), "The plugin file is 2 bytes short of what it says it holds."); // WHAT: the shortfall. WHY: the same message as before for a short file.
     }
 
     #[test]
