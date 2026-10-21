@@ -2117,9 +2117,11 @@ fn markuplist_of(server: &Server, id: &str, user: &[takeoff::user::UserColumn]) 
                 "Scaled": row.scaled,
                 "Quantity": row.quantity,
                 "Each": each,
-                "LengthFt": row.scaled.then_some(row.length).flatten(),
-                "AreaSqFt": row.scaled.then_some(row.area).flatten(),
-                "VolumeCuFt": row.scaled.then_some(row.volume).flatten(),
+                "LengthFt": row.length_ft().filter(|_| row.scaled), // WHAT: the length in feet, whatever the sheet's unit. WHY: the field's name says feet, and Fabwire reads it as feet; a unit not known sends none, never a wrong number.
+                "AreaSqFt": row.area_sqft().filter(|_| row.scaled), // WHAT: the area in square feet. WHY: the same.
+                "VolumeCuFt": row.volume_cuft().filter(|_| row.scaled), // WHAT: the volume in cubic feet. WHY: the same.
+                "Unit": row.measured_unit(), // WHAT: the sheet's own unit. WHY: said beside the feet, so a reader sees what was converted.
+                "UnitKnown": row.feet_per_unit().is_some(), // WHAT: whether that unit could be turned into feet. WHY: false means no numbers were sent for it, not zero.
                 "Status": row.status,
                 "CarriedForward": carried_forward,
                 "NeedsCheck": needs_check,

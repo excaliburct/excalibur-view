@@ -79,6 +79,51 @@ pub struct Row {
 }
 
 impl Row {
+    /// WHAT: Feet in one of the unit this row was measured in; `None` on an
+    /// unscaled sheet or a unit not known. WHY: lengths, areas and volumes go
+    /// out in feet whatever the sheet was scaled in (a metric sheet measures in
+    /// millimetres), and an unknown unit is never sent as feet.
+    #[must_use]
+    pub fn feet_per_unit(&self) -> Option<f64> {
+        // WHAT: the scale's own unit in feet. WHY: the row's numbers are in that unit.
+        self.scale.as_ref().and_then(Measure::feet_per_unit)
+    }
+
+    /// WHAT: The length in feet; `None` when unmeasured or the unit isn't known.
+    /// WHY: what a reader asking for feet must get.
+    #[must_use]
+    pub fn length_ft(&self) -> Option<f64> {
+        // WHAT: converted by the foot. WHY: as above.
+        self.length.zip(self.feet_per_unit()).map(|(v, f)| v * f)
+    }
+
+    /// WHAT: The area in square feet; `None` as for the length. WHY: an area
+    /// converts by the square of the unit.
+    #[must_use]
+    pub fn area_sqft(&self) -> Option<f64> {
+        // WHAT: converted by the square. WHY: as above.
+        self.area.zip(self.feet_per_unit()).map(|(v, f)| v * f * f)
+    }
+
+    /// WHAT: The volume in cubic feet; `None` as for the length. WHY: a volume
+    /// converts by the cube.
+    #[must_use]
+    pub fn volume_cuft(&self) -> Option<f64> {
+        // WHAT: converted by the cube. WHY: as above.
+        self.volume
+            .zip(self.feet_per_unit())
+            .map(|(v, f)| v * f * f * f)
+    }
+
+    /// WHAT: The unit this row was measured in, as its scale writes it; "" on
+    /// an unscaled sheet. WHY: sent beside the feet, so a reader sees what was
+    /// converted.
+    #[must_use]
+    pub fn measured_unit(&self) -> &str {
+        // WHAT: the scale's first unit. WHY: the numbers' own unit.
+        self.scale.as_ref().map_or("", Measure::primary_unit)
+    }
+
     /// Weight in pounds, from the markup's own column data. `None` means the
     /// markup carries no weight, which is not the same as weighing nothing.
     pub fn pounds(&self, which: WeightColumns) -> Option<f64> {
@@ -466,7 +511,7 @@ pub fn read_document(doc: &Document) -> Vec<Row> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use annot::measure::imperial;
+    use annot::measure::{feet_in, imperial, metric};
 
     fn quarter() -> Measure {
         imperial(48.0, "1/4\" = 1'-0\"", 16)
@@ -643,5 +688,46 @@ mod tests {
         let row = measure(0, Ref::new(1, 0), &m, Some(&quarter()));
         assert_eq!(row.kind, Kind::Markup);
         assert_eq!(row.count, 0.0);
+    }
+
+    // WHAT: a forty-foot beam on an imperial sheet is 40 ft; the same drawn
+    // length on a 1:50 metric sheet is sent in feet, not millimetres. WHY: the
+    // field says feet, and a program reading it takes it as feet.
+    #[test]
+    fn lengths_go_out_in_feet_whatever_the_sheet_was_scaled_in() {
+        // WHAT: a straight line 720 points long. WHY: forty feet at 1/4" = 1'-0".
+        let line = beam(&[[0.0, 0.0], [720.0, 0.0]]);
+        // WHAT: measured at 1/4" = 1'-0". WHY: forty feet.
+        let imperial_row = measure(0, pdf::Ref::new(0, 0), &line, Some(&quarter()));
+        // WHAT: 40 ft. WHY: feet already.
+        assert!((imperial_row.length_ft().unwrap() - 40.0).abs() < 1e-9);
+        // WHAT: its unit said, the foot mark. WHY: sent beside it.
+        assert_eq!(imperial_row.measured_unit(), "'");
+        // WHAT: the same line at 1:50. WHY: measured in millimetres.
+        let metric_row = measure(0, pdf::Ref::new(0, 0), &line, Some(&metric(50.0, "1:50")));
+        // WHAT: the length in the sheet's unit. WHY: 12,700 mm.
+        let millimetres = metric_row.length.unwrap();
+        // WHAT: 720/72 in × 50 × 25.4. WHY: as the metric scale reads.
+        assert!((millimetres - 12_700.0).abs() < 1e-6, "{millimetres}");
+        // WHAT: sent as 41.67 ft. WHY: never 12,700 "feet".
+        assert!((metric_row.length_ft().unwrap() - 12_700.0 / 304.8).abs() < 1e-9);
+        // WHAT: its unit said. WHY: a reader sees it was converted.
+        assert_eq!(metric_row.measured_unit(), "mm");
+        // WHAT: inches and yards, any capitals and spaces. WHY: as a scale may write them.
+        assert_eq!(feet_in("IN"), Some(1.0 / 12.0));
+        // WHAT: yards, with spaces round it. WHY: the same.
+        assert_eq!(feet_in(" yd "), Some(3.0));
+        // WHAT: centimetres. WHY: 30.48 to the foot.
+        assert!((feet_in("cm").unwrap() * 30.48 - 1.0).abs() < 1e-12);
+        // WHAT: a unit not known. WHY: never taken as feet.
+        assert_eq!(feet_in("furlong"), None);
+        // WHAT: a scale in a unit not known. WHY: its numbers are not sent.
+        let mut odd = metric(50.0, "1:50");
+        // WHAT: renamed. WHY: as above.
+        odd.x[0].unit = "furlong".into();
+        // WHAT: measured on it. WHY: as above.
+        let odd_row = measure(0, pdf::Ref::new(0, 0), &line, Some(&odd));
+        // WHAT: none sent. WHY: a wrong number is worse than none.
+        assert_eq!(odd_row.length_ft(), None);
     }
 }
