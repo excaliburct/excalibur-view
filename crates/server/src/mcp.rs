@@ -7,7 +7,7 @@
 //! it can be asked.
 //!
 //! It speaks MCP over HTTP: JSON-RPC 2.0 at `/mcp`, with the same bearer token
-//! as the rest of the API. Point an AI assistant or anything else that speaks MCP at a
+//! as the rest of the API. Point an assistant app or anything else that speaks MCP at a
 //! shop's own server and it can read that shop's quantities. Bluebeam has
 //! nothing of the kind, and could not easily: the numbers only exist inside
 //! its own window.

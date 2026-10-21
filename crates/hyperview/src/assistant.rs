@@ -15,7 +15,7 @@
 //!   appear in the window with a Fix button and are drawn only when the person
 //!   clicks it.
 //!
-//! "Connect AI Assistant" in the Help menu does the setting up: it asks the server
+//! "Connect Assistant" in the Help menu does the setting up: it asks the server
 //! for the key, keeps it beside the program, and adds Hyperview to the assistant
 //! app's list of connectors — both places the assistant app keeps that list
 //! on Windows, because the Store version reads a different one from the one
@@ -24,7 +24,7 @@
 //! # When it does not work
 //!
 //! Every start of the connector, and every question the assistant asks it, is
-//! written to `assistant-bridge.log` beside the program. "Test AI Assistant Connection"
+//! written to `assistant-bridge.log` beside the program. "Test Assistant Connection"
 //! in the Help menu reads that log, checks both settings files, and runs the
 //! connector itself the way the assistant would — so the answer to "it didn't seem to
 //! work" is a report, not a guess. The three things that actually go wrong:
@@ -56,9 +56,13 @@ pub const SERVER_NAME: &str = "excalibur-hyperview";
 
 // Where the assistant app this connects to keeps its list of connectors, and
 // what its process is called. These are its names, not ours.
+// WHAT: the folder name the desktop assistant app keeps its settings under. WHY: it is that app's own name on disk, so it must be written exactly as the app writes it or its list of connectors is never found.
 const APP_FOLDER: &str = "Claude";
+// WHAT: the desktop assistant app's settings file name. WHY: chosen by that app, not by us; any other name is a file it never reads.
 const SETTINGS_FILE: &str = "claude_desktop_config.json";
+// WHAT: how the Microsoft Store copies of the assistant app name their package folders. WHY: the Store version keeps its own settings file there, and these prefixes are the only way to find it.
 const STORE_PACKAGES: [&str; 2] = ["Claude_", "AnthropicClaude"];
+// WHAT: the running assistant app's process name. WHY: used only to tell the person it must be quit and reopened; the name is the app's own.
 const PROCESS: &str = "claude";
 
 fn home_folder() -> Option<PathBuf> {
@@ -121,7 +125,7 @@ pub fn assistant_app_settings() -> Vec<PathBuf> {
 /// A settings file as JSON. A byte-order mark — what Notepad and Windows
 /// PowerShell 5 put at the front of a file they save as UTF-8 — is read past
 /// rather than taken for the file being broken, which is what made Connect
-/// AI Assistant leave the one file that mattered alone.
+/// Assistant leave the one file that mattered alone.
 pub fn read_settings(settings: &Path) -> Result<Value, String> {
     let text = match std::fs::read(settings) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
@@ -187,8 +191,9 @@ pub fn add_to_assistant_app() -> Result<Vec<PathBuf>, String> {
         .ok_or("where Excalibur View is installed could not be found")?;
     let places = assistant_app_settings();
     if places.is_empty() {
+        // WHAT: says no assistant app is installed and names the Help command to run again. WHY: the command is now called Connect Assistant, so the message names it the way the menu does.
         return Err("No assistant app that takes connectors is installed on this computer. \
-                    Install one, open it once, then choose Connect AI Assistant again."
+                    Install one, open it once, then choose Connect Assistant again."
             .into());
     }
     let mut done = Vec::new();
@@ -277,7 +282,7 @@ pub fn serve() -> i32 {
     let connection = kept();
     log.line(match &connection {
         Some(c) => format!("office server: {} {}", c.name, c.base),
-        None => "no office server kept on this computer (Help → Connect AI Assistant makes one)".into(),
+        None => "no office server kept on this computer (Help → Connect Assistant makes one)".into(), // WHAT: the log line when no office server is kept. WHY: names the Help command by its menu name, so the log points at something the person can find.
     });
     let agent = office_agent();
     let stdin = std::io::stdin();
@@ -418,11 +423,12 @@ fn call(agent: &hub::web::ureq::Agent, connection: Option<&Connection>, request:
         window_call(&name, &args)
     } else {
         match connection {
+            // WHAT: the answer when this copy has no office server. WHY: it tells the assistant which Help command adds the office's jobs, by the name the menu shows.
             None => text_result(
                 "This copy of Excalibur View is not connected to an office server, so there are no shared \
                  jobs to read. Everything in the window works: window_status, read_sheet, look_at_sheet, \
                  takeoff_totals and propose_markups. An office with Excalibur View Office signs in to its \
-                 server (Studio) and chooses Help → Connect AI Assistant again to add its jobs.",
+                 server (Studio) and chooses Help → Connect Assistant again to add its jobs.",
                 true,
             ),
             Some(c) => match office(agent, c, request) {
@@ -460,9 +466,10 @@ fn office(agent: &hub::web::ureq::Agent, c: &Connection, request: &Value) -> Res
         Ok(response) => response
             .into_json::<Value>()
             .map_err(|_| "The office server's answer was not readable.".to_string()),
+        // WHAT: the message when the office server refuses this computer's key. WHY: it names the Help command that makes a new key, by the name the menu shows.
         Err(hub::web::ureq::Error::Status(401, _)) | Err(hub::web::ureq::Error::Status(403, _)) => Err(format!(
             "{place} no longer accepts this computer's key. Open Excalibur View and choose Help → Connect \
-             AI Assistant again."
+             Assistant again."
         )),
         Err(hub::web::ureq::Error::Status(code, _)) => Err(format!("{place} answered with an error ({code}).")),
         Err(e) => Err(format!(
@@ -703,9 +710,9 @@ fn reply(stdout: &std::io::Stdout, answer: &Value) {
     let _ = out.flush();
 }
 
-// ---- Test AI Assistant Connection -------------------------------------------------------------
+// ---- Test Assistant Connection -------------------------------------------------------------
 
-/// Help → Test AI Assistant Connection, and `Hyperview.exe --mcp-test`: everything
+/// Help → Test Assistant Connection, and `Hyperview.exe --mcp-test`: everything
 /// that decides whether the assistant app can use Hyperview, checked, in words.
 pub fn diagnose() -> String {
     let mut out = String::new();
@@ -724,8 +731,9 @@ pub fn diagnose() -> String {
         Some(c) => say(true, format!("Office server for the assistant: {} ({})", c.name, c.base)),
         None => say(
             true,
+            // WHAT: the test's line when no office server is kept. WHY: it names the Help command that adds the office's jobs, by the name the menu shows.
             "No office server: the assistant works with this window on its own. (With Excalibur View Office, sign in \
-             and choose Connect AI Assistant again to add the office's jobs.)"
+             and choose Connect Assistant again to add the office's jobs.)"
                 .into(),
         ),
     }
@@ -738,7 +746,7 @@ pub fn diagnose() -> String {
         match (read_settings(place), lists_us(place)) {
             (Err(why), _) => say(false, why),
             (Ok(_), Some(true)) => say(true, format!("{} lists Excalibur View.", place.display())),
-            (Ok(_), _) => say(false, format!("{} does not list Excalibur View. Choose Help → Connect AI Assistant.", place.display())),
+            (Ok(_), _) => say(false, format!("{} does not list Excalibur View. Choose Help → Connect Assistant.", place.display())), // WHAT: a settings file that does not list us yet. WHY: names the Help command that adds us, as the menu shows it.
         }
     }
 
@@ -765,7 +773,7 @@ pub fn diagnose() -> String {
     }
 
     if assistant_app_running() {
-        out.push_str("\nThe assistant app is running. After Connect AI Assistant, it must be quit from the tray and opened again before it sees Excalibur View.\n");
+        out.push_str("\nThe assistant app is running. After Connect Assistant, it must be quit from the tray and opened again before it sees Excalibur View.\n"); // WHAT: reminds the person to restart the running assistant app. WHY: it reads its connectors only when it starts; the command is named as the menu shows it.
     }
     out.insert_str(
         0,
@@ -981,7 +989,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(asked["result"]["isError"], true);
-        assert!(asked["result"]["content"][0]["text"].as_str().unwrap().contains("Connect AI Assistant"));
+        assert!(asked["result"]["content"][0]["text"].as_str().unwrap().contains("Connect Assistant")); // WHAT: the answer names the Help command to run. WHY: proves the message points at the command by its current menu name.
     }
 
     #[test]

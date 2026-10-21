@@ -32,7 +32,7 @@ What changes on a tablet:
 - **Left out.** Updating itself (the store does it), buying or entering a
   license (an office's license lives on its server), running plugins on the
   device (the office server runs them), hosting the office server (a tablet
-  joins one), and connecting a desktop AI assistant to the program.
+  joins one), and connecting a desktop assistant app to the program.
 
 `HYPERVIEW_TABLET=1` makes a desktop build behave like a tablet — the list of
 files, the larger controls, the tablet's hints — which is how the tablet side

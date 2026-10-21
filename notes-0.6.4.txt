@@ -77,7 +77,7 @@ hand, the way a sealed office wants everything to arrive.
 
 ## Also in this release
 
-- The AI assistant works in the free app, not only in Office (0.6.2).
+- The assistant works in the free app, not only in Office (0.6.2).
 - The website's download links and checksums come off the release itself, so
   they are never out of date (0.6.2).
 - Licence rules finished: seats, expiry and what happens when a licence runs

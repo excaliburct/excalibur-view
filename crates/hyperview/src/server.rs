@@ -874,13 +874,14 @@ pub fn start(repaint: egui::Context) -> Link {
                             match result {
                                 Ok(places) => say(
                                     &told,
+                                    // WHAT: what the person is told once the assistant app is connected. WHY: names the Help command that checks it, as the menu shows it.
                                     Told::AssistantConnected(format!(
                                         "The assistant app can read {}'s takeoffs now, and work \
                                          alongside you in this window — it proposes, only you \
                                          draw. Quit the assistant app from the tray (right-click its \
                                          icon, Quit — closing the window is not enough) and open \
                                          it again, then ask it something like \"what's on this \
-                                         sheet?\" ({} settings file{} updated. Help → Test AI Assistant \
+                                         sheet?\" ({} settings file{} updated. Help → Test Assistant \
                                          Connection checks it any time.)",
                                         if server_name.is_empty() { "the office" } else { &server_name },
                                         places.len(),

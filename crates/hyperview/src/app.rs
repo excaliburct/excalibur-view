@@ -835,7 +835,7 @@ pub struct App {
     /// A license file opened by somebody who was not signed in yet. It goes
     /// on the moment an administrator is.
     pub waiting_license: Option<PathBuf>,
-    /// Help → Test AI Assistant Connection: the report, once there is one, and the
+    /// Help → Test Assistant Connection: the report, once there is one, and the
     /// test while it runs.
     pub assistant_report: Option<String>,
     pub assistant_testing: Option<std::sync::mpsc::Receiver<String>>,

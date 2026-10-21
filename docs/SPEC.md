@@ -812,7 +812,7 @@ is ignored and never packaged.
 ## 6e. An MCP connection — planned
 
 The server already answers, over a documented API, every question about a job
-that anybody asks by hand. The same answers through MCP would let an AI assistant or
+that anybody asks by hand. The same answers through MCP would let an assistant app or
 ChatGPT answer them in words, which is worth having for the questions that are
 tedious rather than hard:
 

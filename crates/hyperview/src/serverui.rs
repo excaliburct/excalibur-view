@@ -1592,7 +1592,7 @@ impl App {
     }
 
     /// "Check for Updates" being answered, or its answer when there is
-    /// nothing to install; also what Connect AI Assistant has to say.
+    /// nothing to install; also what Connect Assistant has to say.
     fn update_answer(&mut self, ctx: &egui::Context) {
         if !self.checking_for_update && self.update_note.is_none() {
             return;
@@ -1622,7 +1622,7 @@ impl App {
         }
     }
 
-    /// Help → Connect AI Assistant.
+    /// Help → Connect Assistant.
     ///
     /// Signed in to an office server, the assistant gets a read-only key to the
     /// office's jobs as well as the window. Without one — one person on the
@@ -1638,12 +1638,13 @@ impl App {
         }
         if !self.standing.signed_in() {
             self.update_note = Some(match crate::assistant::add_to_assistant_app() {
+                // WHAT: what the person is told once the assistant app is connected. WHY: names the Help command that checks it, as the menu shows it.
                 Ok(places) => format!(
                     "The assistant app can work alongside you in this window now: it sees what is open, reads \
                      and looks at sheets, totals the drawing's takeoff, and proposes markups and scales with a \
                      Fix button — only you draw. Quit the assistant app from the tray (right-click its icon, Quit — \
                      closing the window is not enough) and open it again, then ask it something like \"what's \
-                     on this sheet?\" ({} settings file{} updated. Help → Test AI Assistant Connection checks it any \
+                     on this sheet?\" ({} settings file{} updated. Help → Test Assistant Connection checks it any \
                      time.) An office on Excalibur View Office signs in to its server and connects again to add \
                      its jobs.",
                     places.len(),
@@ -2218,7 +2219,7 @@ fn office_section(
                         RichText::new(format!(
                             "{} · {}{}{}",
                             match key.purpose.as_str() {
-                                "assistant" => "AI assistant",
+                                "assistant" => "assistant", // WHAT: an assistant key's own word in the key list. WHY: tells it apart from a program's key when deciding which to take back.
                                 "sync" => "program, sync only", // WHAT: a sync key's own words. WHY: tells it apart from a full integration key when deciding which to take back.
                                 _ => "program",
                             },

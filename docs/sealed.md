@@ -57,7 +57,7 @@ existing policy does to them.
 |---|---|---|---|
 | Update check | Desktop and server | The release feed you configure (GitHub by default) | Look for a newer version |
 | Update download | Desktop and server | The same | Fetch it |
-| The assistant | Desktop | The assistant's provider | An AI assistant working alongside the person |
+| The assistant | Desktop | The assistant's provider | An assistant app working alongside the person |
 | Excalibur Fleet | Server | The Fleet service | Watching a server on your behalf |
 | Change notices | Server | The address an administrator gives it | Telling another program a takeoff changed, only once an administrator sets one up. Sealed sends them only to addresses inside your network |
 | Website links | Desktop | excaliburct.com | Pricing, documentation |
