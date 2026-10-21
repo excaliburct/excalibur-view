@@ -130,13 +130,20 @@ to do when somebody leaves.",
             }
         },
         "/me": {
-            "get": { "summary": "Who this token belongs to.", "responses": ok("User") }
+            "get": {
+                "summary": "Who this token belongs to.",
+                "description": "With a key, also which key it is and what it was made for, so a \
+program can refuse to run on a key with more power than it needs. `may_administer` is true \
+only for an administrator signed in with their password: no key ever administers.",
+                "responses": ok("Me")
+            }
         },
         "/me/password": {
             "post": {
                 "summary": "Change your own password.",
-                "description": "Needs the current one. Every other place you are signed in \
-is signed out.",
+                "description": "Needs the current one, and a person signed in: a key is \
+refused (403 key_not_allowed). Wrong tries count against the same limit as signing in (429 \
+too_many). Every other place you are signed in is signed out.",
                 "requestBody": body("ChangePassword"),
                 "responses": ok("Changed")
             }
@@ -159,10 +166,16 @@ is signed out.",
             "post": {
                 "summary": "Make a key for a program.",
                 "description": "`assistant` reads the takeoffs over MCP at `/mcp` and nothing \
-else. `integration` uses this API as you — for another system such as FabWire \
-— and only an administrator can make one. Send it as `Authorization: Bearer <key>`. \
-The key is in this answer and never again. Asking again with the same name \
-replaces the old key. A key cannot make a key.",
+else. `integration` uses this API as you — for another system — and only an \
+administrator can make one. `sync` is narrower still, for a program that keeps its \
+own projects in step: `GET /me`, `POST /projects` (under a reference), \
+`POST /projects/{id}/archive`, `POST /sets`, `GET /projects/{id}/stamp` and \
+`GET /projects/{id}/markuplist`, on projects filed under a reference, and nothing \
+else; only an administrator can make one. No key of any purpose can administer the \
+server, whoever made it. `expires_in_days` gives a key an end (1 to 3650); left out, \
+it never runs out. Send it as `Authorization: Bearer <key>`. \
+The key is in this answer and never again. Asking again with the same name and \
+purpose replaces the old key. A key cannot make a key.",
                 "requestBody": body("NewKey"),
                 "responses": ok("ApiKey")
             }
@@ -276,7 +289,9 @@ anybody else does.",
                 "summary": "Start a project.",
                 "description": "With a `reference` that another project already has, answers \
 with that project instead of making a second — brought back if it was archived. A program \
-that files its jobs here by its own id can push as often as it likes.",
+that files its jobs here by its own id can push as often as it likes. Filing under a \
+`reference` takes an administrator (signed in, or a key they made) or a sync key; anybody \
+else is refused (403) whether or not the reference exists.",
                 "requestBody": body("NewProject"),
                 "responses": ok("Project")
             }
@@ -526,7 +541,7 @@ another drawing.",
                 "summary": "Where this office stands with Excalibur View Office.",
                 "description": "founding, licensed, trial or unlicensed, with users, the date \
                                 updates run through and one sentence to show. Anybody signed in \
-                                may ask; an administrator is also told the license id. With no \
+                                may ask; an administrator signed in (never a key) is also told the license id. With no \
                                 license after the trial, reading and exporting carry on and \
                                 writes answer 403 license_needed.",
                 "responses": ok("Standing")
@@ -752,15 +767,25 @@ fn schemas() -> Value {
         "ApiKey": object(&[
             ("id", "string", ""),
             ("name", "string", "What it was called when it was made."),
-            ("purpose", "string", "assistant or integration."),
-            ("person", "string", "Whose it is. It can do what they can, no more."),
+            ("purpose", "string", "assistant, integration or sync."),
+            ("person", "string", "Whose it is. It can do what they can, no more, and never administer."),
             ("made", "string", ""),
             ("last_used", "string", ""),
             ("key", "string", "Only in the answer that made it."),
+            ("expires", "string", "When it stops working by itself. Absent: never."),
         ]),
         "NewKey": object(&[
-            ("purpose", "string", "assistant or integration."),
-            ("name", "string", "e.g. FabWire, or the assistant on the estimator's PC."),
+            ("purpose", "string", "assistant, integration or sync."),
+            ("name", "string", "e.g. the program's name, or the assistant on the estimator's PC."),
+            ("expires_in_days", "integer", "Optional: stop working this many days from now (1 to 3650). Left out, never."),
+        ]),
+        "Me": object(&[
+            ("id", "string", ""),
+            ("name", "string", "What goes in a markup's Author column."),
+            ("email", "string", ""),
+            ("role", "string", "viewer, estimator or admin. A sync key made by an administrator says estimator: that is all it acts as."),
+            ("may_administer", "boolean", "True only for an administrator signed in with their password. Never for a key."),
+            ("key", "object", "The key this request came with: id, name, purpose (assistant, integration or sync) and expires. Absent for a signed-in person."),
         ]),
         "FleetAccess": object(&[
             ("on", "boolean", ""),

@@ -65,6 +65,26 @@ pub struct Who {
     pub name: String,
     pub email: String,
     pub role: Role,
+    /// The key this request came with, when it came with one rather than a
+    /// signed-in session; None for a person signed in with a password.
+    pub key: Option<KeyUse>, // WHAT: which key is acting, if any. WHY: a key never carries the power its maker's session would, so every check has to know.
+}
+
+/// A key acting for the person who made it: what it is, so the routes can hold
+/// it to what it was made for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyUse {
+    pub id: String, // WHAT: the key's id. WHY: so /me can say which key this is, and the person can find it in the list to take back.
+    pub name: String, // WHAT: what the key was called when it was made. WHY: the name a person recognises it by.
+    pub purpose: String, // WHAT: assistant, integration or sync. WHY: decides which routes the key may reach at all.
+    pub expires: Option<String>, // WHAT: when it stops working, if it was given an end. WHY: shown back so the program can warn before it runs out.
+}
+
+impl Who {
+    /// Whether this request came with a key of `purpose`.
+    pub fn is_key(&self, purpose: &str) -> bool {
+        self.key.as_ref().is_some_and(|k| k.purpose == purpose) // WHAT: true only for a key made for that purpose. WHY: a signed-in person is never mistaken for a key.
+    }
 }
 
 impl Who {
@@ -107,6 +127,7 @@ pub fn whose(db: &Connection, token: &str, now: &str) -> Result<Option<Who>> {
                         name: r.get(1)?,
                         email: r.get(2)?,
                         role: role_from(&r.get::<_, String>(3)?),
+                        key: None, // WHAT: no key: this is a password sign-in. WHY: a session is the person themselves.
                     },
                     r.get::<_, String>(4)?,
                 ))
@@ -156,8 +177,20 @@ pub mod purpose {
     /// An assistant: the MCP endpoint and nothing else, and that read-only.
     pub const ASSISTANT: &str = "assistant";
     /// Another system — FabWire — using the API as the person who made it.
+    /// It never carries an administrator's power, even when an administrator
+    /// made it: running the server takes a signed-in administrator.
     pub const INTEGRATION: &str = "integration";
+    /// A program that keeps projects in step with its own records: it files
+    /// projects under its own reference, puts drawings up, moves and archives
+    /// those projects and reads their markups back — that list of routes and
+    /// nothing else (`crate::api::SYNC_ROUTES`), and only on projects filed
+    /// under a reference. Made by an administrator, never with their power.
+    pub const SYNC: &str = "sync"; // WHAT: the narrow key purpose. WHY: a program that only syncs should not hold a key that can run the server.
 }
+
+/// The longest end a key can be given, in days: ten years. Longer is "never",
+/// which is what leaving it out already means.
+pub const LONGEST_KEY_DAYS: u32 = 3650; // WHAT: the cap on a key's lifetime. WHY: a number nobody would type on purpose is refused rather than stored.
 
 /// What every key starts with, so one can never be mistaken for a session.
 pub const KEY_PREFIX: &str = "hvk_";
@@ -171,37 +204,105 @@ pub fn fresh_key() -> (String, String) {
     (key, digest)
 }
 
-/// Whose key this is, when it is one of `purposes`.
+/// Whose key this is, when it is one of `purposes` and has not run out.
+///
+/// A `sync` key acts as its maker with at most an estimator's role: it may
+/// change what it was made to change and never what an administrator could.
 pub fn whose_key(db: &Connection, key: &str, purposes: &[&str], now: &str) -> Result<Option<Who>> {
     let digest = token_hash(key);
     let found: Option<(Who, String, String)> = db
         .query_row(
-            "SELECT people.id, people.name, people.email, people.role, keys.purpose, keys.id
+            "SELECT people.id, people.name, people.email, people.role, keys.purpose, keys.id, keys.name, keys.expires
              FROM keys JOIN people ON people.id = keys.person
              WHERE keys.digest = ?1",
             params![digest],
             |r| {
+                let purpose: String = r.get(4)?; // WHAT: what the key was made for. WHY: kept on the Who so every route can see it.
+                let id: String = r.get(5)?; // WHAT: the key's own id. WHY: for last_used below and for /me.
                 Ok((
                     Who {
                         id: r.get(0)?,
                         name: r.get(1)?,
                         email: r.get(2)?,
                         role: role_from(&r.get::<_, String>(3)?),
+                        key: Some(KeyUse {
+                            id: id.clone(), // WHAT: the key's id. WHY: so the answer can say which key acted.
+                            name: r.get(6)?, // WHAT: the key's name. WHY: shown back on /me.
+                            purpose: purpose.clone(), // WHAT: the purpose. WHY: the routes hold the key to it.
+                            expires: r.get(7)?, // WHAT: its end, if it has one. WHY: checked just below and shown on /me.
+                        }), // WHAT: the request came with this key. WHY: a key never acts with its maker's full session power.
                     },
-                    r.get(4)?,
-                    r.get(5)?,
+                    purpose,
+                    id,
                 ))
             },
         )
         .optional()?;
-    let Some((who, purpose, id)) = found else {
+    let Some((mut who, purpose, id)) = found else {
         return Ok(None);
     };
     if !purposes.contains(&purpose.as_str()) {
         return Ok(None);
     }
+    let ends = who.key.as_ref().and_then(|k| k.expires.clone()); // WHAT: the key's end, if it was given one. WHY: a key past its end is nobody.
+    if let Some(ends) = ends {
+        // WHAT: an end that cannot be read, or has come, refuses the key. WHY: the safe way round: an unreadable date never means "forever".
+        match (parse_time(&ends), parse_time(now)) {
+            (Some(ends_at), Some(now_at)) if now_at < ends_at => {} // WHAT: still inside its time. WHY: the key works until the instant it ends.
+            _ => return Ok(None), // WHAT: run out, or a date nobody can read. WHY: refused exactly like a key that does not exist.
+        }
+    }
+    if purpose == purpose::SYNC && who.role != Role::Admin {
+        // WHAT: a sync key whose maker is no longer an administrator is nobody, read fresh from the people table on every use. WHY: a sync key reaches every program's project because only an administrator may make one; demoted, its maker's key must not keep that reach.
+        return Ok(None);
+    }
+    if purpose == purpose::SYNC && who.role == Role::Admin {
+        who.role = Role::Estimator; // WHAT: a sync key made by an administrator acts as an estimator. WHY: it may write drawings, never run the server or see every job.
+    }
     db.execute("UPDATE keys SET last_used = ?1 WHERE id = ?2", params![now, id])?;
     Ok(Some(who))
+}
+
+/// A key as `purpose_of` finds it: what it was made for, whose it is, and its id.
+pub struct KeyFound {
+    pub purpose: String, // WHAT: what the key was made for. WHY: decides whether the sync list applies.
+    pub maker: String, // WHAT: the email of whoever made it. WHY: goes on the audit line.
+    pub id: String, // WHAT: the key's own id, never the key. WHY: refusals are written to the log at most once a minute per key.
+}
+
+/// What a key was made for, whose it is and its id, without using it:
+/// nothing is written and nobody is signed in by asking. None when there is
+/// no such key, and also when it has run out or its end cannot be read, so
+/// an expired key is answered exactly like one that does not exist.
+pub fn purpose_of(db: &Connection, key: &str, now: &str) -> Result<Option<KeyFound>> {
+    let found: Option<(KeyFound, Option<String>, Role)> = db
+        .query_row(
+            "SELECT keys.purpose, people.email, keys.id, keys.expires, people.role FROM keys JOIN people ON people.id = keys.person WHERE keys.digest = ?1", // WHAT: looked up by digest, as every key is. WHY: the key itself is never stored.
+            params![token_hash(key)],
+            |r| Ok((KeyFound { purpose: r.get(0)?, maker: r.get(1)?, id: r.get(2)? }, r.get(3)?, role_from(&r.get::<_, String>(4)?))), // WHAT: the purpose, the maker's email, the id, its end and the maker's role now. WHY: the end and the role are checked just below.
+        )
+        .optional()?; // WHAT: None for a key that is not there. WHY: the route then refuses it as nobody, as before.
+    let Some((found, ends, role)) = found else {
+        return Ok(None); // WHAT: no such key. WHY: nobody.
+    };
+    if found.purpose == purpose::SYNC && role != Role::Admin {
+        return Ok(None); // WHAT: a sync key whose maker is no longer an administrator. WHY: `whose_key` refuses it, so it must look like a missing key here too.
+    }
+    if let Some(ends) = ends {
+        // WHAT: the same end check as `whose_key`. WHY: a key past its end, or with an end nobody can read, must look exactly like a missing one.
+        match (parse_time(&ends), parse_time(now)) {
+            (Some(ends_at), Some(now_at)) if now_at < ends_at => {} // WHAT: still inside its time. WHY: treated as the key it is.
+            _ => return Ok(None), // WHAT: run out, or unreadable. WHY: answered as nobody.
+        }
+    }
+    Ok(Some(found)) // WHAT: a live key. WHY: the gate decides on its purpose.
+}
+
+/// The moment `days` from `now`, written the way every other time here is.
+pub fn days_from(now: &str, days: u32) -> Option<String> {
+    let start = parse_time(now)?; // WHAT: now, read back as a time. WHY: the end is counted from it.
+    let end = start + time::Duration::days(i64::from(days)); // WHAT: that many whole days later. WHY: "30 days" means the same instant thirty days on.
+    end.format(&time::format_description::well_known::Rfc3339).ok() // WHAT: written as RFC 3339. WHY: the same shape as made, last_used and every session's expiry.
 }
 
 #[cfg(test)]

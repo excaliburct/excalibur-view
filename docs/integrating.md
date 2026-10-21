@@ -189,15 +189,34 @@ server will not tell you.
 
 ### Getting a key
 
-Studio → Office → Keys → make one. Two purposes:
+Studio → Office → Keys → make one, or `POST /me/keys` signed in. Three
+purposes:
 
+- **`sync`** — for a program that keeps its own projects in step with this
+  server: it files each project under its own reference, puts drawings up,
+  archives and brings back those projects, and reads their markups back. That
+  is `GET /me`, `POST /projects` (with a `reference`), `POST
+  /projects/{id}/archive`, `POST /sets`, `GET /projects/{id}/stamp` and `GET
+  /projects/{id}/markuplist`, on projects filed under a reference, and nothing
+  else. Every other route refuses it. An administrator makes it, and it acts as
+  an estimator. **If your program only does those things, this is the key to
+  give it.**
 - **`integration`** — the API as the person who made the key. What another
-  system uses.
-- **`assistant`** — the MCP endpoint only, read only.
+  system uses when it needs more than `sync` covers.
+- **`assistant`** — the MCP endpoint only, read only. It sees the jobs its
+  person may see and no others.
 
-Keys start `hvk_`, are stored on the server as digests, shown once, never
-expire on their own, and are revoked one at a time. A key can never be mistaken
-for a session because of that prefix.
+**No key runs the server**, whoever made it. People, roles, invitations, keys,
+remote access, updates, plugins, tool chests, the license and the audit log
+take an administrator signed in with their password; a key asking for any of
+them is refused with `key_not_allowed`. `GET /me` with a key says which key it
+is (`key.purpose`) and `may_administer` (always false for a key), so a program
+can refuse to run on a key with more power than it needs.
+
+Keys start `hvk_`, are stored on the server as digests, shown once, and are
+revoked one at a time. A key can be given an end with `expires_in_days` (1 to
+3650); left out, it never runs out on its own. A key can never be mistaken for
+a session because of that prefix.
 
 ```
 Authorization: Bearer hvk_…

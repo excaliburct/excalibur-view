@@ -69,6 +69,7 @@ pub mod action {
     pub const MADE_KEY: &str = "made a key for another program";
     pub const REVOKED_KEY: &str = "took back a key";
     pub const CHANGED_SETTING: &str = "changed a server setting";
+    pub const KEY_REFUSED: &str = "a key asked for something it is not for"; // WHAT: a key refused by its purpose. WHY: a sync key straying off its list is worth a line someone can find.
 }
 
 impl Entry {
