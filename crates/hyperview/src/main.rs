@@ -111,7 +111,7 @@ fn main() -> eframe::Result {
     if arguments.iter().any(|a| a == "--mcp") {
         std::process::exit(hyperview::assistant::serve());
     }
-    // The same check as Help → Test AI Assistant Connection, for a script or a
+    // The same check as Help → Test Assistant Connection, for a script or a
     // support call: written beside the program, printed, and shown.
     if arguments.iter().any(|a| a == "--mcp-test") {
         let report = hyperview::assistant::diagnose();
@@ -123,7 +123,7 @@ fn main() -> eframe::Result {
                 shown.push_str(&format!("\nSaved to {}", path.display()));
             }
             rfd::MessageDialog::new()
-                .set_title("Excalibur View — AI assistant")
+                .set_title("Excalibur View — assistant") // WHAT: the title of the connection test's message box. WHY: says what the report is about in plain words.
                 .set_description(shown)
                 .set_buttons(rfd::MessageButtons::Ok)
                 .show();

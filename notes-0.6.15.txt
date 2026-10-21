@@ -37,8 +37,8 @@ are kept as two drawings.
 
 HELP MENU
 
-The two commands for a desktop AI assistant are now Connect AI Assistant
-and Test AI Assistant Connection. They work the same as before, and an
+The two commands for a desktop assistant app are now Connect Assistant
+and Test Assistant Connection. They work the same as before, and an
 assistant that was already connected stays connected. The connection test
 keeps its report in assistant-check.txt beside the program, and its log in
 assistant-bridge.log.

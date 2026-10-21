@@ -449,12 +449,13 @@ mod tests {
 
     #[test]
     fn notes_written_as_markdown_keep_their_sections_and_lists() {
+        // WHAT: a sample of release notes written as Markdown. WHY: the same words as notes-0.6.4.txt, so the test reads what a real release says.
         let notes = "The Mac version — and the first public release since 0.6.1, so this carries\r\n\
                      0.6.2 and 0.6.3 with it.\r\n\
                      \r\n\
                      ## Also in this release\r\n\
                      \r\n\
-                     - The AI assistant works in the free app (0.6.2).\r\n\
+                     - The assistant works in the free app (0.6.2).\r\n\
                      - Clicking a button no longer switched the keyboard off. Any button that had\r\n  \
                        been clicked kept the focus.\r\n\
                      1. First\r\n";
@@ -466,7 +467,7 @@ mod tests {
                         .into()
                 ),
                 Block::Heading("Also in this release".into()),
-                Block::Point { mark: "•".into(), text: "The AI assistant works in the free app (0.6.2).".into() },
+                Block::Point { mark: "•".into(), text: "The assistant works in the free app (0.6.2).".into() }, // WHAT: the list point the sample's first line becomes. WHY: proves a Markdown list line is read as a point.
                 Block::Point {
                     mark: "•".into(),
                     text: "Clicking a button no longer switched the keyboard off. Any button that had been clicked kept the focus."

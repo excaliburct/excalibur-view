@@ -524,7 +524,7 @@ impl App {
         let title = output.title.clone();
         self.plugin_shown = Some(crate::pluginui::Shown {
             plugin: ASSISTANT.into(),
-            plugin_name: "AI assistant".into(),
+            plugin_name: "Assistant".into(), // WHAT: the name shown over the assistant's proposed markups. WHY: says who proposed them in plain words.
             command: plugin_api::Command {
                 id: "proposals".into(),
                 name: title.clone(),
@@ -793,7 +793,7 @@ impl App {
 }
 
 impl App {
-    /// Help → Test AI Assistant Connection. Runs in the background: part of it is
+    /// Help → Test Assistant Connection. Runs in the background: part of it is
     /// starting the connector and asking the office server, which takes a
     /// moment on a slow network.
     pub fn test_assistant(&mut self) {
@@ -824,7 +824,7 @@ impl App {
         let Some(report) = self.assistant_report.clone() else { return };
         let mut open = true;
         let mut again = false;
-        egui::Window::new("AI assistant on this computer")
+        egui::Window::new("The assistant on this computer") // WHAT: the title of the connection test's report window. WHY: says what the report is about in plain words.
             .open(&mut open)
             .default_width(560.0)
             .max_width(720.0)
