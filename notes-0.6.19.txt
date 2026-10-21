@@ -1,0 +1,98 @@
+Plugins are handed their sheets more carefully. A number too big for the
+short form plugins read now comes through as the biggest number that form
+holds instead of as infinity, and an input too big to count in that form
+goes over whole, as plain text, instead of being cut down. A plugin file
+that holds more than it says now says so plainly, by how many bytes. None
+of this changes how a plugin behaves on a normal drawing. This carries
+0.6.18 with it.
+
+The two assistant commands in the Help menu have plainer names: Connect
+Assistant and Test Assistant Connection. They work the same as before, and
+an assistant that was already connected stays connected. This carries
+0.6.17 with it.
+
+The part of Excalibur View that makes secure connections is updated to
+fix security problems found in it. This carries 0.6.16 with it, so
+Excalibur View now runs on Linux too, the same program as on Windows and
+the Mac, and keeps itself up to date there the same way.
+
+SECURE CONNECTIONS
+
+Excalibur View talks to the office's server, to remote access and to the
+update feed over encrypted connections, using a library called rustls.
+Six security problems were published for the versions it was built with,
+and this version takes the fixed ones:
+
+- rustls 0.23.45 to 0.23.46. Fixes four problems: secrets of a
+  connection could show up in a debug printout; in a rare case, data
+  meant for one server could be sent to another; a server could make it
+  use up to 1 GiB of memory before proving who it is; and a forged reply
+  could make later connections use weaker encryption.
+- rustls-webpki 0.103.15 to 0.103.16, which checks a server's
+  certificate. It could accept a certificate from an authority that has
+  since been distrusted.
+- webpki-roots 1.0.9 to 1.0.10, the list of authorities it trusts. The
+  list still trusted some emSign authorities that have been distrusted.
+
+Nothing needs doing for this part: the next update brings it.
+
+LINUX
+
+ExcaliburView-linux is the whole program in one file, for 64-bit Linux
+desktops (Intel and AMD) at least as new as Ubuntu 22.04, on X11 or
+Wayland. Mark it as a program (right-click, Properties, Allow executing)
+and run it once. It installs itself for that person in their own
+~/.local/share, with no administrator and nothing in /usr: it goes on the
+applications menu with its icon, opens hyperview:// links, and is offered
+in Open With for PDFs, Excalibur View Office licenses and tool chests.
+Running an older download later opens the newer copy instead of going
+backwards.
+
+It finds the office's server by itself, wherever the server runs, and
+takes each new version the way a Windows seat does: fetched in the
+background, checked against the signing key built into it, and in use
+the next time it opens. Printing goes to the computer's own printers.
+Right-click it on the applications menu and Uninstall Excalibur View
+takes it, its menu entry and its icon away again; drawings and markups
+are not touched.
+
+KEYS FOR PROGRAMS
+
+No key can run the server any more, whoever made it. Adding people,
+changing roles, invitations, remote access, updates, plugins, tool chests,
+the license and the audit log all take an administrator signed in with
+their password. A key that asks is refused, and says why.
+
+There is a new, narrower kind of key, a sync key, for a program that only
+keeps its own projects in step with the server: it files projects under its
+own reference, puts drawings up, archives them and reads the markups back,
+and nothing else. It never sees a project somebody made by hand. Make one
+for such a program and take its old key back in Studio, Office, Keys.
+
+A key can now be given an end date when it is made. Keys made without one
+never run out, as before. A key past its end is answered exactly as a key
+that does not exist.
+
+A sync key works only while the person who made it is an administrator.
+Make them an estimator or a viewer and their sync keys stop working; make
+them an administrator again and they work again.
+
+Changing a password takes the person signed in; no key can do it. Wrong
+tries at the current password count against the same limit as signing in.
+
+A key is told about the license only what anybody signed in is told.
+
+Only an administrator, a key an administrator made, or a sync key can file
+a project under another program's reference. Anybody else gets the same
+refusal whether or not that reference is already in use.
+
+When a sync key asks for something it is not for, the audit log gets one
+line about it a minute at most, however often it asks.
+
+AN ASSISTANT SEES WHAT ITS PERSON MAY SEE
+
+An assistant connected to the server now sees only the jobs its person may
+see. Before, an assistant key read every job on the server, even ones with
+people named on them that its person was not one of. The same check now
+guards putting a drawing into a job, and finding a job by another
+program's reference.
