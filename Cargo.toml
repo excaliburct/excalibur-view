@@ -8,11 +8,11 @@ members = ["crates/annot", "crates/chest", "crates/pdf", "crates/hub", "crates/h
 exclude = ["plugins", "private"]
 
 [workspace.package]
-# WHAT: the version every crate in the program carries. WHY: 0.6.19 is a new
-# build (the plugin interface's code is tidied and its number conversions are
-# checked), and two builds never share a version, because an install refuses
-# to put a version over itself.
-version = "0.6.19"
+# WHAT: the version every crate in the program carries. WHY: 0.6.20 is a new
+# build (Overlay Pages and Compare Documents line sheets up properly), and two
+# builds never share a version, because an install refuses to put a version
+# over itself.
+version = "0.6.20"
 edition = "2021"
 rust-version = "1.88"
 

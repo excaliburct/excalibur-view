@@ -370,8 +370,95 @@ pub fn compare(older: &Ink, newer: &Ink) -> Comparison {
     }
 }
 
+/// Compares two issues already laid on the same pixels by an overlay fit.
+///
+/// The older ink has been redrawn on the newer sheet's pixels, so nothing
+/// more is lined up here. A line counts as still there when the other issue
+/// has ink within `tolerance` pixels, so a fit good to a fraction of a pixel
+/// does not fringe every line with "added" and "removed".
+#[must_use]
+pub fn compare_fitted(older: &Ink, newer: &Ink, agreement: f32, tolerance: usize) -> Comparison { // WHAT: compares two inks already laid on the same pixels. WHY: Compare Documents lines sheets up the overlay's way first.
+    let alignment = Alignment { dx: 0, dy: 0, agreement }; // WHAT: already lined up, and how well. WHY: the message reads it.
+    if agreement < ENOUGH_AGREEMENT { // WHAT: too little agrees. WHY: nothing is marked rather than everything.
+        return Comparison { alignment, changes: Vec::new(), could_not_align: true }; // WHAT: nothing marked. WHY: marking the whole sheet would tell nobody anything.
+    }
+    let (w, h) = (newer.width, newer.height); // WHAT: the newer sheet's pixels. WHY: both are on them now.
+    let near_old = crate::overlay::grow(&older.on, w, h, tolerance); // WHAT: near the older ink. WHY: within tolerance is not a change.
+    let near_new = crate::overlay::grow(&newer.on, w, h, tolerance); // WHAT: near the newer ink. WHY: the same.
+    let added: Vec<bool> = (0..w * h).map(|i| newer.on[i] && !near_old[i]).collect(); // WHAT: newer ink with no older ink near. WHY: what arrived.
+    let removed: Vec<bool> = (0..w * h).map(|i| older.on[i] && !near_new[i]).collect(); // WHAT: older ink with no newer ink near. WHY: what went.
+    let reach = ((w as f64 * TOGETHER) as usize).clamp(3, 48); // WHAT: how close is one change. WHY: the same rule as an unfitted comparison.
+    let mut changes = clump(&added, w, h, reach, Kind::Added); // WHAT: what arrived, in rectangles. WHY: a person wants regions, not dots.
+    changes.extend(clump(&removed, w, h, reach, Kind::Removed)); // WHAT: what went. WHY: the same.
+    Comparison { alignment, changes: merge_overlapping(changes), could_not_align: false } // WHAT: what was found. WHY: a redrawn detail is one change.
+}
+
 /// Gathers scattered pixels into the rectangles a person would draw round them.
+///
+/// The sheet is cut into squares `reach` across, and squares that hold a
+/// changed pixel and touch each other are one change. Two changed pixels
+/// within `reach` of each other are always in the same or touching squares,
+/// so nothing that belongs together is split (two changes up to twice the
+/// reach apart can be joined, which only makes one cloud a little bigger);
+/// and the work grows with the
+/// size of the sheet, not with the size of the sheet times the size of the
+/// reach, which on a sheet that changed all over took minutes.
 fn clump(map: &[bool], w: usize, h: usize, reach: usize, kind: Kind) -> Vec<Change> {
+    let reach = reach.max(1); // WHAT: at least one pixel. WHY: a square nought across holds nothing.
+    let (cw, ch) = (w.div_ceil(reach), h.div_ceil(reach)); // WHAT: how many squares across and down. WHY: the grid.
+    let mut cells = vec![[usize::MAX, usize::MAX, 0, 0, 0]; cw * ch]; // WHAT: per square, its changed pixels' box and count. WHY: one pass over the sheet fills them.
+    for y in 0..h { // WHAT: every row. WHY: one pass over the sheet.
+        for x in 0..w { // WHAT: every pixel in it. WHY: the same.
+            if map[y * w + x] { // WHAT: a changed pixel. WHY: tallied in its square.
+                let c = &mut cells[(y / reach) * cw + x / reach]; // WHAT: the square it is in. WHY: tallied there.
+                c[0] = c[0].min(x); // WHAT: the box's left. WHY: the change's rectangle.
+                c[1] = c[1].min(y); // WHAT: top. WHY: the same.
+                c[2] = c[2].max(x); // WHAT: right. WHY: the same.
+                c[3] = c[3].max(y); // WHAT: bottom. WHY: the same.
+                c[4] += 1; // WHAT: one more pixel. WHY: tiny changes are noise.
+            }
+        }
+    }
+    let mut seen = vec![false; cw * ch]; // WHAT: squares already gathered. WHY: each joins one change.
+    let mut out: Vec<Change> = Vec::new(); // WHAT: the changes. WHY: handed back.
+    for start in 0..cw * ch { // WHAT: every square. WHY: each starts a change if it holds one and is not taken.
+        if cells[start][4] == 0 || seen[start] { // WHAT: an empty or already gathered square. WHY: nothing to start.
+            continue; // WHAT: empty or done. WHY: nothing to start from.
+        }
+        // Iterative, because a change can be a whole revision cloud's worth of
+        // squares and a recursive walk would run out of stack.
+        let mut stack = vec![start]; // WHAT: squares still to visit. WHY: the flood.
+        seen[start] = true; // WHAT: visited. WHY: not again.
+        let (mut x0, mut y0, mut x1, mut y1, mut pixels) = (usize::MAX, usize::MAX, 0usize, 0usize, 0usize); // WHAT: the change's box and size. WHY: grown as squares join.
+        while let Some(i) = stack.pop() { // WHAT: the next square to take in. WHY: the flood, without recursion.
+            let c = cells[i]; // WHAT: this square. WHY: its pixels join the change.
+            x0 = x0.min(c[0]); // WHAT: grows the box. WHY: the change's rectangle.
+            y0 = y0.min(c[1]); // WHAT: the same. WHY: the same.
+            x1 = x1.max(c[2]); // WHAT: the same. WHY: the same.
+            y1 = y1.max(c[3]); // WHAT: the same. WHY: the same.
+            pixels += c[4]; // WHAT: its pixels. WHY: the change's size.
+            let (cx, cy) = (i % cw, i / cw); // WHAT: where the square is. WHY: its neighbours.
+            for ny in cy.saturating_sub(1)..=(cy + 1).min(ch - 1) { // WHAT: the rows of its neighbours. WHY: touching squares join.
+                for nx in cx.saturating_sub(1)..=(cx + 1).min(cw - 1) { // WHAT: the columns of its neighbours. WHY: the same.
+                    let j = ny * cw + nx; // WHAT: a neighbour. WHY: touching squares are one change.
+                    if cells[j][4] > 0 && !seen[j] { // WHAT: a neighbour with change in it, not yet taken. WHY: part of this change.
+                        seen[j] = true; // WHAT: visited. WHY: not again.
+                        stack.push(j); // WHAT: to visit. WHY: the flood.
+                    }
+                }
+            }
+        }
+        if pixels >= SMALLEST { // WHAT: big enough to be real. WHY: specks are noise.
+            out.push(Change { area: [x0, y0, x1, y1], pixels, kind }); // WHAT: one change. WHY: big enough to be real.
+        }
+    }
+    out // WHAT: the changes found. WHY: handed back.
+}
+
+/// The old way of gathering changed pixels, kept only so the tests can show
+/// the new one finds the same changes.
+#[cfg(test)]
+fn clump_pixel_by_pixel(map: &[bool], w: usize, h: usize, reach: usize, kind: Kind) -> Vec<Change> { // WHAT: the earlier pixel-by-pixel gathering, unchanged inside. WHY: the reference the faster one is checked against.
     let mut seen = vec![false; w * h];
     let mut out: Vec<Change> = Vec::new();
 
@@ -598,6 +685,49 @@ mod tests {
         let found = compare(&a, &b);
         assert!(!found.could_not_align);
         assert!(found.changes.is_empty());
+    }
+
+    #[test]
+    fn gathering_by_squares_finds_what_gathering_by_pixels_did() { // WHAT: the test. WHY: the faster gathering must find what the old one did.
+        let mut map = vec![false; 300 * 200]; // WHAT: a changed-pixel map. WHY: gathered both ways.
+        for (x0, y0, x1, y1) in [(10, 10, 30, 20), (36, 12, 50, 30), (200, 150, 230, 190), (120, 40, 121, 41)] { // WHAT: four blocks of change. WHY: close ones, a far one and a speck.
+            for y in y0..=y1 { // WHAT: each row of a block. WHY: filled in.
+                for x in x0..=x1 { // WHAT: each pixel of it. WHY: the same.
+                    map[y * 300 + x] = true; // WHAT: a block of change. WHY: some close, some far, one tiny.
+                }
+            }
+        }
+        let by_squares = clump(&map, 300, 200, 8, Kind::Added); // WHAT: the new way. WHY: compared.
+        let by_pixels = clump_pixel_by_pixel(&map, 300, 200, 8, Kind::Added); // WHAT: the old way. WHY: the reference.
+        let mut a: Vec<[usize; 4]> = by_squares.iter().map(|c| c.area).collect(); // WHAT: the new way's rectangles. WHY: sorted to compare.
+        let mut b: Vec<[usize; 4]> = by_pixels.iter().map(|c| c.area).collect(); // WHAT: the old way's. WHY: the same.
+        a.sort_unstable(); // WHAT: in order. WHY: compared as sets.
+        b.sort_unstable(); // WHAT: the same. WHY: the same.
+        assert_eq!(a, b, "the same changes, the same rectangles"); // WHAT: identical. WHY: only the speed was to change.
+    }
+
+    #[test]
+    fn a_sheet_changed_all_over_is_gathered_quickly() { // WHAT: the test. WHY: a sheet changed all over took minutes before.
+        let (w, h) = (1700, 1200); // WHAT: the size a sheet is compared at. WHY: the real case.
+        let map: Vec<bool> = (0..w * h).map(|i| (i / w + i % w) % 3 == 0).collect(); // WHAT: a third of every pixel changed. WHY: a scan against a vector sheet, at its worst.
+        let started = std::time::Instant::now(); // WHAT: the clock. WHY: how long it takes.
+        let found = clump(&map, w, h, 20, Kind::Added); // WHAT: gathers it. WHY: the test.
+        assert_eq!(found.len(), 1, "one change covering the sheet"); // WHAT: one region. WHY: it is all touching.
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed()); // WHAT: seconds, not minutes, even unoptimised. WHY: the pixel-by-pixel way took minutes here.
+    }
+
+    #[test]
+    fn a_fitted_comparison_ignores_a_fraction_of_a_pixel() { // WHAT: the test. WHY: a fit good to a fraction of a pixel must not fringe every line.
+        let mut older = blank(200, 200); // WHAT: the older issue, already laid on the newer. WHY: what an overlay fit hands over.
+        box_in(&mut older, 20, 20, 21, 120); // WHAT: a line two pixels wide. WHY: line-work.
+        let mut newer = blank(200, 200); // WHAT: the newer issue. WHY: compared.
+        box_in(&mut newer, 21, 20, 22, 120); // WHAT: the same line, a pixel over. WHY: the fit's last fraction.
+        box_in(&mut newer, 120, 120, 150, 150); // WHAT: something really new. WHY: must still be found.
+        let found = compare_fitted(&older, &newer, 0.95, 1); // WHAT: compared with a pixel of tolerance. WHY: the test.
+        assert_eq!(found.changes.len(), 1, "{:?}", found.changes); // WHAT: only the new box. WHY: the line did not move.
+        assert_eq!(found.changes[0].kind, Kind::Added); // WHAT: added. WHY: it arrived.
+        let refused = compare_fitted(&older, &newer, 0.4, 1); // WHAT: badly lined up. WHY: the other case.
+        assert!(refused.could_not_align && refused.changes.is_empty()); // WHAT: nothing marked. WHY: as an unfitted comparison.
     }
 
     #[test]

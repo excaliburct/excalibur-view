@@ -80,6 +80,33 @@ copies, and a preview of the sheet on the paper. The sheets go straight to the
 printer, drawn by the PDF engine as vectors with their markups. No other
 program is opened.
 
+## Overlay Pages and Compare Documents
+
+Under the Document menu. **Overlay Pages** prints two issues of a sheet over
+each other: red is the older, blue is the newer, dark grey is both, so what
+moved is the colour and everything else reads as an ordinary drawing.
+**Compare Documents** looks at the same pair and lists what changed, and can
+cloud each change on the newer sheet as real markups.
+
+Both line the two sheets up first. **By the drawing** (the default) finds a
+re-plot's shift, a sheet stored or scanned a quarter turned, a crooked scan,
+a half-size print, a bigger sheet or a tighter crop, from the line-work
+itself. **By two points** is for the sheet it cannot: click the same two
+places on each sheet, two grid crossings far apart, and it lines them up
+through those. **As they are** lays them where the two files put them. When
+nothing lines them up it says so and shows them uncorrected, rather than a
+page of colour that looks like a revision.
+
+Only the drawing is compared. Markups on either sheet (somebody's takeoff, or
+the clouds from last time) are left out, and a scan's grey paper is read as
+paper. **Save as PDF…** writes the overlay at the newer sheet's own size, with
+a line on the sheet saying which colour is which file, and opens it to zoom,
+print or send. A whole set (Document or Batch → Overlay Pages) matches sheets
+by sheet number, so a sheet added in the middle does not knock the rest out of
+step; page 5 of the overlay is always sheet 5 of the newer set, and a sheet
+with nothing to lay it over is shown all in blue. Nothing is measured.
+`crates/hyperview/tests/overlay.rs` runs all of this on drawn revision pairs.
+
 ## Snapping
 
 With a measuring or drawing tool in hand, the point being put down is pulled

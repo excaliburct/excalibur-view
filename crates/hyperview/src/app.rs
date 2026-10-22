@@ -1441,6 +1441,7 @@ impl App {
                     self.comparison_failed(job, why.clone());
                     if let Some(overlaying) = self.overlaying.as_mut() {
                         overlaying.running = false;
+                        overlaying.looking = false; // WHAT: no longer waiting for the sheets either. WHY: the same failure answers both.
                         overlaying.error = Some(why);
                     }
                 }
@@ -1449,6 +1450,7 @@ impl App {
                 FromWorker::Overlaid { job, image, said } => {
                     self.overlay_done(job, *image, said, ctx)
                 }
+                FromWorker::OverlayLooks { job, older, older_size, newer, newer_size } => self.overlay_looks_done(job, (*older, older_size), (*newer, newer_size), ctx), // WHAT: the two sheets for picking points. WHY: shown in the overlay window.
                 FromWorker::ExtractFailed { job, why } => self.printing_failed(job, why),
                 FromWorker::PrintProgress { job, done, of } => self.print_progress(job, done, of),
                 FromWorker::Read { job, page, reading } => self.plugin_read(job, page, *reading),

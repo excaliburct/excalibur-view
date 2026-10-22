@@ -216,7 +216,15 @@ pub enum ToWorker {
         newer: PathBuf,
         newer_page: u32,
         darkness: f32,
-        align_them: bool,
+        lining: crate::overlay::Lining, // WHAT: found, by two points, or as they are. WHY: the overlay window offers all three.
+    },
+    /// Draw two sheets small, side by side, for picking points on.
+    OverlayLooks { // WHAT: ask for both sheets drawn small. WHY: to pick points on.
+        job: u64,         // WHAT: which request. WHY: an answer to an old one is dropped.
+        older: PathBuf,   // WHAT: the older file. WHY: drawn.
+        older_page: u32,  // WHAT: its sheet. WHY: the same.
+        newer: PathBuf,   // WHAT: the newer file. WHY: drawn.
+        newer_page: u32,  // WHAT: its sheet. WHY: the same.
     },
     /// Do one job to a list of drawings, reporting each.
     Batch {
@@ -374,6 +382,14 @@ pub enum FromWorker {
         job: u64,
         image: Box<egui::ColorImage>,
         said: String,
+    },
+    /// The two sheets drawn small for picking points on, and their sizes in points.
+    OverlayLooks { // WHAT: both sheets drawn small. WHY: for the overlay window.
+        job: u64,                                 // WHAT: which request. WHY: matched to the window's.
+        older: Box<egui::ColorImage>,             // WHAT: the older sheet. WHY: clicked on.
+        older_size: [f64; 2],                     // WHAT: its size in points. WHY: a click becomes a point on the sheet.
+        newer: Box<egui::ColorImage>,             // WHAT: the newer sheet. WHY: clicked on.
+        newer_size: [f64; 2],                     // WHAT: its size. WHY: the same.
     },
     /// A batch got through one more file. They arrive one at a time so the
     /// list fills while the rest of forty files is still running.
@@ -667,6 +683,23 @@ pub fn compare_two(
     with_engine(library, move |engine| {
         engine.compare_sheets(&older, older_page, &newer, newer_page, darkness)
     })
+}
+
+/// Lays one issue of a sheet over another, off the window's thread.
+///
+/// The same code Overlay Pages runs, reachable for tests: the full-size
+/// picture, how well they agreed, and what the window would say.
+pub fn overlay_two( // WHAT: one sheet's overlay, for tests. WHY: the window's own path, checked.
+    library: Option<PathBuf>, // WHAT: where pdfium is. WHY: the engine loads it.
+    older: &std::path::Path, // WHAT: the older file. WHY: laid over.
+    older_page: u32, // WHAT: its sheet. WHY: the same.
+    newer: &std::path::Path, // WHAT: the newer file. WHY: laid on.
+    newer_page: u32, // WHAT: its sheet. WHY: the same.
+    darkness: f32, // WHAT: how dark is line-work. WHY: the window's setting.
+    lining: &crate::overlay::Lining, // WHAT: how to line them up. WHY: the window's choice.
+) -> Result<Overlaid, String> { // WHAT: the overlay, or why not. WHY: checked by the tests.
+    let (older, newer, lining) = (older.to_path_buf(), newer.to_path_buf(), lining.clone()); // WHAT: owned copies. WHY: moved to the engine's thread.
+    with_engine(library, move |engine| engine.overlay_sheets(&older, older_page, &newer, newer_page, darkness, &lining)) // WHAT: runs it. WHY: the same engine the window uses.
 }
 
 /// How many sheets are in a file. Asked of pdfium, which is the only thing that
@@ -1538,46 +1571,24 @@ impl Queue {
                 let _ = tx.send(told);
                 ctx.request_repaint();
             }
-            ToWorker::Overlay {
-                job,
-                older,
-                older_page,
-                newer,
-                newer_page,
-                darkness,
-                align_them,
-            } => {
-                let told = match engine.overlay_sheets(
-                    &older,
-                    older_page,
-                    &newer,
-                    newer_page,
-                    darkness,
-                    align_them,
-                ) {
+            ToWorker::Overlay { job, older, older_page, newer, newer_page, darkness, lining } => { // WHAT: lay two sheets over each other. WHY: the overlay window asked.
+                let told = match engine.overlay_sheets(&older, older_page, &newer, newer_page, darkness, &lining) { // WHAT: lays them over. WHY: the window asked.
                     Ok(laid) => {
-                        let said = if laid.lined_up {
-                            "Red is the older issue, blue is the newer one, dark grey is \
-                             both. Nothing has been measured."
-                                .to_string()
-                        } else {
-                            format!(
-                                "These two sheets could not be lined up — only {:.0}% of \
-                                 the line-work matches. They are shown as they are, \
-                                 uncorrected.",
-                                laid.agreement * 100.0
-                            )
-                        };
-                        FromWorker::Overlaid {
-                            job,
-                            image: Box::new(laid.image),
-                            said,
-                        }
+                        let (pixels, w, h) = crate::overlay::smaller(&pixels_of(&laid.image), laid.image.size[0], laid.image.size[1], PREVIEW_PIXELS); // WHAT: a smaller copy for the window. WHY: a full-size overlay is bigger than a graphics card will take as one picture.
+                        FromWorker::Overlaid { job, image: Box::new(colour_image(&pixels, w, h)), said: laid.said } // WHAT: the picture and what to say. WHY: shown in the window.
                     }
-                    Err(why) => FromWorker::CompareFailed { job, why },
+                    Err(why) => FromWorker::CompareFailed { job, why }, // WHAT: why not. WHY: shown in the window.
                 };
-                let _ = tx.send(told);
-                ctx.request_repaint();
+                let _ = tx.send(told); // WHAT: sends it. WHY: the window is waiting.
+                ctx.request_repaint(); // WHAT: wakes the window. WHY: it only redraws when asked.
+            }
+            ToWorker::OverlayLooks { job, older, older_page, newer, newer_page } => { // WHAT: draw both sheets small. WHY: to pick points on.
+                let told = match (engine.picture(&older, older_page, LOOK_PIXELS, LOOK_PIXELS), engine.picture(&newer, newer_page, LOOK_PIXELS, LOOK_PIXELS), engine.sheet_size(&older, older_page), engine.sheet_size(&newer, newer_page)) { // WHAT: draws both sheets and reads their sizes. WHY: points are picked on them.
+                    (Ok(a), Ok(b), Ok(sa), Ok(sb)) => FromWorker::OverlayLooks { job, older: Box::new(a), older_size: sa, newer: Box::new(b), newer_size: sb }, // WHAT: both sheets and their sizes. WHY: points are picked on them.
+                    (Err(why), ..) | (_, Err(why), ..) | (_, _, Err(why), _) | (.., Err(why)) => FromWorker::CompareFailed { job, why }, // WHAT: why one would not draw. WHY: shown.
+                };
+                let _ = tx.send(told); // WHAT: sends it. WHY: the window is waiting.
+                ctx.request_repaint(); // WHAT: wakes the window. WHY: the same.
             }
             ToWorker::Batch { job, work, files } => {
                 // Combining is the one job that takes the whole list at once;
@@ -2148,6 +2159,116 @@ pub struct Overlaid {
     /// False when the two could not be lined up, so what is shown is the two
     /// sheets as they are rather than as they would be if they matched.
     pub lined_up: bool,
+    pub size: [f64; 2], // WHAT: the newer sheet's size in points. WHY: the overlay is written on paper exactly that size.
+    pub said: String,   // WHAT: one line saying what it shows and how it was lined up. WHY: shown under the picture.
+}
+
+/// How many pixels a side, at most, the overlay window's picture has.
+const PREVIEW_PIXELS: usize = 2048; // WHAT: the window's copy. WHY: every graphics card takes a picture this big.
+/// How many pixels a side the sheets drawn for picking points have.
+const LOOK_PIXELS: u32 = 1400; // WHAT: big enough to click on a grid line. WHY: and small enough to come back at once.
+/// An overlay's resolution, in dots an inch.
+const OVERLAY_DPI: f64 = 150.0; // WHAT: 150 dots an inch. WHY: bolts and dimension text stay readable printed and zoomed.
+/// The most pixels an overlay has, for a sheet too big for 150 dots an inch.
+const OVERLAY_PIXELS: f64 = 12_000_000.0; // WHAT: twelve million. WHY: an ARCH E sheet at full resolution would need more memory than a Remote Desktop seat can spare.
+
+/// One sheet as the fit search sees it.
+struct SheetLook { // WHAT: a sheet ready for fitting. WHY: its drawing, size and coordinates.
+    luma: Vec<u8>,                // WHAT: its drawing, one byte a pixel. WHY: ink is found in it.
+    width: usize,                 // WHAT: pixels across. WHY: the ink's size.
+    height: usize,                // WHAT: pixels down. WHY: the same.
+    k: f64,                       // WHAT: pixels per point. WHY: fits go between pixels and points.
+    size: [f64; 2],               // WHAT: the sheet in points, as shown. WHY: the overlay's paper.
+    own: Option<[f64; 6]>,        // WHAT: the file's coordinates to the sheet's. WHY: the likeliest fit between two plots.
+}
+
+/// How the older sheet came to be where it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Lined { // WHAT: how a fit came about. WHY: said differently each way.
+    Found,     // WHAT: lined up by the line-work. WHY: the usual case.
+    NotFound,  // WHAT: tried and could not, so left as they are. WHY: said, so its colours are not read as change.
+    Points,    // WHAT: lined up by two points somebody picked. WHY: said.
+    AsTheyAre, // WHAT: left as they are because that was asked. WHY: said.
+}
+
+/// What fitting two sheets found.
+struct Fitted { // WHAT: what fitting found. WHY: overlay and comparison both use it.
+    fit: crate::overlay::Fit,         // WHAT: older sheet points to newer sheet points. WHY: the overlay is drawn through it.
+    fit_px: crate::overlay::Fit,      // WHAT: the same fit in working pixels. WHY: a comparison warps the ink through it.
+    agreement: f32,                   // WHAT: how much of the line-work agrees. WHY: said.
+    how: Lined,                       // WHAT: how it was lined up. WHY: said.
+    older_size: [f64; 2],             // WHAT: the older sheet in points. WHY: said when it differs.
+    newer_size: [f64; 2],             // WHAT: the newer sheet in points. WHY: the overlay's paper.
+    newer_k: f64,                     // WHAT: working pixels per point, newer sheet. WHY: back to points.
+    older_ink: crate::compare::Ink,   // WHAT: the older's line-work. WHY: a comparison uses it.
+    newer_ink: crate::compare::Ink,   // WHAT: the newer's. WHY: the same.
+}
+
+impl Fitted { // WHAT: what to say about a fit. WHY: one line under the picture.
+    /// One line saying what the colours are and how the sheets were lined up.
+    fn says(&self) -> String { // WHAT: the line. WHY: the colours and how they were lined up.
+        let colours = "Red is the older issue, blue is the newer one, dark grey is both."; // WHAT: the legend. WHY: always said first.
+        let percent = self.agreement * 100.0; // WHAT: the agreement as a percentage. WHY: people read percentages.
+        let mut extra = Vec::new(); // WHAT: what the line-up did beyond a shift. WHY: a turn or a rescale is worth knowing.
+        let mut turn = self.fit.degrees(); // WHAT: the turn, 0 to 360. WHY: said below.
+        if turn > 180.0 { // WHAT: more than half a turn. WHY: said as a small turn the other way.
+            turn -= 360.0; // WHAT: as a small turn either way. WHY: "-0.6°" reads better than "359.4°".
+        }
+        if turn.abs() >= 45.0 { // WHAT: a big turn. WHY: said as turned.
+            extra.push(format!("turned {:.0}°", turn.abs())); // WHAT: a quarter or half turn. WHY: the sheet was stored or scanned turned.
+        } else if turn.abs() >= 0.05 { // WHAT: a small turn. WHY: said as straightened.
+            extra.push(format!("straightened {:.1}°", turn.abs())); // WHAT: a skew taken out. WHY: a crooked scan.
+        }
+        if (self.fit.scale - 1.0).abs() >= 0.01 { // WHAT: drawn bigger or smaller. WHY: said.
+            extra.push(format!("drawn at {:.0}% to match", self.fit.scale * 100.0)); // WHAT: rescaled. WHY: a half-size print or a different paper size.
+        }
+        if (self.older_size[0] - self.newer_size[0]).abs() > 1.0 || (self.older_size[1] - self.newer_size[1]).abs() > 1.0 { // WHAT: different paper sizes. WHY: said.
+            extra.push(format!("the sheets are different sizes ({:.0} by {:.0} and {:.0} by {:.0} inches)", self.older_size[0] / 72.0, self.older_size[1] / 72.0, self.newer_size[0] / 72.0, self.newer_size[1] / 72.0)); // WHAT: both paper sizes. WHY: so a scale change is no surprise.
+        }
+        let extra = if extra.is_empty() { String::new() } else { format!(" ({})", extra.join("; ")) }; // WHAT: the extras in brackets. WHY: one line.
+        match self.how { // WHAT: by how it was lined up. WHY: each says it differently.
+            Lined::Found => format!("{colours} Lined up by the drawing{extra}: {percent:.0}% of the line-work matches. Nothing has been measured."), // WHAT: lined up. WHY: the usual message.
+            Lined::NotFound => format!("These two sheets could not be lined up — only {percent:.0}% of the line-work matches. They are shown as they are, uncorrected, so the colours do not mean change. Try lining them up by two points. {colours}"), // WHAT: not lined up. WHY: so nobody reads the colours as a revision.
+            Lined::Points => format!("{colours} Lined up by the two points picked{extra}: {percent:.0}% of the line-work matches. Nothing has been measured."), // WHAT: by hand. WHY: said.
+            Lined::AsTheyAre => format!("{colours} Shown as they are, not lined up: {percent:.0}% of the line-work matches. Nothing has been measured."), // WHAT: uncorrected, as asked. WHY: said.
+        }
+    }
+}
+
+/// The fit the two files' own coordinates give: where the newer sheet shows
+/// a point of the file, after undoing where the older sheet shows it.
+///
+/// None unless that is a turn and a shift (with any scale), which it is for
+/// any two real pages; anything else would be a mirror or a shear.
+fn own_fit(older: [f64; 6], newer: [f64; 6]) -> Option<crate::overlay::Fit> { // WHAT: the fit the files' coordinates give. WHY: the first start.
+    let det = older[0] * older[3] - older[1] * older[2]; // WHAT: the older transform's determinant. WHY: zero means it cannot be undone.
+    if det.abs() < 1e-12 { // WHAT: cannot be undone. WHY: no fit.
+        return None; // WHAT: cannot be undone. WHY: no fit follows.
+    }
+    let inv = [older[3] / det, -older[1] / det, -older[2] / det, older[0] / det]; // WHAT: the older's turn and scale undone. WHY: sheet back to file.
+    let inv_e = -(inv[0] * older[4] + inv[2] * older[5]); // WHAT: its shift undone, across. WHY: the same.
+    let inv_f = -(inv[1] * older[4] + inv[3] * older[5]); // WHAT: and down. WHY: the same.
+    let a = newer[0] * inv[0] + newer[2] * inv[1]; // WHAT: the composed transform's first number. WHY: older sheet to file to newer sheet.
+    let b = newer[1] * inv[0] + newer[3] * inv[1]; // WHAT: its second. WHY: the same.
+    let c = newer[0] * inv[2] + newer[2] * inv[3]; // WHAT: its third. WHY: the same.
+    let d = newer[1] * inv[2] + newer[3] * inv[3]; // WHAT: its fourth. WHY: the same.
+    let e = newer[0] * inv_e + newer[2] * inv_f + newer[4]; // WHAT: its shift across. WHY: the same.
+    let f = newer[1] * inv_e + newer[3] * inv_f + newer[5]; // WHAT: its shift down. WHY: the same.
+    let scale = a.hypot(b); // WHAT: its scale. WHY: a turn-and-scale has the same in both columns.
+    if scale < 1e-9 || (a - d).abs() > 1e-3 * scale || (b + c).abs() > 1e-3 * scale { // WHAT: a mirror, a shear or nothing. WHY: not a fit to draw.
+        return None; // WHAT: a mirror or a shear. WHY: not a fit an overlay can draw honestly.
+    }
+    Some(crate::overlay::Fit { scale, turn: b.atan2(a), dx: e, dy: f }) // WHAT: the fit. WHY: the first start tried.
+}
+
+/// Coloured pixels as a picture egui can show.
+fn colour_image(pixels: &[[u8; 3]], width: usize, height: usize) -> egui::ColorImage { // WHAT: coloured pixels as an egui picture. WHY: shown or written.
+    egui::ColorImage { size: [width, height], pixels: pixels.iter().map(|p| egui::Color32::from_rgb(p[0], p[1], p[2])).collect(), source_size: egui::vec2(width as f32, height as f32) } // WHAT: the picture. WHY: shown, or written into a page.
+}
+
+/// A picture's pixels as plain colours.
+fn pixels_of(image: &egui::ColorImage) -> Vec<[u8; 3]> { // WHAT: an egui picture as plain colours. WHY: made smaller.
+    image.pixels.iter().map(|p| [p.r(), p.g(), p.b()]).collect() // WHAT: red, green and blue. WHY: made smaller by the overlay module.
 }
 
 /// What a comparison found, in the newer sheet's own coordinates.
@@ -2755,6 +2876,7 @@ impl Engine {
             Operation::Overlay { newer, older, to, darkness } => {
                 self.overlay_whole_set(newer, older, to, *darkness)
             }
+            Operation::OverlaySheet { newer, newer_page, older, older_page, darkness, lining, to } => self.overlay_one_sheet(newer, *newer_page, older, *older_page, *darkness, lining, to), // WHAT: one sheet's overlay, written as a file. WHY: so it can be opened, printed and sent.
             Operation::Print { source } => self.print_whole(source),
             Operation::Summary { sources, to } => self.summary_of_many(sources, to),
             Operation::Secure {
@@ -4219,95 +4341,110 @@ impl Engine {
     /// read: rather than a list of regions, the two issues are printed over
     /// each other, one in each colour, and everything that did not move comes
     /// out dark. Done across a set instead of a sheet at a time.
-    fn overlay_whole_set(
-        &mut self,
-        newer: &std::path::Path,
-        older: &std::path::Path,
-        to: &std::path::Path,
-        darkness: f32,
-    ) -> Result<Done, String> {
-        const ACROSS: u32 = 2200;
-        const DOWN: u32 = 1600;
-
-        let new_one = self.open_alone(newer)?;
-        let new_count = new_one.count;
-        self.close_alone(new_one);
-        let old_one = self.open_alone(older)?;
-        let old_count = old_one.count;
-        self.close_alone(old_one);
-
-        let fresh = unsafe { self.bindings.FPDF_CreateNewDocument() };
-        if fresh.is_null() {
-            return Err("a new drawing could not be started".into());
-        }
-        let mut laid = 0usize;
-        let mut unaligned: Vec<usize> = Vec::new();
-        for page in 0..new_count.min(old_count) {
-            let overlaid = match self.overlay_sheets(
-                older,
-                page as u32,
-                newer,
-                page as u32,
-                darkness,
-                true,
-            ) {
-                Ok(found) => found,
-                Err(_) => continue,
-            };
-            if !overlaid.lined_up {
-                unaligned.push(page + 1);
+    ///
+    /// Sheets are matched by sheet number, so a sheet put in the middle of a
+    /// set does not push every sheet after it onto the wrong partner. Every
+    /// newer sheet gets its page, in order — page 5 of the overlay is always
+    /// sheet 5 of the newer set — and a sheet with nothing to lay it over is
+    /// shown all in the newer colour rather than left out.
+    fn overlay_whole_set(&mut self, newer: &std::path::Path, older: &std::path::Path, to: &std::path::Path, darkness: f32) -> Result<Done, String> { // WHAT: a whole set laid over another. WHY: the batch and Document menus.
+        let b = self.open_alone(newer)?; // WHAT: the newer set. WHY: open for the whole run, not once a sheet.
+        let a = match self.open_alone(older) { // WHAT: the older set. WHY: open for the whole run.
+            Ok(a) => a, // WHAT: the older set. WHY: the same.
+            Err(why) => { // WHAT: the older would not open. WHY: close the newer and say why.
+                self.close_alone(b); // WHAT: closes the newer. WHY: nothing left open on the way out.
+                return Err(why); // WHAT: why the older would not open. WHY: said plainly.
             }
-            // The sheet's own size, so the overlaid picture is the same paper
-            // as the drawing it came from.
-            let one = self.open_alone(newer)?;
-            let handle = unsafe { self.bindings.FPDF_LoadPage(one.doc, page as i32) };
-            let (width, height) = if handle.is_null() {
-                (ACROSS as f64, DOWN as f64)
+        };
+        let new_numbers = self.sheet_numbers(b.doc, b.count); // WHAT: the newer set's sheet numbers. WHY: sheets are matched by them.
+        let old_numbers = self.sheet_numbers(a.doc, a.count); // WHAT: the older set's. WHY: the same.
+        let pairs = crate::overlay::pair_sheets(&new_numbers, &old_numbers); // WHAT: which older sheet each newer sheet goes over. WHY: by number, else by place.
+        let by_number = new_numbers.iter().any(|n| !n.trim().is_empty()) && old_numbers.iter().any(|n| !n.trim().is_empty()); // WHAT: were numbers used. WHY: said in the message.
+        let fresh = unsafe { self.bindings.FPDF_CreateNewDocument() }; // WHAT: the overlay file. WHY: a new file; neither issue is touched.
+        if fresh.is_null() { // WHAT: no new file. WHY: close both and say so.
+            self.close_alone(a); // WHAT: closes both. WHY: nothing left open.
+            self.close_alone(b); // WHAT: the same. WHY: the same.
+            return Err("a new drawing could not be started".into()); // WHAT: says so. WHY: plainly.
+        }
+        let names = [nice(older), nice(newer)]; // WHAT: the two files' names. WHY: the legend and the messages.
+        let label = |i: usize, numbers: &[String]| if numbers[i].trim().is_empty() { format!("sheet {}", i + 1) } else { numbers[i].trim().to_string() }; // WHAT: a sheet as a person names it. WHY: "S-101A", or "sheet 3" when it has no number.
+        let (mut laid, mut alone, mut unaligned, mut failed) = (0usize, Vec::new(), Vec::new(), Vec::new()); // WHAT: what happened to each sheet. WHY: the message says it.
+        for (i, pair) in pairs.iter().enumerate() { // WHAT: each newer sheet in order. WHY: page N is sheet N.
+            let at = unsafe { self.bindings.FPDF_GetPageCount(fresh) }.max(0) as usize; // WHAT: where this sheet's page goes. WHY: at the end, so pages follow the newer set.
+            let this = label(i, &new_numbers); // WHAT: this sheet's name. WHY: the messages.
+            let mut made = false; // WHAT: did its page go in. WHY: if not, a blank keeps its place.
+            if let Some(j) = pair { // WHAT: it has an older partner. WHY: laid over it.
+                match self.overlay_open(a.doc, *j as u32, b.doc, i as u32, darkness, &crate::overlay::Lining::Auto, [&names[0], &names[1]]) { // WHAT: laid over, or why not. WHY: either is reported.
+                    Ok(laid_over) => { // WHAT: laid over. WHY: written.
+                        if !laid_over.lined_up { // WHAT: could not be lined up. WHY: listed.
+                            unaligned.push(this.clone()); // WHAT: noted. WHY: the message lists sheets left as they stand.
+                        }
+                        let legend = format!("Overlay. Red: {} {}. Blue: {} {}. Dark grey: on both. Nothing has been measured.", names[0], label(*j, &old_numbers), names[1], this); // WHAT: which colour is which, and which sheets. WHY: a print has no dialog beside it.
+                        made = self.overlay_page(fresh, at, &laid_over, &legend); // WHAT: the page. WHY: the overlay.
+                        if made { // WHAT: its page went in. WHY: counted.
+                            laid += 1; // WHAT: counted. WHY: the message.
+                        }
+                    }
+                    Err(why) => failed.push(format!("{this} ({why})")), // WHAT: noted with the reason. WHY: a sheet is never dropped without saying.
+                }
             } else {
-                let w = unsafe { self.bindings.FPDF_GetPageWidthF(handle) } as f64;
-                let h = unsafe { self.bindings.FPDF_GetPageHeightF(handle) } as f64;
-                unsafe { self.bindings.FPDF_ClosePage(handle) };
-                (w, h)
-            };
-            self.close_alone(one);
-
-            let at = unsafe { self.bindings.FPDF_GetPageCount(fresh) } as usize;
-            if self.page_from_picture(fresh, at, width, height, &overlaid.image) {
-                laid += 1;
+                alone.push(this.clone()); // WHAT: noted. WHY: the message names new sheets.
+            }
+            if !made { // WHAT: no page yet. WHY: shown alone instead.
+                if let Some(only) = self.newer_alone(b.doc, i as u32, darkness) { // WHAT: it draws alone. WHY: all in blue.
+                    let legend = format!("Overlay. Blue: {} {}, which has no sheet to lay it over. Nothing has been measured.", names[1], this); // WHAT: says why it is all blue. WHY: the same as any other page.
+                    made = self.overlay_page(fresh, at, &only, &legend); // WHAT: the sheet alone, all new. WHY: it keeps its place in the set.
+                }
+            }
+            if !made { // WHAT: still no page. WHY: a blank keeps its place.
+                failed.push(format!("{this} (it would not draw, so its page is blank)")); // WHAT: noted. WHY: said, never silent.
+                let blank = unsafe { self.bindings.FPDFPage_New(fresh, at as i32, 612.0, 792.0) }; // WHAT: a blank page in its place. WHY: page N stays sheet N.
+                if !blank.is_null() { // WHAT: the blank was made. WHY: closed.
+                    unsafe { self.bindings.FPDF_ClosePage(blank) }; // WHAT: closes it. WHY: done.
+                }
             }
         }
+        let used: Vec<usize> = pairs.iter().flatten().copied().collect(); // WHAT: older sheets that were laid under something. WHY: the rest are only in the older issue.
+        let only_older: Vec<String> = (0..a.count).filter(|j| !used.contains(j)).map(|j| label(j, &old_numbers)).collect(); // WHAT: older sheets with no newer partner. WHY: named, so nobody wonders.
+        self.close_alone(a); // WHAT: closes the older. WHY: done reading.
+        self.close_alone(b); // WHAT: closes the newer. WHY: the same.
+        let wrote = self.write_out(fresh, to); // WHAT: writes the overlay file. WHY: the result.
+        unsafe { self.bindings.FPDF_CloseDocument(fresh) }; // WHAT: closes it. WHY: done.
+        wrote?; // WHAT: stops if it did not write. WHY: says why.
 
-        let wrote = self.write_out(fresh, to);
-        unsafe { self.bindings.FPDF_CloseDocument(fresh) };
-        wrote?;
-
-        let mut said = format!(
-            "{laid} sheet{} laid over each other in {}. What moved shows as colour; \
-             what did not shows dark. Nothing has been measured.",
-            if laid == 1 { "" } else { "s" },
-            nice(to)
-        );
-        if new_count != old_count {
-            said.push_str(&format!(
-                " The two issues have different numbers of sheets ({new_count} and \
-                 {old_count}); only the first {} were laid over.",
-                new_count.min(old_count)
-            ));
+        let plural = |n: usize| if n == 1 { "" } else { "s" }; // WHAT: "sheet" or "sheets". WHY: messages read as English.
+        let mut said = format!("{laid} sheet{} laid over each other in {}. Red is the older issue, blue the newer, dark grey both. Nothing has been measured.", plural(laid), nice(to)); // WHAT: what was done. WHY: the first thing to say.
+        said.push_str(if by_number { " Sheets were matched by sheet number." } else { " Sheets were matched by their place in the set, because they have no sheet numbers to match by." }); // WHAT: how sheets were paired. WHY: so a wrong pairing is never a surprise.
+        if !alone.is_empty() { // WHAT: sheets new in this issue. WHY: named.
+            said.push_str(&format!(" New in this issue, shown all in blue: {}.", alone.join(", "))); // WHAT: sheets with no older issue. WHY: named.
+        }
+        if !only_older.is_empty() { // WHAT: sheets only in the older. WHY: named.
+            said.push_str(&format!(" Only in the older issue, so not in the overlay: {}.", only_older.join(", "))); // WHAT: sheets that went. WHY: named.
         }
         if !unaligned.is_empty() {
-            said.push_str(&format!(
-                " {} sheet{} could not be lined up and {} laid over as {} stand: {}.",
-                unaligned.len(),
-                if unaligned.len() == 1 { "" } else { "s" },
-                if unaligned.len() == 1 { "was" } else { "were" },
-                if unaligned.len() == 1 { "it stands" } else { "they" },
-                unaligned.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")
-            ));
+            said.push_str(&format!(" Could not be lined up, so laid over as they stand: {}.", unaligned.join(", "))); // WHAT: sheets left uncorrected. WHY: their colours do not mean change.
         }
-        Ok(Done {
-            wrote: vec![to.to_path_buf()],
-            said,
-        })
+        if !failed.is_empty() { // WHAT: sheets that failed. WHY: named with why.
+            said.push_str(&format!(" Could not be laid over: {}.", failed.join("; "))); // WHAT: sheets that failed, with why. WHY: never silent.
+        }
+        Ok(Done { wrote: vec![to.to_path_buf()], said }) // WHAT: the file and the message. WHY: the batch and Document menus show both.
+    }
+
+    /// One sheet laid over another and written as a one-page file, so it can
+    /// be opened, zoomed, printed or sent like any other drawing.
+    #[allow(clippy::too_many_arguments)] // WHAT: allows the long list. WHY: two sheets, the darkness, the line-up and where to write.
+    fn overlay_one_sheet(&mut self, newer: &std::path::Path, newer_page: u32, older: &std::path::Path, older_page: u32, darkness: f32, lining: &crate::overlay::Lining, to: &std::path::Path) -> Result<Done, String> { // WHAT: one overlaid sheet written as a file. WHY: Save as PDF.
+        let laid = self.overlay_sheets(older, older_page, newer, newer_page, darkness, lining)?; // WHAT: the overlay at full size. WHY: written out.
+        let fresh = unsafe { self.bindings.FPDF_CreateNewDocument() }; // WHAT: the new file. WHY: neither issue is touched.
+        if fresh.is_null() { // WHAT: no new file. WHY: say so.
+            return Err("a new drawing could not be started".into()); // WHAT: says so. WHY: plainly.
+        }
+        let legend = format!("Overlay. Red: {} sheet {}. Blue: {} sheet {}. Dark grey: on both. Nothing has been measured.", nice(older), older_page + 1, nice(newer), newer_page + 1); // WHAT: which colour is which. WHY: on the paper itself.
+        let made = self.overlay_page(fresh, 0, &laid, &legend); // WHAT: the page. WHY: the overlay.
+        let wrote = if made { self.write_out(fresh, to) } else { Err("the overlay would not go into a page".to_string()) }; // WHAT: writes it, or says why not. WHY: plainly.
+        unsafe { self.bindings.FPDF_CloseDocument(fresh) }; // WHAT: closes it. WHY: done.
+        wrote?; // WHAT: stops if it did not write. WHY: says why.
+        Ok(Done { wrote: vec![to.to_path_buf()], said: format!("{} {} written.", laid.said, nice(to)) }) // WHAT: the file and what it shows. WHY: opened straight away.
     }
 
     /// One takeoff report covering several sets.
@@ -5193,53 +5330,6 @@ impl Engine {
 
     // ---- comparing two issues of a sheet ----------------------------------
 
-    /// Renders a page of a file opened aside, as ink.
-    ///
-    /// Both sides of a comparison go through this, at the same pixel size, so
-    /// a difference in the result is a difference in the drawings rather than
-    /// a difference in how they were rendered.
-    fn ink_of(
-        &mut self,
-        path: &std::path::Path,
-        index: u32,
-        across: u32,
-        down: u32,
-        darkness: f32,
-    ) -> Result<crate::compare::Ink, String> {
-        let one = self.open_alone(path)?;
-        if index as usize >= one.count {
-            let count = one.count;
-            self.close_alone(one);
-            return Err(format!(
-                "{} has {count} sheet{}, so there is no sheet {}.",
-                nice(path),
-                if count == 1 { "" } else { "s" },
-                index + 1
-            ));
-        }
-        let page = unsafe { self.bindings.FPDF_LoadPage(one.doc, index as i32) };
-        if page.is_null() {
-            self.close_alone(one);
-            return Err(format!("sheet {} of {} would not open", index + 1, nice(path)));
-        }
-        let width = unsafe { self.bindings.FPDF_GetPageWidthF(page) } as f64;
-        let height = unsafe { self.bindings.FPDF_GetPageHeightF(page) } as f64;
-        // Fitted rather than stretched: two issues of a sheet are the same
-        // proportions, and stretching one to the other's box would turn a
-        // different paper size into "everything changed".
-        let scale = (across as f64 / width.max(1.0)).min(down as f64 / height.max(1.0));
-        let image = self.raster(page, scale, 0.0, 0.0, across, down);
-        unsafe { self.bindings.FPDF_ClosePage(page) };
-        self.close_alone(one);
-
-        let image = image.ok_or_else(|| format!("sheet {} would not render", index + 1))?;
-        Ok(crate::compare::Ink {
-            width: across as usize,
-            height: down as usize,
-            on: to_ink(&image, darkness),
-        })
-    }
-
     /// Draws one sheet at the size asked for, fitted inside it.
     fn picture(
         &mut self,
@@ -5273,6 +5363,18 @@ impl Engine {
         unsafe { self.bindings.FPDF_ClosePage(page) };
         self.close_alone(one);
         image.ok_or_else(|| format!("sheet {} would not render", index + 1))
+    }
+
+    /// One sheet's size as shown, in points.
+    fn sheet_size(&mut self, path: &std::path::Path, index: u32) -> Result<[f64; 2], String> { // WHAT: a sheet's size in points. WHY: clicks become points.
+        let one = self.open_alone(path)?; // WHAT: the file. WHY: its sheet is measured.
+        let page = if (index as usize) < one.count { unsafe { self.bindings.FPDF_LoadPage(one.doc, index as i32) } } else { std::ptr::null_mut() }; // WHAT: the sheet, if there is one. WHY: a missing sheet is said below.
+        let size = if page.is_null() { None } else { Some([f64::from(unsafe { self.bindings.FPDF_GetPageWidthF(page) }), f64::from(unsafe { self.bindings.FPDF_GetPageHeightF(page) })]) }; // WHAT: its width and height. WHY: a click on its picture becomes a point on it.
+        if !page.is_null() { // WHAT: the sheet was loaded. WHY: closed.
+            unsafe { self.bindings.FPDF_ClosePage(page) }; // WHAT: closes it. WHY: done.
+        }
+        self.close_alone(one); // WHAT: closes the file. WHY: done.
+        size.ok_or_else(|| format!("there is no sheet {} in {}", index + 1, nice(path))) // WHAT: the size, or why not. WHY: said plainly.
     }
 
     /// Every word on one sheet.
@@ -5480,62 +5582,102 @@ impl Engine {
 
     /// Compares two issues of a sheet and gives the differences back in the
     /// newer sheet's own coordinates, so they can be drawn on it.
-    fn compare_sheets(
-        &mut self,
-        older: &std::path::Path,
-        older_page: u32,
-        newer: &std::path::Path,
-        newer_page: u32,
-        darkness: f32,
-    ) -> Result<Compared, String> {
-        // Big enough that a bolt symbol is several pixels across, small enough
-        // that the whole thing happens while somebody is still looking at the
-        // dialog.
-        const ACROSS: u32 = 1700;
-        const DOWN: u32 = 1200;
+    ///
+    /// Lined up the way Overlay Pages lines them up — shift, quarter turns,
+    /// skew and scale — and then compared on the newer sheet's own pixels, so
+    /// a half-size print or a crooked scan is compared as the drawing it is.
+    fn compare_sheets(&mut self, older: &std::path::Path, older_page: u32, newer: &std::path::Path, newer_page: u32, darkness: f32) -> Result<Compared, String> { // WHAT: two sheets compared, lined up first. WHY: Compare Documents.
+        let (a, b) = self.open_pair(older, older_page, newer, newer_page)?; // WHAT: both files. WHY: open while they are fitted.
+        let fitted = self.fit_sheets(a.doc, older_page, b.doc, newer_page, darkness, &crate::overlay::Lining::Auto, [&nice(older), &nice(newer)]); // WHAT: how the older sits on the newer. WHY: compared through it.
+        self.close_alone(a); // WHAT: closes the older. WHY: done with the file.
+        self.close_alone(b); // WHAT: closes the newer. WHY: the same.
+        let fitted = fitted?; // WHAT: the fit, or why not. WHY: said plainly.
+        let (w, h) = (fitted.newer_ink.width, fitted.newer_ink.height); // WHAT: the newer sheet's working pixels. WHY: both are compared on them.
+        let moved = crate::overlay::warp(&fitted.older_ink, &fitted.fit_px, w, h); // WHAT: the older ink laid on the newer's pixels. WHY: compared pixel for pixel.
+        let found = crate::compare::compare_fitted(&moved, &fitted.newer_ink, fitted.agreement, 1); // WHAT: what changed. WHY: the comparison.
+        let k = fitted.newer_k; // WHAT: working pixels per point on the newer sheet. WHY: changes go back to points.
+        let changes = found.changes.iter().map(|c| (c.kind, [c.area[0] as f64 / k, c.area[1] as f64 / k, c.area[2] as f64 / k, c.area[3] as f64 / k])).collect(); // WHAT: each change in the newer sheet's points. WHY: that is the sheet the clouds go on.
+        Ok(Compared { said: found.says(), could_not_align: found.could_not_align, agreement: found.alignment.agreement, changes }) // WHAT: what was found. WHY: shown and clouded.
+    }
 
-        let a = self.ink_of(older, older_page, ACROSS, DOWN, darkness)?;
-        let b = self.ink_of(newer, newer_page, ACROSS, DOWN, darkness)?;
-        let found = crate::compare::compare(&a, &b);
+    /// Draws one sheet's drawing alone — no markups, no form fields — through
+    /// a transform, into a grey picture of the size asked for.
+    ///
+    /// Without markups because an overlay and a comparison are about the
+    /// drawing: an estimator's takeoff on the newer sheet is not a revision,
+    /// and a comparison's own clouds must not show up as changes the next
+    /// time it is run. Brightness only, one byte a pixel, because colour is
+    /// never what decides ink from paper and a big sheet is four times
+    /// smaller this way.
+    fn drawing_alone(&mut self, page: FPDF_PAGE, m: [f64; 6], width: u32, height: u32) -> Option<Vec<u8>> { // WHAT: a sheet's drawing alone, as brightness. WHY: overlay and comparison.
+        if width == 0 || height == 0 { // WHAT: no size. WHY: nothing to draw.
+            return None; // WHAT: nothing to draw into. WHY: pdfium refuses an empty bitmap.
+        }
+        let mut buf = vec![0u8; width as usize * height as usize * 4]; // WHAT: the picture's memory. WHY: pdfium draws into it.
+        let bitmap = unsafe { self.bindings.FPDFBitmap_CreateEx(width as i32, height as i32, FPDFBITMAP_BGRA as i32, buf.as_mut_ptr() as *mut c_void, (width * 4) as i32) }; // WHAT: a bitmap over that memory. WHY: what pdfium renders to.
+        if bitmap.is_null() { // WHAT: no bitmap. WHY: nothing drawn.
+            return None; // WHAT: no bitmap. WHY: out of memory, most likely.
+        }
+        unsafe { self.bindings.FPDFBitmap_FillRect(bitmap, 0, 0, width as i32, height as i32, 0xFFFF_FFFFu32 as _) }; // WHAT: white first. WHY: paper.
+        let matrix = FS_MATRIX { a: m[0] as f32, b: m[1] as f32, c: m[2] as f32, d: m[3] as f32, e: m[4] as f32, f: m[5] as f32 }; // WHAT: the transform. WHY: turned, scaled and moved onto the other sheet.
+        let clip = FS_RECTF { left: 0.0, top: 0.0, right: width as f32, bottom: height as f32 }; // WHAT: the whole picture. WHY: nothing outside it is drawn.
+        unsafe { self.bindings.FPDF_RenderPageBitmapWithMatrix(bitmap, page, &matrix, &clip, 0) }; // WHAT: the drawing alone, no annotations. WHY: markups are not the drawing.
+        unsafe { self.bindings.FPDFBitmap_Destroy(bitmap) }; // WHAT: lets the bitmap go. WHY: the memory is ours and is read below.
+        Some(buf.chunks_exact(4).map(|p| ((u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2])) / 3) as u8).collect()) // WHAT: each pixel's brightness. WHY: the same plain average every ink test in the program uses.
+    }
 
-        // Back into the newer sheet's points, because that is the sheet the
-        // marks will be drawn on.
-        let one = self.open_alone(newer)?;
-        let page = unsafe { self.bindings.FPDF_LoadPage(one.doc, newer_page as i32) };
-        let (width, height) = if page.is_null() {
-            (ACROSS as f64, DOWN as f64)
-        } else {
-            let w = unsafe { self.bindings.FPDF_GetPageWidthF(page) } as f64;
-            let h = unsafe { self.bindings.FPDF_GetPageHeightF(page) } as f64;
-            unsafe { self.bindings.FPDF_ClosePage(page) };
-            (w, h)
+    /// One sheet looked at for lining up: its drawing, at about `most` pixels
+    /// on its long side and in its own proportions, and its size.
+    fn sheet_look(&mut self, doc: FPDF_DOCUMENT, index: u32, most: f64, name: &str) -> Result<SheetLook, String> { // WHAT: a sheet looked at for fitting. WHY: its drawing and size.
+        let page = unsafe { self.bindings.FPDF_LoadPage(doc, index as i32) }; // WHAT: the sheet. WHY: drawn below.
+        if page.is_null() { // WHAT: it would not load. WHY: say which.
+            return Err(format!("sheet {} of {name} would not open", index + 1)); // WHAT: says which. WHY: nobody guesses.
+        }
+        let width = f64::from(unsafe { self.bindings.FPDF_GetPageWidthF(page) }); // WHAT: its width as shown, in points. WHY: turned and cropped as the viewer shows it.
+        let height = f64::from(unsafe { self.bindings.FPDF_GetPageHeightF(page) }); // WHAT: its height. WHY: the same.
+        let k = most / width.max(height).max(1.0); // WHAT: pixels per point. WHY: the long side is `most` pixels.
+        let (w, h) = ((width * k).round().max(1.0) as u32, (height * k).round().max(1.0) as u32); // WHAT: the picture's size. WHY: the sheet's own proportions, never stretched.
+        let own = self.sheet_transform(page, PageSize { width: width as f32, height: height as f32 }); // WHAT: where the file's own coordinates put things on the sheet. WHY: the likeliest fit between two plots.
+        let luma = self.drawing_alone(page, [k, 0.0, 0.0, k, 0.0, 0.0], w, h); // WHAT: the drawing, scaled. WHY: looked at.
+        unsafe { self.bindings.FPDF_ClosePage(page) }; // WHAT: closes the sheet. WHY: done with it.
+        let luma = luma.ok_or_else(|| format!("sheet {} of {name} would not draw", index + 1))?; // WHAT: the picture, or why not. WHY: said plainly.
+        Ok(SheetLook { luma, width: w as usize, height: h as usize, k, size: [width, height], own }) // WHAT: the look. WHY: fitted next.
+    }
+
+    /// How the older sheet is laid on the newer, found or chosen.
+    #[allow(clippy::too_many_arguments)] // WHAT: allows the long list. WHY: two sheets, two pages, the darkness and how to line them up are all needed.
+    fn fit_sheets(&mut self, older: FPDF_DOCUMENT, older_page: u32, newer: FPDF_DOCUMENT, newer_page: u32, darkness: f32, lining: &crate::overlay::Lining, names: [&str; 2]) -> Result<Fitted, String> { // WHAT: how the older lies on the newer. WHY: overlay and comparison.
+        use crate::overlay::{self, Fit, Lining}; // WHAT: the fitting. WHY: short names here.
+        const WORK: f64 = 1800.0; // WHAT: the working size, long side, in pixels. WHY: a bolt symbol is a few pixels across, and hundreds of fits are tried in a moment.
+        let a = self.sheet_look(older, older_page, WORK, names[0])?; // WHAT: the older sheet. WHY: fitted onto the newer.
+        let b = self.sheet_look(newer, newer_page, WORK, names[1])?; // WHAT: the newer sheet. WHY: what the older is laid on.
+        let ink_a = overlay::ink_of(&a.luma, a.width, a.height, darkness); // WHAT: the older's line-work. WHY: fits are found on ink.
+        let ink_b = overlay::ink_of(&b.luma, b.width, b.height, darkness); // WHAT: the newer's. WHY: the same.
+        // The files' own coordinates: the newer's sheet transform after the
+        // older's undone. Two issues plotted from one drawing have it there.
+        let own = match (a.own, b.own) { // WHAT: the files' own fit, if both have one. WHY: the first start.
+            (Some(ta), Some(tb)) => own_fit(ta, tb).map(|f| f.rescaled(a.k, b.k)), // WHAT: that fit, in working pixels. WHY: the first start tried.
+            _ => None, // WHAT: unknown. WHY: then the other starts do.
         };
-        self.close_alone(one);
-        let scale = (ACROSS as f64 / width.max(1.0)).min(DOWN as f64 / height.max(1.0));
-
-        let where_ = found
-            .changes
-            .iter()
-            .map(|change| {
-                let [x0, y0, x1, y1] = change.area;
-                (
-                    change.kind,
-                    [
-                        (x0 as f64 - found.alignment.dx as f64) / scale,
-                        (y0 as f64 - found.alignment.dy as f64) / scale,
-                        (x1 as f64 - found.alignment.dx as f64) / scale,
-                        (y1 as f64 - found.alignment.dy as f64) / scale,
-                    ],
-                )
-            })
-            .collect();
-
-        Ok(Compared {
-            said: found.says(),
-            could_not_align: found.could_not_align,
-            agreement: found.alignment.agreement,
-            changes: where_,
-        })
+        let same_points = b.k / a.k; // WHAT: the scale that keeps a point a point. WHY: bigger paper, same drawing.
+        let as_they_are = own.unwrap_or(Fit { scale: same_points, ..Fit::SAME }); // WHAT: the sheets as they are. WHY: shown when nothing lines them up.
+        let (fit_px, agreement, how) = match lining { // WHAT: the fit by the way chosen. WHY: found, picked or as they are.
+            Lining::Auto => { // WHAT: by the drawing. WHY: searched.
+                let found = overlay::find(&ink_a, &ink_b, &overlay::starts([a.width as f64, a.height as f64], [b.width as f64, b.height as f64], same_points, own)); // WHAT: the best fit. WHY: lined up by the line-work.
+                if found.agreement >= crate::compare::ENOUGH_AGREEMENT { // WHAT: enough agrees. WHY: lined up.
+                    (found.fit, found.agreement, Lined::Found) // WHAT: lined up. WHY: enough of it agrees.
+                } else {
+                    (as_they_are, found.agreement, Lined::NotFound) // WHAT: left as they are. WHY: a fit that does not agree would only mislead.
+                }
+            }
+            Lining::Points { older: po, newer: pn } => { // WHAT: by two points. WHY: settled from them.
+                let picked = Fit::from_points(*po, *pn).ok_or("The two points on a sheet have to be in different places.")?; // WHAT: the fit through the points, in sheet points. WHY: somebody chose it.
+                let found = overlay::settle(&ink_a, &ink_b, picked.rescaled(a.k, b.k)); // WHAT: settled onto the line-work. WHY: a click is never exact to the pixel.
+                (found.fit, found.agreement, Lined::Points) // WHAT: lined up by hand. WHY: shown whatever it agrees.
+            }
+            Lining::AsTheyAre => (as_they_are, overlay::agreement(&ink_a, &ink_b, &as_they_are), Lined::AsTheyAre), // WHAT: uncorrected. WHY: asked for.
+        };
+        Ok(Fitted { fit: fit_px.rescaled(1.0 / a.k, 1.0 / b.k), fit_px, agreement, how, older_size: a.size, newer_size: b.size, newer_k: b.k, older_ink: ink_a, newer_ink: ink_b }) // WHAT: the fit in points and in pixels, and both inks. WHY: the overlay draws through the first; a comparison uses the rest.
     }
 
     /// Lays two issues of a sheet on top of each other in different colours.
@@ -5546,64 +5688,105 @@ impl Engine {
     /// dark where both agree. Where only one sheet has ink, its colour shows —
     /// so what was taken out and what was put in are the two colours, and
     /// everything unchanged is the third.
-    fn overlay_sheets(
-        &mut self,
-        older: &std::path::Path,
-        older_page: u32,
-        newer: &std::path::Path,
-        newer_page: u32,
-        darkness: f32,
-        align_them: bool,
-    ) -> Result<Overlaid, String> {
-        const ACROSS: u32 = 1700;
-        const DOWN: u32 = 1200;
-
-        let a = self.ink_of(older, older_page, ACROSS, DOWN, darkness)?;
-        let b = self.ink_of(newer, newer_page, ACROSS, DOWN, darkness)?;
-        let (dx, dy, agreement) = if align_them {
-            let found = crate::compare::align(&a, &b);
-            (found.dx, found.dy, found.agreement)
-        } else {
-            (0, 0, crate::compare::ENOUGH_AGREEMENT)
-        };
-
-        // Colours chosen so the two are told apart by hue rather than by
-        // brightness, which is what makes an overlay readable in a photocopy
-        // and to somebody who does not see red and green as different.
-        let older_colour = [0xC0u8, 0x39, 0x2Bu8];
-        let newer_colour = [0x1Fu8, 0x6F, 0xB2u8];
-        let both_colour = [0x33u8, 0x33, 0x33u8];
-
-        let mut pixels =
-            vec![egui::Color32::WHITE; (ACROSS as usize) * (DOWN as usize)];
-        for y in 0..DOWN as usize {
-            for x in 0..ACROSS as usize {
-                let was = a.at(x, y);
-                let now = {
-                    let nx = x as i32 + dx;
-                    let ny = y as i32 + dy;
-                    nx >= 0 && ny >= 0 && b.at(nx as usize, ny as usize)
-                };
-                let colour = match (was, now) {
-                    (true, true) => both_colour,
-                    (true, false) => older_colour,
-                    (false, true) => newer_colour,
-                    (false, false) => continue,
-                };
-                pixels[y * ACROSS as usize + x] =
-                    egui::Color32::from_rgb(colour[0], colour[1], colour[2]);
-            }
+    ///
+    /// The older sheet is drawn by pdfium straight through the fit, as
+    /// vectors, at the newer sheet's own size and proportions — so the
+    /// overlay is the newer sheet's paper, and a line on it is where the line
+    /// is on the newer sheet.
+    #[allow(clippy::too_many_arguments)] // WHAT: allows the long list. WHY: the same as fit_sheets.
+    fn overlay_open(&mut self, older: FPDF_DOCUMENT, older_page: u32, newer: FPDF_DOCUMENT, newer_page: u32, darkness: f32, lining: &crate::overlay::Lining, names: [&str; 2]) -> Result<Overlaid, String> { // WHAT: two open sheets laid over each other. WHY: a sheet or a set at a time.
+        let fitted = self.fit_sheets(older, older_page, newer, newer_page, darkness, lining, names)?; // WHAT: how the older sits on the newer. WHY: drawn through it.
+        let [width, height] = fitted.newer_size; // WHAT: the newer sheet in points. WHY: the overlay is its paper.
+        let ks = (OVERLAY_DPI / 72.0).min((OVERLAY_PIXELS / (width * height).max(1.0)).sqrt()); // WHAT: pixels per point for the overlay. WHY: 150 a inch, less on a sheet so big it would not fit in memory.
+        let (w, h) = ((width * ks).round().max(1.0) as u32, (height * ks).round().max(1.0) as u32); // WHAT: the overlay's size. WHY: the newer sheet's proportions exactly.
+        let page = unsafe { self.bindings.FPDF_LoadPage(newer, newer_page as i32) }; // WHAT: the newer sheet. WHY: drawn as it is.
+        if page.is_null() { // WHAT: the newer would not load. WHY: say which.
+            return Err(format!("sheet {} of {} would not open", newer_page + 1, names[1])); // WHAT: says which. WHY: plainly.
         }
+        let b = self.drawing_alone(page, [ks, 0.0, 0.0, ks, 0.0, 0.0], w, h); // WHAT: the newer drawing at overlay size. WHY: one of the two layers.
+        unsafe { self.bindings.FPDF_ClosePage(page) }; // WHAT: closes it. WHY: done.
+        let page = unsafe { self.bindings.FPDF_LoadPage(older, older_page as i32) }; // WHAT: the older sheet. WHY: drawn through the fit.
+        if page.is_null() { // WHAT: the older would not load. WHY: say which.
+            return Err(format!("sheet {} of {} would not open", older_page + 1, names[0])); // WHAT: says which. WHY: plainly.
+        }
+        let f = fitted.fit; // WHAT: the fit in sheet points. WHY: turned into pdfium's transform.
+        let (s, c) = f.turn.sin_cos(); // WHAT: the turn. WHY: the transform's first four numbers.
+        let m = [ks * f.scale * c, ks * f.scale * s, -ks * f.scale * s, ks * f.scale * c, ks * f.dx, ks * f.dy]; // WHAT: older sheet points to overlay pixels. WHY: the fit, then the overlay's scale.
+        let a = self.drawing_alone(page, m, w, h); // WHAT: the older drawing, laid on the newer paper. WHY: the other layer, still vectors when drawn.
+        unsafe { self.bindings.FPDF_ClosePage(page) }; // WHAT: closes it. WHY: done.
+        let (a, b) = (a.ok_or("the older sheet would not draw")?, b.ok_or("the newer sheet would not draw")?); // WHAT: both layers, or why not. WHY: plainly.
+        let tolerance = (0.75 * ks / fitted.newer_k).ceil().clamp(1.0, 4.0) as usize; // WHAT: how near is the same line, in overlay pixels. WHY: the fit is good to under a working pixel, which is a few overlay pixels.
+        let pixels = crate::overlay::colour(&a, &b, w as usize, h as usize, darkness, tolerance); // WHAT: the coloured overlay. WHY: what people look at.
+        Ok(Overlaid { image: colour_image(&pixels, w as usize, h as usize), agreement: fitted.agreement, lined_up: fitted.how != Lined::NotFound, size: [width, height], said: fitted.says() }) // WHAT: the picture and what to say about it. WHY: shown, saved or printed.
+    }
 
-        Ok(Overlaid {
-            image: egui::ColorImage {
-                size: [ACROSS as usize, DOWN as usize],
-                pixels,
-                source_size: egui::vec2(ACROSS as f32, DOWN as f32),
-            },
-            agreement,
-            lined_up: agreement >= crate::compare::ENOUGH_AGREEMENT,
-        })
+    /// The same, opening the two files itself.
+    #[allow(clippy::too_many_arguments)] // WHAT: allows the long list. WHY: the same as fit_sheets.
+    fn overlay_sheets(&mut self, older: &std::path::Path, older_page: u32, newer: &std::path::Path, newer_page: u32, darkness: f32, lining: &crate::overlay::Lining) -> Result<Overlaid, String> { // WHAT: two files' sheets laid over each other. WHY: the window's overlay.
+        let (a, b) = self.open_pair(older, older_page, newer, newer_page)?; // WHAT: both files. WHY: open while the overlay is drawn.
+        let done = self.overlay_open(a.doc, older_page, b.doc, newer_page, darkness, lining, [&nice(older), &nice(newer)]); // WHAT: lays them over. WHY: the work.
+        self.close_alone(a); // WHAT: closes the older. WHY: done.
+        self.close_alone(b); // WHAT: closes the newer. WHY: done.
+        done // WHAT: the overlay, or why not. WHY: handed back.
+    }
+
+    /// Opens two files and checks each has the sheet asked for.
+    fn open_pair(&mut self, older: &std::path::Path, older_page: u32, newer: &std::path::Path, newer_page: u32) -> Result<(Aside, Aside), String> { // WHAT: opens two files, checking their sheets. WHY: overlay and comparison.
+        let a = self.open_alone(older)?; // WHAT: the older file. WHY: read.
+        let b = match self.open_alone(newer) { // WHAT: the newer file. WHY: open alongside.
+            Ok(b) => b, // WHAT: the newer file. WHY: read.
+            Err(why) => { // WHAT: the newer would not open. WHY: close the older and say why.
+                self.close_alone(a); // WHAT: closes the older. WHY: nothing left open on the way out.
+                return Err(why); // WHAT: why the newer would not open. WHY: plainly.
+            }
+        };
+        let missing = [(a.count, older_page, older), (b.count, newer_page, newer)].into_iter().find(|(count, page, _)| *page as usize >= *count); // WHAT: a sheet asked for that is not there. WHY: the commonest mistake.
+        if let Some((count, page, path)) = missing { // WHAT: a sheet asked for is missing. WHY: close both and say which.
+            let why = format!("{} has {count} sheet{}, so there is no sheet {}.", nice(path), if count == 1 { "" } else { "s" }, page + 1); // WHAT: which sheet is missing. WHY: said plainly.
+            self.close_alone(a); // WHAT: closes both. WHY: nothing left open.
+            self.close_alone(b); // WHAT: the same. WHY: the same.
+            return Err(why); // WHAT: the reason. WHY: shown.
+        }
+        Ok((a, b)) // WHAT: both open. WHY: used by the caller, who closes them.
+    }
+
+    /// Writes one overlaid sheet as a page of `into`, with a line saying
+    /// which colour is which.
+    ///
+    /// The line goes on the page itself, because an overlay printed and
+    /// handed across a desk has no dialog beside it to say what red means.
+    fn overlay_page(&mut self, into: FPDF_DOCUMENT, at: usize, laid: &Overlaid, legend: &str) -> bool { // WHAT: an overlay as a page with its legend. WHY: a file to print or send.
+        if !self.page_from_picture(into, at, laid.size[0], laid.size[1], &laid.image) { // WHAT: the picture would not go in. WHY: reported.
+            return false; // WHAT: the picture did not go in. WHY: the caller says which sheet.
+        }
+        let page = unsafe { self.bindings.FPDF_LoadPage(into, at as i32) }; // WHAT: the page just made. WHY: the legend goes on it.
+        if page.is_null() { // WHAT: the page would not reopen. WHY: kept without a legend.
+            return true; // WHAT: the picture is there, just no legend. WHY: better than losing the sheet.
+        }
+        let font = unsafe { self.bindings.FPDFText_LoadStandardFont(into, "Helvetica") }; // WHAT: a plain font. WHY: every reader has it.
+        let size = (laid.size[0].min(laid.size[1]) / 90.0).clamp(6.0, 14.0) as f32; // WHAT: the legend's size. WHY: readable on a letter sheet and an ARCH E alike.
+        self.write_text(into, page, font, legend, size * 1.5, size * 1.5, size, [0x33, 0x33, 0x33]); // WHAT: the legend, bottom left. WHY: where a print's notes go.
+        unsafe { self.bindings.FPDFPage_GenerateContent(page) }; // WHAT: writes it into the page. WHY: pdfium keeps edits in memory until asked.
+        unsafe { self.bindings.FPDF_ClosePage(page) }; // WHAT: closes it. WHY: done.
+        true // WHAT: written. WHY: reported.
+    }
+
+    /// One sheet with nothing to lay it over, drawn all in the newer colour.
+    fn newer_alone(&mut self, newer: FPDF_DOCUMENT, page_index: u32, darkness: f32) -> Option<Overlaid> { // WHAT: a sheet with nothing under it, all blue. WHY: it keeps its place.
+        let page = unsafe { self.bindings.FPDF_LoadPage(newer, page_index as i32) }; // WHAT: the sheet. WHY: drawn alone.
+        if page.is_null() { // WHAT: it would not load. WHY: reported.
+            return None; // WHAT: it would not open. WHY: the caller says so.
+        }
+        let width = f64::from(unsafe { self.bindings.FPDF_GetPageWidthF(page) }); // WHAT: its width. WHY: the page's paper.
+        let height = f64::from(unsafe { self.bindings.FPDF_GetPageHeightF(page) }); // WHAT: its height. WHY: the same.
+        let ks = (OVERLAY_DPI / 72.0).min((OVERLAY_PIXELS / (width * height).max(1.0)).sqrt()); // WHAT: the overlay's scale. WHY: the same as a laid-over sheet.
+        let (w, h) = ((width * ks).round().max(1.0) as u32, (height * ks).round().max(1.0) as u32); // WHAT: its size. WHY: the same.
+        let b = self.drawing_alone(page, [ks, 0.0, 0.0, ks, 0.0, 0.0], w, h); // WHAT: the drawing. WHY: all of it is new.
+        unsafe { self.bindings.FPDF_ClosePage(page) }; // WHAT: closes it. WHY: done.
+        let b = b?; // WHAT: the drawing, or nothing. WHY: the caller says so.
+        let blank = vec![255u8; b.len()]; // WHAT: no older sheet: white paper. WHY: everything on it arrived with this issue.
+        let pixels = crate::overlay::colour(&blank, &b, w as usize, h as usize, darkness, 1); // WHAT: all blue. WHY: all new.
+        Some(Overlaid { image: colour_image(&pixels, w as usize, h as usize), agreement: 0.0, lined_up: true, size: [width, height], said: String::new() }) // WHAT: the page. WHY: it keeps its place in the set.
     }
 
     /// The sheet numbers in a document opened aside, read the same way the

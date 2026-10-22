@@ -34,6 +34,7 @@ pub mod modelview;
 pub mod modelwindow;
 pub mod morepanels;
 pub mod ocr;
+pub mod overlay; // WHAT: fitting one issue of a sheet on another and colouring the result. WHY: Overlay Pages and Compare Documents both line sheets up with it.
 pub mod panelbody;
 pub mod picture;
 pub mod panels;
