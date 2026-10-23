@@ -168,6 +168,16 @@ pub enum Operation {
         to: PathBuf,
         darkness: f32,
     },
+    /// Lay one sheet over another and write the overlay as a one-page file.
+    OverlaySheet { // WHAT: one sheet's overlay written as a file. WHY: Save as PDF in the overlay window.
+        newer: PathBuf,                    // WHAT: the newer issue. WHY: its sheet is the overlay's paper.
+        newer_page: u32,                   // WHAT: which of its sheets. WHY: the same.
+        older: PathBuf,                    // WHAT: the older issue. WHY: laid over it.
+        older_page: u32,                   // WHAT: which of its sheets. WHY: the same.
+        darkness: f32,                     // WHAT: how dark is line-work. WHY: a faint scan needs it higher.
+        lining: crate::overlay::Lining,    // WHAT: how they are lined up. WHY: found, by two points, or as they are.
+        to: PathBuf,                       // WHAT: where to write it. WHY: a new file; neither issue is touched.
+    },
     /// Send a set to the plotter.
     Print {
         source: PathBuf,
@@ -344,6 +354,7 @@ impl Operation {
                  not shows as dark.",
                 name(older)
             ),
+            Operation::OverlaySheet { older, older_page, newer_page, .. } => format!("Lay sheet {} of {} over sheet {} of this drawing and write it as a new file.", older_page + 1, name(older), newer_page + 1), // WHAT: what it will do. WHY: the same plain line every operation has.
             Operation::Print { source } => {
                 format!("Send {} to the plotter.", name(source))
             }
@@ -441,6 +452,7 @@ impl Operation {
             | Operation::Unflatten { to, .. }
             | Operation::ApplyRedactions { to, .. }
             | Operation::Overlay { to, .. }
+            | Operation::OverlaySheet { to, .. } // WHAT: one sheet's overlay writes a file too. WHY: so it is listed with the others that do.
             | Operation::Secure { to, .. }
             | Operation::NewBlank { to, .. }
             | Operation::FromPictures { to, .. }
