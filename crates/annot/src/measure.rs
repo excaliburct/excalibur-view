@@ -297,6 +297,25 @@ impl Measure {
         }
     }
 
+    /// WHAT: The primary unit's name as the scale writes it ("ft", "in", "m").
+    /// WHY: a length in the primary unit means nothing without it; the takeoff
+    /// is sent in feet, so the unit is what it is converted from.
+    #[must_use]
+    pub fn primary_unit(&self) -> &str {
+        // WHAT: the first step's unit, none when there is none. WHY: the length is in that unit (per_point).
+        self.x.first().map_or("", |f| f.unit.as_str())
+    }
+
+    /// WHAT: How many feet one of the primary unit is; `None` for a unit this
+    /// doesn't know. WHY: a sheet scaled in inches or metres sent its lengths
+    /// as "feet" before (`per_point` is in the primary unit);
+    /// an unknown unit is said, never guessed.
+    #[must_use]
+    pub fn feet_per_unit(&self) -> Option<f64> {
+        // WHAT: looked up by name. WHY: one table, below.
+        feet_in(self.primary_unit())
+    }
+
     /// How many of the primary unit one point of paper is worth.
     pub fn per_point(&self) -> f64 {
         self.x.first().map(|f| f.conversion).unwrap_or(1.0)
@@ -481,6 +500,38 @@ pub fn metric(ratio: f64, label: &str) -> Measure {
             ..Default::default()
         }],
     }
+}
+
+/// WHAT: How many feet one `unit` is, by the names a scale writes ("ft",
+/// "in", "yd", "mi", "m", "cm", "mm", "km", their marks and words, any
+/// capitals); `None` for one it doesn't know. WHY: the takeoff's lengths go
+/// out in feet whatever the sheet was scaled in.
+#[must_use]
+pub fn feet_in(unit: &str) -> Option<f64> {
+    // WHAT: the unit, trimmed, lower case. WHY: "FT" and "ft " are feet.
+    let name = unit.trim().to_ascii_lowercase();
+    let feet = match name.as_str() {
+        // WHAT: feet. WHY: one foot is a foot.
+        "ft" | "'" | "feet" | "foot" | "ft'" => 1.0,
+        // WHAT: inches. WHY: twelve to the foot.
+        "in" | "\"" | "inch" | "inches" => 1.0 / 12.0,
+        // WHAT: yards. WHY: three feet.
+        "yd" | "yard" | "yards" => 3.0,
+        // WHAT: miles. WHY: 5,280 feet.
+        "mi" | "mile" | "miles" => 5280.0,
+        // WHAT: metres. WHY: a foot is 0.3048 m exactly.
+        "m" | "meter" | "metre" | "meters" | "metres" => 1.0 / 0.3048,
+        // WHAT: centimetres. WHY: 30.48 to the foot.
+        "cm" => 1.0 / 30.48,
+        // WHAT: millimetres. WHY: 304.8 to the foot.
+        "mm" => 1.0 / 304.8,
+        // WHAT: kilometres. WHY: a thousand metres.
+        "km" => 1000.0 / 0.3048,
+        // WHAT: a unit not known. WHY: said by the caller, never taken as feet.
+        _ => return None,
+    };
+    // WHAT: the feet. WHY: the caller converts with it.
+    Some(feet)
 }
 
 #[cfg(test)]

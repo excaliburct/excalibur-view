@@ -345,6 +345,10 @@ fn a_drawing_issued_again_brings_its_takeoff_and_says_it_needs_a_look() {
     let count = markups.iter().find(|m| m["Subject"] == "Moment Conn").expect("the count");
     assert_eq!(beam["Hyperview"]["Each"], 2.0, "two beams");
     assert!((beam["Hyperview"]["LengthFt"].as_f64().unwrap() - 40.0).abs() < 1e-6);
+    // WHAT: the sheet's unit known. WHY: the feet sent are real feet.
+    assert_eq!(beam["Hyperview"]["UnitKnown"], true);
+    // WHAT: the sheet's own unit sent. WHY: a reader sees what was converted.
+    assert!(beam["Hyperview"]["Unit"].is_string());
     assert_eq!(count["Hyperview"]["Each"], 7.0, "seven connections, exactly");
     assert_eq!(count["Hyperview"]["Kind"], "Count");
     for m in &markups {

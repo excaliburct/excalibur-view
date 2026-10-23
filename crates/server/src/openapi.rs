@@ -205,7 +205,9 @@ scale — in which case every total is short.",
                 "summary": "Every set in a project, the same way.",
                 "description": "`{ \"results\": [ { \"file\", \"set\", \"markups\": { \"Markups\": [...] } } ] }`: \
 a whole bid's takeoff in one answer. Each markup also carries `Hyperview`: its id, kind, \
-`Each` (the exact count, quantity included), `LengthFt`, `AreaSqFt`, and whether it was \
+`Each` (the exact count, quantity included), `LengthFt`, `AreaSqFt` and `VolumeCuFt` in \
+feet whatever unit the sheet was scaled in, `Unit` (the sheet's own) and `UnitKnown` (false \
+when it couldn't be turned into feet, so no numbers were sent), and whether it was \
 carried forward from an earlier issue and not yet checked. A drawing issued again is read \
 from its newest issue; the ones it replaced are listed under `superseded` with how many \
 markups they still hold. `stamp` is the same as `GET /projects/{id}/stamp`.",
