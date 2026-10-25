@@ -359,7 +359,7 @@ impl App {
                         painter.rect_filled(rect, 4.0, egui::Color32::WHITE);
                         painter.line_segment(
                             [rect.left_bottom() + egui::vec2(24.0, -40.0), rect.right_bottom() + egui::vec2(-24.0, -40.0)],
-                            egui::Stroke::new(1.0, egui::Color32::from_gray(200)),
+                            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(200)), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                         );
                         if let Some(p) = response.interact_pointer_pos() {
                             let local = [p.x - rect.left(), p.y - rect.top()];
@@ -382,7 +382,7 @@ impl App {
                             if points.len() == 1 {
                                 painter.circle_filled(points[0], 1.2, colour);
                             } else {
-                                painter.add(egui::Shape::line(points, egui::Stroke::new(2.2, colour)));
+                                painter.add(egui::Shape::line(points, egui::Stroke::new(2.2_f32, colour))); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                             }
                         }
                         if making.strokes.is_empty() {
@@ -476,7 +476,7 @@ impl App {
                                     ui.painter().rect_stroke(
                                         rect,
                                         4.0,
-                                        egui::Stroke::new(2.0, theme.accent),
+                                        egui::Stroke::new(2.0_f32, theme.accent), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                                         egui::StrokeKind::Inside,
                                     );
                                 }

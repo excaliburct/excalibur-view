@@ -997,7 +997,7 @@ impl App {
                         painter.rect_stroke(
                             rect.shrink(1.0),
                             egui::CornerRadius::same(4),
-                            egui::Stroke::new(1.5, if selected { Color32::WHITE } else { theme.accent }),
+                            egui::Stroke::new(1.5_f32, if selected { Color32::WHITE } else { theme.accent }), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                             egui::StrokeKind::Inside,
                         );
                     }

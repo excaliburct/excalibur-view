@@ -1078,7 +1078,7 @@ impl App {
             painter.rect_stroke(
                 rect,
                 3.0,
-                Stroke::new(if chosen { 2.5 } else { 1.5 }, colour.gamma_multiply(if chosen { 1.0 } else { 0.8 })),
+                Stroke::new(if chosen { 2.5_f32 } else { 1.5_f32 }, colour.gamma_multiply(if chosen { 1.0 } else { 0.8 })), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                 egui::StrokeKind::Middle,
             );
         }

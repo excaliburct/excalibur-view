@@ -240,8 +240,8 @@ impl App {
             return;
         }
         let colour = Color32::from_rgb(40, 220, 90);
-        let under = Stroke::new(3.5, Color32::from_black_alpha(160));
-        let over = Stroke::new(1.6, colour);
+        let under = Stroke::new(3.5_f32, Color32::from_black_alpha(160)); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
+        let over = Stroke::new(1.6_f32, colour); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
         let r = 6.0;
         let shape = |stroke: Stroke| -> Vec<egui::Shape> {
             match hit.kind {
@@ -419,7 +419,7 @@ impl App {
             if points.len() > 1 {
                 painter.add(egui::Shape::line(
                     points,
-                    Stroke::new(2.5, theme.warn),
+                    Stroke::new(2.5_f32, theme.warn), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                 ));
             }
         }
@@ -440,7 +440,7 @@ impl App {
         fill_shape(painter, &points, theme.accent.gamma_multiply(0.42));
         painter.add(egui::Shape::closed_line(
             points,
-            Stroke::new(2.0, theme.accent_text),
+            Stroke::new(2.0_f32, theme.accent_text), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
         ));
         // The openings taken out, drawn as what they are: not part of it.
         for hole in holes {
@@ -449,7 +449,7 @@ impl App {
                 fill_shape(painter, &ring, theme.surround.gamma_multiply(0.9));
                 painter.add(egui::Shape::closed_line(
                     ring,
-                    Stroke::new(1.5, theme.warn),
+                    Stroke::new(1.5_f32, theme.warn), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                 ));
             }
         }
@@ -496,7 +496,7 @@ impl App {
         painter.rect_stroke(
             mine.shrink(1.0),
             0.0,
-            Stroke::new(1.5, theme.accent_text.gamma_multiply(0.7)),
+            Stroke::new(1.5_f32, theme.accent_text.gamma_multiply(0.7)), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
             egui::StrokeKind::Inside,
         );
 
@@ -627,7 +627,7 @@ impl App {
                 painter.rect_stroke(
                     rect.expand(2.0),
                     3.0,
-                    Stroke::new(1.5, theme.warn),
+                    Stroke::new(1.5_f32, theme.warn), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                     egui::StrokeKind::Middle,
                 );
             }
@@ -2098,7 +2098,7 @@ impl App {
             return;
         }
         let colour = Color32::from_rgba_unmultiplied(70, 110, 170, 60);
-        let stroke = Stroke::new(1.0, colour);
+        let stroke = Stroke::new(1.0_f32, colour); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
         for x in xs {
             let a = view.to_screen([x as f32, on_sheet[1] as f32]);
             let b = view.to_screen([x as f32, on_sheet[3] as f32]);
@@ -2137,15 +2137,15 @@ impl App {
                     crate::grips::Grip::Side(_) => {
                         let r = Rect::from_center_size(at, egui::vec2(8.0, 8.0));
                         painter.rect_filled(r, 1.0, Color32::WHITE);
-                        painter.rect_stroke(r, 1.0, Stroke::new(1.5, blue), egui::StrokeKind::Middle);
+                        painter.rect_stroke(r, 1.0, Stroke::new(1.5_f32, blue), egui::StrokeKind::Middle); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                     }
                     crate::grips::Grip::Point(_) => {
                         painter.circle_filled(at, 4.5, Color32::WHITE);
-                        painter.circle_stroke(at, 4.5, Stroke::new(1.5, blue));
+                        painter.circle_stroke(at, 4.5, Stroke::new(1.5_f32, blue)); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                     }
                     crate::grips::Grip::Leader(_) => {
                         painter.circle_filled(at, 4.5, Color32::from_rgb(255, 196, 64));
-                        painter.circle_stroke(at, 4.5, Stroke::new(1.5, Color32::from_gray(40)));
+                        painter.circle_stroke(at, 4.5, Stroke::new(1.5_f32, Color32::from_gray(40))); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                     }
                 }
             }
@@ -2157,7 +2157,7 @@ impl App {
                 for point in mark.on_sheet(&frame) {
                     let at = doc.view.to_screen([point[0] as f32, point[1] as f32]);
                     painter.circle_filled(at, 4.0, Color32::from_rgb(90, 170, 255));
-                    painter.circle_stroke(at, 4.0, Stroke::new(1.0, Color32::WHITE));
+                    painter.circle_stroke(at, 4.0, Stroke::new(1.0_f32, Color32::WHITE)); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                 }
             }
         }
@@ -2182,7 +2182,7 @@ impl App {
                 painter.rect_stroke(
                     rect,
                     0.0,
-                    Stroke::new(1.0, Color32::from_rgb(90, 170, 255)),
+                    Stroke::new(1.0_f32, Color32::from_rgb(90, 170, 255)), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                     egui::StrokeKind::Middle,
                 );
                 let name = mark
@@ -2237,7 +2237,7 @@ impl App {
                 .collect();
             painter.add(egui::Shape::closed_line(
                 screen,
-                Stroke::new(1.5, Color32::from_rgb(90, 170, 255)),
+                Stroke::new(1.5_f32, Color32::from_rgb(90, 170, 255)), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
             ));
         }
         if let Some(draft) = doc.draft.as_ref() {
@@ -2272,7 +2272,7 @@ impl App {
             if draft.tool == Tool::Callout && draft.points.len() == 1 {
                 if let Some(pointer) = painter.ctx().input(|i| i.pointer.hover_pos()) {
                     let tip = doc.view.to_screen([draft.points[0][0] as f32, draft.points[0][1] as f32]);
-                    let stroke = Stroke::new(1.5, colour);
+                    let stroke = Stroke::new(1.5_f32, colour); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                     painter.line_segment([tip, pointer], stroke);
                     let (w, h) = (96.0 * doc.view.zoom, 20.0 * doc.view.zoom);
                     let x0 = if pointer.x >= tip.x { pointer.x } else { pointer.x - w };
@@ -2299,7 +2299,7 @@ impl App {
                     let words = [x0, y0, x1, y1];
                     let line = crate::grips::leader_between(cloud, words);
                     let screen = |p: [f64; 2]| doc.view.to_screen([p[0] as f32, p[1] as f32]);
-                    let stroke = Stroke::new(1.5, colour);
+                    let stroke = Stroke::new(1.5_f32, colour); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                     painter.line_segment([screen(line[0]), screen(line[1])], stroke);
                     painter.rect_stroke(
                         Rect::from_two_pos(screen([words[0], words[1]]), screen([words[2], words[3]])),
@@ -2606,7 +2606,7 @@ fn paint_shape(painter: &egui::Painter, view: &View, sheet: &[[f64; 2]], look: &
             painter.rect_stroke(
                 bounding(&points).expand(6.0),
                 2.0,
-                Stroke::new(1.5, Color32::from_rgb(90, 170, 255)),
+                Stroke::new(1.5_f32, Color32::from_rgb(90, 170, 255)), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                 egui::StrokeKind::Outside,
             );
         }
@@ -2686,7 +2686,7 @@ fn paint_shape(painter: &egui::Painter, view: &View, sheet: &[[f64; 2]], look: &
         painter.rect_stroke(
             bounding(&points).expand(6.0),
             2.0,
-            Stroke::new(1.5, Color32::from_rgb(90, 170, 255)),
+            Stroke::new(1.5_f32, Color32::from_rgb(90, 170, 255)), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
             egui::StrokeKind::Outside,
         );
     }
@@ -2885,7 +2885,7 @@ fn paint_one(
     painter.rect_stroke(
         page_rect,
         0.0,
-        Stroke::new(1.0, Color32::from_gray(90)),
+        Stroke::new(1.0_f32, Color32::from_gray(90)), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
         egui::StrokeKind::Outside,
     );
 }

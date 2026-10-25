@@ -109,41 +109,41 @@ pub fn visuals() -> Visuals {
     v.hyperlink_color = Color32::from_rgb(0, 0, 204);
     v.warn_fg_color = Color32::from_rgb(150, 75, 0);
     v.error_fg_color = Color32::from_rgb(170, 0, 0);
-    v.window_stroke = Stroke::new(1.0, WINDOW);
+    v.window_stroke = Stroke::new(1.0_f32, WINDOW); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
     v.window_corner_radius = CornerRadius::ZERO;
     v.menu_corner_radius = CornerRadius::ZERO;
     v.window_shadow = egui::Shadow::NONE;
     v.popup_shadow = egui::Shadow::NONE;
     v.window_highlight_topmost = true;
     v.selection.bg_fill = NAVY;
-    v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
-    v.text_cursor.stroke = Stroke::new(1.5, Color32::BLACK);
+    v.selection.stroke = Stroke::new(1.0_f32, Color32::WHITE); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
+    v.text_cursor.stroke = Stroke::new(1.5_f32, Color32::BLACK); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
     v.slider_trailing_fill = false;
     v.handle_shape = egui::style::HandleShape::Rect { aspect_ratio: 0.55 };
     v.collapsing_header_frame = false;
     v.indent_has_left_vline = false;
 
-    let black = Stroke::new(1.0, Color32::BLACK);
+    let black = Stroke::new(1.0_f32, Color32::BLACK); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = FACE;
     w.noninteractive.weak_bg_fill = FACE;
-    w.noninteractive.bg_stroke = Stroke::new(1.0, ETCH);
+    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, ETCH); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
     w.noninteractive.fg_stroke = black;
     w.inactive.bg_fill = BOX;
     w.inactive.weak_bg_fill = FACE;
-    w.inactive.bg_stroke = Stroke::new(1.0, RAISED);
+    w.inactive.bg_stroke = Stroke::new(1.0_f32, RAISED); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
     w.inactive.fg_stroke = black;
     w.hovered.bg_fill = BOX;
     w.hovered.weak_bg_fill = HOVER;
-    w.hovered.bg_stroke = Stroke::new(1.0, RAISED);
+    w.hovered.bg_stroke = Stroke::new(1.0_f32, RAISED); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
     w.hovered.fg_stroke = black;
     w.active.bg_fill = BOX;
     w.active.weak_bg_fill = FACE;
-    w.active.bg_stroke = Stroke::new(1.0, PRESSED);
+    w.active.bg_stroke = Stroke::new(1.0_f32, PRESSED); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
     w.active.fg_stroke = black;
     w.open.bg_fill = BOX;
     w.open.weak_bg_fill = TITLE;
-    w.open.bg_stroke = Stroke::new(1.0, RAISED);
+    w.open.bg_stroke = Stroke::new(1.0_f32, RAISED); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
     w.open.fg_stroke = black;
     for widget in [
         &mut w.noninteractive,
@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn something_it_does_not_know_is_left_alone() {
-        let plain = frame_of(Color32::from_rgb(200, 30, 30), Stroke::new(2.0, Color32::GREEN));
+        let plain = frame_of(Color32::from_rgb(200, 30, 30), Stroke::new(2.0_f32, Color32::GREEN)); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
         assert!(matches!(restyled(plain), Shape::Rect(_)));
     }
 

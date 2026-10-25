@@ -613,7 +613,7 @@ impl Scene {
         let ink = Color32::from_rgb(0xE8, 0x3E, 0x8C);
         let points: Vec<Option<egui::Pos2>> = self.marks.iter().map(|mark| on_screen(mark.point)).collect();
         if let [Some(a), Some(b)] = points[..] {
-            painter.line_segment([a, b], egui::Stroke::new(2.0, ink));
+            painter.line_segment([a, b], egui::Stroke::new(2.0_f32, ink)); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
             let words = feet_and_inches(distance(self.marks[0].point, self.marks[1].point) as f64);
             let middle = a + (b - a) * 0.5 + egui::vec2(0.0, -12.0);
             let galley = painter.layout_no_wrap(words, egui::FontId::proportional(13.0), Color32::WHITE);
@@ -628,7 +628,7 @@ impl Scene {
                     painter.rect_filled(egui::Rect::from_center_size(at, egui::vec2(9.0, 9.0)), 0.0, ink);
                 }
                 Snap::Edge => {
-                    painter.circle_stroke(at, 5.0, egui::Stroke::new(2.0, ink));
+                    painter.circle_stroke(at, 5.0, egui::Stroke::new(2.0_f32, ink)); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                 }
                 Snap::Face => {
                     painter.circle_filled(at, 3.0, ink);

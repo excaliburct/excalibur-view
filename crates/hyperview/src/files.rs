@@ -794,7 +794,7 @@ fn big_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
         egui::Button::new(text)
             .min_size(egui::vec2(0.0, 36.0))
             .fill(fill.gamma_multiply(1.6))
-            .stroke(egui::Stroke::new(1.0, line.color)),
+            .stroke(egui::Stroke::new(1.0_f32, line.color)), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
     )
 }
 
@@ -808,7 +808,7 @@ fn size_of(bytes: u64) -> String {
 }
 
 fn folder_glyph(painter: &egui::Painter, at: egui::Pos2, colour: Color32) {
-    let stroke = egui::Stroke::new(1.5, colour);
+    let stroke = egui::Stroke::new(1.5_f32, colour); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
     let body = egui::Rect::from_center_size(at + egui::vec2(0.0, 1.5), egui::vec2(18.0, 12.0));
     painter.rect_stroke(body, 2.0, stroke, egui::StrokeKind::Middle);
     let tab = egui::Rect::from_min_size(body.left_top() - egui::vec2(0.0, 3.0), egui::vec2(7.0, 3.0));
@@ -816,7 +816,7 @@ fn folder_glyph(painter: &egui::Painter, at: egui::Pos2, colour: Color32) {
 }
 
 fn file_glyph(painter: &egui::Painter, at: egui::Pos2, colour: Color32) {
-    let stroke = egui::Stroke::new(1.5, colour);
+    let stroke = egui::Stroke::new(1.5_f32, colour); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
     let page = egui::Rect::from_center_size(at, egui::vec2(13.0, 17.0));
     painter.rect_stroke(page, 1.5, stroke, egui::StrokeKind::Middle);
     for n in 0..3 {
