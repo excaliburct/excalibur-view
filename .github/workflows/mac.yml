@@ -81,6 +81,20 @@ jobs:
       - name: The whole test suite
         run: cargo test --workspace
 
+      # The test build leaves several gigabytes in target/debug, and the runner's
+      # disk is small: the disk image at the end then fails with "No space left on
+      # device". The release build never uses those files, so they go before it
+      # starts, along with the Android SDK the runner image carries and this job
+      # never touches. df shows the room before and after, so a full disk is
+      # visible in the log rather than guessed at.
+      - name: Make room for the release build
+        run: |
+          set -euo pipefail
+          df -h "$GITHUB_WORKSPACE"
+          rm -rf target/debug
+          rm -rf "${ANDROID_HOME:-$HOME/Library/Android/sdk}" "$HOME/Library/Android/sdk"
+          df -h "$GITHUB_WORKSPACE"
+
       # Apple's certificate goes into a keychain made for this job and thrown
       # away with the machine. Never the default keychain, and never a file
       # left behind on disk.
