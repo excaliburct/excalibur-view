@@ -623,7 +623,7 @@ impl crate::app::App {
             painter.add(egui::Shape::closed_line(
                 points,
                 egui::Stroke::new(
-                    if under { 1.6 } else { 0.8 },
+                    if under { 1.6_f32 } else { 0.8_f32 }, // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                     if under { blue } else { egui::Color32::from_rgba_unmultiplied(90, 170, 255, 110) },
                 ),
             ));
@@ -744,7 +744,7 @@ impl crate::app::App {
             .show(ctx, |ui| {
                 egui::Frame::new()
                     .fill(egui::Color32::WHITE)
-                    .stroke(egui::Stroke::new(1.5, theme.accent))
+                    .stroke(egui::Stroke::new(1.5_f32, theme.accent)) // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                     .inner_margin(egui::Margin::same(2))
                     .show(ui, |ui| {
                         let typed = ui.add_enabled(

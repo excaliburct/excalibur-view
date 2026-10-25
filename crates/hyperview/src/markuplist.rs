@@ -576,7 +576,7 @@ fn chevron_glyph(painter: &egui::Painter, rect: egui::Rect, open: bool, colour: 
         egui::pos2(c.x, c.y + a / 2.0 - b / 4.0 - 1.0),
         egui::pos2(c.x + 5.0, c.y + b / 2.0 - a / 4.0),
     ];
-    painter.add(egui::Shape::line(points, egui::Stroke::new(1.6, colour)));
+    painter.add(egui::Shape::line(points, egui::Stroke::new(1.6_f32, colour))); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
 }
 
 fn now_text() -> String {

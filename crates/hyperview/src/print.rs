@@ -726,8 +726,8 @@ fn paper_preview(
             clip.rect_filled(sheet_rect, 0.0, egui::Color32::from_gray(235));
         }
     }
-    clip.rect_stroke(sheet_rect, 0.0, egui::Stroke::new(1.0, theme.accent), egui::StrokeKind::Inside);
-    painter.rect_stroke(paper_rect, 0.0, egui::Stroke::new(1.0, egui::Color32::from_gray(90)), egui::StrokeKind::Outside);
+    clip.rect_stroke(sheet_rect, 0.0, egui::Stroke::new(1.0_f32, theme.accent), egui::StrokeKind::Inside); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
+    painter.rect_stroke(paper_rect, 0.0, egui::Stroke::new(1.0_f32, egui::Color32::from_gray(90)), egui::StrokeKind::Outside); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
 }
 
 #[cfg(test)]

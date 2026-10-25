@@ -520,7 +520,7 @@ impl App {
                                     painter.circle_stroke(
                                         egui::pos2(left + 3.0, rect.center().y),
                                         3.0,
-                                        egui::Stroke::new(1.0, theme.faint),
+                                        egui::Stroke::new(1.0_f32, theme.faint), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                                     );
                                     left += 12.0;
                                 }
@@ -616,7 +616,7 @@ fn classic_tab(painter: &egui::Painter, rect: egui::Rect, open: bool) {
 fn draw_cross(painter: &egui::Painter, rect: egui::Rect, colour: Color32) {
     let c = rect.center();
     let s = rect.width() * 0.26;
-    let stroke = egui::Stroke::new(1.3, colour);
+    let stroke = egui::Stroke::new(1.3_f32, colour); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
     painter.line_segment(
         [egui::pos2(c.x - s, c.y - s), egui::pos2(c.x + s, c.y + s)],
         stroke,

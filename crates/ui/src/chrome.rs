@@ -184,14 +184,14 @@ impl Theme {
         visuals.extreme_bg_color = self.sunken;
         visuals.faint_bg_color = self.hover;
         visuals.selection.bg_fill = self.accent.gamma_multiply(0.55);
-        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.line);
-        visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, self.text);
+        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, self.line); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
+        visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, self.text); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
         visuals.widgets.inactive.bg_fill = self.bar;
         visuals.widgets.inactive.weak_bg_fill = self.bar;
         visuals.widgets.hovered.bg_fill = self.hover;
         visuals.widgets.hovered.weak_bg_fill = self.hover;
         visuals.widgets.active.bg_fill = self.pressed;
-        visuals.window_stroke = Stroke::new(1.0, self.line);
+        visuals.window_stroke = Stroke::new(1.0_f32, self.line); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
         visuals.window_corner_radius = egui::CornerRadius::same(6);
         visuals.menu_corner_radius = egui::CornerRadius::same(5);
         for widget in [
@@ -394,7 +394,7 @@ impl Chrome {
             painter.rect_stroke(
                 rect.shrink(3.0),
                 CornerRadius::same(3),
-                Stroke::new(1.0, self.theme.line),
+                Stroke::new(1.0_f32, self.theme.line), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                 egui::StrokeKind::Inside,
             );
             icon::letter(painter, id, rect, self.theme.faint);
@@ -446,7 +446,7 @@ impl Chrome {
                 painter.rect_stroke(
                     face.expand(1.5),
                     CornerRadius::same((TILE * 0.25 + 1.5).round() as u8),
-                    Stroke::new(1.25, self.theme.accent_text),
+                    Stroke::new(1.25_f32, self.theme.accent_text), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                     egui::StrokeKind::Middle,
                 );
             }
@@ -519,7 +519,7 @@ impl Chrome {
                 painter.rect_stroke(
                     rect.shrink(2.0),
                     CornerRadius::same(3),
-                    Stroke::new(1.0, self.theme.line),
+                    Stroke::new(1.0_f32, self.theme.line), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                     egui::StrokeKind::Inside,
                 );
                 painter.text(
@@ -589,7 +589,7 @@ impl Chrome {
                 egui::pos2(x, rect.top() + 4.0),
                 egui::pos2(x, rect.bottom() - 4.0),
             ],
-            Stroke::new(1.0, self.theme.line),
+            Stroke::new(1.0_f32, self.theme.line), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
         );
     }
 
@@ -804,7 +804,7 @@ impl Chrome {
                             egui::pos2(c.x - 1.0, c.y + 3.5),
                             egui::pos2(c.x + 4.5, c.y - 4.0),
                         ],
-                        Stroke::new(1.8, self.theme.accent),
+                        Stroke::new(1.8_f32, self.theme.accent), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                     ));
                 }
                 let clicked = ui.button(name).clicked();
@@ -876,7 +876,7 @@ impl Chrome {
                     egui::pos2(c.x - 1.0, c.y + 3.5),
                     egui::pos2(c.x + 4.5, c.y - 4.0),
                 ],
-                Stroke::new(1.8, if off.is_some() { SHADOW } else { ink }),
+                Stroke::new(1.8_f32, if off.is_some() { SHADOW } else { ink }), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
             ));
         }
         write(egui::pos2(rect.left() + 26.0, rect.center().y - label.size().y * 0.5), label);

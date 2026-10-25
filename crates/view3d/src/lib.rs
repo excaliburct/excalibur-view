@@ -170,10 +170,14 @@ enum Reply {
     Frame(Frame),
 }
 
-/// The window's handle on a view. Dropping it ends the drawing thread.
+/// The window's handle on a view. Dropping it ends the drawing thread, and
+/// waits for the thread to put its graphics device away.
 pub struct View {
     jobs: mpsc::Sender<Job>,
     replies: mpsc::Receiver<Reply>,
+    // WHAT: the drawing thread itself, and a line that goes dead once it has finished.
+    // WHY: so dropping the view can wait for the graphics device to be put away, instead of leaving it to race the program's exit.
+    thread: Option<(std::thread::JoinHandle<()>, mpsc::Receiver<()>)>,
     state: State,
     newest: Option<Frame>,
     serial: u64,
@@ -188,12 +192,16 @@ impl View {
     pub fn start() -> View {
         let (jobs, work) = mpsc::channel();
         let (answer, replies) = mpsc::channel();
-        let started = std::thread::Builder::new().name("3D view".into()).spawn(move || worker(work, answer));
-        let state = match started {
-            Ok(_) => State::Starting,
-            Err(e) => State::Failed(format!("The 3D view couldn't start ({e}).")),
+        let (finished, gone) = mpsc::channel::<()>(); // WHAT: a line the thread holds until its very end. WHY: when it goes dead, everything the thread owned, the GPU device included, has been dropped.
+        let started = std::thread::Builder::new().name("3D view".into()).spawn(move || {
+            worker(work, answer); // WHAT: the drawing loop, until the view is dropped. WHY: it returns only after its device, queue and buffers are gone.
+            drop(finished); // WHAT: lets go of the line, last of all. WHY: says to the waiting view that the device is put away.
+        });
+        let (state, thread) = match started {
+            Ok(handle) => (State::Starting, Some((handle, gone))), // WHAT: keeps hold of the running thread. WHY: so Drop can wait for it.
+            Err(e) => (State::Failed(format!("The 3D view couldn't start ({e}).")), None), // WHAT: no thread to wait for. WHY: it never started.
         };
-        View { jobs, replies, state, newest: None, serial: 0, anchor: None, bounds: Vec::new(), whole: None }
+        View { jobs, replies, thread, state, newest: None, serial: 0, anchor: None, bounds: Vec::new(), whole: None } // WHAT: the handle, with the thread kept. WHY: the thread is waited for when the handle goes.
     }
 
     /// Takes in whatever the drawing thread has said since last asked.
@@ -321,6 +329,23 @@ impl View {
         let (tx, rx) = mpsc::channel();
         let _ = self.jobs.send(Job::Picture(request, tx));
         rx
+    }
+}
+
+/// How long dropping a view waits for its thread to put the device away.
+const FINISH: Duration = Duration::from_secs(5); // WHAT: five seconds at most. WHY: a thread stuck in a driver must not hang the window that closes it.
+
+impl Drop for View {
+    fn drop(&mut self) {
+        // WHAT: swaps the job line for one nobody listens on, dropping the real one. WHY: the thread sees its line close and stops.
+        drop(std::mem::replace(&mut self.jobs, mpsc::channel().0));
+        if let Some((handle, gone)) = self.thread.take() { // WHAT: the thread, when there is one. WHY: a view that never started has nothing to wait for.
+            // WHAT: waits until the thread's line goes dead, at most FINISH. WHY: the line only goes dead once the device is dropped.
+            if let Err(mpsc::RecvTimeoutError::Disconnected) = gone.recv_timeout(FINISH) {
+                let _ = handle.join(); // WHAT: collects the finished thread. WHY: nothing of it outlives the view; a panic in it has nothing left to report here, so it is set aside.
+            }
+            // WHAT: past FINISH the thread is left to end by itself. WHY: better than a window that never closes; this is only the old behaviour.
+        }
     }
 }
 

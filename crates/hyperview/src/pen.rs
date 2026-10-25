@@ -508,7 +508,7 @@ fn swatches(ui: &mut egui::Ui, line: egui::Color32) -> Option<[u8; 4]> {
         for (name, rgb) in menu_colours() {
             let (rect, response) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
             ui.painter().rect_filled(rect.shrink(2.0), 3.0, egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
-            ui.painter().rect_stroke(rect.shrink(2.0), 3.0, egui::Stroke::new(1.0, line), egui::StrokeKind::Inside);
+            ui.painter().rect_stroke(rect.shrink(2.0), 3.0, egui::Stroke::new(1.0_f32, line), egui::StrokeKind::Inside); // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
             if response.on_hover_text(name).clicked() {
                 picked = Some(rgb);
             }
@@ -835,7 +835,7 @@ impl App {
                             ui.painter().rect_stroke(
                                 rect.shrink(2.0),
                                 3.0,
-                                egui::Stroke::new(1.0, theme.line),
+                                egui::Stroke::new(1.0_f32, theme.line), // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
                                 egui::StrokeKind::Inside,
                             );
                             response.on_hover_text(name).clicked()
