@@ -1563,8 +1563,9 @@ impl App {
                         updatebox::Choice::Open => {}
                         updatebox::Choice::Later => self.dismissed_update = Some(version),
                         updatebox::Choice::Download => {
+                            let page = updatebox::download_page(Some(version.as_str())); // WHAT: the offered version's own release page. WHY: "latest" skips early releases, so an early-channel office was sent to the version it already had.
                             self.dismissed_update = Some(version);
-                            if let Some(page) = hub::web::download_page(crate::trust::HOME_FEED) {
+                            if let Some(page) = page {
                                 ctx.open_url(egui::OpenUrl::new_tab(page));
                             }
                         }
