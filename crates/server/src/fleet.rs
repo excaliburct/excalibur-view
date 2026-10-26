@@ -19,7 +19,7 @@
 //!   the same wire shape Citadel answers with, so the Fleet's Devices view
 //!   works here without a line of per-product code.
 //! - `POST /api/admin/update` — key-gated. A signed release, delivered
-//!   verbatim.
+//!   verbatim. Up to [`LARGEST_PUSH`], read only once the key is right.
 //! - `POST /api/admin/update/rollback` — key-gated. Put the office back.
 //!
 //! **The Fleet cannot mint a build.** What arrives at `/api/admin/update` is
@@ -37,7 +37,9 @@
 
 use std::sync::Arc;
 
+use axum::body::{Body, Bytes, HttpBody}; // WHAT: the raw request body, its chunks, and the trait that reads them. WHY: a push is read by hand, after the key is checked and no further than its limit.
 use axum::extract::{Query, State};
+use axum::http::header::{CONTENT_LENGTH, EXPECT}; // WHAT: the two headers that say how big a body is and whether the caller waits before sending it. WHY: an oversized push is refused from those before any of it is read.
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -312,6 +314,31 @@ async fn presence(
 
 // ---- taking a release -----------------------------------------------------
 
+/// The largest push `/api/admin/update` takes, as it arrives: the JSON, with
+/// the installer in it as base64 (a third bigger than the installer).
+///
+/// Sized from what is really sent. One push carries one platform's
+/// program, and the biggest today is the Linux one at about 60 MB, which
+/// arrives as about 80 MB; the Windows push is about 62 MB. 192 MiB is more
+/// than twice that, so a program can grow to about 140 MB before this needs
+/// changing, and it stays well short of what an office server should hold in
+/// memory for one request. Only this route has it: everywhere else on this
+/// channel keeps the 2 MB that every small request gets.
+pub const LARGEST_PUSH: usize = 192 * 1024 * 1024; // WHAT: 192 MiB. WHY: twice and more the biggest real push (about 80 MB), where axum's default 2 MB refused every one of them.
+
+/// How much of a push that is too big is read and thrown away, so the caller
+/// is still listening when it is told so.
+///
+/// A server that answers and hangs up while the caller is still sending makes
+/// the caller's next write fail, and all it then reports is "broken pipe",
+/// never the answer. Reading the rest (into nothing, so it costs no memory)
+/// lets the refusal arrive as a plain 413. Only a caller that has already
+/// given the right key gets this, and only up to here.
+pub const READ_PAST_AT_MOST: u64 = 1024 * 1024 * 1024; // WHAT: 1 GiB thrown away at most. WHY: covers any honest mistake (several programs in one push) with a readable answer, and no more.
+
+/// What a push too big for [`LARGEST_PUSH`] is told.
+const TOO_BIG: &str = "that release is larger than this server takes in one push (192 MiB)"; // WHAT: the refusal, with the limit in it. WHY: whoever sent it can see at once what is wrong and by how much it has to shrink.
+
 #[derive(Deserialize)]
 pub struct Push {
     /// The signed manifest, exactly as the release tool produced it.
@@ -336,12 +363,24 @@ struct Landed {
     message: String,
 }
 
+/// Takes a pushed release.
+///
+/// The key is checked before a byte of the body is read. The body is read
+/// here rather than by axum's `Json`, because an extractor reads the body
+/// before the handler runs, and with a limit big enough for a real push that
+/// would let anybody who can reach the port make the server take in 192 MiB
+/// before being told no.
 async fn update(
     State(server): State<Shared>,
     headers: HeaderMap,
-    Json(push): Json<Push>,
+    body: Body,
 ) -> Result<Json<Landed>, No> {
-    maintainer(&server, &headers)?;
+    maintainer(&server, &headers)?; // WHAT: the maintenance key, first. WHY: nothing of the body has been read yet, so a caller without the key costs the server nothing.
+    let bytes = read_push(&headers, body).await?; // WHAT: the push, read up to its limit. WHY: a real push is tens of megabytes, and one too big is refused with a plain 413.
+    let Ok(push) = serde_json::from_slice::<Push>(&bytes) else {
+        return Err(No(StatusCode::BAD_REQUEST, "that push is not a release")); // WHAT: a body that is not a push, refused. WHY: the same refusal Json gave before, said in the channel's own words.
+    };
+    drop(bytes); // WHAT: lets go of the raw body. WHY: the installer is now in `push`, and holding both would double what the push costs in memory.
 
     use base64::Engine;
     let Ok(installer) = base64::engine::general_purpose::STANDARD.decode(push.installer.as_bytes())
@@ -412,6 +451,71 @@ async fn update(
             format!("{version} is on the server, held back until somebody marks it ready.")
         },
     }))
+}
+
+/// Reads a push's body, no further than [`LARGEST_PUSH`].
+///
+/// A push too big is refused with 413, from its Content-Length when it says
+/// one and as soon as it passes the limit when it does not. Before that
+/// answer, the rest of it is read into nothing (see [`READ_PAST_AT_MOST`]), so
+/// the caller hears the 413 instead of a broken connection. A caller that
+/// asked to wait before sending ("Expect: 100-continue") is answered at once
+/// and never sends it.
+async fn read_push(headers: &HeaderMap, mut body: Body) -> Result<Vec<u8>, No> {
+    let declared = headers
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok()); // WHAT: the size the caller says it is sending. WHY: one too big can be refused before any of it is read.
+    let waits = headers
+        .get(EXPECT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("100-continue")); // WHAT: whether the caller waits to be told to go on. WHY: then a refusal now means it never sends the body at all.
+    if let Some(size) = declared.filter(|&n| n > LARGEST_PUSH as u64) {
+        let budget = if waits { 0 } else { size.min(READ_PAST_AT_MOST) }; // WHAT: nothing for a caller that waits, else what it said it is sending, but never more than the cap. WHY: a waiting caller has not sent it and must not be asked to; anyone else is read past only so far.
+        read_past(&mut body, budget).await; // WHAT: reads that much into nothing. WHY: so a caller still sending is listening when the 413 comes.
+        return Err(No(StatusCode::PAYLOAD_TOO_LARGE, TOO_BIG)); // WHAT: refused for its size. WHY: a clear answer that says what is wrong.
+    }
+    let mut kept = Vec::with_capacity(declared.unwrap_or(0) as usize); // WHAT: room for what it says it is sending. WHY: under the limit, by the check above, so one allocation instead of many.
+    while let Some(chunk) = next_chunk(&mut body).await {
+        let Ok(chunk) = chunk else {
+            return Err(No(StatusCode::BAD_REQUEST, "the push did not arrive whole")); // WHAT: a body that broke off. WHY: half an installer is never taken.
+        };
+        if kept.len() + chunk.len() > LARGEST_PUSH {
+            let so_far = (kept.len() + chunk.len()) as u64; // WHAT: how much has come so far. WHY: counts against what is read past.
+            drop(kept); // WHAT: lets go of what was kept. WHY: it is not going to be used, and need not be held while the rest is read past.
+            read_past(&mut body, READ_PAST_AT_MOST.saturating_sub(so_far)).await; // WHAT: the rest, into nothing. WHY: so the 413 is heard.
+            return Err(No(StatusCode::PAYLOAD_TOO_LARGE, TOO_BIG)); // WHAT: refused for its size. WHY: it said no size, and turned out bigger than the limit.
+        }
+        kept.extend_from_slice(&chunk); // WHAT: keeps the chunk. WHY: under the limit, so it is part of the push.
+    }
+    Ok(kept) // WHAT: the whole push. WHY: it came in under the limit.
+}
+
+/// The next chunk of a body's data, or `None` at its end. Trailers are not
+/// data and are passed over.
+async fn next_chunk(body: &mut Body) -> Option<Result<Bytes, axum::Error>> {
+    loop {
+        let frame = std::future::poll_fn(|cx| std::pin::Pin::new(&mut *body).poll_frame(cx)).await?; // WHAT: the next frame, or None at the end. WHY: read a frame at a time, so the limit is checked as it comes.
+        match frame {
+            Err(e) => return Some(Err(e)), // WHAT: the body broke off. WHY: said to the caller, who refuses the push.
+            Ok(frame) => {
+                if let Ok(data) = frame.into_data() {
+                    return Some(Ok(data)); // WHAT: a chunk of data. WHY: that is what a push is made of.
+                } // WHAT: anything else (trailers) is passed over. WHY: a push has nothing in them.
+            }
+        }
+    }
+}
+
+/// Reads up to `at_most` more of a body and throws it away.
+async fn read_past(body: &mut Body, at_most: u64) {
+    let mut read = 0u64; // WHAT: how much has been thrown away. WHY: it stops at `at_most`.
+    while read < at_most {
+        match next_chunk(body).await {
+            Some(Ok(chunk)) => read += chunk.len() as u64, // WHAT: counted and dropped. WHY: costs no memory beyond one chunk.
+            _ => break, // WHAT: the end of the body, or it broke off. WHY: nothing more to read either way.
+        }
+    }
 }
 
 /// What a rollback may be narrowed to. The Fleet sends no body at all, which

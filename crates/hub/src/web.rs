@@ -112,6 +112,29 @@ pub fn download_page(feed: &str) -> Option<String> {
     Some(format!("https://github.com/{owner}/{repo}/releases/latest"))
 }
 
+/// The page for one version's own release, `.../releases/tag/v<version>`,
+/// and the latest release's page when no usable version is given.
+///
+/// "Latest" is the newest full release only. An office on the early channel
+/// is offered early releases that "latest" skips, so sending them there
+/// would hand them the version they already have.
+pub fn release_page(feed: &str, version: Option<&str>) -> Option<String> {
+    let latest = download_page(feed)?; // WHAT: the feed's latest-release page, or None for a feed that is not GitHub's. WHY: the tag page is built from the same place, and a feed with neither has no page at all.
+    let version = version.map(|v| v.trim().trim_start_matches('v')).filter(|v| plain_version(v)); // WHAT: the version without a leading "v", kept only when it looks like a version. WHY: it goes into an address, so anything that could leave the releases page is dropped for "latest".
+    match version {
+        Some(v) => Some(format!("{}tag/v{v}", latest.trim_end_matches("latest"))), // WHAT: ".../releases/" plus "tag/v0.6.23". WHY: the release's tags are "v" and the version, as the publishing script makes them.
+        None => Some(latest), // WHAT: the latest release. WHY: with no version known, the newest full release is the best page there is.
+    }
+}
+
+/// A version as the releases are tagged: a digit first, then digits,
+/// letters, dots and dashes, and not too long to be one.
+fn plain_version(v: &str) -> bool {
+    v.len() <= 40 // WHAT: a cap on its length. WHY: no real version comes close, and an address is no place for an essay.
+        && v.starts_with(|c: char| c.is_ascii_digit()) // WHAT: starts with a number. WHY: every release is tagged by its number.
+        && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') // WHAT: only characters a tag uses. WHY: a slash, "?" or "#" would point the browser somewhere else.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +148,32 @@ mod tests {
         );
         assert_eq!(download_page("https://example.com/releases.json"), None);
         assert_eq!(download_page("https://api.github.com/repos/x/releases"), None);
+    }
+
+    // WHAT: Download goes to the offered version's own page. WHY: an early release is skipped by "latest", so an early-channel office sent there got the old version again.
+    #[test]
+    fn the_download_page_for_a_version_is_that_version_s_release() {
+        let feed = "https://api.github.com/repos/excaliburct/hyperview-releases/releases"; // WHAT: the feed the program reads. WHY: the page is worked out from it.
+        assert_eq!(
+            release_page(feed, Some("0.6.23")).as_deref(),
+            Some("https://github.com/excaliburct/hyperview-releases/releases/tag/v0.6.23")
+        ); // WHAT: a known version opens its tag. WHY: that is the release the box offered.
+        assert_eq!(
+            release_page(feed, Some(" v0.7.0-beta.1 ")).as_deref(),
+            Some("https://github.com/excaliburct/hyperview-releases/releases/tag/v0.7.0-beta.1")
+        ); // WHAT: a leading "v" and spaces are not doubled into the tag. WHY: the tag is "v" once.
+        assert_eq!(
+            release_page(feed, None).as_deref(),
+            Some("https://github.com/excaliburct/hyperview-releases/releases/latest")
+        ); // WHAT: no version, the latest page. WHY: the fallback still gets somebody a copy.
+        for odd in ["", "v", "../../evil", "0.6.23/../../x", "0.6.23?x=1", "0.6.23#top", "latest"] {
+            assert_eq!(
+                release_page(feed, Some(odd)).as_deref(),
+                Some("https://github.com/excaliburct/hyperview-releases/releases/latest"),
+                "{odd:?}"
+            ); // WHAT: anything that is not a plain version falls back to latest. WHY: it would go into the address otherwise.
+        }
+        assert_eq!(release_page("https://example.com/releases.json", Some("0.6.23")), None); // WHAT: a feed that is not GitHub's has no page. WHY: the same as download_page.
     }
 
     #[test]

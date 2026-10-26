@@ -1375,6 +1375,197 @@ fn a_release_offered_without_the_maintenance_key_gets_nowhere() {
     }
 }
 
+// ---- how big a push may be ---------------------------------------------------
+//
+// A real push is one platform's program in base64, tens of megabytes. axum's
+// default 2 MB refused every one, and the caller saw only "broken pipe". These
+// prove a real-sized push gets in, a too-big one is told so in words, and a
+// caller without the key is turned away before the server reads its body.
+
+/// A made-up release for an installer, signed by nobody this build trusts.
+fn unsigned_release(installer: &[u8]) -> Release {
+    Release {
+        version: "9.9.9".into(), // WHAT: a version no real build has. WHY: nothing real is mistaken for it.
+        channel: Channel::Stable,
+        platform: "linux-x64".into(), // WHAT: the Linux build. WHY: it is the biggest push there is today.
+        published: "2026-10-25T00:00:00Z".into(),
+        notes: "Made up".into(),
+        download: "/api/v1/update/9.9.9/download?platform=linux-x64".into(),
+        bytes: installer.len() as u64, // WHAT: its real size. WHY: the manifest describes the file it came with.
+        digest: "00".repeat(32),
+        signature: "11".repeat(64),
+        key: "nobody".into(), // WHAT: no key this build pins. WHY: it must be refused at the signature, after the size check.
+        minimum_api_version: 1,
+    }
+}
+
+/// A connection to a running server, with a generous read timeout.
+fn a_socket(server: &Running) -> std::net::TcpStream {
+    let address = server.base.trim_start_matches("http://"); // WHAT: host and port. WHY: these tests speak HTTP by hand.
+    let stream = std::net::TcpStream::connect(address).expect("a connection"); // WHAT: a plain socket. WHY: so what the server does with the connection shows, not what a client library hides.
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(60))).unwrap(); // WHAT: a minute to answer. WHY: a server that waits for a body it should not read never answers, and the test must fail rather than hang.
+    stream
+}
+
+/// Reads the server's answer: its status line and whatever body follows.
+/// Panics if the connection was broken instead of answered.
+fn the_answer(stream: &mut std::net::TcpStream) -> String {
+    use std::io::Read;
+    let mut got = Vec::new(); // WHAT: everything read so far. WHY: the answer may come in pieces.
+    let mut buffer = [0u8; 8192];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break, // WHAT: the server closed after answering. WHY: the answer is all there.
+            Ok(n) => got.extend_from_slice(&buffer[..n]), // WHAT: more of the answer. WHY: kept until it is whole.
+            Err(e) => panic!("the connection broke instead of being answered: {e} (so far: {:?})", String::from_utf8_lossy(&got)), // WHAT: a reset or a timeout fails the test. WHY: that is the failure the caller saw before.
+        }
+        let text = String::from_utf8_lossy(&got).to_string(); // WHAT: the answer as text. WHY: to see whether it is whole yet.
+        if let Some(end) = text.find("\r\n\r\n") {
+            if text[end..].contains('}') {
+                return text; // WHAT: the headers and the JSON body. WHY: that is all a test reads.
+            }
+        }
+    }
+    String::from_utf8_lossy(&got).to_string()
+}
+
+#[test]
+fn a_push_the_size_of_a_real_build_gets_past_the_size_check() {
+    let key = "a-long-maintenance-key-nobody-guesses";
+    let server = start_maintained(key);
+    let installer = vec![0x5a_u8; 60 * 1024 * 1024]; // WHAT: 60 MiB, the size of the Linux program. WHY: the biggest push there is today.
+    use base64::Engine;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "release": unsigned_release(&installer),
+        "installer": base64::engine::general_purpose::STANDARD.encode(&installer),
+        "ready": false,
+    }))
+    .unwrap(); // WHAT: the push, as the Fleet sends it. WHY: the size that matters is the base64 one.
+    assert!(body.len() > 80 * 1024 * 1024, "{}", body.len()); // WHAT: over 80 MiB on the wire. WHY: the test is only worth anything at a real size.
+    let said = ureq::post(&format!("{}/api/admin/update", server.base))
+        .set(hyperview_server::fleet::KEY_HEADER, key)
+        .set("Content-Type", "application/json")
+        .send_bytes(&body)
+        .expect("a push this size is answered, not refused") // WHAT: a 200. WHY: a 413 here is the bug this fixes.
+        .into_string()
+        .expect("a body");
+    let answer: serde_json::Value = serde_json::from_str(&said).expect("json");
+    let why = answer["skipped"][0].as_str().unwrap_or_default().to_lowercase(); // WHAT: why it was not taken. WHY: it must be the signature, which is checked only after the whole push is in.
+    assert!(why.contains("signature"), "it should have got as far as the signature: {said}");
+}
+
+#[test]
+fn a_push_bigger_than_the_server_takes_is_told_so_and_not_cut_off() {
+    use std::io::Write;
+    let key = "a-long-maintenance-key-nobody-guesses";
+    let server = start_maintained(key);
+    let size = hyperview_server::fleet::LARGEST_PUSH + 1; // WHAT: one byte over. WHY: the limit itself is what is tested.
+    let mut stream = a_socket(&server);
+    write!(
+        stream,
+        "POST /api/admin/update HTTP/1.1\r\nHost: test\r\n{}: {key}\r\nContent-Type: application/json\r\nContent-Length: {size}\r\n\r\n",
+        hyperview_server::fleet::KEY_HEADER
+    )
+    .unwrap(); // WHAT: the headers, with the right key and the size. WHY: the way the Fleet sends a push, with no Expect.
+    let chunk = vec![b'a'; 1024 * 1024]; // WHAT: a megabyte at a time. WHY: sent the way a real upload goes, without holding it all.
+    let mut sent = 0usize;
+    while sent < size {
+        let n = chunk.len().min(size - sent); // WHAT: the last piece is whatever is left. WHY: exactly the size it said.
+        stream.write_all(&chunk[..n]).unwrap_or_else(|e| panic!("the server cut the push off after {sent} bytes: {e}")); // WHAT: a broken pipe fails the test. WHY: that was all the Fleet ever saw.
+        sent += n;
+    }
+    let answer = the_answer(&mut stream);
+    assert!(answer.starts_with("HTTP/1.1 413"), "{answer}"); // WHAT: 413. WHY: too big is a clear refusal.
+    assert!(answer.contains("192 MiB"), "and it should say what the limit is: {answer}");
+}
+
+#[test]
+fn a_push_of_no_stated_size_is_told_so_once_it_passes_the_limit() {
+    use std::io::Write;
+    let key = "a-long-maintenance-key-nobody-guesses";
+    let server = start_maintained(key);
+    let mut stream = a_socket(&server);
+    write!(
+        stream,
+        "POST /api/admin/update HTTP/1.1\r\nHost: test\r\n{}: {key}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n",
+        hyperview_server::fleet::KEY_HEADER
+    )
+    .unwrap(); // WHAT: a push that says no size. WHY: the limit must hold when it is found out by counting.
+    let chunk = vec![b'a'; 1024 * 1024];
+    let mut sent = 0usize;
+    while sent <= hyperview_server::fleet::LARGEST_PUSH + 32 * 1024 * 1024 { // WHAT: 32 MiB past the limit. WHY: more than the socket's buffers hold, so a server that stopped reading at the limit would cut it off.
+        write!(stream, "{:x}\r\n", chunk.len()).unwrap(); // WHAT: the chunk's size line. WHY: how a body of no stated size is sent.
+        stream.write_all(&chunk).unwrap_or_else(|e| panic!("the server cut the push off after {sent} bytes: {e}"));
+        stream.write_all(b"\r\n").unwrap();
+        sent += chunk.len();
+    }
+    stream.write_all(b"0\r\n\r\n").unwrap(); // WHAT: the end of the body. WHY: well past the limit, and done.
+    let answer = the_answer(&mut stream);
+    assert!(answer.starts_with("HTTP/1.1 413"), "{answer}");
+}
+
+#[test]
+fn a_push_that_waits_to_be_told_to_go_on_is_refused_before_it_is_sent() {
+    use std::io::Write;
+    let key = "a-long-maintenance-key-nobody-guesses";
+    let server = start_maintained(key);
+    let mut stream = a_socket(&server);
+    write!(
+        stream,
+        "POST /api/admin/update HTTP/1.1\r\nHost: test\r\n{}: {key}\r\nContent-Type: application/json\r\nExpect: 100-continue\r\nContent-Length: {}\r\n\r\n",
+        hyperview_server::fleet::KEY_HEADER,
+        10u64 << 30
+    )
+    .unwrap(); // WHAT: 10 GiB announced, nothing sent. WHY: a caller that waits must hear no at once, not be asked to send it.
+    let answer = the_answer(&mut stream);
+    assert!(answer.starts_with("HTTP/1.1 413"), "{answer}");
+}
+
+#[test]
+fn a_push_far_too_big_is_read_past_only_as_far_as_the_cap() {
+    use std::io::Write;
+    let key = "a-long-maintenance-key-nobody-guesses";
+    let server = start_maintained(key);
+    let cap = hyperview_server::fleet::READ_PAST_AT_MOST; // WHAT: the most the server throws away. WHY: past that, a caller with the key still cannot keep it reading.
+    let declared = cap * 3; // WHAT: three times the cap. WHY: a server that read whatever it was told would take all of it.
+    let mut stream = a_socket(&server);
+    write!(
+        stream,
+        "POST /api/admin/update HTTP/1.1\r\nHost: test\r\n{}: {key}\r\nContent-Type: application/json\r\nContent-Length: {declared}\r\n\r\n",
+        hyperview_server::fleet::KEY_HEADER
+    )
+    .unwrap(); // WHAT: the right key, and a size far over the cap. WHY: the cap is about callers that have the key.
+    let chunk = vec![b'a'; 1024 * 1024];
+    let mut sent = 0u64; // WHAT: how much the server took before it stopped reading. WHY: that is what the cap limits.
+    while sent < declared {
+        if stream.write_all(&chunk).is_err() {
+            break; // WHAT: the server stopped reading and closed. WHY: expected, once it has read as far as the cap.
+        }
+        sent += chunk.len() as u64;
+    }
+    let slack = 64 * 1024 * 1024; // WHAT: room for what the sockets' buffers hold. WHY: those bytes are written but never read by the server.
+    assert!(sent >= cap, "it should have read as far as the cap, not stopped at {sent}"); // WHAT: it did read past, up to the cap. WHY: that is what gives an honest caller a readable answer.
+    assert!(sent <= cap + slack, "it read {sent} bytes, past the cap of {cap}"); // WHAT: and no further. WHY: a caller must not be able to make it read without end.
+}
+
+#[test]
+fn a_big_push_without_the_key_is_turned_away_before_it_is_read() {
+    use std::io::Write;
+    let server = start_maintained("a-long-maintenance-key-nobody-guesses");
+    for key in [None, Some("a-wrong-maintenance-key-of-some-length")] {
+        let mut stream = a_socket(&server);
+        let line = key.map(|k| format!("{}: {k}\r\n", hyperview_server::fleet::KEY_HEADER)).unwrap_or_default(); // WHAT: no key, or a wrong one. WHY: both must be turned away the same.
+        write!(
+            stream,
+            "POST /api/admin/update HTTP/1.1\r\nHost: test\r\n{line}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            150 * 1024 * 1024
+        )
+        .unwrap(); // WHAT: says 150 MiB, under the limit, and sends none of it. WHY: a server that read the body before the key would sit waiting for it, and never answer.
+        let answer = the_answer(&mut stream);
+        assert!(answer.starts_with("HTTP/1.1 401"), "{key:?}: {answer}"); // WHAT: refused at once. WHY: the key is checked before a byte of the body is read.
+    }
+}
+
 #[test]
 fn the_fleet_can_ask_who_is_connected_and_the_answer_names_the_seat() {
     // A maintained server with one seat on it, so the question has an answer.

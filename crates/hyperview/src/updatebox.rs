@@ -115,6 +115,19 @@ pub enum Offer<'a> {
     Download { why: Option<&'a str> },
 }
 
+/// What the box says to a copy that is not the installed one: a download
+/// folder's copy, or one started from a menu entry somebody made by hand.
+/// Such a copy never updates, so saying only "Download" left people on it.
+pub const NOT_INSTALLED: &str = "This copy is not the installed one, so it does not update itself. \
+     Download the new version, run the downloaded program once so it installs itself, \
+     and from then on open Excalibur View from the Start menu or your applications menu."; // WHAT: the three steps, in order. WHY: running the download once is what installs it, and opening the installed copy from the menu is what keeps it up to date.
+
+/// The page Download opens for `version`: that version's own release, or the
+/// latest release's when there is no version to go by.
+pub fn download_page(version: Option<&str>) -> Option<String> {
+    hub::web::release_page(crate::trust::HOME_FEED, version) // WHAT: the offered version's release page, from the program's own feed. WHY: "latest" skips early releases, so an early-channel office sent there got the old version.
+}
+
 /// What somebody chose in the box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Choice {
@@ -201,12 +214,7 @@ pub fn show(
                     theme.faint,
                 ),
                 Offer::Download { why: Some(why) } => (format!("It could not be installed here: {why}"), theme.warn),
-                Offer::Download { why: None } => (
-                    "This copy is not the installed one, so it does not update itself. \
-                     Download puts the new version on this computer."
-                        .to_string(),
-                    theme.faint,
-                ),
+                Offer::Download { why: None } => (NOT_INSTALLED.to_string(), theme.faint), // WHAT: what to do with a copy that is not the installed one. WHY: said step by step, so the next version is one that updates itself.
             };
             ui.add(egui::Label::new(RichText::new(said).size(11.5).color(colour)).wrap());
 
@@ -614,5 +622,22 @@ mod tests {
         a_pass(&ctx, size, vec![press(false)], |ctx| may = (may_open(ctx, false), may_open(ctx, true)));
         a_pass(&ctx, size, vec![], |ctx| may = (may_open(ctx, false), may_open(ctx, true)));
         assert_eq!(may, (true, true));
+    }
+
+    // WHAT: Download opens the offered version's release, not "latest". WHY: an early-channel office was sent to the full release it already had.
+    #[test]
+    fn download_opens_the_offered_version_s_own_release() {
+        let page = download_page(Some("0.6.23")).expect("the program's feed is GitHub's"); // WHAT: the page for a known version. WHY: it is what the button opens.
+        assert!(page.ends_with("/releases/tag/v0.6.23"), "{page}"); // WHAT: that version's tag. WHY: the early release is there, and "latest" skips it.
+        let fallback = download_page(None).expect("the program's feed is GitHub's"); // WHAT: the page with no version known. WHY: the button must still go somewhere useful.
+        assert!(fallback.ends_with("/releases/latest"), "{fallback}"); // WHAT: the latest release. WHY: the fallback is the old behaviour.
+    }
+
+    // WHAT: the not-installed message says what to do. WHY: a person running a copy from a hand-made menu entry never got updates and was not told why or how.
+    #[test]
+    fn a_copy_that_is_not_installed_is_told_how_to_get_one_that_is() {
+        assert!(NOT_INSTALLED.contains("run the downloaded program once"), "{NOT_INSTALLED}"); // WHAT: run it once. WHY: that is what installs it.
+        assert!(NOT_INSTALLED.contains("installs itself"), "{NOT_INSTALLED}"); // WHAT: says it installs itself. WHY: so nobody looks for an installer step that is not there.
+        assert!(NOT_INSTALLED.contains("Start menu") && NOT_INSTALLED.contains("applications menu"), "{NOT_INSTALLED}"); // WHAT: where to open it from on each system. WHY: opening the installed copy is what keeps it up to date.
     }
 }
