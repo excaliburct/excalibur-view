@@ -103,6 +103,28 @@ jobs:
           path: mobile/ios/build/export/*.ipa
           if-no-files-found: warn
 
+      # When the export or upload fails, Xcode writes its real reason only to
+      # its own distribution logs, in the runner's temporary folder, and the
+      # job log says just "Error Downloading App Information". These copy
+      # those logs out so the reason can be read. They hold no key: the App
+      # Store Connect key is a separate file in RUNNER_TEMP, removed below.
+      - name: Gather Xcode's distribution logs
+        if: failure()
+        run: |
+          set -u
+          mkdir -p "$RUNNER_TEMP/distlogs"
+          find "${TMPDIR:-/tmp}" /var/folders -maxdepth 6 -name '*.xcdistributionlogs' -print -exec cp -R {} "$RUNNER_TEMP/distlogs/" \; 2>/dev/null || true
+          ls -R "$RUNNER_TEMP/distlogs" | head -50
+
+      - name: Keep Xcode's distribution logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcode-distribution-logs
+          path: ${{ runner.temp }}/distlogs
+          if-no-files-found: warn
+          retention-days: 3
+
       - name: Forget the key
         if: always()
         run: rm -f "$RUNNER_TEMP/appstore.p8"
