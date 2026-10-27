@@ -83,9 +83,13 @@
 	<string>Excalibur View reaches your office's Excalibur View server on your company network, where your drawing sets and markups are kept.</string>
 
 	<!-- TLS to the office server, and PDF password protection, use standard
-	     encryption the app carries itself (rustls, AES). App Store Connect
-	     asks about it with every upload unless this is answered here. -->
+	     encryption the app carries itself (rustls, AES). That is standard
+	     encryption only (HTTPS, and opening protected PDFs), which is exempt:
+	     so the answer is false. "true" means non-exempt encryption, which
+	     App Store Connect refuses without export compliance documentation
+	     ("Invalid Export Compliance Code" on upload, 2026-10-27). App Store
+	     Connect asks about it with every upload unless this is answered here. -->
 	<key>ITSAppUsesNonExemptEncryption</key>
-	<true/>
+	<false/>
 </dict>
 </plist>
