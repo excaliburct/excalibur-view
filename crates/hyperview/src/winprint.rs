@@ -7,6 +7,9 @@
 //!
 //! Before this, printing handed a file to "whatever prints PDFs" — which, on a
 //! machine where Hyperview is the PDF program, was another Hyperview window.
+//!
+//! On Linux and the Mac the printers and their papers come from CUPS instead
+//! (see `cups.rs`), and the sheets go to the chosen printer through `lp`.
 
 /// How a sheet is sized onto the paper.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -140,6 +143,19 @@ pub const PRINT_FLAGS: i32 = 0x01 | 0x800;
 #[cfg(windows)]
 pub use self::windows_printing::*;
 
+/// A paper's name as a person reads it: Windows' names already are.
+#[cfg(windows)]
+pub fn paper_label(paper: &PaperSize) -> String {
+    paper.name.clone() // WHAT: the name Windows gave. WHY: it is already "Letter" or "ARCH D".
+}
+
+/// The paper a printer uses unless told: Windows keeps that in the
+/// printer's settings, which the dialog reads instead.
+#[cfg(windows)]
+pub fn default_paper(_printer: &str) -> Option<String> {
+    None // WHAT: nothing here. WHY: the settings say it on Windows.
+}
+
 #[cfg(not(windows))]
 pub use self::elsewhere::*;
 
@@ -147,14 +163,37 @@ pub use self::elsewhere::*;
 mod elsewhere {
     use super::*;
 
+    /// The printers CUPS has, and its default. None at all where CUPS is
+    /// not there (a tablet, or a Linux box without it).
     pub fn printers() -> (Vec<String>, Option<String>) {
-        (Vec::new(), None)
+        if crate::platform::tablet() {
+            return (Vec::new(), None); // WHAT: none. WHY: a tablet prints through the system's own printing, with its own list.
+        }
+        crate::cups::Cups::system().printers().unwrap_or_default() // WHAT: CUPS's printers. WHY: Linux and the Mac both print through it.
     }
     pub fn render_to_dc(_library: Option<&std::path::Path>) -> Option<RenderToDc> {
         None
     }
-    pub fn paper_sizes(_printer: &str) -> Vec<PaperSize> {
-        Vec::new()
+    /// The papers a CUPS printer offers. The name is CUPS's own, which is
+    /// what goes back to it; `paper_label` makes it readable.
+    pub fn paper_sizes(printer: &str) -> Vec<PaperSize> {
+        let (papers, _) = crate::cups::Cups::system().papers(printer); // WHAT: what lpoptions lists. WHY: only sizes the printer takes are offered.
+        papers
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let (w, h) = p.inches.unwrap_or((0.0, 0.0)); // WHAT: the size, or nothing known. WHY: a size of nought is shown as the usual letter in the preview.
+                PaperSize { id: i as i16 + 1, name: p.keyword, size: ((w * 254.0).round() as i32, (h * 254.0).round() as i32) } // WHAT: numbered from one, in tenths of a millimetre. WHY: the same shape the Windows list has.
+            })
+            .collect()
+    }
+    /// The paper CUPS uses on a printer unless told otherwise.
+    pub fn default_paper(printer: &str) -> Option<String> {
+        crate::cups::Cups::system().papers(printer).1 // WHAT: the starred size in lpoptions. WHY: the dialog opens on it.
+    }
+    /// A paper's name as a person reads it.
+    pub fn paper_label(paper: &PaperSize) -> String {
+        crate::cups::label_of(&paper.name) // WHAT: "ARCHD" as "ARCHD (24 × 36 in)". WHY: CUPS's names are for programs.
     }
     pub fn settings(_printer: &str) -> Option<Vec<u8>> {
         None

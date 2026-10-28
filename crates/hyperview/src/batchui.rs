@@ -282,12 +282,31 @@ pub fn gathered(mut batching: Batching, mut files: Vec<PathBuf>) -> Batching {
             batching.files.push(file);
         }
     }
-    if batching.to.trim().is_empty() {
-        if let Some(folder) = batching.files.first().and_then(|f| f.parent()) {
-            batching.to = folder.join("Combined.pdf").display().to_string();
+    name_the_combined(&mut batching); // WHAT: Combined.pdf beside the first, unless somewhere was chosen. WHY: the same rule however the files arrived.
+    batching
+}
+
+/// Adds files to a batch's list, each once, in the order given, and names
+/// the combined file when nobody has yet.
+pub fn add_to_list(batching: &mut Batching, files: impl IntoIterator<Item = PathBuf>) {
+    for file in files {
+        if !batching.files.contains(&file) {
+            batching.files.push(file); // WHAT: on the end. WHY: each file once, in the order chosen.
         }
     }
-    batching
+    name_the_combined(batching); // WHAT: a file for the result. WHY: without one, Combine stayed greyed out until somebody typed a path.
+}
+
+/// The file a combine goes into, when nobody has said: Combined.pdf beside
+/// the first file. Before this, only files handed over by Windows' Explorer
+/// got a name; on Linux, where nothing hands files over that way, the box
+/// stayed empty and the Combine button stayed grey.
+pub fn name_the_combined(batching: &mut Batching) {
+    if batching.to.trim().is_empty() {
+        if let Some(folder) = batching.files.first().and_then(|f| f.parent()) {
+            batching.to = folder.join("Combined.pdf").display().to_string(); // WHAT: beside the first file. WHY: where somebody would look for it.
+        }
+    }
 }
 
 impl App {
@@ -330,6 +349,8 @@ impl App {
         let mut go = false;
         let mut add_files = false;
         let mut add_folder = false;
+        let mut add_open = false; // WHAT: Add the open drawings pressed. WHY: acted on after the window is drawn.
+        let mut add_from_list = false; // WHAT: Pick from a list pressed. WHY: the same.
         let mut copy_report = false;
         let mut pick_seal = false;
         let mut pick_revisions = false;
@@ -368,6 +389,17 @@ impl App {
                     }
                     if ui.small_button("Add a folder…").clicked() {
                         add_folder = true;
+                    }
+                    if !self.docs.is_empty() && ui.small_button("Add the open drawings").on_hover_text("Every drawing open in tabs now").clicked() {
+                        add_open = true; // WHAT: the drawings already open. WHY: a way to fill the list that needs no file window at all.
+                    }
+                    if crate::files::offer_own_list()
+                        && ui
+                            .small_button("Pick from a list…")
+                            .on_hover_text("Choose the files in Excalibur View's own list, for when the system's file window does not open or will not take several files. Dragging PDFs onto this window adds them too.")
+                            .clicked()
+                    {
+                        add_from_list = true; // WHAT: the program's own list. WHY: Linux's file window can be missing or refuse several files.
                     }
                     if !batching.files.is_empty() && ui.small_button("Clear").clicked() {
                         batching.files.clear();
@@ -1079,15 +1111,18 @@ impl App {
                 });
             });
 
-        if add_files {
-            self.filing.many(
-                crate::files::Choose::open_many().filter("Drawing sets (PDF)", &["pdf"]),
-                |app, picked| {
-                    if let Some(b) = app.batching.as_mut() {
-                        b.files.extend(picked);
-                    }
-                },
-            );
+        if add_files || add_from_list {
+            let choose = crate::files::Choose::open_many().filter("Drawing sets (PDF)", &["pdf"]); // WHAT: several PDFs. WHY: a batch is a list of sets.
+            let choose = if add_from_list { choose.here() } else { choose }; // WHAT: the program's own list, when asked for. WHY: see Pick from a list.
+            self.filing.many(choose, |app, picked| {
+                if let Some(b) = app.batching.as_mut() {
+                    add_to_list(b, picked); // WHAT: each once, and the combined file named. WHY: Combine can start straight away.
+                }
+            });
+        }
+        if add_open {
+            let open: Vec<PathBuf> = self.docs.iter().map(|d| d.path.clone()).collect(); // WHAT: every open drawing's file. WHY: in tab order.
+            add_to_list(&mut batching, open); // WHAT: added. WHY: Add the open drawings.
         }
         if add_folder {
             self.filing.one(crate::files::Choose::folder(), |app, folder| {
@@ -1100,7 +1135,7 @@ impl App {
                     ));
                 } else {
                     batching.error = None;
-                    batching.files.extend(found);
+                    add_to_list(batching, found); // WHAT: each once, and the combined file named. WHY: as for files added one by one.
                 }
             });
         }

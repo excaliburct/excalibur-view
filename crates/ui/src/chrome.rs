@@ -735,6 +735,12 @@ impl Chrome {
         }
     }
 
+    /// One menu's entries, drawn into a menu somewhere other than the menu
+    /// bar: simple mode's Measure and Markup buttons.
+    pub fn menu_entries(&mut self, ui: &mut Ui, entries: &'static [Entry]) {
+        self.entries(ui, entries); // WHAT: the same entries the menu bar draws. WHY: one list of tools, ticked and fired the same way wherever it is shown.
+    }
+
     fn entries(&mut self, ui: &mut Ui, entries: &'static [Entry]) {
         for entry in entries {
             match entry {

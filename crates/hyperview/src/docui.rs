@@ -322,6 +322,10 @@ impl App {
         let mut keep = true;
         let mut go = false;
         let mut pick_others = false;
+        let mut add_open = false; // WHAT: Add the other open drawings pressed. WHY: acted on after the window is drawn.
+        let mut pick_from_list = false; // WHAT: Pick from a list pressed. WHY: the same.
+        let others_open: Vec<PathBuf> = self.docs.iter().map(|d| d.path.clone()).filter(|p| *p != source).collect(); // WHAT: the other drawings open in tabs. WHY: what Add the other open drawings adds.
+        let others_open_count = others_open.len(); // WHAT: how many. WHY: the button only shows when there are some.
 
         egui::Window::new(setting.job.title())
             .collapsible(false)
@@ -475,9 +479,27 @@ impl App {
                             );
                         }
                         ui.add_space(4.0);
-                        if ui.button("Choose…").clicked() {
-                            pick_others = true;
-                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Choose…").clicked() {
+                                pick_others = true;
+                            }
+                            if setting.job == Job::Combine {
+                                if others_open_count > 0 && ui.button("Add the other open drawings").on_hover_text("Every other drawing open in tabs now").clicked() {
+                                    add_open = true; // WHAT: the drawings already open. WHY: a way to choose that needs no file window.
+                                }
+                                if crate::files::offer_own_list()
+                                    && ui
+                                        .button("Pick from a list…")
+                                        .on_hover_text("Choose the files in Excalibur View's own list, for when the system's file window does not open or will not take several files. Dragging PDFs onto this window adds them too.")
+                                        .clicked()
+                                {
+                                    pick_from_list = true; // WHAT: the program's own list. WHY: Linux's file window can be missing or refuse several files.
+                                }
+                                if !setting.others.is_empty() && ui.button("Clear").clicked() {
+                                    setting.others.clear(); // WHAT: start the list again. WHY: choosing now adds rather than replaces.
+                                }
+                            }
+                        });
                         if setting.job == Job::SlipSheet {
                             ui.add_space(8.0);
                             ui.checkbox(
@@ -1034,7 +1056,7 @@ impl App {
                     }
                 },
             );
-        } else if pick_others {
+        } else if pick_others || pick_from_list {
             let choose = if setting.job == Job::FromPictures {
                 crate::files::Choose::open_many()
                     .filter(
@@ -1047,11 +1069,19 @@ impl App {
             } else {
                 crate::files::Choose::open().filter("Drawing sets (PDF)", &["pdf"])
             };
+            let choose = if pick_from_list { choose.here() } else { choose }; // WHAT: the program's own list, when asked for. WHY: see Pick from a list.
             self.filing.many(choose, |app, picked| {
                 if let Some(setting) = app.doc_job.as_mut() {
-                    setting.others = picked;
+                    if setting.job == Job::Combine {
+                        add_others(setting, picked); // WHAT: added to the list, each once. WHY: files from two folders can be combined, a few at a time.
+                    } else {
+                        setting.others = picked; // WHAT: the one file. WHY: inserting or slip-sheeting takes one.
+                    }
                 }
             });
+        }
+        if add_open {
+            add_others(&mut setting, others_open); // WHAT: the other open drawings added. WHY: Add the other open drawings.
         }
 
         if go {
@@ -1124,6 +1154,18 @@ fn chosen(range: &str, sheets: usize) -> Vec<u32> {
         return (0..sheets as u32).collect();
     }
     crate::print::read_range(range, sheets)
+}
+
+/// Adds files to a Combine's list, each once and in the order given. Before
+/// this, choosing replaced the list, so files in two folders could not be
+/// combined, and on a desktop whose file window picks one file at a time
+/// (a Linux one without its portal) only one could ever be listed.
+pub fn add_others(setting: &mut Setting, files: impl IntoIterator<Item = PathBuf>) {
+    for file in files {
+        if !setting.others.contains(&file) {
+            setting.others.push(file); // WHAT: on the end. WHY: combined in the order chosen.
+        }
+    }
 }
 
 /// Turns what is on the window into the operation it describes, or `None` when
@@ -1316,6 +1358,15 @@ fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn choosing_files_to_combine_again_adds_to_the_list_rather_than_replacing_it() {
+        let mut setting = Setting::new(Job::Combine, std::path::Path::new("Set.pdf")); // WHAT: Document, Combine. WHY: the window that is filled.
+        add_others(&mut setting, vec![PathBuf::from("/a/One.pdf")]); // WHAT: one file chosen. WHY: a file window that picks one at a time.
+        add_others(&mut setting, vec![PathBuf::from("/b/Two.PDF"), PathBuf::from("/a/One.pdf")]); // WHAT: then another, and the first again. WHY: chosen a second time, from another folder.
+        assert_eq!(setting.others, vec![PathBuf::from("/a/One.pdf"), PathBuf::from("/b/Two.PDF")]); // WHAT: both, once each, in order. WHY: choosing used to replace the list, so only the last pick was combined.
+        assert!(matches!(build(&setting, std::path::Path::new("Set.pdf"), 1, 1), Some(Operation::Combine { ref sources, .. }) if sources.len() == 3)); // WHAT: this set and both others. WHY: what gets combined.
+    }
 
     #[test]
     fn an_empty_sheet_box_means_all_of_them() {

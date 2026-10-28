@@ -113,6 +113,9 @@ pub enum Ask {
     RunPlugin { id: String, input: plugin_api::Input },
     /// An administrator making a key for another system, such as FabWire.
     MakeIntegrationKey(String),
+    /// An administrator making a sync key: for a program that only keeps its
+    /// own projects in step with the server.
+    MakeSyncKey(String), // WHAT: asks for a key of purpose "sync". WHY: the narrower key a syncing program should hold, which Studio could not make before.
     RevokeKey(String),
     /// Tell another program at this address whenever a takeoff changes.
     AddNotice(String),
@@ -799,6 +802,16 @@ pub fn start(repaint: egui::Context) -> Link {
                         },
                     },
 
+                    Ask::MakeSyncKey(name) => match connected(&client) {
+                        Err(message) => say(&told, Told::Trouble(message)), // WHAT: not signed in. WHY: said, as for every other key.
+                        Ok(client) => match client.make_key(crate::serverui::SYNC_PURPOSE, &name) {
+                            Ok(key) => {
+                                say(&told, Told::IntegrationKey(Box::new(key))); // WHAT: the new key, to show once. WHY: the same place an integration key is shown.
+                                office(client, &told); // WHAT: the key list again. WHY: the new key appears in it.
+                            }
+                            Err(e) => say(&told, Told::Trouble(e.to_string())), // WHAT: the server's refusal. WHY: passed on as it is (only an administrator may make one).
+                        },
+                    },
                     Ask::MakeIntegrationKey(name) => match connected(&client) {
                         Err(message) => say(&told, Told::Trouble(message)),
                         Ok(client) => match client.make_key("integration", &name) {

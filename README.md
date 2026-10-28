@@ -80,6 +80,23 @@ copies, and a preview of the sheet on the paper. The sheets go straight to the
 printer, drawn by the PDF engine as vectors with their markups. No other
 program is opened.
 
+On Linux and the Mac the same dialog lists the printers CUPS has (`lpstat`),
+opens on the default, offers the paper sizes the chosen printer lists
+(`lpoptions`), and prints with `lp -d` to whichever was picked; the printer
+and paper are remembered for next time. With no CUPS on the computer it says
+so and opens the sheets in the PDF reader instead. `crates/hyperview/src/cups.rs`
+is tested against stand-in `lpstat`, `lpoptions` and `lp` programs.
+
+## Simple mode and quick tools
+
+**View → Simple Mode** puts the toolbars away and leaves one bar: open,
+select, pan, the measuring and markup tools, the scale, undo and redo, the
+pages, and **Full toolbars** to come back. It starts on for a tablet and off
+on a desktop, and the choice is kept per device. **Quick tools** are a bar
+down the right of each person's most-used tools (View → Choose Quick Tools),
+kept in that device's settings; the office server keeps no per-person
+settings to carry them between devices.
+
 ## Overlay Pages and Compare Documents
 
 Under the Document menu. **Overlay Pages** prints two issues of a sheet over

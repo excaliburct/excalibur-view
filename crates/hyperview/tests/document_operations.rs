@@ -731,6 +731,33 @@ fn a_batch_combine_puts_them_all_in_one_file_in_order() {
 }
 
 #[test]
+fn combining_files_added_a_few_at_a_time_from_two_folders_works_with_no_name_typed() {
+    // WHAT: what Combine does on a Linux desktop, end to end. WHY: there the files arrive through Add files, a folder, the open drawings or a drop, never from Explorer, and nobody had typed where the result goes.
+    let scratch = Scratch::new("combinelinux"); // WHAT: a folder of its own. WHY: cleaned up after.
+    let first = scratch.at("Job 6742"); // WHAT: one folder, with a space in its name. WHY: as real job folders are.
+    let second = scratch.at("revisions"); // WHAT: another folder. WHY: files from two places in one set.
+    std::fs::create_dir_all(&first).unwrap(); // WHAT: made. WHY: the sets go in them.
+    std::fs::create_dir_all(&second).unwrap(); // WHAT: made. WHY: as above.
+    let a = first.join("S-100 FRAMING.PDF"); // WHAT: an upper-case extension. WHY: how plotters and scanners name files, and what Linux's file window used to hide.
+    let b = second.join("s-200 rev 1.pdf"); // WHAT: an ordinary one. WHY: the two kinds side by side.
+    a_set(&a, 2, &["S-100", "S-101"]); // WHAT: two sheets. WHY: something to count.
+    a_set(&b, 1, &["S-200"]); // WHAT: one sheet. WHY: as above.
+
+    let mut batching = hyperview::batchui::Batching::new(hyperview::batchui::Which::Combine); // WHAT: the Combine window, fresh. WHY: as somebody opens it.
+    assert!(batching.job().is_none(), "nothing to combine yet"); // WHAT: the button greyed. WHY: no files.
+    hyperview::batchui::add_to_list(&mut batching, vec![a.clone()]); // WHAT: the first file added on its own. WHY: a file window that picks one at a time.
+    hyperview::batchui::add_to_list(&mut batching, vec![b.clone(), a.clone()]); // WHAT: then the second, with the first again. WHY: added a few at a time, each once.
+    assert_eq!(batching.files, vec![a.clone(), b.clone()], "each file once, in the order added"); // WHAT: the list. WHY: the order is the combined set's order.
+    let job = batching.job().expect("Combine can start without anybody typing where it goes"); // WHAT: the button live. WHY: it used to stay grey until a path was typed.
+    let hyperview::batch::Job::CombineAll { to } = &job else { panic!("a combine") }; // WHAT: where it goes. WHY: checked next.
+    assert_eq!(to.parent(), Some(first.as_path()), "beside the first file"); // WHAT: Combined.pdf in the first file's folder. WHY: where somebody looks for it.
+
+    let report = hyperview::render::batch_over(library(), &job, &batching.files).expect("the batch should run"); // WHAT: combined for real. WHY: through pdfium, as the window does it.
+    assert_eq!(report.failed(), 0, "{}", report.as_text()); // WHAT: nothing failed. WHY: Combine works on Linux.
+    assert_eq!(sheets_in(to), 3, "every sheet from both folders"); // WHAT: two and one. WHY: nothing lost.
+}
+
+#[test]
 fn a_batch_writes_beside_each_file_when_no_folder_is_given() {
     let scratch = Scratch::new("batchbeside");
     let one = scratch.at("A.pdf");
