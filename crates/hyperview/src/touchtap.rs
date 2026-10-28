@@ -43,7 +43,11 @@ pub struct Seen {
 /// for a double click to finish the shape. A finger is wider than a mouse
 /// pointer, so it is given more room.
 pub fn finish_reach(finger: bool) -> f32 {
-    if finger { 24.0 } else { 10.0 } // WHAT: the room a double click is allowed. WHY: a fingertip lands less exactly than a mouse.
+    if finger {
+        24.0
+    } else {
+        10.0
+    } // WHAT: the room a double click is allowed. WHY: a fingertip lands less exactly than a mouse.
 }
 
 /// Reads one frame of input for a tool that puts points down.
@@ -95,11 +99,17 @@ pub fn pointer(input: &egui::InputState) -> Option<egui::Pos2> {
 /// mouse moving or clicking with no touch says mouse; a frame with neither
 /// leaves it as it was.
 pub fn by_finger(events: &[egui::Event], was: bool) -> bool {
-    if events.iter().any(|e| matches!(e, egui::Event::Touch { .. })) {
+    if events
+        .iter()
+        .any(|e| matches!(e, egui::Event::Touch { .. }))
+    {
         return true; // WHAT: a touch this frame. WHY: a finger or a pen is on the screen.
     }
     let mouse = events.iter().any(|e| {
-        matches!(e, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. }) // WHAT: the pointer moved or clicked. WHY: with no touch alongside, that is a mouse or a trackpad.
+        matches!(
+            e,
+            egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. }
+        ) // WHAT: the pointer moved or clicked. WHY: with no touch alongside, that is a mouse or a trackpad.
     });
     if mouse {
         return false; // WHAT: a mouse was used. WHY: a tablet with a mouse or trackpad plugged in works as a desktop does.
@@ -125,7 +135,11 @@ pub fn stroke_width(pen: f64, pressures: &[f32]) -> f64 {
     if pressures.is_empty() || pen <= 0.0 {
         return pen; // WHAT: the pen's own width. WHY: no pressure was reported, or there is no width to vary.
     }
-    let average = pressures.iter().map(|p| p.clamp(0.0, 1.0) as f64).sum::<f64>() / pressures.len() as f64; // WHAT: how hard the stroke was pressed, on average. WHY: one width for the whole stroke.
+    let average = pressures
+        .iter()
+        .map(|p| p.clamp(0.0, 1.0) as f64)
+        .sum::<f64>()
+        / pressures.len() as f64; // WHAT: how hard the stroke was pressed, on average. WHY: one width for the whole stroke.
     pen * (0.6 + 0.8 * average) // WHAT: 0.6 times the width at the lightest touch, 1.4 times at the hardest. WHY: noticeably different, never vanishing or blotting.
 }
 
@@ -146,39 +160,81 @@ mod tests {
     use super::*;
 
     fn seen(clicked: bool, double: bool, secondary: bool, stopped: bool) -> Seen {
-        Seen { clicked, double_clicked: double, secondary_clicked: secondary, drag_stopped: stopped } // WHAT: one frame's events. WHY: short to write in each test.
+        Seen {
+            clicked,
+            double_clicked: double,
+            secondary_clicked: secondary,
+            drag_stopped: stopped,
+        } // WHAT: one frame's events. WHY: short to write in each test.
     }
 
     #[test]
     fn a_mouse_click_places_and_a_double_click_or_right_click_finishes() {
-        assert_eq!(read(seen(true, false, false, false), false, false), Tap::Place); // WHAT: a click. WHY: puts a point down, as always.
-        assert_eq!(read(seen(true, true, false, false), false, true), Tap::Finish); // WHAT: a double click on the last point. WHY: ends the shape.
-        assert_eq!(read(seen(false, false, true, false), false, false), Tap::Finish); // WHAT: a right click. WHY: ends the shape, as always.
-        assert_eq!(read(seen(false, false, false, true), false, false), Tap::Nothing); // WHAT: a mouse drag let go. WHY: dragging with a mouse places nothing, as before.
+        assert_eq!(
+            read(seen(true, false, false, false), false, false),
+            Tap::Place
+        ); // WHAT: a click. WHY: puts a point down, as always.
+        assert_eq!(
+            read(seen(true, true, false, false), false, true),
+            Tap::Finish
+        ); // WHAT: a double click on the last point. WHY: ends the shape.
+        assert_eq!(
+            read(seen(false, false, true, false), false, false),
+            Tap::Finish
+        ); // WHAT: a right click. WHY: ends the shape, as always.
+        assert_eq!(
+            read(seen(false, false, false, true), false, false),
+            Tap::Nothing
+        ); // WHAT: a mouse drag let go. WHY: dragging with a mouse places nothing, as before.
     }
 
     #[test]
     fn a_finger_lifting_after_aiming_or_a_long_press_puts_a_point_down() {
-        assert_eq!(read(seen(true, false, false, false), true, false), Tap::Place); // WHAT: a quick tap. WHY: a point.
-        assert_eq!(read(seen(false, false, false, true), true, false), Tap::Place); // WHAT: a slide then a lift. WHY: the point goes where it lifted.
-        assert_eq!(read(seen(false, false, true, false), true, false), Tap::Place); // WHAT: a finger held still. WHY: a slow tap is a point, and must not finish the shape and lose the points.
-        assert_eq!(read(seen(false, false, false, false), true, false), Tap::Nothing); // WHAT: a finger still moving. WHY: nothing until it settles or lifts.
+        assert_eq!(
+            read(seen(true, false, false, false), true, false),
+            Tap::Place
+        ); // WHAT: a quick tap. WHY: a point.
+        assert_eq!(
+            read(seen(false, false, false, true), true, false),
+            Tap::Place
+        ); // WHAT: a slide then a lift. WHY: the point goes where it lifted.
+        assert_eq!(
+            read(seen(false, false, true, false), true, false),
+            Tap::Place
+        ); // WHAT: a finger held still. WHY: a slow tap is a point, and must not finish the shape and lose the points.
+        assert_eq!(
+            read(seen(false, false, false, false), true, false),
+            Tap::Nothing
+        ); // WHAT: a finger still moving. WHY: nothing until it settles or lifts.
     }
 
     #[test]
     fn two_quick_taps_in_different_places_are_two_points_not_a_finish() {
-        assert_eq!(read(seen(true, true, false, false), true, false), Tap::Place); // WHAT: a fast second tap somewhere else. WHY: setting the scale is two quick taps, and must not end after one.
-        assert_eq!(read(seen(true, true, false, false), true, true), Tap::Finish); // WHAT: a double tap on the last point. WHY: ends a run of points.
+        assert_eq!(
+            read(seen(true, true, false, false), true, false),
+            Tap::Place
+        ); // WHAT: a fast second tap somewhere else. WHY: setting the scale is two quick taps, and must not end after one.
+        assert_eq!(
+            read(seen(true, true, false, false), true, true),
+            Tap::Finish
+        ); // WHAT: a double tap on the last point. WHY: ends a run of points.
     }
 
     /// One frame of input through a real egui context, with a canvas that
     /// senses clicks and drags the way the sheet does. Returns what the
     /// canvas saw, where the pointer hovered, and where a tool should act.
-    fn frame(ctx: &egui::Context, events: Vec<egui::Event>, time: f64) -> (Seen, Option<egui::Pos2>, Option<egui::Pos2>) {
+    fn frame(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        time: f64,
+    ) -> (Seen, Option<egui::Pos2>, Option<egui::Pos2>) {
         let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))), // WHAT: a window-sized screen. WHY: the canvas needs room to be under the finger.
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )), // WHAT: a window-sized screen. WHY: the canvas needs room to be under the finger.
             time: Some(time), // WHAT: the frame's time. WHY: egui decides clicks, double clicks and long presses by it.
-            events, // WHAT: what happened. WHY: the touch being tested.
+            events,           // WHAT: what happened. WHY: the touch being tested.
             ..Default::default()
         };
         let mut out = (Seen::default(), None, None); // WHAT: filled in from inside the frame. WHY: the input is only readable there.
@@ -186,7 +242,12 @@ mod tests {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let rect = ui.max_rect(); // WHAT: the whole panel. WHY: it stands for the sheet.
                 let r = ui.allocate_rect(rect, egui::Sense::click_and_drag()); // WHAT: sensed the way the sheet is. WHY: the same clicks and drags reach it.
-                out.0 = Seen { clicked: r.clicked(), double_clicked: r.double_clicked(), secondary_clicked: r.secondary_clicked(), drag_stopped: r.drag_stopped() }; // WHAT: what the canvas saw. WHY: what the tools read.
+                out.0 = Seen {
+                    clicked: r.clicked(),
+                    double_clicked: r.double_clicked(),
+                    secondary_clicked: r.secondary_clicked(),
+                    drag_stopped: r.drag_stopped(),
+                }; // WHAT: what the canvas saw. WHY: what the tools read.
                 out.1 = ui.input(|i| i.pointer.hover_pos()); // WHAT: where egui says the pointer hovers. WHY: what the tools used to read.
                 out.2 = ui.input(pointer); // WHAT: where a tool should act. WHY: what they read now.
             });
@@ -204,7 +265,13 @@ mod tests {
     }
 
     fn touch(phase: egui::TouchPhase, at: egui::Pos2) -> egui::Event {
-        egui::Event::Touch { device_id: egui::TouchDeviceId(1), id: egui::TouchId(1), phase, pos: at, force: Some(0.5) } // WHAT: one finger's event. WHY: what a tablet sends alongside the pretend mouse.
+        egui::Event::Touch {
+            device_id: egui::TouchDeviceId(1),
+            id: egui::TouchId(1),
+            phase,
+            pos: at,
+            force: Some(0.5),
+        } // WHAT: one finger's event. WHY: what a tablet sends alongside the pretend mouse.
     }
 
     /// The events egui-winit sends for a finger coming down at `at`.
@@ -212,7 +279,12 @@ mod tests {
         vec![
             touch(egui::TouchPhase::Start, at), // WHAT: the touch. WHY: as a tablet sends it.
             egui::Event::PointerMoved(at), // WHAT: the pretend mouse moves there. WHY: egui-winit does this first.
-            egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }, // WHAT: and presses. WHY: a finger down is a button down.
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }, // WHAT: and presses. WHY: a finger down is a button down.
         ]
     }
 
@@ -221,7 +293,12 @@ mod tests {
     fn finger_up(at: egui::Pos2) -> Vec<egui::Event> {
         vec![
             touch(egui::TouchPhase::End, at), // WHAT: the touch ends. WHY: as a tablet sends it.
-            egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() }, // WHAT: the button comes up. WHY: a lift is a release.
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }, // WHAT: the button comes up. WHY: a lift is a release.
             egui::Event::PointerGone, // WHAT: the pointer goes. WHY: egui-winit sends this with every lift, so nothing hovers.
         ]
     }
@@ -235,7 +312,10 @@ mod tests {
         assert!(seen.clicked, "a quick tap is a click"); // WHAT: egui does see the tap. WHY: the lost taps were never egui's.
         assert_eq!(hover, None, "nothing hovers on the frame a finger lifts"); // WHAT: the cause of the lost taps. WHY: this is what the tools used to ask.
         assert_eq!(tool, Some(at), "the tool is told where the finger lifted"); // WHAT: the fix. WHY: the tap lands where it was made.
-        assert_eq!(read(seen, by_finger(&finger_up(at), false), false), Tap::Place); // WHAT: and it places a point. WHY: tap, tap, type is what setting the scale is.
+        assert_eq!(
+            read(seen, by_finger(&finger_up(at), false), false),
+            Tap::Place
+        ); // WHAT: and it places a point. WHY: tap, tap, type is what setting the scale is.
     }
 
     #[test]
@@ -247,9 +327,16 @@ mod tests {
         assert_eq!(read(first, true, false), Tap::Place); // WHAT: the first end is a point. WHY: it was always so.
         let _ = frame(&ctx, finger_down(b), 1.15); // WHAT: second tap down, quickly. WHY: within egui's double-click time.
         let (second, _, tool) = frame(&ctx, finger_up(b), 1.2); // WHAT: and up. WHY: the second end.
-        assert!(second.double_clicked, "egui calls two quick taps a double click wherever they are"); // WHAT: the trap. WHY: that used to finish the shape with one point.
+        assert!(
+            second.double_clicked,
+            "egui calls two quick taps a double click wherever they are"
+        ); // WHAT: the trap. WHY: that used to finish the shape with one point.
         assert_eq!(tool, Some(b)); // WHAT: it is at the second end. WHY: where the finger lifted.
-        assert_eq!(read(second, true, false), Tap::Place, "the second end is a point"); // WHAT: far from the first, so not a finish. WHY: the second tap must register.
+        assert_eq!(
+            read(second, true, false),
+            Tap::Place,
+            "the second end is a point"
+        ); // WHAT: far from the first, so not a finish. WHY: the second tap must register.
     }
 
     #[test]
@@ -258,11 +345,18 @@ mod tests {
         let at = egui::pos2(250.0, 250.0); // WHAT: where the finger rests. WHY: anywhere on the canvas.
         let _ = frame(&ctx, finger_down(at), 1.0); // WHAT: down. WHY: the start of a slow tap.
         let (held, hover, _) = frame(&ctx, vec![touch(egui::TouchPhase::Move, at)], 2.0); // WHAT: still down a second later. WHY: longer than egui's click time.
-        assert!(held.secondary_clicked && !held.clicked, "egui calls a held finger a right click"); // WHAT: what egui reports. WHY: with a mouse a right click finishes the shape.
+        assert!(
+            held.secondary_clicked && !held.clicked,
+            "egui calls a held finger a right click"
+        ); // WHAT: what egui reports. WHY: with a mouse a right click finishes the shape.
         assert_eq!(hover, Some(at)); // WHAT: the finger is still there. WHY: the point goes where it is held.
         assert_eq!(read(held, true, false), Tap::Place, "a slow tap is a point"); // WHAT: a point, not a finish. WHY: it used to end the shape and drop its points.
         let (lifted, _, _) = frame(&ctx, finger_up(at), 2.05); // WHAT: lifted. WHY: the end of the slow tap.
-        assert_eq!(read(lifted, true, false), Tap::Nothing, "the lift after it adds nothing more"); // WHAT: one point for one touch. WHY: egui reports nothing on that lift, so no second point lands.
+        assert_eq!(
+            read(lifted, true, false),
+            Tap::Nothing,
+            "the lift after it adds nothing more"
+        ); // WHAT: one point for one touch. WHY: egui reports nothing on that lift, so no second point lands.
     }
 
     #[test]
@@ -284,7 +378,9 @@ mod tests {
 
     #[test]
     fn a_long_wobbly_stroke_is_made_smaller_and_keeps_its_ends() {
-        let wobbly: Vec<[f64; 2]> = (0..200).map(|i| [i as f64, if i % 2 == 0 { 0.0 } else { 0.05 }]).collect(); // WHAT: two hundred points along a line, wobbling a twentieth of a point. WHY: what a finger drawing a straight line sends.
+        let wobbly: Vec<[f64; 2]> = (0..200)
+            .map(|i| [i as f64, if i % 2 == 0 { 0.0 } else { 0.05 }])
+            .collect(); // WHAT: two hundred points along a line, wobbling a twentieth of a point. WHY: what a finger drawing a straight line sends.
         let small = simplify_stroke(&wobbly, 0.5); // WHAT: simplified at half a point. WHY: finer than anybody can see.
         assert!(small.len() < 10, "{} points kept", small.len()); // WHAT: nearly all gone. WHY: they said nothing the line does not.
         assert_eq!(small.first(), wobbly.first()); // WHAT: the start kept. WHY: the stroke starts where it did.

@@ -15,11 +15,11 @@ use crate::app::App;
 /// and marks up most.
 pub const DEFAULTS: &[&str] = &[
     "Measure.Length", // WHAT: length. WHY: most of a takeoff is lengths.
-    "Measure.Area", // WHAT: area. WHY: decks, slabs and plate.
-    "Measure.Count", // WHAT: count. WHY: embeds, anchors, columns.
-    "Markup.Cloud", // WHAT: a revision cloud. WHY: marking what changed.
+    "Measure.Area",   // WHAT: area. WHY: decks, slabs and plate.
+    "Measure.Count",  // WHAT: count. WHY: embeds, anchors, columns.
+    "Markup.Cloud",   // WHAT: a revision cloud. WHY: marking what changed.
     "Markup.TextBox", // WHAT: a text box. WHY: a note on the sheet.
-    "Markup.Pen", // WHAT: the pen. WHY: a quick sketch or circle, by hand.
+    "Markup.Pen",     // WHAT: the pen. WHY: a quick sketch or circle, by hand.
 ];
 
 /// What the quick tools bar is doing, beyond what the settings hold.
@@ -128,7 +128,9 @@ impl App {
     /// to drag or move with the arrows and take off; every tool on the right,
     /// to add.
     pub fn quick_tools_window(&mut self, ctx: &egui::Context) {
-        let Some(mut list) = self.quick.choosing.take() else { return }; // WHAT: the list being edited. WHY: no window unless it is open.
+        let Some(mut list) = self.quick.choosing.take() else {
+            return;
+        }; // WHAT: the list being edited. WHY: no window unless it is open.
         let theme = self.chrome.theme; // WHAT: the colours in use. WHY: matches the rest.
         let (mut keep, mut save) = (true, false); // WHAT: whether the window stays and whether to keep the list. WHY: acted on after drawing.
         let mut moved: Option<(usize, usize)> = None; // WHAT: a tool moved, from where to where. WHY: the list cannot change while it is drawn.
@@ -223,7 +225,8 @@ impl App {
             self.prefs.quick_tools = Some(list); // WHAT: this computer keeps the list. WHY: the office server keeps no settings for each person.
             self.prefs.quick_tools_shown = true; // WHAT: the bar shown. WHY: somebody who just set it up wants to see it.
             if let Err(e) = self.prefs.save() {
-                self.error = Some(format!("Could not keep the quick tools: {e}")); // WHAT: say it was not kept. WHY: better than finding out next time.
+                self.error = Some(format!("Could not keep the quick tools: {e}"));
+                // WHAT: say it was not kept. WHY: better than finding out next time.
             }
         } else if keep {
             self.quick.choosing = Some(list); // WHAT: still open. WHY: carries on next frame.
@@ -238,13 +241,19 @@ mod tests {
     #[test]
     fn a_new_seat_has_length_area_count_cloud_text_and_pen() {
         let tools = tools_of(None); // WHAT: nothing chosen. WHY: a first run.
-        assert_eq!(tools, DEFAULTS.iter().map(|s| s.to_string()).collect::<Vec<_>>()); // WHAT: the usual six, in order. WHY: what was asked for.
+        assert_eq!(
+            tools,
+            DEFAULTS.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        ); // WHAT: the usual six, in order. WHY: what was asked for.
     }
 
     #[test]
     fn every_default_and_every_choosable_tool_is_a_real_tool() {
         for id in DEFAULTS {
-            assert!(crate::panelbody::tool_for(id).is_some(), "{id} is not a tool"); // WHAT: each default picks a tool. WHY: a dead button in the bar would be worse than none.
+            assert!(
+                crate::panelbody::tool_for(id).is_some(),
+                "{id} is not a tool"
+            ); // WHAT: each default picks a tool. WHY: a dead button in the bar would be worse than none.
         }
         let all = choosable(); // WHAT: every tool offered. WHY: the chooser's list.
         assert!(all.len() > 30, "only {} tools offered", all.len()); // WHAT: the full set. WHY: anybody may want any of them.
@@ -254,8 +263,16 @@ mod tests {
 
     #[test]
     fn a_kept_list_loses_what_this_version_has_no_tool_for_and_any_repeats() {
-        let saved = vec!["Markup.Pen".to_string(), "Markup.Unheardof".into(), "Markup.Pen".into(), "Measure.Angle".into()]; // WHAT: a list with a stranger and a repeat. WHY: a hand-edited or newer settings file.
-        assert_eq!(tools_of(Some(&saved)), vec!["Markup.Pen".to_string(), "Measure.Angle".into()]); // WHAT: only real tools, once each, in order. WHY: no dead or doubled buttons.
+        let saved = vec![
+            "Markup.Pen".to_string(),
+            "Markup.Unheardof".into(),
+            "Markup.Pen".into(),
+            "Measure.Angle".into(),
+        ]; // WHAT: a list with a stranger and a repeat. WHY: a hand-edited or newer settings file.
+        assert_eq!(
+            tools_of(Some(&saved)),
+            vec!["Markup.Pen".to_string(), "Measure.Angle".into()]
+        ); // WHAT: only real tools, once each, in order. WHY: no dead or doubled buttons.
         assert!(tools_of(Some(&Vec::new())).is_empty()); // WHAT: an empty list chosen. WHY: is kept empty, not replaced by the six.
     }
 

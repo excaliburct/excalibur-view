@@ -45,7 +45,14 @@ pub struct Choice {
 
 impl Default for Choice {
     fn default() -> Choice {
-        Choice { copies: 1, collate: true, media: None, fit_to_paper: true, landscape: None, title: String::new() } // WHAT: one copy, fitted, turned to suit. WHY: what Batch Print and an untouched dialog mean.
+        Choice {
+            copies: 1,
+            collate: true,
+            media: None,
+            fit_to_paper: true,
+            landscape: None,
+            title: String::new(),
+        } // WHAT: one copy, fitted, turned to suit. WHY: what Batch Print and an untouched dialog mean.
     }
 }
 
@@ -64,7 +71,9 @@ impl Cups {
 
     /// The programs found on this PATH instead: a test's stand-ins.
     pub fn on_path(path: impl Into<OsString>) -> Cups {
-        Cups { path: Some(path.into()) } // WHAT: a PATH of its own. WHY: tests put a pretend lpstat and lp on it.
+        Cups {
+            path: Some(path.into()),
+        } // WHAT: a PATH of its own. WHY: tests put a pretend lpstat and lp on it.
     }
 
     fn command(&self, program: &str) -> Command {
@@ -93,7 +102,10 @@ impl Cups {
             Some(text) => names_from_e(&text), // WHAT: `lpstat -e`, one name a line. WHY: CUPS 2's plainest list.
             None => names_from_a(&self.ask("lpstat", &["-a"])?), // WHAT: `lpstat -a` instead. WHY: older CUPS has no -e; with neither, CUPS is not there.
         };
-        let default = self.ask("lpstat", &["-d"]).and_then(|t| default_from(&t)).filter(|d| list.contains(d)); // WHAT: the default, when it is one of the printers. WHY: a default that has been taken away is no default.
+        let default = self
+            .ask("lpstat", &["-d"])
+            .and_then(|t| default_from(&t))
+            .filter(|d| list.contains(d)); // WHAT: the default, when it is one of the printers. WHY: a default that has been taken away is no default.
         Some((list, default))
     }
 
@@ -103,7 +115,13 @@ impl Cups {
             return (Vec::new(), None); // WHAT: nothing known. WHY: the printer's own paper is used.
         };
         let (keywords, default) = media_from(&text); // WHAT: the names offered. WHY: what the Paper list shows.
-        let papers = keywords.into_iter().map(|keyword| Paper { inches: size_of(&keyword), keyword }).collect(); // WHAT: each with its size where known. WHY: the preview needs it.
+        let papers = keywords
+            .into_iter()
+            .map(|keyword| Paper {
+                inches: size_of(&keyword),
+                keyword,
+            })
+            .collect(); // WHAT: each with its size where known. WHY: the preview needs it.
         (papers, default)
     }
 
@@ -119,7 +137,11 @@ impl Cups {
             return Ok(()); // WHAT: queued. WHY: the printer has it.
         }
         let said = String::from_utf8_lossy(&out.stderr).trim().to_string(); // WHAT: what lp said. WHY: passed on as it is.
-        Err(if said.is_empty() { format!("{printer} would not take the sheets.") } else { format!("{printer} would not take the sheets: {said}") }) // WHAT: why it failed. WHY: the person can act on it.
+        Err(if said.is_empty() {
+            format!("{printer} would not take the sheets.")
+        } else {
+            format!("{printer} would not take the sheets: {said}")
+        }) // WHAT: why it failed. WHY: the person can act on it.
     }
 }
 
@@ -149,7 +171,11 @@ pub fn lp_args(printer: &str, choice: &Choice) -> Vec<String> {
         None => {} // WHAT: nothing said. WHY: CUPS turns each sheet to suit the paper, as Auto means.
     }
     args.push("-o".into());
-    args.push(if choice.fit_to_paper { "fit-to-page".into() } else { "print-scaling=none".into() }); // WHAT: fitted, or the sheet's own size. WHY: a scaled drawing printed at actual size must not be shrunk.
+    args.push(if choice.fit_to_paper {
+        "fit-to-page".into()
+    } else {
+        "print-scaling=none".into()
+    }); // WHAT: fitted, or the sheet's own size. WHY: a scaled drawing printed at actual size must not be shrunk.
     if !choice.title.is_empty() {
         args.push("-t".into());
         args.push(choice.title.clone()); // WHAT: the job's name. WHY: so it can be picked out in the printer's queue.
@@ -160,12 +186,19 @@ pub fn lp_args(printer: &str, choice: &Choice) -> Vec<String> {
 
 /// The names in `lpstat -e`'s answer: one a line.
 pub fn names_from_e(text: &str) -> Vec<String> {
-    text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect() // WHAT: every line that has a name on it. WHY: that is all -e prints.
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect() // WHAT: every line that has a name on it. WHY: that is all -e prints.
 }
 
 /// The names in `lpstat -a`'s answer: the first word of each line.
 pub fn names_from_a(text: &str) -> Vec<String> {
-    text.lines().filter_map(|l| l.split_whitespace().next()).map(String::from).collect() // WHAT: "NAME accepting requests since ..." to NAME. WHY: the name comes first.
+    text.lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .map(String::from)
+        .collect() // WHAT: "NAME accepting requests since ..." to NAME. WHY: the name comes first.
 }
 
 /// The default in `lpstat -d`'s answer, if there is one.
@@ -183,7 +216,10 @@ pub fn media_from(text: &str) -> (Vec<String>, Option<String>) {
     let line = text
         .lines()
         .find(|l| l.starts_with("PageSize/") || l.starts_with("PageSize:"))
-        .or_else(|| text.lines().find(|l| l.starts_with("media/") || l.starts_with("media:"))); // WHAT: the paper line. WHY: PageSize for most drivers, media for some.
+        .or_else(|| {
+            text.lines()
+                .find(|l| l.starts_with("media/") || l.starts_with("media:"))
+        }); // WHAT: the paper line. WHY: PageSize for most drivers, media for some.
     let Some((_, values)) = line.and_then(|l| l.split_once(':')) else {
         return (Vec::new(), None); // WHAT: no paper offered. WHY: the printer's own is used.
     };
@@ -191,7 +227,10 @@ pub fn media_from(text: &str) -> (Vec<String>, Option<String>) {
     let mut out = Vec::new(); // WHAT: every size. WHY: the list to choose from.
     for word in values.split_whitespace() {
         let keyword = word.trim_start_matches('*'); // WHAT: the name without its star. WHY: the star only marks the default.
-        if keyword.is_empty() || keyword == "Custom.WIDTHxHEIGHT" || out.iter().any(|k: &String| k == keyword) {
+        if keyword.is_empty()
+            || keyword == "Custom.WIDTHxHEIGHT"
+            || out.iter().any(|k: &String| k == keyword)
+        {
             continue; // WHAT: skipped. WHY: the custom placeholder is not a size, and each once.
         }
         if word.starts_with('*') {
@@ -207,10 +246,27 @@ pub fn media_from(text: &str) -> (Vec<String>, Option<String>) {
 pub fn size_of(keyword: &str) -> Option<(f32, f32)> {
     let base = keyword.split('.').next().unwrap_or(keyword); // WHAT: without ".Borderless" and the like. WHY: the same paper.
     let known: &[(&str, (f32, f32))] = &[
-        ("letter", (8.5, 11.0)), ("legal", (8.5, 14.0)), ("tabloid", (11.0, 17.0)), ("ledger", (17.0, 11.0)), ("executive", (7.25, 10.5)), ("11x17", (11.0, 17.0)),
-        ("ansic", (17.0, 22.0)), ("ansid", (22.0, 34.0)), ("ansie", (34.0, 44.0)),
-        ("archa", (9.0, 12.0)), ("archb", (12.0, 18.0)), ("archc", (18.0, 24.0)), ("archd", (24.0, 36.0)), ("arche", (36.0, 48.0)), ("arche1", (30.0, 42.0)),
-        ("a0", (33.11, 46.81)), ("a1", (23.39, 33.11)), ("a2", (16.54, 23.39)), ("a3", (11.69, 16.54)), ("a4", (8.27, 11.69)), ("a5", (5.83, 8.27)),
+        ("letter", (8.5, 11.0)),
+        ("legal", (8.5, 14.0)),
+        ("tabloid", (11.0, 17.0)),
+        ("ledger", (17.0, 11.0)),
+        ("executive", (7.25, 10.5)),
+        ("11x17", (11.0, 17.0)),
+        ("ansic", (17.0, 22.0)),
+        ("ansid", (22.0, 34.0)),
+        ("ansie", (34.0, 44.0)),
+        ("archa", (9.0, 12.0)),
+        ("archb", (12.0, 18.0)),
+        ("archc", (18.0, 24.0)),
+        ("archd", (24.0, 36.0)),
+        ("arche", (36.0, 48.0)),
+        ("arche1", (30.0, 42.0)),
+        ("a0", (33.11, 46.81)),
+        ("a1", (23.39, 33.11)),
+        ("a2", (16.54, 23.39)),
+        ("a3", (11.69, 16.54)),
+        ("a4", (8.27, 11.69)),
+        ("a5", (5.83, 8.27)),
     ]; // WHAT: the sizes a fabricator's printers and plotters offer. WHY: so the preview shows the real paper.
     let lower = base.to_ascii_lowercase(); // WHAT: compared without case. WHY: drivers spell them every way.
     if let Some((_, size)) = known.iter().find(|(name, _)| *name == lower) {
@@ -225,24 +281,36 @@ pub fn size_of(keyword: &str) -> Option<(f32, f32)> {
     }
     let last = lower.rsplit('_').next()?; // WHAT: PWG's size part, "8.5x11in" or "210x297mm". WHY: the name carries its size.
     let (number, per_inch) = match last.strip_suffix("in") {
-        Some(n) => (n, 1.0), // WHAT: inches. WHY: "8.5x11in".
+        Some(n) => (n, 1.0),                      // WHAT: inches. WHY: "8.5x11in".
         None => (last.strip_suffix("mm")?, 25.4), // WHAT: millimetres, or no size at all. WHY: "210x297mm"; anything else says no size.
     };
     let (w, h) = number.split_once('x')?; // WHAT: across by down. WHY: as PWG writes it.
-    Some((w.parse::<f32>().ok()? / per_inch, h.parse::<f32>().ok()? / per_inch)) // WHAT: in inches. WHY: what the preview works in.
+    Some((
+        w.parse::<f32>().ok()? / per_inch,
+        h.parse::<f32>().ok()? / per_inch,
+    )) // WHAT: in inches. WHY: what the preview works in.
 }
 
 /// A paper's name as a person reads it: "Letter (8.5 × 11 in)".
 pub fn label_of(keyword: &str) -> String {
     let base = keyword.split('.').next().unwrap_or(keyword); // WHAT: without ".Borderless". WHY: shorter, and the same paper.
     let name = if base.contains('_') {
-        base.split('_').nth(1).unwrap_or(base).replace('-', " ").to_uppercase() // WHAT: PWG's middle part, "arch-d" to "ARCH D". WHY: the part a person recognises.
+        base.split('_')
+            .nth(1)
+            .unwrap_or(base)
+            .replace('-', " ")
+            .to_uppercase() // WHAT: PWG's middle part, "arch-d" to "ARCH D". WHY: the part a person recognises.
     } else {
         base.to_string() // WHAT: the name as the driver gives it. WHY: already readable.
     };
     let borderless = keyword.contains(".Borderless") || keyword.contains(".Fullbleed"); // WHAT: printed to the edge. WHY: worth saying, it is a different choice.
-    let size = size_of(keyword).map(|(w, h)| format!(" ({} × {} in)", trim(w), trim(h))).unwrap_or_default(); // WHAT: its size. WHY: two printers can call the same paper different things.
-    format!("{name}{size}{}", if borderless { ", borderless" } else { "" })
+    let size = size_of(keyword)
+        .map(|(w, h)| format!(" ({} × {} in)", trim(w), trim(h)))
+        .unwrap_or_default(); // WHAT: its size. WHY: two printers can call the same paper different things.
+    format!(
+        "{name}{size}{}",
+        if borderless { ", borderless" } else { "" }
+    )
 }
 
 fn trim(n: f32) -> String {
@@ -265,7 +333,8 @@ mod tests {
         for (program, script) in programs {
             let path = dir.join(program); // WHAT: the program's file. WHY: found on the PATH by its name.
             std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap(); // WHAT: a little shell script. WHY: stands in for CUPS's own.
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap(); // WHAT: runnable. WHY: a program has to be.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // WHAT: runnable. WHY: a program has to be.
         }
         dir
     }
@@ -280,7 +349,10 @@ esac"#; // WHAT: two printers, the plotter the default. WHY: what a shop's compu
     fn the_printers_and_the_default_come_from_lpstat() {
         let dir = pretend("list", &[("lpstat", LPSTAT)]); // WHAT: a pretend lpstat. WHY: no real printers here.
         let (list, default) = Cups::on_path(&dir).printers().expect("CUPS is there"); // WHAT: ask it. WHY: as the Print dialog does.
-        assert_eq!(list, vec!["Office_Laser".to_string(), "Plotter_T830".into()]); // WHAT: both printers. WHY: every printer is offered, not just the default.
+        assert_eq!(
+            list,
+            vec!["Office_Laser".to_string(), "Plotter_T830".into()]
+        ); // WHAT: both printers. WHY: every printer is offered, not just the default.
         assert_eq!(default.as_deref(), Some("Plotter_T830")); // WHAT: the default named. WHY: the dialog opens on it.
     }
 
@@ -311,7 +383,10 @@ esac"#; // WHAT: an lpstat with no -e and no default. WHY: older CUPS.
         let dir = pretend("papers", &[("lpoptions", script)]); // WHAT: a pretend lpoptions. WHY: as above.
         let (papers, default) = Cups::on_path(&dir).papers("Plotter_T830"); // WHAT: ask for its papers. WHY: as the dialog does.
         let names: Vec<&str> = papers.iter().map(|p| p.keyword.as_str()).collect(); // WHAT: just the names. WHY: easy to compare.
-        assert_eq!(names, ["Letter", "Legal", "ARCHD", "na_arch-e_36x48in", "w612h792"]); // WHAT: every real size, the placeholder left out. WHY: each can be chosen.
+        assert_eq!(
+            names,
+            ["Letter", "Legal", "ARCHD", "na_arch-e_36x48in", "w612h792"]
+        ); // WHAT: every real size, the placeholder left out. WHY: each can be chosen.
         assert_eq!(default.as_deref(), Some("ARCHD")); // WHAT: the starred one. WHY: the printer's own.
         assert_eq!(papers[2].inches, Some((24.0, 36.0))); // WHAT: ARCH D's size. WHY: the preview shows the real paper.
         assert_eq!(papers[3].inches, Some((36.0, 48.0))); // WHAT: a PWG name's size. WHY: read from the name.
@@ -327,24 +402,48 @@ esac"#; // WHAT: an lpstat with no -e and no default. WHY: older CUPS.
         let dir = pretend("print", &[("lp", &script)]); // WHAT: put it on the PATH. WHY: as above.
         let file = dir.join("-odd name.pdf"); // WHAT: a file whose name starts with a dash and has a space. WHY: must still reach lp as a file.
         std::fs::write(&file, b"%PDF-1.4").unwrap(); // WHAT: something to print. WHY: lp is given a real file.
-        let choice = Choice { copies: 2, collate: true, media: Some("ARCHD".into()), fit_to_paper: false, landscape: Some(true), title: "S-201".into() }; // WHAT: everything chosen. WHY: each must reach lp.
-        Cups::on_path(&dir).print("Plotter T830", &file, &choice).expect("printed"); // WHAT: print. WHY: as the dialog does.
+        let choice = Choice {
+            copies: 2,
+            collate: true,
+            media: Some("ARCHD".into()),
+            fit_to_paper: false,
+            landscape: Some(true),
+            title: "S-201".into(),
+        }; // WHAT: everything chosen. WHY: each must reach lp.
+        Cups::on_path(&dir)
+            .print("Plotter T830", &file, &choice)
+            .expect("printed"); // WHAT: print. WHY: as the dialog does.
         let told = std::fs::read_to_string(&record).unwrap(); // WHAT: what lp was given. WHY: checked word by word.
         let words: Vec<&str> = told.lines().collect(); // WHAT: one word a line. WHY: as the pretend lp wrote them.
         assert_eq!(&words[..2], ["-d", "Plotter T830"]); // WHAT: the printer chosen, space and all. WHY: not just the default.
         assert!(told.contains("-n\n2\n")); // WHAT: two copies. WHY: as chosen.
-        assert!(told.contains("collate=true") && told.contains("media=ARCHD") && told.contains("landscape") && told.contains("print-scaling=none")); // WHAT: collate, paper, turn and actual size. WHY: as chosen.
+        assert!(
+            told.contains("collate=true")
+                && told.contains("media=ARCHD")
+                && told.contains("landscape")
+                && told.contains("print-scaling=none")
+        ); // WHAT: collate, paper, turn and actual size. WHY: as chosen.
         assert_eq!(words[words.len() - 2], "--"); // WHAT: the options end before the file. WHY: a dashed name is not an option.
         assert_eq!(words[words.len() - 1], file.display().to_string()); // WHAT: the file last. WHY: what is printed.
     }
 
     #[test]
     fn a_printer_that_refuses_says_why_and_no_lp_says_cups_is_missing() {
-        let dir = pretend("refuse", &[("lp", "echo 'lp: The printer or class does not exist.' >&2; exit 1")]); // WHAT: lp that refuses. WHY: a printer that has gone.
-        let err = Cups::on_path(&dir).print("Gone", Path::new("/nowhere.pdf"), &Choice::default()).unwrap_err(); // WHAT: try. WHY: it must fail plainly.
+        let dir = pretend(
+            "refuse",
+            &[(
+                "lp",
+                "echo 'lp: The printer or class does not exist.' >&2; exit 1",
+            )],
+        ); // WHAT: lp that refuses. WHY: a printer that has gone.
+        let err = Cups::on_path(&dir)
+            .print("Gone", Path::new("/nowhere.pdf"), &Choice::default())
+            .unwrap_err(); // WHAT: try. WHY: it must fail plainly.
         assert!(err.contains("does not exist"), "{err}"); // WHAT: lp's reason passed on. WHY: the person can act on it.
         let empty = pretend("nolp", &[]); // WHAT: no lp at all. WHY: no CUPS.
-        let err = Cups::on_path(&empty).print("Any", Path::new("/nowhere.pdf"), &Choice::default()).unwrap_err(); // WHAT: try. WHY: as above.
+        let err = Cups::on_path(&empty)
+            .print("Any", Path::new("/nowhere.pdf"), &Choice::default())
+            .unwrap_err(); // WHAT: try. WHY: as above.
         assert!(err.contains("CUPS"), "{err}"); // WHAT: says what is missing. WHY: rather than a bare error code.
     }
 }
