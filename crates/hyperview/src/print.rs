@@ -40,6 +40,11 @@ pub struct Printing {
     /// Printers are asked about off the window's thread: a network printer
     /// that is switched off can take a while to say so.
     pub asking: Option<Receiver<Found>>,
+    /// The paper chosen last time, by name, to choose again once the
+    /// printer's papers are known. Kept in the settings on Linux and the Mac.
+    pub wanted_paper: String, // WHAT: last time's paper. WHY: a plot goes on the roll it went on before.
+    /// The printers have been asked about at least once.
+    pub listed: bool, // WHAT: the first answer has come. WHY: "no printers" is only said once it is known.
 }
 
 /// What asking Windows about printers came to.
@@ -49,6 +54,9 @@ pub struct Found {
     pub printer: String,
     pub papers: Vec<PaperSize>,
     pub settings: Vec<u8>,
+    /// The paper the printer uses unless told, by name, where the system
+    /// says (CUPS does; Windows keeps it in the settings).
+    pub default_paper: Option<String>, // WHAT: the printer's own paper. WHY: the dialog opens on it.
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -90,6 +98,8 @@ impl Printing {
             copies: 1,
             collate: true,
             asking: None,
+            wanted_paper: String::new(), // WHAT: none yet. WHY: the dialog's opener fills it from the settings.
+            listed: false, // WHAT: not asked yet. WHY: asked just below.
         };
         printing.ask(true);
         printing
@@ -104,13 +114,7 @@ impl Printing {
             .name("hyperview-printers".into())
             .spawn(move || {
                 let list = and_the_list.then(winprint::printers);
-                let printer = if wanted.is_empty() {
-                    list.as_ref()
-                        .and_then(|(all, default)| default.clone().or_else(|| all.first().cloned()))
-                        .unwrap_or_default()
-                } else {
-                    wanted
-                };
+                let printer = printer_to_use(&wanted, list.as_ref()); // WHAT: the printer asked for if it is still there, else the default. WHY: a printer remembered from last week may have been taken away.
                 let (papers, settings) = if printer.is_empty() {
                     (Vec::new(), Vec::new())
                 } else {
@@ -119,7 +123,8 @@ impl Printing {
                         winprint::settings(&printer).unwrap_or_default(),
                     )
                 };
-                let _ = tx.send(Found { printers: list, printer, papers, settings });
+                let default_paper = if printer.is_empty() { None } else { winprint::default_paper(&printer) }; // WHAT: the printer's own paper, where the system says. WHY: chosen until somebody picks another.
+                let _ = tx.send(Found { printers: list, printer, papers, settings, default_paper });
             })
             .ok();
         self.asking = Some(rx);
@@ -138,9 +143,14 @@ impl Printing {
         }
         self.printer = found.printer;
         self.papers = found.papers;
+        self.listed = true; // WHAT: the answer has come. WHY: from now on an empty list means there are none.
         let offered = |id: i16| self.papers.iter().any(|p| p.id == id);
         if !self.paper.is_some_and(offered) {
             self.paper = winprint::paper_of(&self.settings).filter(|id| offered(*id));
+        }
+        if self.paper.is_none() {
+            let by_name = |name: &str| self.papers.iter().find(|p| !name.is_empty() && p.name == name).map(|p| p.id); // WHAT: a paper found by its name. WHY: CUPS names its papers rather than numbering them.
+            self.paper = by_name(&self.wanted_paper).or_else(|| found.default_paper.as_deref().and_then(by_name)); // WHAT: last time's paper, or the printer's own. WHY: the dialog opens on what will actually be used.
         }
     }
 
@@ -152,6 +162,17 @@ impl Printing {
     fn outgoing(&self) -> Vec<u8> {
         winprint::with_choices(&self.settings, self.paper, self.orientation, self.copies, self.collate)
     }
+}
+
+/// Which printer the dialog opens on: the one asked for (last time's) when
+/// it is still on the list, otherwise the default, otherwise the first.
+/// With no list to check against, the one asked for.
+pub fn printer_to_use(wanted: &str, list: Option<&(Vec<String>, Option<String>)>) -> String {
+    let gone = list.is_some_and(|(all, _)| !all.is_empty() && !all.iter().any(|p| p == wanted)); // WHAT: the printer asked for is not on the list. WHY: printing to a printer that has gone fails at the last step.
+    if !wanted.is_empty() && !gone {
+        return wanted.to_string(); // WHAT: last time's printer. WHY: remembered so nobody has to choose it again.
+    }
+    list.and_then(|(all, default)| default.clone().or_else(|| all.first().cloned())).unwrap_or_default() // WHAT: the default, or the first there is. WHY: the printer the system would have used.
 }
 
 pub fn read_range(text: &str, sheets: usize) -> Vec<u32> {
@@ -243,7 +264,8 @@ pub fn send_to_printer(path: &std::path::Path) -> Result<bool, String> {
         {
             return Ok(true);
         }
-        let opened = std::process::Command::new("xdg-open")
+        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" }; // WHAT: the system's "open this file". WHY: the Mac has open, Linux desktops xdg-open.
+        let opened = std::process::Command::new(opener)
             .arg(path)
             .status()
             .map_err(|e| e.to_string())?;
@@ -255,13 +277,34 @@ pub fn send_to_printer(path: &std::path::Path) -> Result<bool, String> {
     }
 }
 
+/// What the Print dialog's choices come to for CUPS.
+pub fn cups_choice(printing: &Printing, title: &str) -> crate::cups::Choice {
+    crate::cups::Choice {
+        copies: printing.copies.max(1), // WHAT: how many. WHY: as chosen, at least one.
+        collate: printing.collate, // WHAT: whole sets. WHY: as chosen.
+        media: printing.paper_size().map(|p| p.name.clone()), // WHAT: CUPS's name for the paper. WHY: lp is told it by that name.
+        fit_to_paper: printing.fit == Fit::ToPaper, // WHAT: fitted or actual size. WHY: as chosen.
+        landscape: match printing.orientation {
+            Orientation::Landscape => Some(true), // WHAT: landscape. WHY: chosen.
+            Orientation::Portrait => Some(false), // WHAT: portrait. WHY: chosen.
+            Orientation::Auto => None, // WHAT: left to CUPS. WHY: it turns each sheet to suit the paper.
+        },
+        title: title.to_string(), // WHAT: the drawing's name. WHY: the job's name in the queue.
+    }
+}
+
 impl App {
     pub fn begin_print(&mut self) {
         if self.doc().is_none() {
             self.status = "Open a drawing first.".into();
             return;
         }
-        let mut printing = Printing::new(&self.last_print);
+        let mut last = self.last_print.clone(); // WHAT: what was chosen last in this run. WHY: the dialog opens on it.
+        if last.printer.is_empty() {
+            last.printer = self.prefs.printer.clone(); // WHAT: or the printer kept in the settings. WHY: remembered from one day to the next.
+        }
+        let mut printing = Printing::new(&last);
+        printing.wanted_paper = self.prefs.paper.clone(); // WHAT: the paper kept with it. WHY: chosen again once the printer's papers are known.
         // Sheets picked in the Thumbnails panel are what somebody means to
         // print, so the window opens on them.
         if let Some(doc) = self.doc() {
@@ -363,7 +406,7 @@ impl App {
                                 ui.label("Paper");
                                 let shown = printing
                                     .paper_size()
-                                    .map(|p| p.name.clone())
+                                    .map(winprint::paper_label) // WHAT: the paper's name as a person reads it. WHY: CUPS's own names are for programs.
                                     .unwrap_or_else(|| "The printer's own".into());
                                 egui::ComboBox::from_id_salt("paper")
                                     .width(250.0)
@@ -371,7 +414,11 @@ impl App {
                                     .show_ui(ui, |ui| {
                                         for paper in &printing.papers {
                                             let (w, h) = paper.inches();
-                                            let label = format!("{}  ({w:.1} × {h:.1} in)", paper.name);
+                                            let label = if cfg!(windows) {
+                                                format!("{}  ({w:.1} × {h:.1} in)", paper.name) // WHAT: Windows' name and its size. WHY: as it always read.
+                                            } else {
+                                                winprint::paper_label(paper) // WHAT: CUPS's paper, made readable, with its size where known. WHY: a size of nought is not worth showing.
+                                            };
                                             if ui
                                                 .selectable_label(printing.paper == Some(paper.id), label)
                                                 .clicked()
@@ -463,6 +510,7 @@ impl App {
                         let paper_in = printing
                             .paper_size()
                             .map(|p| p.inches())
+                            .filter(|(w, h)| *w > 0.0 && *h > 0.0) // WHAT: only a size that is known. WHY: a CUPS paper with a name nobody recognises has none.
                             .unwrap_or((8.5, 11.0));
                         let landscape = match printing.orientation {
                             Orientation::Landscape => true,
@@ -483,6 +531,18 @@ impl App {
                     });
                 });
 
+                if !cfg!(windows) && printing.listed && printing.printers.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "No printers were found. This computer prints through CUPS, and either it is not \
+                             installed or no printer has been set up in it (Settings, Printers). Print will \
+                             open the sheets in the PDF reader instead, to print from there.",
+                        )
+                        .color(theme.faint)
+                        .size(11.0),
+                    ); // WHAT: why the list is empty and what Print will do. WHY: better than an empty list and a guess.
+                }
                 if let Some(error) = &printing.error {
                     ui.add_space(8.0);
                     ui.colored_label(egui::Color32::from_rgb(235, 120, 120), error);
@@ -606,12 +666,34 @@ impl App {
             return;
         };
         if !cfg!(windows) {
-            self.printing = None;
-            match send_to_printer(&to) {
-                Ok(true) => self.status = format!("{pages} sheet(s) sent to print."),
-                Ok(false) => self.status = "Nothing on this system would print them.".into(),
-                Err(why) => self.error = Some(why),
+            let printer = printing.printer.clone(); // WHAT: the printer chosen. WHY: CUPS is told which.
+            if printer.is_empty() || crate::platform::tablet() {
+                self.printing = None; // WHAT: the dialog closes. WHY: the system takes over from here.
+                match send_to_printer(&to) {
+                    Ok(true) => self.status = format!("{pages} sheet(s) sent to print."),
+                    Ok(false) => self.status = "No printer here, so the sheets are open in the PDF reader to print from there.".into(), // WHAT: what happened instead. WHY: no CUPS printer to send them to.
+                    Err(why) => self.error = Some(why),
+                }
+                return;
             }
+            let title = to.file_stem().map(|s| s.to_string_lossy().replace(" (to print)", "")).unwrap_or_default(); // WHAT: the drawing's name. WHY: the job's name in the printer's queue.
+            let choice = cups_choice(printing, &title); // WHAT: copies, paper, size and turn. WHY: as chosen in the dialog.
+            match crate::cups::Cups::system().print(&printer, &to, &choice) {
+                Ok(()) => {
+                    self.printing = None; // WHAT: the dialog closes. WHY: the printer has the sheets.
+                    self.prefs.printer = printer.clone(); // WHAT: this printer kept. WHY: the next print goes there without asking.
+                    self.prefs.paper = choice.media.clone().unwrap_or_default(); // WHAT: and this paper. WHY: the same.
+                    if let Err(e) = self.prefs.save() {
+                        log::warn!("could not keep the printer chosen: {e}"); // WHAT: noted, not shown. WHY: the print itself worked.
+                    }
+                    self.status = format!("{pages} sheet{} sent to {printer}.", if pages == 1 { "" } else { "s" }); // WHAT: done. WHY: says where they went.
+                }
+                Err(why) => {
+                    printing.waiting = false; // WHAT: no longer getting ready. WHY: it stopped.
+                    printing.error = Some(format!("That did not print: {why}")); // WHAT: why, in the dialog. WHY: the person can pick another printer and try again.
+                }
+            }
+            let _ = std::fs::remove_file(&to); // WHAT: the copy made for printing goes. WHY: lp has sent all of it to CUPS before it answers.
             return;
         }
         printing.waiting = false;
@@ -733,6 +815,31 @@ fn paper_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_dialog_opens_on_last_times_printer_while_it_is_still_there() {
+        let list = (vec!["Office_Laser".to_string(), "Plotter".to_string()], Some("Office_Laser".to_string())); // WHAT: two printers, the laser the default. WHY: a shop's computer.
+        assert_eq!(printer_to_use("Plotter", Some(&list)), "Plotter"); // WHAT: last time's printer. WHY: remembered.
+        assert_eq!(printer_to_use("Gone_Printer", Some(&list)), "Office_Laser"); // WHAT: one that has been taken away. WHY: the default instead of a print that fails.
+        assert_eq!(printer_to_use("", Some(&list)), "Office_Laser"); // WHAT: nothing remembered. WHY: the default.
+        assert_eq!(printer_to_use("", Some(&(vec!["Only".to_string()], None))), "Only"); // WHAT: no default set. WHY: the first there is.
+        assert_eq!(printer_to_use("Plotter", None), "Plotter"); // WHAT: no list asked for. WHY: switching printers keeps the one picked.
+        assert_eq!(printer_to_use("", Some(&(Vec::new(), None))), ""); // WHAT: no printers at all. WHY: the dialog says so.
+    }
+
+    #[test]
+    fn the_print_windows_choices_reach_cups_as_they_were_made() {
+        let mut printing = Printing::new(&LastChoice::default()); // WHAT: a fresh Print window's choices. WHY: changed below as somebody would.
+        printing.papers = vec![PaperSize { id: 1, name: "ARCHD".into(), size: (6096, 9144) }]; // WHAT: a plotter's paper. WHY: CUPS names it ARCHD.
+        printing.paper = Some(1); // WHAT: it is picked. WHY: so it goes to lp.
+        printing.copies = 3; // WHAT: three copies. WHY: as chosen.
+        printing.fit = Fit::Actual; // WHAT: actual size. WHY: a scaled drawing.
+        printing.orientation = Orientation::Portrait; // WHAT: upright. WHY: as chosen.
+        let choice = cups_choice(&printing, "S-201"); // WHAT: what CUPS is told. WHY: checked next.
+        assert_eq!(choice.media.as_deref(), Some("ARCHD")); // WHAT: the paper by CUPS's name. WHY: lp -o media takes that name.
+        assert_eq!((choice.copies, choice.fit_to_paper, choice.landscape), (3, false, Some(false))); // WHAT: copies, actual size, portrait. WHY: as chosen.
+        assert_eq!(choice.title, "S-201"); // WHAT: the job's name. WHY: shown in the printer's queue.
+    }
 
     #[test]
     fn people_write_ranges_the_way_people_write_ranges() {

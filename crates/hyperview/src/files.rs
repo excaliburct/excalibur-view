@@ -66,11 +66,21 @@ pub struct Choose {
     pub title: Option<String>,
     pub filters: Vec<Filter>,
     pub start_in: Option<PathBuf>,
+    /// Asked with the program's own list even on a desktop, starting from the
+    /// home folder: for when the system's file window will not open or will
+    /// not let several files be picked.
+    pub own: bool, // WHAT: use the program's own list. WHY: a way to pick files that never depends on the desktop's file window.
 }
 
 impl Choose {
     fn of(kind: Kind) -> Choose {
-        Choose { kind, title: None, filters: Vec::new(), start_in: None }
+        Choose { kind, title: None, filters: Vec::new(), start_in: None, own: false }
+    }
+
+    /// Asks with the program's own list rather than the system's window.
+    pub fn here(mut self) -> Choose {
+        self.own = true; // WHAT: the program's list. WHY: see `own`.
+        self
     }
 
     pub fn open() -> Choose {
@@ -142,6 +152,9 @@ struct Asked {
 pub struct Choosing {
     waiting: VecDeque<Asked>,
     list: Option<List>,
+    /// A system file window open on a thread of its own, and what to do
+    /// with its answer when it comes. Linux only; see `answer_file_questions`.
+    open_window: Option<(std::sync::mpsc::Receiver<Vec<PathBuf>>, Then, bool)>, // WHAT: the answer still to come, and what it is for. WHY: the window keeps drawing while the file window is open.
 }
 
 impl Choosing {
@@ -169,8 +182,34 @@ impl Choosing {
 
     /// Whether anything is being asked or waiting to be.
     pub fn busy(&self) -> bool {
-        self.list.is_some() || !self.waiting.is_empty()
+        self.list.is_some() || !self.waiting.is_empty() || self.open_window.is_some()
     }
+}
+
+/// Whether the system's file window is asked on a thread of its own rather
+/// than the window's. On Linux it is: the file window there is another
+/// program (the desktop's portal) and can be asked from any thread, and
+/// while the window's own thread waited on it nothing was drawn, so the
+/// desktop could offer to close Excalibur View as not responding.
+pub fn file_window_on_its_own_thread() -> bool {
+    cfg!(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")))) // WHAT: Linux and the BSDs. WHY: Windows and the Mac need their file windows on the main thread.
+}
+
+/// An extension as a pattern that matches it in any case: "pdf" as
+/// "[pP][dD][fF]". Linux's file windows match patterns by case, so "*.pdf"
+/// hid every drawing named ".PDF", which is how plotters and scanners name
+/// them.
+pub fn case_blind(extension: &str) -> String {
+    extension
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphabetic() {
+                format!("[{}{}]", c.to_ascii_lowercase(), c.to_ascii_uppercase()) // WHAT: either case of the letter. WHY: .pdf and .PDF alike.
+            } else {
+                c.to_string() // WHAT: a digit or a dot as it is. WHY: has no case.
+            }
+        })
+        .collect()
 }
 
 /// The kinds of file a question takes, as MIME types, for a system picker
@@ -218,22 +257,79 @@ pub fn drawings_folder() -> PathBuf {
     documents.join("Excalibur View")
 }
 
+/// The person's home folder, where the program's own list starts on a
+/// desktop.
+pub fn home_folder() -> PathBuf {
+    directories::UserDirs::new()
+        .map(|u| u.home_dir().to_path_buf()) // WHAT: the system's idea of home. WHY: right on every desktop.
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from)) // WHAT: or $HOME. WHY: the same, asked more plainly.
+        .unwrap_or_else(drawings_folder) // WHAT: or the drawings folder. WHY: somewhere that exists.
+}
+
+/// Whether the program's own list is offered beside the system's file
+/// window, for when that window cannot be relied on: on Linux, where it is
+/// the desktop's portal and may be missing or refuse to pick several files.
+pub fn offer_own_list() -> bool {
+    system_dialogs() && file_window_on_its_own_thread() // WHAT: a Linux desktop. WHY: where the system's file window can be missing.
+}
+
 impl App {
     /// Asks whatever is waiting to be asked. Called once a frame, after
     /// everything else has been drawn.
     pub fn answer_file_questions(&mut self, ctx: &egui::Context) {
-        if system_dialogs() {
+        // WHAT: a file window open on its own thread is waited for, frame by frame. WHY: the window goes on drawing meanwhile.
+        if let Some((answer, _, _)) = self.filing.open_window.as_ref() {
+            match answer.try_recv() {
+                Ok(chosen) => {
+                    let (_, then, always) = self.filing.open_window.take().expect("the window that answered"); // WHAT: what the answer is for. WHY: handed it now.
+                    if !chosen.is_empty() || always {
+                        then(self, chosen); // WHAT: the files chosen. WHY: what was asked for.
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(150)); // WHAT: look again shortly. WHY: the answer comes when the person chooses.
+                    return; // WHAT: one question at a time. WHY: two file windows at once would confuse anybody.
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    let (_, then, always) = self.filing.open_window.take().expect("the window that went"); // WHAT: the thread ended without answering. WHY: treated as nothing chosen.
+                    if always {
+                        then(self, Vec::new()); // WHAT: told nothing came. WHY: whatever waited on it is undone.
+                    }
+                }
+            }
+        }
+        if self.filing.list.is_none() {
             while let Some(asked) = self.filing.waiting.pop_front() {
+                if !system_dialogs() || asked.choose.own {
+                    self.filing.list = Some(List::new(asked)); // WHAT: the program's own list. WHY: a tablet, or somebody who asked for it.
+                    break;
+                }
+                if file_window_on_its_own_thread() {
+                    let (tx, rx) = std::sync::mpsc::channel(); // WHAT: the way the answer comes back. WHY: from the thread the file window runs on.
+                    let choose = asked.choose.clone(); // WHAT: the question. WHY: the thread needs its own copy.
+                    let spawned = std::thread::Builder::new().name("hyperview-file-window".into()).spawn(move || {
+                        let _ = tx.send(desktop::ask(&choose)); // WHAT: ask and send back what was chosen. WHY: off the window's thread.
+                    });
+                    match spawned {
+                        Ok(_) => {
+                            self.filing.open_window = Some((rx, asked.then, asked.always)); // WHAT: wait for it. WHY: answered next frames.
+                            ctx.request_repaint_after(std::time::Duration::from_millis(150)); // WHAT: look for the answer. WHY: as above.
+                            return;
+                        }
+                        Err(why) => {
+                            log::warn!("the file window could not be opened on a thread of its own: {why}"); // WHAT: noted. WHY: asked the old way instead.
+                            let chosen = desktop::ask(&asked.choose); // WHAT: ask here instead. WHY: better a still window than no file window.
+                            if !chosen.is_empty() || asked.always {
+                                (asked.then)(self, chosen);
+                            }
+                            continue;
+                        }
+                    }
+                }
                 let chosen = desktop::ask(&asked.choose);
                 if !chosen.is_empty() || asked.always {
                     (asked.then)(self, chosen);
                 }
-            }
-            return;
-        }
-        if self.filing.list.is_none() {
-            if let Some(asked) = self.filing.waiting.pop_front() {
-                self.filing.list = Some(List::new(asked));
             }
         }
         let theme = self.chrome.theme;
@@ -271,7 +367,12 @@ mod desktop {
             dialog = dialog.set_title(title);
         }
         for filter in &choose.filters {
-            dialog = dialog.add_filter(&filter.name, &filter.extensions);
+            let patterns: Vec<String> = if super::file_window_on_its_own_thread() {
+                filter.extensions.iter().map(|e| super::case_blind(e)).collect() // WHAT: each extension in either case. WHY: Linux's file window hid ".PDF" files from a "pdf" filter.
+            } else {
+                filter.extensions.clone() // WHAT: as they are. WHY: Windows and the Mac match extensions without case already.
+            };
+            dialog = dialog.add_filter(&filter.name, &patterns);
         }
         if let Some(folder) = &choose.start_in {
             dialog = dialog.set_directory(folder);
@@ -435,7 +536,7 @@ struct List {
 impl List {
     fn new(asked: Asked) -> List {
         let Asked { choose, then, always } = asked;
-        let root = drawings_folder();
+        let root = if choose.own { home_folder() } else { drawings_folder() }; // WHAT: the home folder when asked for on a desktop. WHY: a desktop's drawings can be anywhere under it, not just in the app's own folder.
         let _ = std::fs::create_dir_all(&root);
         let here = choose
             .start_in
@@ -479,7 +580,8 @@ impl List {
 
     /// Where `here` is, as the names of the folders from the top.
     fn trail(&self) -> Vec<(String, PathBuf)> {
-        let mut trail = vec![("Drawings".to_string(), self.root.clone())];
+        let top = if self.choose.own { "Home" } else { "Drawings" }; // WHAT: what the top folder is called. WHY: on a desktop the list starts at the home folder.
+        let mut trail = vec![(top.to_string(), self.root.clone())];
         if let Ok(rest) = self.here.strip_prefix(&self.root) {
             let mut at = self.root.clone();
             for part in rest.components() {
@@ -828,6 +930,15 @@ fn file_glyph(painter: &egui::Painter, at: egui::Pos2, colour: Color32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_filter_for_pdf_matches_dot_pdf_in_any_case_on_linux() {
+        assert_eq!(case_blind("pdf"), "[pP][dD][fF]"); // WHAT: every letter either case. WHY: Linux's file window matches by case and hid S-101.PDF.
+        assert_eq!(case_blind("tif2"), "[tT][iI][fF]2"); // WHAT: a digit left alone. WHY: has no case.
+        let choose = Choose::open_many().filter("Drawing sets (PDF)", &["pdf"]); // WHAT: Combine's question. WHY: the one that hid the files.
+        assert!(choose.shows("S-101.PDF") && choose.shows("s-101.pdf")); // WHAT: the program's own list takes both. WHY: it never cared about case.
+        assert!(!choose.own && choose.clone().here().own); // WHAT: here() asks with the program's list. WHY: the fallback when the system's window fails.
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("exv-files-{name}-{}", std::process::id()));

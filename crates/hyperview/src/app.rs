@@ -718,6 +718,12 @@ pub struct App {
     /// came down, so a second finger turning the touch into a pinch can put
     /// back whatever the first one started. See `view::touch`.
     pub touch: crate::view::Touch,
+    /// A finger or a pen is doing the work, rather than a mouse. See `touchtap::by_finger`.
+    pub fingers: bool, // WHAT: finger or mouse, as of the last pointer event. WHY: a finger's lift is read as a tap.
+    /// How hard the stroke being drawn is pressed, frame by frame, when the screen says.
+    pub ink_pressure: Vec<f32>, // WHAT: the pressures of the stroke so far. WHY: decides the stroke's width when it is put down.
+    /// The quick tools down the side, and whether it is being set up.
+    pub quick: crate::quicktools::Quick, // WHAT: the side bar of each person's own tools. WHY: the few tools somebody uses all day, one tap away.
     /// A grip on the selected markup, while it is being dragged.
     pub gripping: Option<crate::grips::Gripping>,
     /// A Cloud+'s cloud has been dragged out and is waiting for a click on
@@ -976,6 +982,9 @@ impl App {
             pen: crate::pen::Pen::default(),
             choosing: None,
             touch: Default::default(),
+            fingers: false, // WHAT: a mouse until a touch says otherwise. WHY: the first touch event sets it.
+            ink_pressure: Vec::new(), // WHAT: no stroke yet. WHY: filled while one is drawn.
+            quick: Default::default(), // WHAT: the side bar, read from the settings below. WHY: set once the settings are loaded.
             asking_depth: None,
             shop: Default::default(),
             models: Default::default(),
@@ -1107,6 +1116,8 @@ impl App {
             ("View.SnapToGrid", self.prefs.snap_to_grid),
             ("View.SnapToContent", self.prefs.snap_to_content),
             ("View.SnapToMarkup", self.prefs.snap_to_markup),
+            ("View.SimpleMode", self.simple_mode()), // WHAT: simple mode's tick. WHY: follows the setting, including a tablet's first-run default.
+            ("View.QuickTools", self.prefs.quick_tools_shown), // WHAT: the quick tools bar's tick. WHY: the same.
         ];
         for (id, on) in settings {
             self.chrome.set(id, on);
@@ -2075,6 +2086,7 @@ impl eframe::App for App {
         self.navigation(ctx);
         crate::bench::mark(&mut marks, "tabs and navigation");
         self.side_panels(ctx);
+        self.quick_tools_bar(ctx); // WHAT: the person's own tools down the right. WHY: before the sheet, which takes whatever room is left.
         crate::bench::mark(&mut marks, "side panels");
         // The markups list's bar is always there; open, it is the list.
         self.markups_bar(ctx);
@@ -2085,6 +2097,7 @@ impl eframe::App for App {
         crate::bench::mark(&mut marks, "sheet");
         self.run_commands(ctx);
         self.calibrate_dialog(ctx);
+        self.quick_tools_window(ctx); // WHAT: setting the quick tools up, when open. WHY: with the other windows.
         self.text_dialog(ctx);
         self.signature_window(ctx);
         self.reword_window(ctx);
@@ -2300,6 +2313,19 @@ impl App {
         // PDFs let go over the Thumbnails list go into the drawing, in front
         // of the sheet they were let go on.
         let pdfs: Vec<PathBuf> = dropped.iter().filter(|p| crate::reorder::is_pdf(p)).cloned().collect();
+        // WHAT: PDFs dropped while a Batch or Combine window is open go on its list. WHY: a way to fill the list that needs no file window, which on Linux may be missing.
+        if !pdfs.is_empty() {
+            if let Some(batching) = self.batching.as_mut().filter(|b| !b.running) {
+                crate::batchui::add_to_list(batching, pdfs.clone()); // WHAT: added, each once. WHY: as if chosen with Add files.
+                self.status = format!("{} file{} added to the list.", pdfs.len(), if pdfs.len() == 1 { "" } else { "s" }); // WHAT: says what happened. WHY: rather than them opening as tabs.
+                return;
+            }
+            if let Some(setting) = self.doc_job.as_mut().filter(|s| s.job == crate::docui::Job::Combine && !s.running) {
+                crate::docui::add_others(setting, pdfs.clone()); // WHAT: added to the files to combine. WHY: the same, for Document, Combine.
+                self.status = format!("{} file{} added to combine.", pdfs.len(), if pdfs.len() == 1 { "" } else { "s" }); // WHAT: says what happened. WHY: as above.
+                return;
+            }
+        }
         let front = self.doc().map(|d| d.id);
         let before = match (self.sheet_rows.as_ref(), crate::platform::pointer_now(ctx)) {
             (Some(rows), Some(at)) if self.panel == "Thumbnails" && Some(rows.doc) == front => {

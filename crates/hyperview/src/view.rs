@@ -219,12 +219,84 @@ impl App {
             self.paint_fill(&painter, mine);
             self.paint_readout(ui, &painter, mine);
             self.paint_snap(&painter, mine);
+            self.paint_draft_points(&painter); // WHAT: a dot on every point put down so far. WHY: under a finger nothing hovers, so the first point has to show for itself.
+            self.drawing_bar(ui.ctx(), mine); // WHAT: what to do next, with Finish and Cancel. WHY: a tablet has no Escape key and no right click.
 
             if let Some(theirs) = theirs {
                 self.pane_edges(ui, mine, theirs, split);
                 self.carry_across(mine, theirs);
             }
         });
+    }
+
+    /// A dot on each point of the shape being drawn, the first a size up.
+    fn paint_draft_points(&self, painter: &egui::Painter) {
+        let Some(doc) = self.doc() else { return }; // WHAT: the drawing. WHY: nothing to mark without one.
+        let Some(draft) = doc.draft.as_ref() else { return }; // WHAT: the shape being drawn. WHY: only its points are marked.
+        if !draft.strokes.is_empty() || draft.points.is_empty() {
+            return; // WHAT: no dots on ink, or on nothing. WHY: a stroke shows itself; dots are for points put down one at a time.
+        }
+        let point_tool = matches!(draft.tool.shaping(), crate::app::Shaping::MultiClick | crate::app::Shaping::ThreePoint); // WHAT: a tool that collects points one tap at a time. WHY: a dragged box needs no dots.
+        if !point_tool {
+            return; // WHAT: not one of those. WHY: as above.
+        }
+        let colour = Color32::from_rgb(draft.colour[0], draft.colour[1], draft.colour[2]); // WHAT: the markup's own colour. WHY: the dots belong to it.
+        for (n, p) in draft.points.iter().enumerate() {
+            let at = doc.view.to_screen([p[0] as f32, p[1] as f32]); // WHAT: the point on the screen. WHY: dots are drawn in screen size, whatever the zoom.
+            let radius = if n == 0 { 6.0 } else { 4.5 }; // WHAT: the first point bigger. WHY: it is the one a closed shape comes back to, and the one a finger needs to see.
+            painter.circle(at, radius, colour, Stroke::new(1.5_f32, Color32::WHITE)); // WHAT: a filled dot, ringed in white. WHY: shows on a dark line and on white paper alike.
+        }
+    }
+
+    /// The bar along the top of the sheet while a shape is being put down a
+    /// point at a time: what to do next, Finish when there are enough points,
+    /// Back to take the last point off, and Cancel.
+    fn drawing_bar(&mut self, ctx: &egui::Context, area: Rect) {
+        let tool = self.tool; // WHAT: the tool in hand. WHY: the words and buttons depend on it.
+        let draft = self.doc().and_then(|d| d.draft.clone()); // WHAT: the shape so far. WHY: how many points it has decides what is said.
+        let Some(words) = drawing_words(tool, draft.as_ref()) else { return }; // WHAT: what to say, if anything. WHY: no bar for tools that do not collect points.
+        let can_finish = draft.as_ref().is_some_and(|d| enough_for(tool, d)) && !finishes_at_two(tool) && tool.shaping() == crate::app::Shaping::MultiClick; // WHAT: Finish shown once there are enough points. WHY: a run of points has no end of its own; three-point tools and the scale finish themselves.
+        let has_points = draft.as_ref().is_some_and(|d| !d.points.is_empty()); // WHAT: anything to take back. WHY: Back does nothing with no points.
+        let theme = self.chrome.theme; // WHAT: the colours in use. WHY: the bar matches the rest of the window.
+        let (mut finish, mut back, mut cancel) = (false, false, false); // WHAT: which button was pressed. WHY: acted on after the bar is drawn.
+        egui::Area::new(egui::Id::new("drawing-bar")) // WHAT: a small layer over the sheet. WHY: it must not move the sheet or take room from it.
+            .order(egui::Order::Foreground) // WHAT: above the sheet. WHY: so its buttons get the tap, not the drawing.
+            .fixed_pos(egui::pos2(area.center().x, area.top() + 8.0)) // WHAT: the top middle of the sheet. WHY: out of the way of the drawing and easy to reach.
+            .pivot(egui::Align2::CENTER_TOP) // WHAT: centred on that point. WHY: the bar stays in the middle whatever its width.
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(theme.bar) // WHAT: the toolbar's colour. WHY: reads as part of the program, not of the drawing.
+                    .stroke(Stroke::new(1.0_f32, theme.line)) // WHAT: a thin edge. WHY: stands it off the sheet.
+                    .corner_radius(6.0) // WHAT: rounded corners. WHY: matches the program's other floating boxes.
+                    .inner_margin(egui::Margin::symmetric(10, 6)) // WHAT: room inside. WHY: buttons a finger can hit.
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(words).color(theme.text)); // WHAT: the next step. WHY: says plainly what a tap will do.
+                            if has_points && ui.button("Back").on_hover_text("Take the last point off").clicked() {
+                                back = true; // WHAT: Back pressed. WHY: a mis-tap is undone without starting again.
+                            }
+                            if can_finish && ui.button("Finish").on_hover_text("Done (or double-click the last point, or press Enter)").clicked() {
+                                finish = true; // WHAT: Finish pressed. WHY: a run of points ends when the person says so.
+                            }
+                            if ui.button("Cancel").on_hover_text("Stop without putting anything down (Escape)").clicked() {
+                                cancel = true; // WHAT: Cancel pressed. WHY: a tablet has no Escape key.
+                            }
+                        });
+                    });
+            });
+        if back {
+            self.take_back_point(); // WHAT: last point off. WHY: Back.
+        }
+        if finish {
+            self.finish_if_enough(); // WHAT: the shape goes down. WHY: Finish.
+        }
+        if cancel {
+            self.cancel_drawing(); // WHAT: nothing goes down. WHY: Cancel.
+            if tool == Tool::Calibrate {
+                self.tool = Tool::Select; // WHAT: the scale tool put away. WHY: cancelling setting the scale goes back to ordinary work.
+                self.chrome.tool = "Select".into(); // WHAT: the toolbar shows Select again. WHY: the button lit matches the tool in hand.
+            }
+        }
     }
 
     /// The mark that says what the pointer has caught: a square on the end of
@@ -642,6 +714,8 @@ impl App {
     ///
     /// True while the fingers have the sheet, when no tool should act on it.
     fn touch(&mut self, ui: &mut egui::Ui, response: &egui::Response) -> bool {
+        let was = self.fingers; // WHAT: finger or mouse, as of last frame. WHY: a frame with no pointer events keeps it.
+        self.fingers = ui.input(|i| crate::touchtap::by_finger(&i.raw.events, was)); // WHAT: finger or mouse now. WHY: the point tools read a finger's lift as a tap.
         let (touching, pinch) = ui.input(|i| (i.any_touches(), i.multi_touch()));
         if !touching {
             // The last finger has come off. If the fingers had the sheet,
@@ -1098,11 +1172,13 @@ impl App {
             }
             return;
         }
-        let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) else {
-            return;
+        let Some(pointer) = ui.input(crate::touchtap::pointer) else {
+            self.snap_hit = None; // WHAT: no snap mark with no pointer. WHY: a mark left where a finger last was looked like a point that had been put down.
+            return; // WHAT: nothing to act on. WHY: no mouse over the sheet and no finger on it.
         };
         let at = self.placed_point(ui, pointer);
         let tool = self.tool;
+        let finger = self.fingers; // WHAT: whether a finger or pen is doing this. WHY: taps and lifts are read differently from clicks.
 
         if tool.is_filling() {
             self.fill_input(ui, response, pointer, _area);
@@ -1324,11 +1400,10 @@ impl App {
         match tool.shaping() {
             crate::app::Shaping::None => return,
             crate::app::Shaping::MultiClick => {
-                let finish = response.double_clicked()
-                    || response.secondary_clicked()
-                    || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let tap = crate::touchtap::read(self.seen(response), finger, self.near_last_point(pointer, finger)); // WHAT: what this frame's click, tap or lift means. WHY: a finger's taps used to be lost or to finish the shape too soon.
+                let finish = tap == crate::touchtap::Tap::Finish || ui.input(|i| i.key_pressed(egui::Key::Enter)); // WHAT: a double click on the last point, a right click, or Enter. WHY: the ways a run of points has always ended.
                 if finish {
-                    self.finish_draft();
+                    self.finish_if_enough(); // WHAT: ends the shape when it has enough points. WHY: a finish with too few used to throw away what was drawn.
                     return;
                 }
                 // A plate is a rectangle, and a rectangle took four clicks.
@@ -1342,7 +1417,8 @@ impl App {
                 // A drag only starts one when nothing is part-drawn already,
                 // so somebody halfway round a footing who moves the mouse with
                 // the button down does not have their work replaced by a box.
-                if tool.is_closed() {
+                if tool.is_closed() && !finger {
+                    // WHAT: dragging out a box is for the mouse only. WHY: a finger slides to aim before it lifts, and that slide is not a box.
                     let part_drawn = self.doc().map(|d| d.draft.is_some()).unwrap_or(false);
                     if response.drag_started() && !part_drawn {
                         self.dragged_box = Some(at);
@@ -1370,7 +1446,7 @@ impl App {
                         }
                     }
                 }
-                if response.clicked() {
+                if tap == crate::touchtap::Tap::Place {
                     self.push_point(at);
                     // A callout is two clicks, what it is about and where
                     // the words go, and then the words: the way Revu's is.
@@ -1378,7 +1454,8 @@ impl App {
                         .doc()
                         .and_then(|d| d.draft.as_ref())
                         .is_some_and(|d| d.points.len() >= 2);
-                    if tool == Tool::Callout && two {
+                    if finishes_at_two(tool) && two {
+                        // WHAT: a callout, or the scale's two ends, is done at its second point. WHY: setting the scale is tap, tap, then type the length; it never needed a double click.
                         self.finish_draft();
                     }
                 }
@@ -1388,7 +1465,8 @@ impl App {
             // decided by its third point and waiting for a double click
             // after it only invites a fourth.
             crate::app::Shaping::ThreePoint => {
-                if response.clicked() {
+                let tap = crate::touchtap::read(self.seen(response), finger, false); // WHAT: a click, tap or lift. WHY: read the same way as every other point tool.
+                if tap == crate::touchtap::Tap::Place {
                     self.push_point(at);
                     let enough = self
                         .doc()
@@ -1406,7 +1484,8 @@ impl App {
 
         match tool {
             Tool::Count => {
-                if response.clicked() {
+                let tap = crate::touchtap::read(self.seen(response), finger, false); // WHAT: a click, tap or lift. WHY: a count is a tap per thing counted, and taps were being lost.
+                if tap == crate::touchtap::Tap::Place {
                     self.start_draft();
                     self.push_point(at);
                     self.finish_draft();
@@ -1462,11 +1541,21 @@ impl App {
             }
             Tool::Ink => {
                 if response.drag_started() {
+                    // WHAT: a stroke still open from before is put down first. WHY: one stroke per touch; a stroke whose lift was missed used to be joined on to the next one with a straight line.
+                    if self.doc().is_some_and(|d| d.draft.as_ref().is_some_and(|draft| !draft.strokes.is_empty())) {
+                        self.finish_stroke();
+                    }
+                    let press = ui.input(|i| i.pointer.press_origin()).unwrap_or(pointer); // WHAT: where the pen came down. WHY: egui only calls it a drag after a few points of travel, and the stroke starts where the pen did.
+                    let start = self.doc().map(|d| d.view.to_sheet(press)).map(|s| [s[0] as f64, s[1] as f64]).unwrap_or(at); // WHAT: that place on the sheet. WHY: strokes are kept in sheet space.
+                    self.ink_pressure.clear(); // WHAT: a fresh record of how hard this stroke is pressed. WHY: each stroke gets its own width.
                     self.start_draft();
                     if let Some(draft) = self.doc_mut().unwrap().draft.as_mut() {
-                        draft.strokes.push(vec![at]);
+                        draft.strokes.push(vec![start, at]); // WHAT: from where it came down to where it is now. WHY: nothing of the start of the stroke is lost.
                     }
                 } else if response.dragged() {
+                    if let Some(force) = ui.input(|i| crate::touchtap::pressure(&i.events)) {
+                        self.ink_pressure.push(force); // WHAT: the pressure on this frame. WHY: a pencil's pressure sets the stroke's width.
+                    }
                     let far = {
                         let doc = self.doc().unwrap();
                         doc.draft
@@ -1487,7 +1576,18 @@ impl App {
                         }
                     }
                 } else if response.drag_stopped() {
-                    self.finish_draft();
+                    if let Some(draft) = self.doc_mut().and_then(|d| d.draft.as_mut()) {
+                        if let Some(stroke) = draft.strokes.last_mut() {
+                            if stroke.last() != Some(&at) {
+                                stroke.push(at); // WHAT: the point it lifted at. WHY: the stroke ends where the pen did.
+                            }
+                        }
+                    }
+                    self.finish_stroke(); // WHAT: the stroke becomes a markup now. WHY: one smooth stroke per touch, the way the mouse draws one per drag.
+                } else if !ui.input(|i| i.pointer.any_down())
+                    && self.doc().is_some_and(|d| d.draft.as_ref().is_some_and(|draft| !draft.strokes.is_empty()))
+                {
+                    self.finish_stroke(); // WHAT: a stroke still open with nothing pressed is put down. WHY: egui reports no end to a drag that began with the finger held still, and that stroke must not wait to be joined to the next.
                 }
             }
             _ if tool.shaping() == crate::app::Shaping::Drag => {
@@ -1753,6 +1853,80 @@ impl App {
         }
     }
 
+    /// What the sheet saw this frame, as far as putting points down goes.
+    fn seen(&self, response: &egui::Response) -> crate::touchtap::Seen {
+        crate::touchtap::Seen {
+            clicked: response.clicked(), // WHAT: a click or a quick tap. WHY: puts a point down.
+            double_clicked: response.double_clicked(), // WHAT: a second click soon after. WHY: may finish the shape.
+            secondary_clicked: response.secondary_clicked(), // WHAT: a right click or long press. WHY: finishes with a mouse, not with a finger.
+            drag_stopped: response.drag_stopped(), // WHAT: a press that moved, let go. WHY: a finger aiming lifts where it means.
+        }
+    }
+
+    /// Whether the pointer is on the last point put down, near enough for a
+    /// double click there to mean "that's the end".
+    fn near_last_point(&self, pointer: Pos2, finger: bool) -> bool {
+        let Some(doc) = self.doc() else { return false }; // WHAT: no drawing. WHY: nothing to be near.
+        let Some(last) = doc.draft.as_ref().and_then(|d| d.last()) else { return false }; // WHAT: the last point, if any. WHY: with none there is nothing to finish.
+        let on_screen = doc.view.to_screen([last[0] as f32, last[1] as f32]); // WHAT: that point on the screen. WHY: the reach is in screen points, whatever the zoom.
+        on_screen.distance(pointer) <= crate::touchtap::finish_reach(finger) // WHAT: within reach. WHY: a double click elsewhere is two more points, not an end.
+    }
+
+    /// Ends the shape if it has the points it needs, and otherwise leaves it
+    /// as it is to carry on with. True when it was finished.
+    pub fn finish_if_enough(&mut self) -> bool {
+        let tool = self.tool; // WHAT: the tool in hand. WHY: each needs a different number of points.
+        let enough = self.doc().and_then(|d| d.draft.as_ref()).is_some_and(|d| enough_for(tool, d)); // WHAT: whether it has them. WHY: decided before anything is taken away.
+        if enough {
+            self.finish_draft(); // WHAT: put it on the sheet. WHY: it is complete.
+        }
+        enough
+    }
+
+    /// Takes the point put down last back off the shape being drawn.
+    pub fn take_back_point(&mut self) {
+        if let Some(doc) = self.doc_mut() {
+            if let Some(draft) = doc.draft.as_mut() {
+                draft.points.pop(); // WHAT: the last point goes. WHY: a mis-tap is put right without starting again.
+                if draft.points.is_empty() && draft.strokes.is_empty() {
+                    doc.draft = None; // WHAT: nothing left of it. WHY: an empty shape is no shape.
+                }
+            }
+        }
+    }
+
+    /// Stops what is being drawn without putting anything on the sheet: the
+    /// Cancel on the bar above the sheet, and Escape.
+    pub fn cancel_drawing(&mut self) {
+        self.lasso = None; // WHAT: no loop half drawn. WHY: cancel means nothing is left over.
+        self.dragged_box = None; // WHAT: no box half dragged. WHY: the same.
+        self.calibrating = None; // WHAT: no scale waiting for its length. WHY: cancelling setting the scale cancels all of it.
+        self.ink_pressure.clear(); // WHAT: no pressure kept. WHY: it belonged to the stroke that was cancelled.
+        if let Some(doc) = self.doc_mut() {
+            doc.draft = None; // WHAT: the shape being drawn goes. WHY: nothing goes on the sheet.
+        }
+    }
+
+    /// Puts a freehand stroke down as a markup: simplified, so a long stroke
+    /// is not hundreds of points, and as wide as it was pressed.
+    fn finish_stroke(&mut self) {
+        let pressures = std::mem::take(&mut self.ink_pressure); // WHAT: how hard the stroke was pressed. WHY: decides its width, once.
+        if let Some(doc) = self.doc_mut() {
+            let tolerance = 0.5 / doc.view.zoom.max(0.01) as f64; // WHAT: half a screen point, in the sheet's own points. WHY: finer than anybody can see at the zoom it was drawn at.
+            if let Some(draft) = doc.draft.as_mut() {
+                for stroke in draft.strokes.iter_mut() {
+                    *stroke = crate::touchtap::simplify_stroke(stroke, tolerance); // WHAT: points that add nothing dropped. WHY: a smaller file and a quicker drawing, the same look.
+                }
+                if draft.template.is_none() {
+                    if let Some(pen) = draft.pen.as_mut() {
+                        pen.width = crate::touchtap::stroke_width(pen.width, &pressures); // WHAT: lighter or bolder with the pressure. WHY: a pencil draws as it is pressed; a tool chest tool keeps its own width.
+                    }
+                }
+            }
+        }
+        self.finish_draft(); // WHAT: the stroke goes on the sheet. WHY: it is done.
+    }
+
     /// Ends the markup being drawn and puts it on the sheet.
     pub fn finish_draft(&mut self) {
         let tool = self.tool;
@@ -1775,15 +1949,7 @@ impl App {
             return;
         }
 
-        let enough = match tool {
-            Tool::Count | Tool::Note | Tool::Flag | Tool::Stamp | Tool::FileAttachment => {
-                !draft.points.is_empty()
-            }
-            Tool::Ink => draft.strokes.iter().any(|s| !s.is_empty()),
-            Tool::Arc | Tool::Diameter | Tool::Radius | Tool::Angle => draft.points.len() >= 3,
-            _ if tool.is_closed() => draft.points.len() >= 3,
-            _ => draft.points.len() >= 2,
-        };
+        let enough = enough_for(tool, &draft); // WHAT: whether it has the points it needs. WHY: the same rule a finish asked for by a tap checks first.
         if !enough {
             return;
         }
@@ -2246,26 +2412,28 @@ impl App {
                 .tool
                 .shape()
                 .unwrap_or((annot::Subtype::Line, None));
-            let points: Vec<[f64; 2]> = if draft.strokes.is_empty() {
-                draft.points.clone()
+            let runs: Vec<Vec<[f64; 2]>> = if draft.strokes.is_empty() {
+                vec![draft.points.clone()] // WHAT: the shape's points as one run. WHY: a shape is one outline.
             } else {
-                draft.strokes.iter().flatten().copied().collect()
+                draft.strokes.clone() // WHAT: each stroke a run of its own. WHY: two strokes run together were drawn joined by a straight line.
             };
-            paint_shape(
-                painter,
-                &doc.view,
-                &points,
-                &Look {
-                    subtype,
-                    colour,
-                    interior: None,
-                    width: 2.0,
-                    caption: String::new(),
-                    selected: true,
-                    cloud: draft.tool.is_cloudy().then_some(9.0),
-                    picture: false,
-                },
-            );
+            for points in &runs {
+                paint_shape(
+                    painter,
+                    &doc.view,
+                    points,
+                    &Look {
+                        subtype,
+                        colour,
+                        interior: None,
+                        width: 2.0,
+                        caption: String::new(),
+                        selected: true,
+                        cloud: draft.tool.is_cloudy().then_some(9.0),
+                        picture: false,
+                    },
+                );
+            }
             // A callout waiting for where its words go: the leader runs from
             // what it points at to the pointer, with the box on the end of it,
             // out from the pointer and away from the tip, as it will be put.
@@ -2405,6 +2573,48 @@ fn inside(ring: &[[f64; 2]], at: [f64; 2]) -> bool {
         j = i;
     }
     within
+}
+
+/// Whether a shape being drawn has the points its tool needs to be a markup.
+pub fn enough_for(tool: Tool, draft: &crate::sheet::Draft) -> bool {
+    match tool {
+        Tool::Count | Tool::Note | Tool::Flag | Tool::Stamp | Tool::FileAttachment => {
+            !draft.points.is_empty() // WHAT: one point. WHY: these are put down with a single click.
+        }
+        Tool::Ink => draft.strokes.iter().any(|s| !s.is_empty()), // WHAT: some ink. WHY: a stroke is the whole of a pen markup.
+        Tool::Arc | Tool::Diameter | Tool::Radius | Tool::Angle => draft.points.len() >= 3, // WHAT: three points. WHY: a circle or an angle is decided by three.
+        _ if tool.is_closed() => draft.points.len() >= 3, // WHAT: three corners. WHY: fewer encloses nothing.
+        _ => draft.points.len() >= 2, // WHAT: two points. WHY: a length, a line or the scale's two ends.
+    }
+}
+
+/// What the bar over the sheet says while a tool is collecting points, or
+/// nothing for a tool that does not. "Tap" covers a click as well; the bar
+/// is the same for a mouse and a finger.
+pub fn drawing_words(tool: Tool, draft: Option<&crate::sheet::Draft>) -> Option<String> {
+    let n = draft.map(|d| d.points.len()).unwrap_or(0); // WHAT: points put down so far. WHY: the next step depends on it.
+    if tool == Tool::Calibrate {
+        return Some(match n {
+            0 => "Set scale: tap one end of a dimension you can read".into(), // WHAT: the first step. WHY: says what to tap.
+            _ => "Now tap the other end, then type what it reads".into(), // WHAT: the second. WHY: the first end is down and showing.
+        });
+    }
+    let shaping = tool.shaping(); // WHAT: how the tool collects points. WHY: only point-by-point tools get the bar.
+    if n == 0 || !matches!(shaping, crate::app::Shaping::MultiClick | crate::app::Shaping::ThreePoint) {
+        return None; // WHAT: no bar. WHY: nothing has been started, or the tool is dragged or clicked once.
+    }
+    Some(match shaping {
+        crate::app::Shaping::ThreePoint => format!("{}: point {} of 3", tool.label(), n + 1), // WHAT: which of the three is next. WHY: these finish on the third.
+        _ if tool == Tool::Callout => "Callout: tap where the words go".into(), // WHAT: the callout's second step. WHY: it finishes there.
+        _ => format!("{}: {} point{}. Tap the next one, or Finish", tool.label(), n, if n == 1 { "" } else { "s" }), // WHAT: how far it has got. WHY: a run of points ends when the person says.
+    })
+}
+
+/// The tools that are finished by their second point rather than by a
+/// double click: a callout (what it points at, then where its words go) and
+/// setting the scale (the two ends of a dimension that can be read).
+pub fn finishes_at_two(tool: Tool) -> bool {
+    matches!(tool, Tool::Callout | Tool::Calibrate) // WHAT: the two-point tools. WHY: waiting for a double click after the second end only invited a third.
 }
 
 /// Squared distance from a point to the nearest part of a run of points.
@@ -2988,6 +3198,41 @@ fn a_real_drag(from: [f64; 2], to: [f64; 2], zoom: f64) -> bool {
     let zoom = if zoom > 0.0 { zoom } else { 1.0 };
     let enough = 4.0 / zoom;
     (to[0] - from[0]).abs() > enough && (to[1] - from[1]).abs() > enough
+}
+
+#[cfg(test)]
+mod putting_points_down {
+    use super::{drawing_words, enough_for, finishes_at_two};
+    use crate::app::Tool;
+    use crate::sheet::Draft;
+
+    fn with(tool: Tool, points: usize) -> Draft {
+        Draft { tool, points: (0..points).map(|i| [i as f64 * 10.0, 0.0]).collect(), ..Draft::default() } // WHAT: a shape with this many points. WHY: what the rules are about.
+    }
+
+    #[test]
+    fn setting_the_scale_finishes_at_its_second_point_and_says_what_to_tap() {
+        assert!(finishes_at_two(Tool::Calibrate)); // WHAT: tap, tap, then type. WHY: no double click needed after the second end.
+        assert!(!finishes_at_two(Tool::Length)); // WHAT: a length can run round corners. WHY: it waits for Finish.
+        assert!(!enough_for(Tool::Calibrate, &with(Tool::Calibrate, 1))); // WHAT: one end is not a scale. WHY: a finish then must keep the point, not lose it.
+        assert!(enough_for(Tool::Calibrate, &with(Tool::Calibrate, 2))); // WHAT: two ends are. WHY: then the length is asked for.
+        assert!(drawing_words(Tool::Calibrate, None).unwrap().contains("tap one end")); // WHAT: before anything. WHY: says what to do first.
+        assert!(drawing_words(Tool::Calibrate, Some(&with(Tool::Calibrate, 1))).unwrap().contains("other end")); // WHAT: after the first tap. WHY: says it was taken, and what is next.
+    }
+
+    #[test]
+    fn every_point_tool_needs_its_points_before_a_finish_takes_it() {
+        assert!(!enough_for(Tool::Length, &with(Tool::Length, 1))); // WHAT: one point. WHY: not a length.
+        assert!(enough_for(Tool::Length, &with(Tool::Length, 2))); // WHAT: two. WHY: a length.
+        assert!(!enough_for(Tool::Area, &with(Tool::Area, 2))); // WHAT: two corners. WHY: encloses nothing.
+        assert!(enough_for(Tool::Area, &with(Tool::Area, 3))); // WHAT: three. WHY: an area.
+        assert!(!enough_for(Tool::Angle, &with(Tool::Angle, 2)) && enough_for(Tool::Angle, &with(Tool::Angle, 3))); // WHAT: three for an angle. WHY: two lines from a corner.
+        assert!(enough_for(Tool::Count, &with(Tool::Count, 1))); // WHAT: one for a count. WHY: a tap a thing.
+        assert!(drawing_words(Tool::Length, None).is_none()); // WHAT: no bar before the first point. WHY: nothing to finish or cancel yet.
+        assert!(drawing_words(Tool::Length, Some(&with(Tool::Length, 2))).unwrap().contains("Finish")); // WHAT: the bar says how to end it. WHY: a tablet has no Enter or right click.
+        assert!(drawing_words(Tool::Angle, Some(&with(Tool::Angle, 1))).unwrap().contains("2 of 3")); // WHAT: which of three is next. WHY: angles finish themselves.
+        assert!(drawing_words(Tool::Rect, Some(&with(Tool::Rect, 2))).is_none()); // WHAT: no bar for a dragged box. WHY: it is done when the drag ends.
+    }
 }
 
 #[cfg(test)]

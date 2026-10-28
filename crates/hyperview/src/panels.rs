@@ -83,8 +83,73 @@ impl App {
         ui.add_space(6.0);
     }
 
+    /// Whether simple mode is on for this computer.
+    pub fn simple_mode(&self) -> bool {
+        self.prefs.simple_on(crate::platform::tablet()) // WHAT: as chosen, or on for a tablet's first run. WHY: the toolbars took five rows of an iPad's screen.
+    }
+
+    /// Simple mode's one bar in place of the toolbars: open, select and pan,
+    /// the measuring and markup tools behind two buttons, the scale, undo and
+    /// redo, the pages, and the way back to the full toolbars.
+    fn simple_bar(&mut self, ctx: &egui::Context) {
+        let theme = self.chrome.theme; // WHAT: the colours in use. WHY: matches the toolbars it stands in for.
+        egui::TopBottomPanel::top("simple-bar")
+            .frame(bar_frame(theme.bar)) // WHAT: the toolbars' own frame. WHY: one look.
+            .show(ctx, |ui| {
+                ui.add_space(2.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0; // WHAT: a little more room between buttons than the toolbars have. WHY: easier for a finger.
+                    self.chrome.button(ui, "File.Open"); // WHAT: open a drawing. WHY: the first thing anybody does.
+                    ui.separator();
+                    for id in ["Select", "Pan"] {
+                        self.chrome.button(ui, id); // WHAT: pick things up, or move round. WHY: the two ways of getting about.
+                    }
+                    ui.separator();
+                    let measuring = ui::menu::MEASURE.iter().any(|e| matches!(e, ui::menu::Entry::Item(id) | ui::menu::Entry::Named(id, _) if *id == self.chrome.tool)); // WHAT: a measuring tool is in hand. WHY: the Measure button says which kind of tool is out.
+                    ui.menu_button(if measuring { RichText::new("Measure ▾").strong() } else { RichText::new("Measure ▾") }, |ui| {
+                        ui.set_min_width(220.0); // WHAT: wide enough for the names. WHY: a menu that wraps is hard to read.
+                        self.chrome.menu_entries(ui, ui::menu::MEASURE); // WHAT: every measuring tool, Set Scale first. WHY: the same list as the Measure menu.
+                    });
+                    self.scale_box(ui); // WHAT: the sheet's scale, and setting it. WHY: no measuring without it.
+                    let marking = ui::menu::MARKUP.iter().any(|e| matches!(e, ui::menu::Entry::Item(id) if *id == self.chrome.tool)); // WHAT: a markup tool is in hand. WHY: the same for the Markup button.
+                    ui.menu_button(if marking { RichText::new("Markup ▾").strong() } else { RichText::new("Markup ▾") }, |ui| {
+                        ui.set_min_width(220.0); // WHAT: as above. WHY: as above.
+                        self.chrome.menu_entries(ui, ui::menu::MARKUP); // WHAT: every markup tool. WHY: the same list as the Markup menu.
+                    });
+                    ui.separator();
+                    for id in ["Edit.Undo", "Edit.Redo"] {
+                        self.chrome.button(ui, id); // WHAT: undo and redo. WHY: a tablet has no Ctrl+Z.
+                    }
+                    ui.separator();
+                    for id in ["View.PageFirst", "View.PagePrevious"] {
+                        self.chrome.button(ui, id); // WHAT: back through the sheets. WHY: the bottom bar is put away in simple mode.
+                    }
+                    self.page_box(ui); // WHAT: which sheet, and going to one by number. WHY: the same.
+                    for id in ["View.PageNext", "View.PageLast"] {
+                        self.chrome.button(ui, id); // WHAT: on through the sheets. WHY: the same.
+                    }
+                    ui.separator();
+                    self.chrome.button(ui, "View.FitPage"); // WHAT: the whole sheet on the screen. WHY: the way back after zooming in too far.
+                    ui.separator();
+                    if ui
+                        .button("Full toolbars")
+                        .on_hover_text("Leave simple mode and show every toolbar (View, Simple Mode)")
+                        .clicked()
+                    {
+                        self.chrome.set("View.SimpleMode", false); // WHAT: the switch shows off. WHY: the View menu's tick follows.
+                        self.chrome.fire("View.SimpleMode"); // WHAT: handled where the View menu's switch is. WHY: one place keeps the setting.
+                    }
+                });
+                ui.add_space(2.0);
+            });
+    }
+
     pub fn tool_bars(&mut self, ctx: &egui::Context) {
         let theme = self.chrome.theme;
+        if self.simple_mode() {
+            self.simple_bar(ctx); // WHAT: the short bar instead. WHY: simple mode.
+            return;
+        }
         egui::TopBottomPanel::top("toolbars")
             .frame(bar_frame(theme.bar))
             .show(ctx, |ui| {
@@ -112,6 +177,9 @@ impl App {
     // ---- the bottom bar --------------------------------------------------
 
     pub fn navigation(&mut self, ctx: &egui::Context) {
+        if self.simple_mode() {
+            return; // WHAT: no bottom bar in simple mode. WHY: its pages and scale are on the simple bar, and the drawing gets the room.
+        }
         let theme = self.chrome.theme;
         egui::TopBottomPanel::bottom("navigation")
             .frame(bar_frame(theme.bar))

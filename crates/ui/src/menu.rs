@@ -193,6 +193,10 @@ pub const POINTS: &[Entry] = &[
 ];
 
 pub const VIEW: &[Entry] = &[
+    Entry::Item("View.SimpleMode"), // WHAT: simple mode, first in the menu. WHY: the way back to the toolbars has to be easy to find.
+    Entry::Item("View.QuickTools"), // WHAT: the quick tools bar on or off. WHY: beside the other choice about what the window shows.
+    Entry::Item("View.ChooseQuickTools"), // WHAT: setting the quick tools up. WHY: next to the switch for them.
+    Entry::Line,
     Entry::Item("View.FitPage"),
     Entry::Item("View.FitWidth"),
     Entry::Item("View.ActualSize"),

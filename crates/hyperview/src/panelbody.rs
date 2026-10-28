@@ -2347,6 +2347,25 @@ impl App {
                     };
                     self.chrome.theme.apply(ctx);
                 }
+                "View.SimpleMode" => {
+                    let on = self.chrome.is_on("View.SimpleMode"); // WHAT: the switch as it now stands. WHY: the menu or the bar has just turned it.
+                    self.prefs.simple = Some(on); // WHAT: kept as this computer's choice. WHY: remembered per device, and no longer left to the first-run default.
+                    if let Err(e) = self.prefs.save() {
+                        self.error = Some(format!("Could not keep the setting: {e}")); // WHAT: say it was not kept. WHY: better than it changing back next time.
+                    }
+                    self.status = if on {
+                        "Simple mode. Full toolbars, on the bar, or View → Simple Mode brings the toolbars back.".into() // WHAT: how to get back. WHY: nobody should be stuck in it.
+                    } else {
+                        "Every toolbar is back. View → Simple Mode puts them away again.".into() // WHAT: how to go back to simple. WHY: the same the other way.
+                    };
+                }
+                "View.QuickTools" => {
+                    self.prefs.quick_tools_shown = self.chrome.is_on("View.QuickTools"); // WHAT: the bar shown or put away. WHY: as the switch says.
+                    if let Err(e) = self.prefs.save() {
+                        self.error = Some(format!("Could not keep the setting: {e}")); // WHAT: say it was not kept. WHY: as above.
+                    }
+                }
+                "View.ChooseQuickTools" => self.choose_quick_tools(), // WHAT: open the window that sets the bar up. WHY: each person picks their own.
                 "View.ClassicLook" => {
                     let on = self.chrome.is_on("View.ClassicLook");
                     self.set_look(ctx, on);

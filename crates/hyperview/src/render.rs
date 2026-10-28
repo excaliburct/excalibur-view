@@ -2736,6 +2736,15 @@ impl Engine {
     fn print_whole(&mut self, source: &std::path::Path) -> Result<Done, String> {
         let (printer, settings) = crate::winprint::usual()
             .ok_or("There is no printer set up on this computer.")?;
+        #[cfg(not(windows))]
+        {
+            let _ = &settings; // WHAT: Windows' printer settings, unused here. WHY: CUPS is told its choices on the command line.
+            let title = nice(source); // WHAT: the file's name. WHY: the job's name in the queue.
+            let choice = crate::cups::Choice { title: title.clone(), ..Default::default() }; // WHAT: one copy, fitted, turned to suit. WHY: what Batch Print has always done.
+            crate::cups::Cups::system().print(&printer, source, &choice)?; // WHAT: the whole file to the printer. WHY: Linux and the Mac print through CUPS; the file's own markups print with it.
+            return Ok(Done { wrote: Vec::new(), said: format!("{title}: sent to {printer}.") }); // WHAT: said as the Windows one says it. WHY: the batch report lists each file.
+        }
+        #[allow(unreachable_code)] // WHAT: the Windows path below. WHY: on other systems the block above has already returned.
         let draw = crate::winprint::render_to_dc(BOUND.get().map(|p| p.as_path()))
             .ok_or("This copy of the PDF engine cannot draw onto a printer.")?;
         let id = PRINT_DOC - 1;

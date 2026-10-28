@@ -7,6 +7,26 @@ use crate::app::App;
 use crate::updatebox;
 use crate::server::{Ask, Standing, Told};
 
+/// The purpose the server gives a sync key.
+pub const SYNC_PURPOSE: &str = "sync"; // WHAT: the word the server's POST /api/v1/me/keys takes. WHY: one spelling, used by the button and the label alike.
+
+/// What a sync key can and cannot do, in plain words, shown when one is made
+/// and on its button.
+pub const SYNC_KEY_WORDS: &str = "A sync key is for a program that only keeps its own projects in step with this server. \
+It can file projects under that program's own reference, put drawing sets up, archive them and read the markups back. \
+It cannot see projects somebody made by hand, and it cannot add people, change roles, make or take back keys, \
+turn on remote access, update the server, or change the license. It works only while the person who made it is \
+an administrator. Take it back here when the program no longer needs it."; // WHAT: the sync key's powers and limits. WHY: whoever sets the program up should know what they are handing it.
+
+/// A key's purpose as it is shown in the list of keys.
+pub fn key_kind_words(purpose: &str) -> &'static str {
+    match purpose {
+        "assistant" => "assistant", // WHAT: an assistant key. WHY: reads the takeoffs for the assistant app, nothing else.
+        SYNC_PURPOSE => "program, sync only", // WHAT: a sync key. WHY: tells it apart from a full program key when deciding which to take back.
+        _ => "program", // WHAT: an integration key. WHY: the API as the person who made it.
+    }
+}
+
 /// Where somebody is up to in getting connected.
 ///
 /// There are four ways into a Hyperview server and a person should only ever
@@ -171,6 +191,8 @@ struct PanelActions {
     /// Ask the server how the tunnel is doing.
     remote_look: bool,
     make_key: Option<String>,
+    /// Make a sync key with this name.
+    make_sync_key: Option<String>, // WHAT: Make a sync key pressed, with the name typed. WHY: acted on after the panel is drawn.
     revoke_key: Option<String>,
     add_notice: Option<String>,
     test_notice: Option<String>,
@@ -1449,6 +1471,9 @@ impl App {
         if let Some(name) = actions.make_key {
             self.ask(Ask::MakeIntegrationKey(name));
         }
+        if let Some(name) = actions.make_sync_key {
+            self.ask(Ask::MakeSyncKey(name)); // WHAT: ask the server for a sync key. WHY: Make a sync key was pressed.
+        }
         if let Some(id) = actions.revoke_key {
             self.ask(Ask::RevokeKey(id));
         }
@@ -2219,11 +2244,7 @@ fn office_section(
                     ui.label(
                         RichText::new(format!(
                             "{} · {}{}{}",
-                            match key.purpose.as_str() {
-                                "assistant" => "assistant", // WHAT: an assistant key's own word in the key list. WHY: tells it apart from a program's key when deciding which to take back.
-                                "sync" => "program, sync only", // WHAT: a sync key's own words. WHY: tells it apart from a full integration key when deciding which to take back.
-                                _ => "program",
-                            },
+                            key_kind_words(&key.purpose), // WHAT: what kind of key, in words. WHY: tells assistant, program and sync-only keys apart when deciding which to take back.
                             key.person,
                             key.last_used
                                 .as_deref()
@@ -2255,20 +2276,31 @@ fn office_section(
                 } else {
                     office.key_name.trim().to_string()
                 };
-                if ui.small_button("Make a key").clicked() {
-                    actions.make_key = Some(name);
+                if ui.small_button("Make a key").on_hover_text("A key that can use the API as you: projects, drawing sets and markups, for a program you trust with all of that.").clicked() {
+                    actions.make_key = Some(name.clone()); // WHAT: an integration key. WHY: as before.
+                }
+                if ui.small_button("Make a sync key").on_hover_text(SYNC_KEY_WORDS).clicked() {
+                    actions.make_sync_key = Some(name); // WHAT: a sync key with the same name box. WHY: the narrower key for a program that only keeps its projects in step.
                 }
             });
+            ui.label(
+                RichText::new("A sync key is narrower than a key: use it for a program that only keeps its own projects in step with this server.")
+                    .color(theme.faint)
+                    .size(10.0),
+            ); // WHAT: which button is for what, in one line. WHY: so the narrower key is the one chosen when it will do.
             if let Some(made) = office.new_key.clone() {
                 let key = made.key.clone().unwrap_or_default();
                 ui.label(
                     RichText::new(format!(
-                        "The key for {}. It is shown this once — copy it into {}'s settings now.",
-                        made.name, made.name
+                        "The key for {} ({}). It is shown this once — copy it into {}'s settings now.",
+                        made.name, key_kind_words(&made.purpose), made.name
                     ))
                     .color(theme.warn)
                     .size(10.0),
-                );
+                ); // WHAT: the key, what kind it is, and that it is shown once. WHY: there is no second look.
+                if made.purpose == SYNC_PURPOSE {
+                    ui.label(RichText::new(SYNC_KEY_WORDS).color(theme.faint).size(10.0)); // WHAT: what a sync key can and cannot do. WHY: plain words for whoever sets the program up.
+                }
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&key).monospace().size(11.0));
                     if ui.small_button("Copy").clicked() {
@@ -2928,6 +2960,17 @@ fn just_set_up(ui: &mut egui::Ui, theme: ui::chrome::Theme, signing: &SigningIn)
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn a_sync_key_is_asked_for_by_the_servers_word_and_labelled_sync_only() {
+        assert_eq!(SYNC_PURPOSE, "sync"); // WHAT: the word the server takes. WHY: POST /api/v1/me/keys {"purpose":"sync"}; any other word makes a different key or none.
+        assert_eq!(key_kind_words(SYNC_PURPOSE), "program, sync only"); // WHAT: how it is shown. WHY: told apart from a full program key.
+        assert_eq!(key_kind_words("integration"), "program"); // WHAT: an integration key. WHY: unchanged.
+        assert_eq!(key_kind_words("assistant"), "assistant"); // WHAT: an assistant key. WHY: unchanged.
+        for limit in ["cannot see projects somebody made by hand", "cannot add people", "only while the person who made it is"] {
+            assert!(SYNC_KEY_WORDS.contains(limit), "the words leave out: {limit}"); // WHAT: each limit said. WHY: whoever hands the key to a program should know what it cannot do.
+        }
+    }
 
     fn write(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
         let path = dir.join(name);

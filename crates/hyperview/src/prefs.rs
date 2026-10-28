@@ -92,6 +92,25 @@ pub struct Prefs {
     /// The Classic look: grey, with raised buttons and sunken boxes.
     #[serde(default)]
     pub classic: bool,
+    /// Simple mode: the toolbars put away and one short bar of everyday tools
+    /// in their place. `None` until somebody chooses, which means on for a
+    /// tablet and off for a desktop.
+    #[serde(default)]
+    pub simple: Option<bool>, // WHAT: simple mode, or not yet chosen. WHY: a first run on a tablet starts simple; a choice made is kept.
+    /// The quick tools down the side, in order, by command. `None` until
+    /// somebody chooses, which means the usual six.
+    #[serde(default)]
+    pub quick_tools: Option<Vec<String>>, // WHAT: this computer's quick tools. WHY: each person keeps the few they use all day.
+    /// Whether the quick tools are shown.
+    #[serde(default = "yes")]
+    pub quick_tools_shown: bool, // WHAT: the side bar on or off. WHY: somebody who never uses it can put it away.
+    /// The printer chosen last, by name, on a computer that prints through
+    /// CUPS (Linux and the Mac). Empty for the system's default.
+    #[serde(default)]
+    pub printer: String, // WHAT: the printer last printed to. WHY: the next print goes there without asking again.
+    /// The paper chosen last on that printer, by CUPS's own name for it.
+    #[serde(default)]
+    pub paper: String, // WHAT: the paper last printed on. WHY: kept with the printer, so a plot goes on the roll it went on before.
 }
 
 /// The sizes a tablet's controls can be drawn at, with their names.
@@ -161,7 +180,20 @@ impl Default for Prefs {
             cut_step: an_inch(),
             control_size: 0.0,
             classic: false,
+            simple: None, // WHAT: not chosen yet. WHY: the device decides until somebody does.
+            quick_tools: None, // WHAT: not chosen yet. WHY: the usual six until somebody picks their own.
+            quick_tools_shown: true, // WHAT: the side bar shown. WHY: it is how somebody finds out it is there.
+            printer: String::new(), // WHAT: no printer chosen. WHY: the system's default until one is.
+            paper: String::new(), // WHAT: no paper chosen. WHY: the printer's own until one is.
         }
+    }
+}
+
+impl Prefs {
+    /// Whether simple mode is on: as chosen, or on a first run, on for a
+    /// tablet and off for a desktop.
+    pub fn simple_on(&self, tablet: bool) -> bool {
+        self.simple.unwrap_or(tablet) // WHAT: the choice, or the device's default. WHY: a five-row toolbar on a tablet leaves little room for the drawing.
     }
 }
 
@@ -295,6 +327,28 @@ mod tests {
         assert_eq!(p.author, "Sam");
         assert_eq!(p.server.base, "");
         assert_eq!(p.channel, hub::update::Channel::Stable);
+    }
+
+    #[test]
+    fn simple_mode_starts_on_for_a_tablet_and_off_for_a_desktop_until_somebody_chooses() {
+        let fresh = Prefs::default(); // WHAT: a first run. WHY: nothing chosen yet.
+        assert!(fresh.simple_on(true)); // WHAT: a tablet. WHY: starts simple.
+        assert!(!fresh.simple_on(false)); // WHAT: a desktop. WHY: starts with the full toolbars.
+        let chosen = Prefs { simple: Some(false), ..Prefs::default() }; // WHAT: somebody turned it off. WHY: their choice beats the device's.
+        assert!(!chosen.simple_on(true)); // WHAT: off on a tablet. WHY: as chosen.
+        let chosen = Prefs { simple: Some(true), ..Prefs::default() }; // WHAT: somebody turned it on. WHY: the same the other way.
+        assert!(chosen.simple_on(false)); // WHAT: on on a desktop. WHY: as chosen.
+    }
+
+    #[test]
+    fn a_settings_file_from_before_simple_mode_keeps_everything_and_shows_the_quick_tools() {
+        let old = r#"{"author": "Sam", "classic": true}"#; // WHAT: a 0.6.23 file. WHY: none of the new fields in it.
+        let p: Prefs = serde_json::from_str(old).expect("it should still load"); // WHAT: read it. WHY: an upgrade must keep the settings.
+        assert!(p.classic); // WHAT: an old setting kept. WHY: nothing lost.
+        assert_eq!(p.simple, None); // WHAT: simple mode not chosen. WHY: so the device decides.
+        assert_eq!(p.quick_tools, None); // WHAT: no quick tools chosen. WHY: the usual six.
+        assert!(p.quick_tools_shown); // WHAT: shown. WHY: the default, the same as a fresh install.
+        assert!(p.printer.is_empty()); // WHAT: no printer kept. WHY: the default printer until one is chosen.
     }
 
     #[test]

@@ -8,12 +8,12 @@ members = ["crates/annot", "crates/chest", "crates/pdf", "crates/hub", "crates/h
 exclude = ["plugins", "private"]
 
 [workspace.package]
-# WHAT: the version every crate in the program carries. WHY: 0.6.23 is a new
-# build (the office server takes a new version pushed to it at full size,
-# and Download in the update box opens the version it offered), and two
-# builds never share a version, because an install refuses to put a version
-# over itself.
-version = "0.6.23"
+# WHAT: the version every crate in the program carries. WHY: 0.6.24 is a new
+# build (taps and the pen work on a tablet, simple mode, quick tools,
+# printing to any printer on Linux and the Mac, Combine on Linux, and sync
+# keys from Studio), and two builds never share a version, because an
+# install refuses to put a version over itself.
+version = "0.6.24"
 edition = "2021"
 rust-version = "1.88"
 
