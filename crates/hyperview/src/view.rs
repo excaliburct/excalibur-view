@@ -252,6 +252,9 @@ impl App {
     /// point at a time: what to do next, Finish when there are enough points,
     /// Back to take the last point off, and Cancel.
     fn drawing_bar(&mut self, ctx: &egui::Context, area: Rect) {
+        if self.calibrating.is_some() {
+            return; // WHAT: no bar while the length is being typed. WHY: the scale window says what to do then.
+        }
         let tool = self.tool; // WHAT: the tool in hand. WHY: the words and buttons depend on it.
         let draft = self.doc().and_then(|d| d.draft.clone()); // WHAT: the shape so far. WHY: how many points it has decides what is said.
         let Some(words) = drawing_words(tool, draft.as_ref()) else { return }; // WHAT: what to say, if anything. WHY: no bar for tools that do not collect points.
@@ -1158,6 +1161,9 @@ impl App {
     fn tool_input(&mut self, ui: &mut egui::Ui, response: &egui::Response, _area: Rect) {
         if self.tool == Tool::Pan || self.touch.pinching || self.touch.panning || self.touch.settling {
             return;
+        }
+        if self.calibrating.is_some() {
+            return; // WHAT: nothing on the sheet while the scale's length is being typed. WHY: the second click of a habitual double click started a stray new scale under the window.
         }
         // Words being typed into a box on the sheet have the pointer to
         // themselves; a click elsewhere finishes them and does nothing else.

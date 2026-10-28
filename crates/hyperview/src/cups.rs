@@ -327,7 +327,10 @@ mod tests {
     /// A folder with pretend CUPS programs in it. Each prints what it is
     /// given here; `lp` also writes the words it was called with to a file.
     fn pretend(name: &str, programs: &[(&str, &str)]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("exv-cups-{name}-{}", std::process::id())); // WHAT: a folder of this test's own. WHY: tests run side by side.
+        let scratch = std::env::var_os("TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")); // WHAT: the test run's own scratch folder, or the build folder. WHY: somewhere private to write the stand-in programs.
+        let dir = scratch.join(format!("exv-cups-{name}-{}", std::process::id())); // WHAT: a folder of this test's own. WHY: tests run side by side.
         let _ = std::fs::remove_dir_all(&dir); // WHAT: nothing left from before. WHY: a clean start.
         std::fs::create_dir_all(&dir).unwrap(); // WHAT: make it. WHY: the programs go in it.
         for (program, script) in programs {
