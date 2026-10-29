@@ -1236,6 +1236,7 @@ pub fn start(repaint: egui::Context) -> Link {
                         },
                     },
 
+                    Ask::OpenFile { name, .. } if crate::openwith::runs_itself(&name) => say(&told, Told::Trouble(crate::openwith::RUNS_ITSELF.to_string())), // WHAT: a program or a shortcut, refused before it is fetched. WHY: it never reaches this computer.
                     Ask::OpenFile { file, name } => match connected(&client) {
                         Err(message) => say(&told, Told::Trouble(message)), // WHAT: not signed in. WHY: said.
                         Ok(client) => match client.file_bytes(&file) {

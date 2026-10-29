@@ -40,9 +40,34 @@ pub fn safe_name(name: &str) -> String {
     } // WHAT: something, always. WHY: a copy needs a name.
 }
 
+/// What the Studio says when a file is a program or a shortcut.
+pub const RUNS_ITSELF: &str = "This is a program or a shortcut, so Excalibur View won't open it: a file that runs itself could be anything. If it's meant to be here, get it from the company files."; // WHAT: the sentence. WHY: said plainly rather than running it.
+
+/// Kinds of file the system would run rather than open: programs, scripts,
+/// installers and shortcuts on Windows, Mac and Linux.
+const RUNS: &[&str] = &[
+    "exe", "com", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msc", "msi", "msp", "scr", "pif", "cpl", "hta", "lnk", "url", "reg", "inf", "jar", "appref-ms", "application", "gadget", "dll", "sys", "scf", "settingcontent-ms", "library-ms", "search-ms", // WHAT: Windows. WHY: Explorer runs each of these.
+    "app", "command", "tool", "pkg", "dmg", "workflow", "terminal", "webloc", "inetloc", "fileloc", // WHAT: Mac. WHY: `open` runs or mounts each of these.
+    "desktop", "sh", "bash", "run", "bin", "appimage", "deb", "rpm", "py", "pl", // WHAT: Linux. WHY: a desktop may run each of these.
+]; // WHAT: the list. WHY: an office's files are spreadsheets, letters and pictures; nothing in them needs to run.
+
+/// Whether a file of this name is one the system would run.
+pub fn runs_itself(name: &str) -> bool {
+    let name = safe_name(name).to_lowercase(); // WHAT: the name as it would be saved. WHY: checked exactly as written to disk.
+    let name = name.trim_end_matches(['.', ' ']); // WHAT: trailing dots and spaces gone. WHY: Windows drops them, so `run.exe.` is `run.exe`.
+    match name.rsplit_once('.') {
+        Some((_, ext)) => RUNS.contains(&ext), // WHAT: its kind on the list. WHY: refused.
+        None => false, // WHAT: no kind at all. WHY: opened as a plain file.
+    }
+}
+
 /// Saves `bytes` as a copy of file `id` called `name` in this person's own
-/// cache folder, beside the kept drawings, and says where.
+/// cache folder, beside the kept drawings, and says where. Never a program
+/// or a shortcut.
 pub fn save_copy(id: &str, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    if runs_itself(name) {
+        return Err(RUNS_ITSELF.to_string()); // WHAT: refused before anything is written. WHY: a file somebody put in a job folder must never run on a field hand's computer with a double click.
+    }
     let drawings = crate::server::cache_folder(); // WHAT: where this person's kept drawings are. WHY: their own folder, not the computer's shared temporary one another account could plant a file in.
     let folder = drawings
         .parent()
@@ -52,7 +77,19 @@ pub fn save_copy(id: &str, name: &str, bytes: &[u8]) -> Result<PathBuf, String> 
     std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?; // WHAT: made. WHY: the copy goes in it.
     let path = folder.join(safe_name(name)); // WHAT: the copy. WHY: its own name, so the system knows its kind.
     std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?; // WHAT: written. WHY: handed to its program.
+    from_elsewhere(&path); // WHAT: marked as downloaded. WHY: Windows then opens Office files in Protected View, as it would from a browser.
     Ok(path)
+}
+
+/// Marks a copy as having come from another computer, as a browser does, so
+/// Windows treats it with the same care (Office's Protected View, the
+/// warning before anything runs). Nothing elsewhere.
+fn from_elsewhere(path: &Path) {
+    if cfg!(windows) {
+        let mut mark = path.as_os_str().to_owned(); // WHAT: the copy's path. WHY: the mark is a stream beside it.
+        mark.push(":Zone.Identifier"); // WHAT: the stream Windows reads. WHY: where a browser writes the same mark.
+        let _ = std::fs::write(PathBuf::from(mark), "[ZoneTransfer]\r\nZoneId=3\r\n"); // WHAT: "from the internet". WHY: the most careful zone; a drive that can't hold it just goes without.
+    }
 }
 
 /// Hands the copy to the system to open with its own program. On a tablet,
@@ -94,5 +131,17 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"PK"); // WHAT: its bytes. WHY: the file whole.
         assert!(path.ends_with("Cut list.xlsx")); // WHAT: its name. WHY: so the system knows its kind.
         let _ = std::fs::remove_dir_all(path.parent().unwrap()); // WHAT: cleaned up. WHY: tests leave nothing.
+    }
+
+    #[test]
+    fn a_program_or_a_shortcut_is_never_saved_or_opened() {
+        for name in ["Site photos.exe", "Pictures/Photo.LNK", "run.bat", "x.ps1", "a.scr", "b.hta", "c.command", "d.desktop", "e.AppImage", "f.exe.", "g.exe ", "h.url"] {
+            assert!(runs_itself(name), "{name}"); // WHAT: each refused. WHY: the system would run it.
+            assert_eq!(save_copy("file_runs", name, b"MZ"), Err(RUNS_ITSELF.to_string()), "{name}"); // WHAT: nothing written. WHY: refused first.
+        }
+        for name in ["Estimate.xlsx", "Letter.docx", "Photo.jpg", "Plan.dwg", "notes", "exe.pdf"] {
+            assert!(!runs_itself(name), "{name}"); // WHAT: ordinary office files. WHY: opened as before.
+        }
+        assert!(!crate::server::cache_folder().parent().unwrap().join("copies").join(crate::server::safe("file_runs")).exists()); // WHAT: no folder made for the refused ones. WHY: nothing was saved.
     }
 }
