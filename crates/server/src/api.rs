@@ -1352,6 +1352,9 @@ async fn upload_set(
                 there.already_here = true;
                 return Ok(there);
             }
+            if let Some(folder) = &set.folder {
+                crate::folders::make_folder(db, &set.project, folder, &who, who.is_key(crate::auth::purpose::SYNC))?; // WHAT: the drawing's folder written down, in the same step, before the issue it replaces is looked for. WHY: a program's new folder is the office's until it says; without its row a drawing sent first would be everybody's.
+            }
             // The same drawing issued again: it takes the old one's place.
             let before =
                 crate::projects::issued_before(db, &set.project, &set.name, set.folder.as_deref())?;
@@ -1361,9 +1364,6 @@ async fn upload_set(
             // sent before folders were takes the new one's.
             if let Some(folder) = before.as_ref().and_then(|b| b.folder.clone()) {
                 set.folder = Some(folder);
-            }
-            if let Some(folder) = &set.folder {
-                crate::folders::make_folder(db, &set.project, folder, &who, who.is_key(crate::auth::purpose::SYNC))?; // WHAT: the drawing's folder written down, in the same step. WHY: a program's new folder is the office's until it says; without its row a drawing sent first would be everybody's.
             }
             db.execute(
                 "INSERT INTO sets (id, project, name, filename, digest, bytes, sheets,

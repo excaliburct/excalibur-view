@@ -1116,3 +1116,30 @@ fn a_long_request_writes_every_rule_change_and_every_group_it_made_in_the_audit_
         .collect(); // WHAT: the group lines. WHY: checked.
     assert!(made.iter().any(|e| e.to_string().contains("Crew")), "{text}"); // WHAT: the group the request made. WHY: groups decide who sees folders.
 }
+
+#[test]
+fn a_drawing_everybody_sees_is_never_pointed_at_a_newer_issue_in_a_folder_they_cant() {
+    let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
+    let admin = &office.admin; // WHAT: Sam. WHY: sets up.
+    let project = office.post(
+        admin,
+        "/projects",
+        json!({ "number": "26-630", "name": "Old and new", "reference": "program:job:630" }),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string(); // WHAT: a job a program keeps in step. WHY: its sync key may reach it.
+    let old = office.drawing(admin, &project, "S-101", "", "before folders"); // WHAT: an issue sent before folders were. WHY: everybody's, as in every office today.
+    let sync = office.key(admin, "sync"); // WHAT: the program's sync key. WHY: the mirror.
+    office.drawing(&sync, &project, "S-101", "01 CONTRACT", "the newer one"); // WHAT: the same name into a new folder of the program's. WHY: the office's by default.
+    let (_, nan) = office.get(&office.nan, &format!("/projects/{project}/sets")); // WHAT: Nan's set list. WHY: what a viewer is told.
+    let mine = nan
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == old.as_str())
+        .unwrap_or_else(|| panic!("{nan}")); // WHAT: the old issue. WHY: still hers.
+    assert!(mine["superseded_by"].is_null(), "{mine}"); // WHAT: not pointed at the hidden one. WHY: she mustn't learn a newer drawing is kept from her.
+    let (_, sam) = office.get(admin, &format!("/projects/{project}/sets")); // WHAT: Sam's list. WHY: both are there for the office.
+    assert_eq!(names(&sam, "name").iter().filter(|n| *n == "S-101").count(), 2, "{sam}"); // WHAT: two S-101s. WHY: kept apart, neither lost.
+}

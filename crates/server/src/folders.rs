@@ -150,6 +150,13 @@ impl Sight {
     }
 }
 
+/// Whether everybody on `project` sees what is in `folder`, by its rule and
+/// every rule above it.
+pub(crate) fn everybodys(db: &Connection, project: &str, folder: &str) -> rusqlite::Result<bool> {
+    let rules = Sight { everything: false, groups: Vec::new(), rules: rules_of(db, project)? }; // WHAT: the project's rules, as nobody in particular. WHY: only the rule matters, not who asks.
+    Ok(matches!(rules.rule(Some(folder)), See::Everyone)) // WHAT: everybody's or not. WHY: a drawing outside every folder may only be replaced by one everybody sees too.
+}
+
 /// What `who` may see of `project`'s folders, read fresh from the database.
 pub fn sight_of(db: &Connection, project: &str, who: &Who) -> rusqlite::Result<Sight> {
     if is_office(who) {

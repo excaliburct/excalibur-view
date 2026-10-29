@@ -557,11 +557,20 @@ pub(crate) fn issued_before(
     let found = current
         .iter()
         .find(|s| same_name(&s.name, name) && same_folder(s.folder.as_deref(), folder))
-        .or_else(|| {
-            folder.and(current.iter().find(|s| s.folder.is_none() && same_name(&s.name, name)))
-        })
         .cloned();
-    Ok(found)
+    if found.is_some() {
+        return Ok(found); // WHAT: the same drawing in the same folder. WHY: that one it replaces.
+    }
+    let Some(folder) = folder else {
+        return Ok(None); // WHAT: sent outside every folder, and none there. WHY: nothing to replace.
+    };
+    if !crate::folders::everybodys(db, project, folder)? {
+        return Ok(None); // WHAT: a folder not everybody sees. WHY: the old issue outside every folder is everybody's, so pointing it at this one would tell a field hand a newer drawing is hidden from them.
+    }
+    Ok(current
+        .iter()
+        .find(|s| s.folder.is_none() && same_name(&s.name, name))
+        .cloned()) // WHAT: the same drawing sent before folders were. WHY: an office that starts using folders keeps its issues in a line.
 }
 
 /// Whether a sheet is the same sheet of paper as another: the same size, the
