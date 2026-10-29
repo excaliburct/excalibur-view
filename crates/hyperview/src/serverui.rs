@@ -150,6 +150,15 @@ pub struct OfficePanel {
     /// until somebody quit the program. What you are looking at should be
     /// what is there.
     pub last_looked: Option<std::time::Instant>,
+    /// The groups of people, and a new one's name as it is typed.
+    pub groups: Vec<hub::Group>, // WHAT: every group and who is in it. WHY: Studio, Office, People ticks people into them.
+    pub group_name: String, // WHAT: the name being typed. WHY: Make group.
+    /// The project being looked at's folders and its files that aren't drawings.
+    pub folders: Vec<hub::FolderInfo>, // WHAT: every folder this person sees, empty ones too. WHY: shown.
+    pub files: Vec<hub::ProjectFile>, // WHAT: the files in them. WHY: shown after the drawings.
+    pub folders_for: String, // WHAT: whose folders those are. WHY: a late answer for another project is dropped.
+    /// A folder whose rule is being changed: (folder, the rule as it is being picked).
+    pub changing_rule: Option<(String, hub::See)>, // WHAT: the folder and the rule being picked. WHY: changed only when Save is pressed.
 }
 
 /// An account being made for somebody, as it is being typed.
@@ -210,6 +219,13 @@ struct PanelActions {
     /// (id, name) -- the name so the sentence afterwards can use it, since
     /// the row it came from is gone by then.
     remove_person: Option<(String, String)>,
+    /// (file id, name): a file to open with its own program.
+    open_file: Option<(String, String)>, // WHAT: Open with its program pressed. WHY: the copy is fetched on the worker.
+    /// (folder, rule): who sees a folder, changed by an administrator.
+    folder_rule: Option<(String, hub::See)>, // WHAT: Save pressed on a folder's rule. WHY: sent to the server.
+    make_group: Option<String>, // WHAT: Make group pressed, with the name. WHY: sent.
+    /// (group, person, in): a tick in a group changed.
+    change_group: Option<(String, String, bool)>, // WHAT: somebody ticked in or out. WHY: sent.
 }
 
 impl App {
@@ -549,6 +565,30 @@ impl App {
                 Told::UpdateRefused(why) => {
                     self.checking_for_update = false;
                     self.standing.update_refused = Some(why);
+                }
+                Told::Folders { project, folders, files } => {
+                    if self.standing.looking_at.as_deref() == Some(project.as_str()) {
+                        self.office.folders = folders; // WHAT: the project's folders. WHY: shown, the empty ones too.
+                        self.office.files = files; // WHAT: its files. WHY: shown after the drawings.
+                        self.office.folders_for = project; // WHAT: whose. WHY: drawn only for that project.
+                    } // WHAT: an answer for a project no longer open is dropped. WHY: never shown under the wrong job.
+                }
+                Told::Groups(groups) => {
+                    self.standing.busy = None; // WHAT: done. WHY: the spinner stops.
+                    self.office.group_name.clear(); // WHAT: the box emptied. WHY: the group is made.
+                    self.office.groups = groups; // WHAT: the groups now. WHY: shown.
+                }
+                Told::FileReady { path, name } => {
+                    self.standing.busy = None; // WHAT: done. WHY: the spinner stops.
+                    match crate::openwith::open(&path) {
+                        Ok(()) => self.status = format!("Opened a copy of {name}. {}", crate::openwith::A_COPY), // WHAT: said, with the warning. WHY: a change saved in the copy goes nowhere.
+                        Err(why) => self.error = Some(why), // WHAT: why it couldn't. WHY: said plainly.
+                    }
+                }
+                Told::Said(said) => {
+                    self.standing.busy = None; // WHAT: done. WHY: the spinner stops.
+                    self.office.changing_rule = None; // WHAT: the rule picker closed. WHY: the change went.
+                    self.status = said; // WHAT: the sentence. WHY: on the status line.
                 }
                 Told::Trouble(message) => {
                     self.standing.busy = None;
@@ -1322,18 +1362,30 @@ impl App {
                                     .size(11.0),
                             );
                         }
-                        // A drawing in the folder it came from in the job's
-                        // own files, the ones with none at the top.
-                        let folders = crate::shelves::shelve(
-                            &self.standing.sets,
-                            |s| s.folder.as_deref(),
-                            &[],
-                        );
-                        for set in &folders.items {
-                            set_row(ui, theme, set, &mut open_set, &mut copy_set);
+                        // Every folder of the job as its own files have it,
+                        // the empty ones too, each with its drawings and then
+                        // its other files; the ones in no folder at the top.
+                        let shown_folders: &[hub::FolderInfo] = if self.office.folders_for == project { &self.office.folders } else { &[] }; // WHAT: the folders, if they are this project's. WHY: never another job's.
+                        let shown_files: &[hub::ProjectFile] = if self.office.folders_for == project { &self.office.files } else { &[] }; // WHAT: the files, likewise. WHY: likewise.
+                        let mut things: Vec<InFolder> = self.standing.sets.iter().map(InFolder::Set).collect(); // WHAT: the drawings first. WHY: drawings before files in each folder.
+                        things.extend(shown_files.iter().map(InFolder::File)); // WHAT: then the files. WHY: after the drawings.
+                        things.extend(shown_folders.iter().map(|f| InFolder::Folder(f.folder.as_str()))); // WHAT: then every folder, so an empty one shows. WHY: the server lists them all.
+                        let folders = crate::shelves::shelve(&things, InFolder::folder, &[]); // WHAT: put on shelves by folder. WHY: as the job's own files.
+                        let mut view = FolderView {
+                            rules: shown_folders,
+                            groups: &self.office.groups,
+                            admin: is_admin,
+                            changing: &mut self.office.changing_rule,
+                            open_set: &mut open_set,
+                            copy_set: &mut copy_set,
+                            open_file: &mut actions.open_file,
+                            folder_rule: &mut actions.folder_rule,
+                        }; // WHAT: what drawing a folder needs. WHY: one bundle for the recursive drawing below.
+                        for thing in &folders.items {
+                            view.thing(ui, theme, thing); // WHAT: what is in no folder. WHY: at the top, as before.
                         }
                         for shelf in &folders.shelves {
-                            set_shelf(ui, theme, shelf, &mut open_set, &mut copy_set);
+                            view.shelf(ui, theme, shelf); // WHAT: each folder. WHY: with who sees it.
                         }
                     }
                 }
@@ -1341,6 +1393,7 @@ impl App {
 
         if actions.people {
             self.ask(Ask::People);
+            self.ask(Ask::Groups); // WHAT: the groups too. WHY: shown under the people.
         }
         if let Some((name, email, password, role)) = actions.add_person.take() {
             self.standing.busy = Some("Making the account…".into());
@@ -1371,7 +1424,27 @@ impl App {
         if let Some(project) = open_project {
             self.standing.looking_at = Some(project.clone());
             self.standing.busy = Some("Looking…".into());
+            self.office.folders.clear(); // WHAT: the last project's folders dropped. WHY: never shown under this one.
+            self.office.files.clear(); // WHAT: and its files. WHY: likewise.
             self.ask(Ask::Sets(project));
+            if is_admin {
+                self.ask(Ask::Groups); // WHAT: the groups. WHY: an administrator picks from them for a folder.
+            }
+        }
+        if let Some((file, name)) = actions.open_file.take() {
+            self.standing.busy = Some(format!("Getting a copy of {name}…")); // WHAT: said while it comes down. WHY: a big file takes a moment.
+            self.ask(Ask::OpenFile { file, name }); // WHAT: fetched and opened. WHY: Open with its program.
+        }
+        if let (Some((folder, see)), Some(project)) = (actions.folder_rule.take(), self.standing.looking_at.clone()) {
+            self.standing.busy = Some("Changing who sees that folder…".into()); // WHAT: said. WHY: the spinner.
+            self.ask(Ask::SetFolderRule { project, folder, see }); // WHAT: sent. WHY: the server keeps and enforces it.
+        }
+        if let Some(name) = actions.make_group.take() {
+            self.standing.busy = Some("Making the group…".into()); // WHAT: said. WHY: the spinner.
+            self.ask(Ask::MakeGroup(name)); // WHAT: sent. WHY: a new group.
+        }
+        if let Some((group, person, on)) = actions.change_group.take() {
+            self.ask(Ask::ChangeGroup { group, person, on }); // WHAT: sent. WHY: decides the folders they see.
         }
         if let Some((set, name)) = copy_set {
             self.standing.busy = Some("Making a copy to take off on…".into());
@@ -1725,6 +1798,37 @@ impl App {
 /// find out the hard way. And every change is followed by the list as the
 /// server now has it, rather than by this screen editing its own copy and
 /// hoping.
+/// Groups of people ("Shop", "Field"): make one, and tick who is in each. A
+/// folder given to a group is seen by the people in it and by the office.
+fn groups_section(ui: &mut egui::Ui, theme: ui::chrome::Theme, office: &mut OfficePanel, people: &[hub::User], actions: &mut PanelActions) {
+    ui.add_space(10.0);
+    ui.label(RichText::new("Groups").strong().size(12.0)); // WHAT: the heading. WHY: under People.
+    ui.label(
+        RichText::new("Give a project's folder to groups and only the people in them, and the office, see it. Viewers see only the folders given to everyone or to one of their groups; administrators and estimators see every folder.")
+            .color(theme.faint)
+            .size(10.0),
+    ); // WHAT: what groups are for. WHY: said once, where they are made.
+    for group in office.groups.clone() {
+        ui.add_space(4.0);
+        ui.label(RichText::new(format!("{} ({})", group.name, group.people.len())).size(12.0)); // WHAT: the group and how many are in it. WHY: shown.
+        ui.horizontal_wrapped(|ui| {
+            for person in people {
+                let mut on = group.people.contains(&person.id); // WHAT: whether they are in it. WHY: the tick.
+                if ui.checkbox(&mut on, &person.name).changed() {
+                    actions.change_group = Some((group.id.clone(), person.id.clone(), on)); // WHAT: in or out. WHY: sent after drawing.
+                }
+            }
+        });
+    }
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut office.group_name).hint_text("Shop, Field…").desired_width(160.0)); // WHAT: a new group's name. WHY: typed.
+        let ready = !office.group_name.trim().is_empty(); // WHAT: a name typed. WHY: a group needs one.
+        if ui.add_enabled(ready, egui::Button::new("Make group")).clicked() {
+            actions.make_group = Some(office.group_name.trim().to_string()); // WHAT: asked for. WHY: sent after drawing.
+        }
+    });
+}
+
 fn people_section(
     ui: &mut egui::Ui,
     theme: ui::chrome::Theme,
@@ -1953,24 +2057,160 @@ fn set_row(
 }
 
 /// A folder of a project's drawings, as it is in the job's own files.
-fn set_shelf(
-    ui: &mut egui::Ui,
-    theme: ui::chrome::Theme,
-    shelf: &crate::shelves::Shelf<'_, hub::DrawingSet>,
-    open_set: &mut Option<(String, String)>,
-    copy_set: &mut Option<(String, String)>,
-) {
-    egui::CollapsingHeader::new(RichText::new(format!("{} ({})", shelf.name, shelf.count())).size(12.0))
-        .id_salt(format!("folder:{}", shelf.path))
-        .default_open(true)
-        .show(ui, |ui| {
-            for inner in &shelf.shelves {
-                set_shelf(ui, theme, inner, open_set, copy_set);
+/// One thing in a project's folders, for the Studio: a drawing set, a file
+/// that isn't a drawing, or a folder, which may hold nothing at all.
+enum InFolder<'a> {
+    Set(&'a hub::DrawingSet), // WHAT: a drawing set. WHY: opened in Excalibur View.
+    File(&'a hub::ProjectFile), // WHAT: any other file. WHY: opened with its own program.
+    Folder(&'a str), // WHAT: a folder, by its path. WHY: so an empty one still shows.
+}
+
+impl InFolder<'_> {
+    /// The folder it is in, or is.
+    fn folder(&self) -> Option<&str> {
+        match self {
+            InFolder::Set(set) => set.folder.as_deref(), // WHAT: the set's folder. WHY: shelved there.
+            InFolder::File(file) => file.folder.as_deref(), // WHAT: the file's folder. WHY: likewise.
+            InFolder::Folder(path) => Some(path), // WHAT: the folder itself. WHY: makes its shelf.
+        }
+    }
+}
+
+/// How many drawings and files are in a folder, however deep, the folders
+/// themselves not counted.
+fn things_in(shelf: &crate::shelves::Shelf<'_, InFolder<'_>>) -> usize {
+    shelf.items.iter().filter(|t| !matches!(t, InFolder::Folder(_))).count() + shelf.shelves.iter().map(things_in).sum::<usize>() // WHAT: drawings and files only. WHY: an empty folder says (0).
+}
+
+/// What drawing a project's folders needs, and what it hands back.
+struct FolderView<'a> {
+    rules: &'a [hub::FolderInfo], // WHAT: each folder's rule, from the server. WHY: shown on its header.
+    groups: &'a [hub::Group], // WHAT: the office's groups. WHY: an administrator picks from them.
+    admin: bool, // WHAT: whether this person may change who sees a folder. WHY: only an administrator may.
+    changing: &'a mut Option<(String, hub::See)>, // WHAT: the folder whose rule is being picked. WHY: open until Save or Cancel.
+    open_set: &'a mut Option<(String, String)>, // WHAT: a set to open. WHY: acted on after drawing.
+    copy_set: &'a mut Option<(String, String)>, // WHAT: a set to copy. WHY: likewise.
+    open_file: &'a mut Option<(String, String)>, // WHAT: a file to open with its program. WHY: likewise.
+    folder_rule: &'a mut Option<(String, hub::See)>, // WHAT: a rule to send. WHY: likewise.
+}
+
+impl FolderView<'_> {
+    /// The server's word on a folder, case and spacing aside.
+    fn rule_of(&self, path: &str) -> Option<&hub::FolderInfo> {
+        let plain = |p: &str| p.split('/').map(|x| x.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()).collect::<Vec<_>>().join("/"); // WHAT: a folder as compared. WHY: the server's spelling may differ in case.
+        self.rules.iter().find(|f| plain(&f.folder) == plain(path)) // WHAT: its entry. WHY: its rule.
+    }
+
+    fn thing(&mut self, ui: &mut egui::Ui, theme: ui::chrome::Theme, thing: &InFolder<'_>) {
+        match thing {
+            InFolder::Set(set) => set_row(ui, theme, set, self.open_set, self.copy_set), // WHAT: a drawing, as before. WHY: opened in Excalibur View.
+            InFolder::File(file) => file_row(ui, theme, file, self.open_file), // WHAT: a file. WHY: opened with its own program.
+            InFolder::Folder(_) => {} // WHAT: nothing to draw. WHY: the folder is its shelf.
+        }
+    }
+
+    fn shelf(&mut self, ui: &mut egui::Ui, theme: ui::chrome::Theme, shelf: &crate::shelves::Shelf<'_, InFolder<'_>>) {
+        egui::CollapsingHeader::new(RichText::new(format!("{} ({})", shelf.name, things_in(shelf))).size(12.0))
+            .id_salt(format!("folder:{}", shelf.path))
+            .default_open(true)
+            .show(ui, |ui| {
+                self.who_sees(ui, theme, &shelf.path); // WHAT: who sees this folder. WHY: an office can tell at a glance what the field sees.
+                for inner in &shelf.shelves {
+                    self.shelf(ui, theme, inner); // WHAT: the folders in it. WHY: the tree as the job has it.
+                }
+                for thing in &shelf.items {
+                    self.thing(ui, theme, thing); // WHAT: its drawings, then its files. WHY: drawings first.
+                }
+                if things_in(shelf) == 0 && shelf.shelves.is_empty() {
+                    ui.label(RichText::new("Empty").color(theme.faint).size(10.5)); // WHAT: said. WHY: an empty folder shows as empty, not as missing.
+                }
+            });
+    }
+
+    /// The line under a folder's name: who sees it, and for an administrator
+    /// a way to change it.
+    fn who_sees(&mut self, ui: &mut egui::Ui, theme: ui::chrome::Theme, path: &str) {
+        let Some(info) = self.rule_of(path).cloned() else { return }; // WHAT: the server's word on it. WHY: an older server says nothing, and nothing is shown.
+        let picking = self.changing.as_ref().is_some_and(|(p, _)| p == path); // WHAT: whether its rule is being picked. WHY: the picker shows instead.
+        if !picking {
+            ui.horizontal_wrapped(|ui| {
+                let mut said = format!("Who sees it: {}", info.see.words()); // WHAT: the rule in words. WHY: what decides.
+                if info.own.is_none() {
+                    said.push_str(" (from the folder it is in)"); // WHAT: inherited. WHY: so nobody changes the wrong folder.
+                }
+                ui.label(RichText::new(said).color(theme.faint).size(10.5)); // WHAT: shown. WHY: as above.
+                if let (Some(by), Some(at)) = (&info.set_by, &info.set_at) {
+                    let place = if info.set_in.as_deref() == Some("program") { "by the program" } else { "in Excalibur View" }; // WHAT: where it was set. WHY: a change in View lasts until the program sets that folder again.
+                    ui.label(RichText::new(format!("set {place}, {by}, {}", at.get(..10).unwrap_or(at))).color(theme.faint).size(10.0)); // WHAT: who and when. WHY: recorded, and shown.
+                }
+                if self.admin && ui.small_button("Change…").on_hover_text("Choose who sees this folder and everything in it.").clicked() {
+                    *self.changing = Some((path.to_string(), info.own.clone().unwrap_or(info.see.clone()))); // WHAT: the picker opened on its rule. WHY: starts from what it is.
+                }
+            });
+            return;
+        }
+        let Some((_, rule)) = self.changing.as_mut() else { return }; // WHAT: the rule being picked. WHY: changed by the buttons below.
+        ui.horizontal_wrapped(|ui| {
+            if ui.radio(matches!(rule, hub::See::Everyone), "Everyone on the job").clicked() {
+                *rule = hub::See::Everyone; // WHAT: everybody. WHY: picked.
             }
-            for set in &shelf.items {
-                set_row(ui, theme, set, open_set, copy_set);
+            if ui.radio(matches!(rule, hub::See::Office), "Office only").clicked() {
+                *rule = hub::See::Office; // WHAT: administrators and estimators. WHY: picked.
+            }
+            if ui.radio(matches!(rule, hub::See::Groups(_)), "These groups").clicked() && !matches!(rule, hub::See::Groups(_)) {
+                *rule = hub::See::Groups(Vec::new()); // WHAT: groups, none ticked yet. WHY: ticked next.
             }
         });
+        if let hub::See::Groups(chosen) = rule {
+            if self.groups.is_empty() {
+                ui.label(RichText::new("No groups yet: make them in Studio, Office, People.").color(theme.faint).size(10.5)); // WHAT: said. WHY: there is nothing to tick.
+            }
+            ui.horizontal_wrapped(|ui| {
+                for group in self.groups {
+                    let mut on = chosen.iter().any(|g| g.eq_ignore_ascii_case(&group.name)); // WHAT: whether it is ticked. WHY: shown.
+                    if ui.checkbox(&mut on, &group.name).changed() {
+                        chosen.retain(|g| !g.eq_ignore_ascii_case(&group.name)); // WHAT: taken off. WHY: then put back if ticked.
+                        if on {
+                            chosen.push(group.name.clone()); // WHAT: ticked. WHY: the group sees it.
+                        }
+                    }
+                }
+            });
+            ui.label(RichText::new("The office always sees it too.").color(theme.faint).size(10.0)); // WHAT: said. WHY: nobody wonders whether they locked themselves out.
+        }
+        let mut done = false; // WHAT: whether the picker closes. WHY: after Save or Cancel.
+        ui.horizontal(|ui| {
+            if ui.button("Save").clicked() {
+                *self.folder_rule = Some((path.to_string(), rule.clone())); // WHAT: the rule to send. WHY: the server decides, and records who changed it.
+                done = true; // WHAT: closes. WHY: sent.
+            }
+            if ui.button("Cancel").clicked() {
+                done = true; // WHAT: closes. WHY: nothing changed.
+            }
+        });
+        if done {
+            *self.changing = None; // WHAT: closed. WHY: as above.
+        }
+    }
+}
+
+/// One file that isn't a drawing: its kind, name, size and when it was
+/// saved, and **Open with its program**.
+fn file_row(ui: &mut egui::Ui, theme: ui::chrome::Theme, file: &hub::ProjectFile, open_file: &mut Option<(String, String)>) {
+    let kind = file.name.rsplit_once('.').map(|(_, e)| e.to_uppercase()).unwrap_or_else(|| "FILE".into()); // WHAT: its kind, by its extension. WHY: shown as a file window does.
+    let size = if file.bytes >= 1_048_576 { format!("{:.1} MB", file.bytes as f64 / 1_048_576.0) } else { format!("{} KB", file.bytes.div_ceil(1024)) }; // WHAT: its size in words. WHY: shown.
+    let saved = file.modified.as_deref().unwrap_or(&file.uploaded); // WHAT: when it was saved, or when it arrived. WHY: shown.
+    let row = ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("[{kind}]")).color(theme.faint).size(10.0)); // WHAT: its kind. WHY: tells a spreadsheet from a letter.
+        ui.label(RichText::new(&file.name).size(12.0)); // WHAT: its name. WHY: shown.
+        ui.label(RichText::new(format!("{size} · {}", saved.get(..10).unwrap_or(saved))).color(theme.faint).size(10.0)); // WHAT: size and date. WHY: shown.
+        if ui.small_button("Open with its program").on_hover_text(crate::openwith::A_COPY).clicked() {
+            *open_file = Some((file.id.clone(), file.name.clone())); // WHAT: asked for. WHY: fetched on the worker.
+        }
+    });
+    if row.response.interact(egui::Sense::click()).double_clicked() {
+        *open_file = Some((file.id.clone(), file.name.clone())); // WHAT: a double click does the same. WHY: as in a file window.
+    }
 }
 
 fn office_section(
@@ -2082,6 +2322,7 @@ fn office_section(
             }
 
             people_section(ui, theme, office, people, me, actions);
+            groups_section(ui, theme, office, people, actions); // WHAT: the groups, under the people. WHY: a folder can be given to a group, so the shop and the field see only theirs.
 
             // Updates
             ui.add_space(10.0);

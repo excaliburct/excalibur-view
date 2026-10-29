@@ -364,6 +364,39 @@ Studio keeps in step with everybody else's copy every few seconds — markups
 somebody else draws appear on your screen without anybody saving or reopening.
 A tool chest an administrator shares arrives on every seat by itself.
 
+A project shows every folder of the job, the empty ones too, each with its
+drawing sets and then its other files (spreadsheets, letters, pictures, models:
+any kind). **Open with its program** saves a copy on the computer and opens it
+with the program the computer uses for that kind of file; it is a copy, and
+changes belong in the company files. On a tablet it goes to the share sheet.
+The server keeps one copy of each file's bytes, however often it is sent.
+
+### Groups, and who sees each folder
+
+Under **Studio → Office → People**, an administrator makes groups (Shop,
+Field) and ticks the people in each; a person can be in several. Each folder
+of a project says who sees it, and an administrator changes it with
+**Change…** beside it:
+
+| Who sees it | Who that is |
+|---|---|
+| Everyone on the job | Everybody who may see the project. A folder with no rule anywhere above it is this, as every folder was before 0.6.25. |
+| Office only | Administrators and estimators. |
+| These groups | The people in the groups ticked, and the office always. |
+
+A folder without its own rule takes the rule of the folder it is in, and is
+never seen by more people than that folder. Administrators and estimators see
+every folder; the rules bind viewers. The server checks the rule on every
+request: folder and set lists, downloads, sheets, markups, takeoffs, exports,
+project counts, the change stamp and the assistant all leave out what the
+person may not see, and answer it exactly as something that isn't there. A
+seat takes off its computer any kept drawing its person can no longer see. A
+rule changed in the Studio stays until the program that keeps the job in step
+sets that folder again; each folder says who set its rule, where and when, and
+every change is in the audit log. The routes are `GET`/`POST /api/v1/groups`,
+`POST /api/v1/groups/{id}/people`, and `GET`/`POST
+/api/v1/projects/{id}/folders`.
+
 ## FabWire, and other programs
 
 An administrator makes a key under **Studio → Office → Other programs** (or
@@ -374,6 +407,12 @@ one and brings its takeoff across, marked for checking — watches a stamp that
 moves when the takeoff does, and reads the takeoff back from
 `/api/v1/projects/{id}/markuplist` in the shape its Bluebeam importer already
 reads, with exact counts beside it. A finished bid is archived, never deleted.
+With a sync key it can also mirror a job's whole folder: `POST /api/v1/files`
+puts a file of any kind in a folder (the same bytes twice are one file; the
+same name in the same folder replaces it, the old kept as history), `POST
+/api/v1/projects/{id}/folders` makes the folders, empty ones too, and says who
+sees each (a folder it makes without saying is office only), and `POST
+/api/v1/sets/{id}/folder` and `POST /api/v1/files/{id}/folder` follow a move.
 See `docs/integrating.md`.
 
 ## The four things Revu does not have

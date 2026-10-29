@@ -70,6 +70,12 @@ pub mod action {
     pub const REVOKED_KEY: &str = "took back a key";
     pub const CHANGED_SETTING: &str = "changed a server setting";
     pub const KEY_REFUSED: &str = "a key asked for something it is not for"; // WHAT: a key refused by its purpose. WHY: a sync key straying off its list is worth a line someone can find.
+    pub const MADE_GROUP: &str = "made a group of people"; // WHAT: a group made. WHY: groups decide who sees which folder.
+    pub const CHANGED_GROUP: &str = "changed who is in a group"; // WHAT: somebody put in a group or taken out. WHY: that changes which folders they see.
+    pub const CHANGED_FOLDER: &str = "changed who sees a folder"; // WHAT: a folder's rule set or changed. WHY: somebody will ask when a folder opened to the field.
+    pub const UPLOADED_FILE: &str = "put a file in a folder"; // WHAT: a file that isn't a drawing put in a project. WHY: the same line a drawing set gets.
+    pub const DOWNLOADED_FILE: &str = "downloaded a file"; // WHAT: a file taken off the server. WHY: reaching a file is the line an auditor wants, as for a drawing.
+    pub const MOVED: &str = "moved to another folder"; // WHAT: a set or a file moved. WHY: moving one can change who sees it.
 }
 
 impl Entry {

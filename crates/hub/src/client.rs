@@ -670,6 +670,54 @@ impl Client {
         Self::read(self.get(&format!("/sets/{id}/sheets")).call())
     }
 
+    // ---- folders, who sees them, and files that aren't drawings -----------
+
+    /// A project's folders this person may see, the empty ones too, each with
+    /// who sees it.
+    pub fn folders(&self, project: &str) -> Answer<Vec<FolderInfo>> {
+        Self::read(self.get(&format!("/projects/{project}/folders")).call()) // WHAT: GET the folders. WHY: the Studio shows every folder.
+    }
+
+    /// Says who sees one folder of a project. Administrators only.
+    pub fn set_folder_rule(&self, project: &str, folder: &str, see: &See) -> Answer<serde_json::Value> {
+        Self::read(
+            self.post(&format!("/projects/{project}/folders"))
+                .send_json(serde_json::json!({ "folders": [{ "folder": folder, "see": see }] })), // WHAT: one folder and its rule. WHY: the route takes a list; the Studio changes one at a time.
+        )
+    }
+
+    /// A project's files that aren't drawing sets, in folders this person may see.
+    pub fn files(&self, project: &str) -> Answer<Vec<ProjectFile>> {
+        Self::read(self.get(&format!("/projects/{project}/files")).call()) // WHAT: GET the files. WHY: listed in their folders after the drawings.
+    }
+
+    /// One file's bytes.
+    pub fn file_bytes(&self, id: &str) -> Answer<Vec<u8>> {
+        match self.get(&format!("/files/{id}/file")).call() {
+            Ok(response) => {
+                let mut bytes = Vec::new(); // WHAT: the file. WHY: saved as a copy to open.
+                response.into_reader().read_to_end(&mut bytes).map_err(|e| Trouble::Unreadable(e.to_string()))?; // WHAT: read whole. WHY: a file is opened whole.
+                Ok(bytes)
+            }
+            other => Self::read::<serde_json::Value>(other).map(|_| Vec::new()), // WHAT: a refusal, as a problem. WHY: the same errors as every other call.
+        }
+    }
+
+    /// Every group of people and who is in each. Administrators only.
+    pub fn groups(&self) -> Answer<Vec<Group>> {
+        Self::read(self.get("/groups").call()) // WHAT: GET the groups. WHY: Studio, Office, People.
+    }
+
+    /// Makes a group, or finds the one of that name. Administrators only.
+    pub fn make_group(&self, name: &str) -> Answer<Group> {
+        Self::read(self.post("/groups").send_json(serde_json::json!({ "name": name }))) // WHAT: POST a name. WHY: a new group.
+    }
+
+    /// Puts somebody in a group, or takes them out. Administrators only.
+    pub fn change_group(&self, group: &str, person: &str, on: bool) -> Answer<Group> {
+        Self::read(self.post(&format!("/groups/{group}/people")).send_json(serde_json::json!({ "person": person, "on": on }))) // WHAT: in or out. WHY: decides the folders they see.
+    }
+
     /// Downloads the drawing itself.
     ///
     /// `have` is the digest of the copy already on this machine. When it

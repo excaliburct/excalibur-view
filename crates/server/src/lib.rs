@@ -22,6 +22,7 @@ pub mod audit;
 pub mod auth;
 pub mod config;
 pub mod fleet;
+pub mod folders; // WHAT: groups, who sees which folder, and files that aren't drawings. WHY: the field and the shop see only the folders given to them.
 pub mod license;
 pub mod mcp;
 pub mod notices;

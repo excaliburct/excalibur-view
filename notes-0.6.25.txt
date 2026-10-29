@@ -1,0 +1,324 @@
+WHO SEES WHICH FOLDER
+
+An office can now decide which of a job's folders the shop and the field
+see. The contract and the prices stay with the office; the shop drawings go
+to the people who build from them.
+
+Studio, Office, People has a new part, Groups. Make a group, Shop or Field
+say, and tick the people in it. A person can be in more than one.
+
+In a project, each folder now says who sees it, and an administrator can
+change it with Change… beside it:
+
+- Everyone on the job: everybody who may see the project. A folder nobody
+  has given a rule to is this, so an office that does nothing sees no
+  difference at all.
+- Office only: administrators and estimators.
+- These groups: the people in the groups ticked, and the office always.
+
+A folder inside another takes its rule unless it is given its own, and it is
+never seen by more people than the folder it is in. Administrators and
+estimators see every folder. The rule binds viewers: somebody in the shop or
+the field who should see only their folders needs to be a viewer.
+
+The server keeps the rule and checks it on every request, so it holds
+everywhere a folder's drawings could show: the project's folders and lists,
+downloads, sheets, markups, takeoffs, exports, the counts on a project, the
+change stamp a program polls, and the assistant. A folder somebody may not
+see is answered exactly as one that isn't there; its name is never shown.
+Taking somebody out of a group counts on their very next request.
+
+A computer or tablet that kept a copy of a drawing its person can no longer
+see takes the copy off within a few minutes of being signed in, so it can't
+be reopened from the recent files either. A seat with no signal keeps its
+drawings until it can ask.
+
+A change made in the Studio is kept until the program that keeps the job in
+step sets that folder again, and each folder says who set its rule, where
+and when. Every change goes in the audit log.
+
+A JOB'S WHOLE FOLDER
+
+A project's folders show in the Studio now even when they are empty, and
+each holds its drawings and then its other files: spreadsheets, letters,
+pictures, models, any kind of file. Open with its program (or a double click)
+saves a copy on this computer and opens it with the program the computer uses
+for that kind of file. It is a copy: save changes in the company files. On a
+tablet it goes to the share sheet, to open in another app.
+
+The server keeps a copy of each file, once however many times it is sent, so
+look at the server's free disk space before a program sends it every job.
+
+A program that keeps an office's jobs in step can now send any file into a
+job's folder, make the job's folders (the empty ones too), say who sees each,
+and move a drawing or a file to another folder when it moves in the company
+files. A drawing moved takes its earlier issues and its markups with it. A
+folder the program makes without saying who sees it is the office's until it
+says, so a whole job sent over is never open to everybody by accident.
+
+A program's key that asks for something it isn't for now always gets the
+whole refusal. Before, the answer could arrive empty on a Mac. This carries
+0.6.24 with it.
+
+ON A TABLET
+
+Setting the scale works with your finger or a pencil. Tap one end of a
+dimension you can read, tap the other end, and type what it says. Before,
+the second tap was never taken, so the scale could not be set on an iPad
+at all. The same fault lost taps in length, area, angle and count, and a
+long press ended whatever you were drawing; all of them take each tap now.
+You can also press, slide to aim and lift: the point goes where you lift.
+
+While a shape is being drawn a point at a time, each point shows as a dot,
+and a bar at the top of the sheet says what to tap next, with Back to take
+the last point off, Finish when there are enough points, and Cancel.
+
+The pen draws one smooth stroke each time your finger or pencil goes down,
+moves and comes up. Before, each new stroke was joined to the last one
+with a straight line. Strokes are trimmed of points nobody could see, so a
+page of handwriting stays small, and with an Apple Pencil a stroke pressed
+lightly comes out a little finer and one pressed hard a little bolder.
+
+SIMPLE MODE
+
+Simple mode puts the toolbars away and leaves one short bar: Open, Select,
+Pan, Measure, the scale, Markup, Undo, Redo, the pages, and Full toolbars
+to bring everything back. It is on the View menu too. It starts on for a
+phone or tablet and off on a computer, and whichever you choose is kept on
+that device.
+
+QUICK TOOLS
+
+A bar down the right-hand side holds the tools you use most. It starts
+with length, area, count, cloud, text box and pen. View, Choose Quick
+Tools picks your own from every tool there is, and you put them in order
+by dragging or with the arrows. It is there in simple mode and with the
+full toolbars, and it is kept on each computer or tablet. The office
+server does not keep settings for each person, so a choice made on one
+device stays on that device.
+
+PRINTING ON LINUX AND THE MAC
+
+The Print window lists every printer the computer has, opens on the
+default one, and prints to whichever you pick, with the copies, the paper
+sizes that printer offers, the orientation and fit to paper or actual
+size. The printer and paper you used last are picked for you next time.
+Before, only the default printer could be used and none were listed. If
+the computer has no print system set up, the window says so and opens the
+sheets in your PDF reader to print from there. Batch, Print works on Linux
+and the Mac now as well.
+
+COMBINE ON LINUX
+
+Combine works on Linux. The file window there hid every drawing whose
+name ends in .PDF in capitals, which is how most plotters and scanners
+name them; it shows them now. Batch, Combine no longer waits for you to
+type where the combined file goes: it is named Combined.pdf beside the
+first file, and you can change it. Choosing files again adds to the list
+instead of replacing it, so files from two folders go together. And if the
+file window will not open or will not let you pick several files, you can
+drag PDFs onto the window, add the drawings you have open, or pick from
+Excalibur View's own list. The program also keeps drawing while the file
+window is open, instead of looking frozen.
+
+SYNC KEYS FROM STUDIO
+
+Studio, Office, Keys has a Make a sync key button beside Make a key. A
+sync key is for a program that only keeps its own projects in step with
+the server: it can file projects under that program's own reference, put
+drawing sets up, archive them and read the markups back. It cannot see
+projects somebody made by hand, add people, change roles, make or take
+back keys, or change the server's settings. The key is shown once, marked
+"program, sync only" in the list, and works only while the person who
+made it is an administrator. This carries 0.6.23 with it.
+
+Download in the update box now opens the page for the version it
+offered. Before, it always opened the newest full release, so an office
+that takes early releases was sent to the version it already had.
+
+When the update box says this copy is not the installed one, it now
+says what to do about it: download the new version, run the downloaded
+program once so it installs itself, and from then on open Excalibur
+View from the Start menu or your applications menu. A copy kept in a
+folder of its own and started from a shortcut somebody made by hand
+never updates itself.
+
+The office server now takes a new version sent to it over its
+maintenance connection. It refused anything over 2 MB, which is every
+real build, and the sender saw only a broken connection. Now it takes up
+to 192 MiB, and anything bigger is turned down with a message that says so.
+A request without the server's maintenance key is still turned away
+before any of it is read. This carries 0.6.22 with it.
+
+Closing a 3D model view is tidier now. The 3D view draws on its own
+graphics device in the background, and when you closed it, it let go of
+that device without waiting for it to be put away. Most of the time that
+didn't matter, but if the program was shutting down at the same moment,
+it could crash on the way out. Now closing the view waits for it to
+finish cleaning up first (a few seconds at most, so a stuck graphics
+driver can't keep the window from closing). Nothing changes in how the
+3D view looks or works.
+
+Tokio, the library the program and the office server use to juggle
+their network connections, goes from 1.53.1 to 1.53.3, which fixes a
+safety problem found in it. Nothing needs doing; the update brings it.
+This carries 0.6.21 with it.
+
+Lengths a program reads from a project's markup list now always come in
+feet, whatever unit the sheet was scaled in. Before, a sheet scaled in
+inches, millimetres or metres sent its lengths in that unit under the
+name feet, so a metric sheet's 12,700 mm beam read as 12,700 feet. Areas
+come in square feet and volumes in cubic feet the same way. Each markup
+also says the unit its sheet was scaled in, and whether it could be
+turned into feet; for a unit Excalibur View doesn't know, no length is
+sent at all rather than a wrong one. Nothing changes on screen, in
+Studio's own takeoff, or for a sheet already scaled in feet. This carries
+0.6.20 with it.
+
+Overlay Pages works properly now. Lay last month's issue of a sheet over
+this month's and the beam that moved shows in red where it was and blue where
+it went, and everything that didn't move comes out dark grey, like a normal
+drawing. Before, a lot of ordinary revisions came out as a mess of red and
+blue that looked like everything changed. This carries 0.6.19 with it.
+
+OVERLAY PAGES
+
+It lines the two sheets up for you, from the drawing itself. That now works
+when the new issue was plotted a little over, printed half size, put on
+bigger paper, cropped tighter, stored sideways, or scanned a little crooked.
+If the two sheets really can't be lined up, it says so and shows them as
+they are, instead of quietly moving one and calling it lined up.
+
+When it can't line them up on its own, pick "By two points": click the same
+two spots on each sheet (two grid crossings far apart work best) and it lines
+them up through those. "As they are" lays them where the two files put them,
+no correcting.
+
+Markups aren't part of it anymore. Your takeoff on the new sheet used to
+show up blue like it was a change to the drawing. Now only the drawing is
+compared.
+
+Scans work. A scan's grey paper used to count as ink, so a scanned sheet
+came out solid. Now it's read as paper.
+
+Save as PDF writes the overlay at full detail on the new sheet's own paper
+size, with a line at the bottom saying which colour is which file, and opens
+it. From there you can zoom in, print it or send it like any other drawing.
+Before, the overlay was only a small picture in the window.
+
+Overlaying a whole set matches sheets by sheet number now. Before, if the
+new set had a sheet added in the middle, every sheet after it got laid over
+the wrong one. Page 5 of the overlay is always sheet 5 of the new set. A
+sheet that's new in this issue shows all in blue instead of being dropped,
+and the message says which sheets were new, which were only in the old set,
+and which couldn't be lined up. The batch overlay used to squash the drawing
+a little to fit the page, too; it's the right shape now.
+
+COMPARE DOCUMENTS
+
+Compare lines sheets up the same way, so a half-size print, a sideways sheet
+or a scan compares as the drawing it is. It doesn't count markups or its own
+clouds from last time as changes. "Cloud these" puts the clouds on the sheet
+you compared, even if you've gone to another page or tab since. And a sheet
+that changed all over no longer takes minutes to sort out.
+
+Nothing is measured by either one. They show you where to look.
+
+Plugins are handed their sheets more carefully. A number too big for the
+short form plugins read now comes through as the biggest number that form
+holds instead of as infinity, and an input too big to count in that form
+goes over whole, as plain text, instead of being cut down. A plugin file
+that holds more than it says now says so plainly, by how many bytes. None
+of this changes how a plugin behaves on a normal drawing. This carries
+0.6.18 with it.
+
+The two assistant commands in the Help menu have plainer names: Connect
+Assistant and Test Assistant Connection. They work the same as before, and
+an assistant that was already connected stays connected. This carries
+0.6.17 with it.
+
+The part of Excalibur View that makes secure connections is updated to
+fix security problems found in it. This carries 0.6.16 with it, so
+Excalibur View now runs on Linux too, the same program as on Windows and
+the Mac, and keeps itself up to date there the same way.
+
+SECURE CONNECTIONS
+
+Excalibur View talks to the office's server, to remote access and to the
+update feed over encrypted connections, using a library called rustls.
+Six security problems were published for the versions it was built with,
+and this version takes the fixed ones:
+
+- rustls 0.23.45 to 0.23.46. Fixes four problems: secrets of a
+  connection could show up in a debug printout; in a rare case, data
+  meant for one server could be sent to another; a server could make it
+  use up to 1 GiB of memory before proving who it is; and a forged reply
+  could make later connections use weaker encryption.
+- rustls-webpki 0.103.15 to 0.103.16, which checks a server's
+  certificate. It could accept a certificate from an authority that has
+  since been distrusted.
+- webpki-roots 1.0.9 to 1.0.10, the list of authorities it trusts. The
+  list still trusted some emSign authorities that have been distrusted.
+
+Nothing needs doing for this part: the next update brings it.
+
+LINUX
+
+ExcaliburView-linux is the whole program in one file, for 64-bit Linux
+desktops (Intel and AMD) at least as new as Ubuntu 22.04, on X11 or
+Wayland. Mark it as a program (right-click, Properties, Allow executing)
+and run it once. It installs itself for that person in their own
+~/.local/share, with no administrator and nothing in /usr: it goes on the
+applications menu with its icon, opens hyperview:// links, and is offered
+in Open With for PDFs, Excalibur View Office licenses and tool chests.
+Running an older download later opens the newer copy instead of going
+backwards.
+
+It finds the office's server by itself, wherever the server runs, and
+takes each new version the way a Windows seat does: fetched in the
+background, checked against the signing key built into it, and in use
+the next time it opens. Printing goes to the computer's own printers.
+Right-click it on the applications menu and Uninstall Excalibur View
+takes it, its menu entry and its icon away again; drawings and markups
+are not touched.
+
+KEYS FOR PROGRAMS
+
+No key can run the server any more, whoever made it. Adding people,
+changing roles, invitations, remote access, updates, plugins, tool chests,
+the license and the audit log all take an administrator signed in with
+their password. A key that asks is refused, and says why.
+
+There is a new, narrower kind of key, a sync key, for a program that only
+keeps its own projects in step with the server: it files projects under its
+own reference, puts drawings up, archives them and reads the markups back,
+and nothing else. It never sees a project somebody made by hand. Make one
+for such a program and take its old key back in Studio, Office, Keys.
+
+A key can now be given an end date when it is made. Keys made without one
+never run out, as before. A key past its end is answered exactly as a key
+that does not exist.
+
+A sync key works only while the person who made it is an administrator.
+Make them an estimator or a viewer and their sync keys stop working; make
+them an administrator again and they work again.
+
+Changing a password takes the person signed in; no key can do it. Wrong
+tries at the current password count against the same limit as signing in.
+
+A key is told about the license only what anybody signed in is told.
+
+Only an administrator, a key an administrator made, or a sync key can file
+a project under another program's reference. Anybody else gets the same
+refusal whether or not that reference is already in use.
+
+When a sync key asks for something it is not for, the audit log gets one
+line about it a minute at most, however often it asks.
+
+AN ASSISTANT SEES WHAT ITS PERSON MAY SEE
+
+An assistant connected to the server now sees only the jobs its person may
+see. Before, an assistant key read every job on the server, even ones with
+people named on them that its person was not one of. The same check now
+guards putting a drawing into a job, and finding a job by another
+program's reference.
