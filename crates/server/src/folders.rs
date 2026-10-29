@@ -35,8 +35,8 @@ use rusqlite::{params, Connection, OptionalExtension}; // WHAT: the database. WH
 use serde::Deserialize; // WHAT: reading request bodies. WHY: the small JSON bodies below.
 
 use crate::api::{
-    administrator, caller, fresh_id, may_reach_project, may_reach_set, now, read_set, record, writer, Answer, Denied,
-    Everything, Server, Shared,
+    administrator, caller, fresh_id, may_reach_project, may_reach_set, now, read_set, record,
+    writer, Answer, Denied, Everything, Server, Shared,
 }; // WHAT: the API's own gates and helpers. WHY: one set of rules for every route.
 use crate::auth::{self, Who}; // WHAT: who is asking. WHY: the rule depends on their role, their groups and their key.
 
@@ -47,7 +47,12 @@ const MOST_FOLDERS: usize = 10_000; // WHAT: ten thousand. WHY: more than any jo
 /// tidied, joined with `/`. The same rule `projects::same_folder` uses.
 pub fn key_of(path: &str) -> String {
     path.split('/') // WHAT: each folder's name. WHY: compared one at a time.
-        .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()) // WHAT: tidied and lower case. WHY: a share's folders don't care about case.
+        .map(|p| {
+            p.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
+        }) // WHAT: tidied and lower case. WHY: a share's folders don't care about case.
         .collect::<Vec<_>>()
         .join("/") // WHAT: joined back. WHY: one string to look up.
 }
@@ -81,8 +86,11 @@ fn from_stored(text: &str) -> See {
 
 /// The rules on one project's folders, by folder key.
 fn rules_of(db: &Connection, project: &str) -> rusqlite::Result<HashMap<String, See>> {
-    let mut statement = db.prepare("SELECT key, see FROM folders WHERE project = ?1 AND see IS NOT NULL")?; // WHAT: the folders that have their own rule. WHY: the rest take their parent's.
-    let rows = statement.query_map(params![project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?; // WHAT: each key and rule. WHY: for the map.
+    let mut statement =
+        db.prepare("SELECT key, see FROM folders WHERE project = ?1 AND see IS NOT NULL")?; // WHAT: the folders that have their own rule. WHY: the rest take their parent's.
+    let rows = statement.query_map(params![project], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?; // WHAT: each key and rule. WHY: for the map.
     let mut rules = HashMap::new(); // WHAT: the map. WHY: looked up per folder.
     for row in rows {
         let (key, see) = row?; // WHAT: one rule. WHY: a database error is passed up, never read as no rule.
@@ -101,7 +109,11 @@ pub struct Sight {
 impl Sight {
     /// Everything: the office's sight.
     pub fn everything() -> Sight {
-        Sight { everything: true, groups: Vec::new(), rules: HashMap::new() } // WHAT: no rules needed. WHY: none would take anything away.
+        Sight {
+            everything: true,
+            groups: Vec::new(),
+            rules: HashMap::new(),
+        } // WHAT: no rules needed. WHY: none would take anything away.
     }
 
     /// Whether this is the office's sight.
@@ -130,8 +142,10 @@ impl Sight {
         }
         match self.rule(folder) {
             See::Everyone => true, // WHAT: everybody's. WHY: the default and the word.
-            See::Office => false, // WHAT: the office's only. WHY: this person is not the office.
-            See::Groups(groups) => groups.iter().any(|g| self.groups.contains(&g.to_lowercase())), // WHAT: one of their groups is named. WHY: given to that group.
+            See::Office => false,  // WHAT: the office's only. WHY: this person is not the office.
+            See::Groups(groups) => groups
+                .iter()
+                .any(|g| self.groups.contains(&g.to_lowercase())), // WHAT: one of their groups is named. WHY: given to that group.
         }
     }
 }
@@ -139,15 +153,24 @@ impl Sight {
 /// What `who` may see of `project`'s folders, read fresh from the database.
 pub fn sight_of(db: &Connection, project: &str, who: &Who) -> rusqlite::Result<Sight> {
     if is_office(who) {
-        return Ok(Sight { everything: true, groups: Vec::new(), rules: rules_of(db, project)? }); // WHAT: the office, with the project's rules. WHY: it sees everything, and a listing still shows it who else sees each folder.
+        return Ok(Sight {
+            everything: true,
+            groups: Vec::new(),
+            rules: rules_of(db, project)?,
+        }); // WHAT: the office, with the project's rules. WHY: it sees everything, and a listing still shows it who else sees each folder.
     }
-    let mut statement =
-        db.prepare("SELECT g.name FROM groups g JOIN group_people m ON m.grp = g.id WHERE m.person = ?1")?; // WHAT: the person's groups. WHY: read on every request, so taking somebody out of a group takes effect at once.
+    let mut statement = db.prepare(
+        "SELECT g.name FROM groups g JOIN group_people m ON m.grp = g.id WHERE m.person = ?1",
+    )?; // WHAT: the person's groups. WHY: read on every request, so taking somebody out of a group takes effect at once.
     let groups = statement
         .query_map(params![who.id], |r| r.get::<_, String>(0))?
         .map(|g| g.map(|g| g.to_lowercase())) // WHAT: lower case. WHY: names compare whatever their case.
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(Sight { everything: false, groups, rules: rules_of(db, project)? }) // WHAT: their groups and the project's rules. WHY: all `sees` needs.
+    Ok(Sight {
+        everything: false,
+        groups,
+        rules: rules_of(db, project)?,
+    }) // WHAT: their groups and the project's rules. WHY: all `sees` needs.
 }
 
 /// The same, through the server's store, refused as a server error when the
@@ -164,7 +187,13 @@ pub fn sight(server: &Server, project: &str, who: &Who) -> Answer<Sight> {
 
 /// The gate for anything kept in a folder: the project's own gate, then the
 /// folder's. Refused as `what` not found, exactly as one that isn't there.
-pub fn may_see_folder(server: &Server, who: &Who, project: &str, folder: Option<&str>, what: &str) -> Answer<()> {
+pub fn may_see_folder(
+    server: &Server,
+    who: &Who,
+    project: &str,
+    folder: Option<&str>,
+    what: &str,
+) -> Answer<()> {
     if sight(server, project, who)?.sees(folder) {
         Ok(()) // WHAT: theirs to see. WHY: the folder's rule lets them.
     } else {
@@ -176,7 +205,8 @@ pub fn may_see_folder(server: &Server, who: &Who, project: &str, folder: Option<
 /// project shows, so a hidden folder's sets aren't counted for somebody who
 /// can't see them.
 pub fn current_sets_seen(db: &Connection, project: &str, sight: &Sight) -> rusqlite::Result<usize> {
-    let mut statement = db.prepare("SELECT folder FROM sets WHERE project = ?1 AND superseded_by IS NULL")?; // WHAT: each current set's folder. WHY: counted by who sees it.
+    let mut statement =
+        db.prepare("SELECT folder FROM sets WHERE project = ?1 AND superseded_by IS NULL")?; // WHAT: each current set's folder. WHY: counted by who sees it.
     let folders = statement
         .query_map(params![project], |r| r.get::<_, Option<String>>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -188,13 +218,23 @@ pub fn current_sets_seen(db: &Connection, project: &str, sight: &Sight) -> rusql
 /// office's, so a mirrored job is safe until somebody says who sees what;
 /// anybody else's new folder takes its parent's rule, as before. Answers how
 /// many were made.
-fn make_folder(db: &Connection, project: &str, path: &str, who: &Who, by_program: bool) -> rusqlite::Result<usize> {
+fn make_folder(
+    db: &Connection,
+    project: &str,
+    path: &str,
+    who: &Who,
+    by_program: bool,
+) -> rusqlite::Result<usize> {
     let mut made = 0; // WHAT: how many were new. WHY: said in the answer.
     let mut ruled_above = false; // WHAT: whether a folder above has its own rule. WHY: then a new one takes it, rather than the office's.
     for above in and_above(path) {
         let key = key_of(&above); // WHAT: as compared. WHY: one row per folder whatever its case.
         let there: Option<Option<String>> = db
-            .query_row("SELECT see FROM folders WHERE project = ?1 AND key = ?2", params![project, key], |r| r.get(0))
+            .query_row(
+                "SELECT see FROM folders WHERE project = ?1 AND key = ?2",
+                params![project, key],
+                |r| r.get(0),
+            )
             .optional()?; // WHAT: the folder's row, and its rule. WHY: made only where missing.
         match there {
             Some(see) => ruled_above |= see.is_some(), // WHAT: there already. WHY: never changed by being named again.
@@ -228,14 +268,15 @@ fn make_folder(db: &Connection, project: &str, path: &str, who: &Who, by_program
 /// current set or file is in, and every folder above them, each once.
 pub fn listing(db: &Connection, project: &str, sight: &Sight) -> rusqlite::Result<Vec<FolderInfo>> {
     struct Row {
-        path: String, // WHAT: as first written. WHY: shown so.
-        own: Option<See>, // WHAT: its own rule. WHY: shown, and for the Studio.
+        path: String,           // WHAT: as first written. WHY: shown so.
+        own: Option<See>,       // WHAT: its own rule. WHY: shown, and for the Studio.
         set_in: Option<String>, // WHAT: program or view. WHY: shown.
         set_by: Option<String>, // WHAT: who set it. WHY: shown.
         set_at: Option<String>, // WHAT: when. WHY: shown.
     }
     let mut found: Vec<(String, Row)> = Vec::new(); // WHAT: each folder by key, in the order found. WHY: one entry per folder.
-    let mut statement = db.prepare("SELECT key, path, see, set_in, set_by, set_at FROM folders WHERE project = ?1")?; // WHAT: the folders written down. WHY: their spelling and rules come first.
+    let mut statement = db
+        .prepare("SELECT key, path, see, set_in, set_by, set_at FROM folders WHERE project = ?1")?; // WHAT: the folders written down. WHY: their spelling and rules come first.
     let rows = statement.query_map(params![project], |r| {
         Ok((
             r.get::<_, String>(0)?,
@@ -257,11 +298,17 @@ pub fn listing(db: &Connection, project: &str, sight: &Sight) -> rusqlite::Resul
         "SELECT folder, 0 FROM sets WHERE project = ?1 AND superseded_by IS NULL AND folder IS NOT NULL
          UNION ALL SELECT folder, 1 FROM files WHERE project = ?1 AND replaced_by IS NULL AND folder IS NOT NULL",
     )?; // WHAT: each current set's and file's folder. WHY: counted, and listed even when not written down.
-    let rows = statement.query_map(params![project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    let rows = statement.query_map(params![project], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })?;
     for row in rows {
         let (folder, file) = row?; // WHAT: one thing's folder, and whether it is a file. WHY: counted in the right column.
         let count = counts.entry(key_of(&folder)).or_default(); // WHAT: its folder's counts. WHY: added to.
-        if file == 1 { count.1 += 1 } else { count.0 += 1 } // WHAT: one more file or set. WHY: shown.
+        if file == 1 {
+            count.1 += 1
+        } else {
+            count.0 += 1
+        } // WHAT: one more file or set. WHY: shown.
         held.push(folder); // WHAT: kept. WHY: listed with the folders above it.
     }
     let mut every: Vec<String> = found.iter().map(|(_, r)| r.path.clone()).collect(); // WHAT: the written-down folders' paths. WHY: and the folders above them.
@@ -287,8 +334,8 @@ pub fn listing(db: &Connection, project: &str, sight: &Sight) -> rusqlite::Resul
                 set_in: row.and_then(|r| r.set_in.clone()), // WHAT: where it was last set. WHY: shown.
                 set_by: row.and_then(|r| r.set_by.clone()), // WHAT: who. WHY: shown.
                 set_at: row.and_then(|r| r.set_at.clone()), // WHAT: when. WHY: shown.
-                sets, // WHAT: its current sets. WHY: shown.
-                files, // WHAT: its current files. WHY: shown.
+                sets,                                       // WHAT: its current sets. WHY: shown.
+                files,                                      // WHAT: its current files. WHY: shown.
             });
         }
     }
@@ -300,19 +347,36 @@ pub fn listing(db: &Connection, project: &str, sight: &Sight) -> rusqlite::Resul
 
 fn group_by_id(db: &Connection, id: &str) -> rusqlite::Result<Option<Group>> {
     let found = db
-        .query_row("SELECT id, name, made, made_by FROM groups WHERE id = ?1", params![id], |r| {
-            Ok(Group { id: r.get(0)?, name: r.get(1)?, people: Vec::new(), made: r.get(2)?, made_by: r.get(3)? })
-        })
+        .query_row(
+            "SELECT id, name, made, made_by FROM groups WHERE id = ?1",
+            params![id],
+            |r| {
+                Ok(Group {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    people: Vec::new(),
+                    made: r.get(2)?,
+                    made_by: r.get(3)?,
+                })
+            },
+        )
         .optional()?; // WHAT: the group, if there is one. WHY: its people are read next.
-    let Some(mut group) = found else { return Ok(None) }; // WHAT: no such group. WHY: answered as not found.
-    let mut statement = db.prepare("SELECT person FROM group_people WHERE grp = ?1 ORDER BY added")?; // WHAT: who is in it. WHY: shown.
-    group.people = statement.query_map(params![id], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?; // WHAT: their ids. WHY: the Studio ticks them.
+    let Some(mut group) = found else {
+        return Ok(None);
+    }; // WHAT: no such group. WHY: answered as not found.
+    let mut statement =
+        db.prepare("SELECT person FROM group_people WHERE grp = ?1 ORDER BY added")?; // WHAT: who is in it. WHY: shown.
+    group.people = statement
+        .query_map(params![id], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?; // WHAT: their ids. WHY: the Studio ticks them.
     Ok(Some(group))
 }
 
 fn every_group(db: &Connection) -> rusqlite::Result<Vec<Group>> {
     let mut statement = db.prepare("SELECT id FROM groups ORDER BY name COLLATE NOCASE")?; // WHAT: every group, by name. WHY: listed in order.
-    let ids = statement.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let ids = statement
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut groups = Vec::new(); // WHAT: the answer. WHY: each with its people.
     for id in ids {
         if let Some(group) = group_by_id(db, &id)? {
@@ -325,20 +389,31 @@ fn every_group(db: &Connection) -> rusqlite::Result<Vec<Group>> {
 /// The group of this name, made empty if there isn't one: whether it was made.
 fn group_named(db: &Connection, name: &str, by: &str) -> rusqlite::Result<(String, bool)> {
     if let Some(id) = db
-        .query_row("SELECT id FROM groups WHERE name = ?1 COLLATE NOCASE", params![name], |r| r.get::<_, String>(0))
+        .query_row(
+            "SELECT id FROM groups WHERE name = ?1 COLLATE NOCASE",
+            params![name],
+            |r| r.get::<_, String>(0),
+        )
         .optional()?
     {
         return Ok((id, false)); // WHAT: there already. WHY: Shop and shop are one group.
     }
     let id = fresh_id("grp"); // WHAT: a new id. WHY: the group's.
-    db.execute("INSERT INTO groups (id, name, made, made_by) VALUES (?1, ?2, ?3, ?4)", params![id, name, now(), by])?; // WHAT: made, nobody in it. WHY: an administrator puts people in it later.
+    db.execute(
+        "INSERT INTO groups (id, name, made, made_by) VALUES (?1, ?2, ?3, ?4)",
+        params![id, name, now(), by],
+    )?; // WHAT: made, nobody in it. WHY: an administrator puts people in it later.
     Ok((id, true))
 }
 
 /// `GET /groups`: every group and who is in it. Administrators only.
 pub async fn groups(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<Vec<Group>>> {
     administrator(&server, &headers)?; // WHAT: an administrator signed in. WHY: who is in which group decides who sees which folder.
-    server.store.with(|db| Ok(every_group(db)?)).map(Json).map_err(|e| Denied::broke("list the groups", e)) // WHAT: every group. WHY: the Studio's list.
+    server
+        .store
+        .with(|db| Ok(every_group(db)?))
+        .map(Json)
+        .map_err(|e| Denied::broke("list the groups", e)) // WHAT: every group. WHY: the Studio's list.
 }
 
 #[derive(Deserialize)]
@@ -350,13 +425,20 @@ pub struct NewGroup {
 fn group_name(name: &str) -> Answer<String> {
     match See::from_value(&serde_json::json!([name])) {
         Ok(See::Groups(names)) => Ok(names[0].clone()), // WHAT: the tidied name. WHY: the same rule a folder's list of groups is read with.
-        Ok(_) | Err(_) => Err(Denied::wrong(format!("A group's name is 1 to {} characters of ordinary text.", hub::LONGEST_GROUP_NAME))), // WHAT: refused. WHY: an empty or odd name.
+        Ok(_) | Err(_) => Err(Denied::wrong(format!(
+            "A group's name is 1 to {} characters of ordinary text.",
+            hub::LONGEST_GROUP_NAME
+        ))), // WHAT: refused. WHY: an empty or odd name.
     }
 }
 
 /// `POST /groups` `{"name": "Shop"}`: a group, made if it isn't there, and
 /// the one there if it is. Administrators only.
-pub async fn make_group(State(server): State<Shared>, headers: HeaderMap, Json(body): Json<NewGroup>) -> Answer<Json<Group>> {
+pub async fn make_group(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<NewGroup>,
+) -> Answer<Json<Group>> {
     let who = administrator(&server, &headers)?; // WHAT: an administrator signed in. WHY: as above.
     let name = group_name(&body.name)?; // WHAT: the name, tidied. WHY: refused if it can't be one.
     let (group, made) = server
@@ -368,7 +450,12 @@ pub async fn make_group(State(server): State<Shared>, headers: HeaderMap, Json(b
         .map_err(|e| Denied::broke("make that group", e))?;
     let group = group.ok_or_else(|| Denied::missing("group"))?; // WHAT: the group. WHY: it was just found or made.
     if made {
-        record(&server, crate::audit::Entry::new(crate::audit::action::MADE_GROUP, &who.email).by(&who.id).about(name)); // WHAT: written down. WHY: groups decide who sees folders.
+        record(
+            &server,
+            crate::audit::Entry::new(crate::audit::action::MADE_GROUP, &who.email)
+                .by(&who.id)
+                .about(name),
+        ); // WHAT: written down. WHY: groups decide who sees folders.
     }
     Ok(Json(group))
 }
@@ -415,13 +502,18 @@ pub async fn change_group(
             Ok(Ok(group_by_id(db, &id)?))
         })
         .map_err(|e| Denied::broke("change who is in that group", e))?;
-    let group = group.map_err(Denied::missing)?.ok_or_else(|| Denied::missing("group"))?; // WHAT: the group as it is now. WHY: the answer.
+    let group = group
+        .map_err(Denied::missing)?
+        .ok_or_else(|| Denied::missing("group"))?; // WHAT: the group as it is now. WHY: the answer.
     record(
         &server,
         crate::audit::Entry::new(crate::audit::action::CHANGED_GROUP, &who.email)
             .by(&who.id)
             .about(group.name.clone())
-            .saying(format!("{} {person}", if body.on { "put in" } else { "taken out" })),
+            .saying(format!(
+                "{} {person}",
+                if body.on { "put in" } else { "taken out" }
+            )),
     ); // WHAT: written down. WHY: somebody will ask when a person started or stopped seeing a folder.
     Ok(Json(group))
 }
@@ -430,7 +522,11 @@ pub async fn change_group(
 
 /// `GET /projects/{id}/folders`: every folder of the project the caller may
 /// see, the empty ones too, each with who sees it.
-pub async fn folders_of(State(server): State<Shared>, headers: HeaderMap, Path(project): Path<String>) -> Answer<Json<Vec<FolderInfo>>> {
+pub async fn folders_of(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Path(project): Path<String>,
+) -> Answer<Json<Vec<FolderInfo>>> {
     let who = caller(&server, &headers)?; // WHAT: anybody signed in, or a key. WHY: reading is for whoever may see the project.
     may_reach_project(&server, &who, &project)?; // WHAT: the project's gate. WHY: the same as every route under a project.
     server
@@ -442,17 +538,21 @@ pub async fn folders_of(State(server): State<Shared>, headers: HeaderMap, Path(p
 
 /// One folder asked for: its path, and who should see it, if said.
 struct Asked {
-    path: String, // WHAT: the folder, checked. WHY: as a set's folder is.
+    path: String,     // WHAT: the folder, checked. WHY: as a set's folder is.
     see: Option<See>, // WHAT: who sees it, when said. WHY: left out, an existing folder's rule is left as it is.
 }
 
 /// Reads `{"folders": [...]}`: each a folder's name, or `{"folder", "see"}`.
 fn asked(body: &serde_json::Value) -> Answer<Vec<Asked>> {
     let Some(list) = body.get("folders").and_then(|f| f.as_array()) else {
-        return Err(Denied::wrong("Send {\"folders\": [...]}: each a folder, or {\"folder\": ..., \"see\": ...}.")); // WHAT: no list. WHY: said plainly.
+        return Err(Denied::wrong(
+            "Send {\"folders\": [...]}: each a folder, or {\"folder\": ..., \"see\": ...}.",
+        )); // WHAT: no list. WHY: said plainly.
     };
     if list.len() > MOST_FOLDERS {
-        return Err(Denied::wrong(format!("At most {MOST_FOLDERS} folders at a time."))); // WHAT: too many. WHY: one request can't tie the server up.
+        return Err(Denied::wrong(format!(
+            "At most {MOST_FOLDERS} folders at a time."
+        ))); // WHAT: too many. WHY: one request can't tie the server up.
     }
     let mut out = Vec::with_capacity(list.len()); // WHAT: the folders read. WHY: the answer.
     for item in list {
@@ -460,7 +560,8 @@ fn asked(body: &serde_json::Value) -> Answer<Vec<Asked>> {
             serde_json::Value::String(text) => (text.as_str(), None), // WHAT: a folder's name alone. WHY: what a program that only makes folders sends.
             serde_json::Value::Object(fields) => {
                 let Some(text) = fields.get("folder").and_then(|f| f.as_str()) else {
-                    return Err(Denied::wrong("Each folder needs its \"folder\".")); // WHAT: no folder named. WHY: refused.
+                    return Err(Denied::wrong("Each folder needs its \"folder\"."));
+                    // WHAT: no folder named. WHY: refused.
                 };
                 let see = match fields.get("see") {
                     None | Some(serde_json::Value::Null) => None, // WHAT: no rule said. WHY: left as it is.
@@ -468,7 +569,11 @@ fn asked(body: &serde_json::Value) -> Answer<Vec<Asked>> {
                 };
                 (text, see)
             }
-            _ => return Err(Denied::wrong("Each folder is its name, or {\"folder\": ..., \"see\": ...}.")), // WHAT: anything else. WHY: refused.
+            _ => {
+                return Err(Denied::wrong(
+                    "Each folder is its name, or {\"folder\": ..., \"see\": ...}.",
+                ))
+            } // WHAT: anything else. WHY: refused.
         };
         let Some(path) = crate::projects::folders(text, "A folder").map_err(Denied::wrong)? else {
             return Err(Denied::wrong("A folder needs a name.")); // WHAT: an empty folder name. WHY: the project's own is not a folder to make.
@@ -536,12 +641,23 @@ pub async fn make_folders(
         .map_err(|e| Denied::broke("make those folders", e))?;
     let (listed, rules) = server
         .store
-        .with(|db| Ok((listing(db, &project, &sight_of(db, &project, &who)?)?, rules_of(db, &project)?))) // WHAT: the whole tree, with its rules. WHY: only the office or the project's program gets here.
+        .with(|db| {
+            Ok((
+                listing(db, &project, &sight_of(db, &project, &who)?)?,
+                rules_of(db, &project)?,
+            ))
+        }) // WHAT: the whole tree, with its rules. WHY: only the office or the project's program gets here.
         .map_err(|e| Denied::broke("list that project's folders", e))?;
-    let narrowed = Sight { everything: false, groups: Vec::new(), rules }; // WHAT: the rules, for working out each parent's. WHY: to say when a folder was asked to be wider than its parent.
+    let narrowed = Sight {
+        everything: false,
+        groups: Vec::new(),
+        rules,
+    }; // WHAT: the rules, for working out each parent's. WHY: to say when a folder was asked to be wider than its parent.
     let mut notes: Vec<String> = Vec::new(); // WHAT: what the caller should know. WHY: said, rather than silently changed.
     for one in &asked {
-        let (Some(see), Some((parent, _))) = (&one.see, one.path.rsplit_once('/')) else { continue }; // WHAT: a rule on a folder inside another. WHY: only those have a parent to be wider than.
+        let (Some(see), Some((parent, _))) = (&one.see, one.path.rsplit_once('/')) else {
+            continue;
+        }; // WHAT: a rule on a folder inside another. WHY: only those have a parent to be wider than.
         let above = narrowed.rule(Some(parent)); // WHAT: who sees the folder it is in. WHY: it can't be seen by more.
         if see.wider_than(&above) {
             notes.push(format!(
@@ -564,7 +680,14 @@ pub async fn make_folders(
             crate::audit::Entry::new(crate::audit::action::CHANGED_FOLDER, &who.email)
                 .by(&who.id)
                 .about(project.clone())
-                .saying(changes.iter().take(20).cloned().collect::<Vec<_>>().join("; ")),
+                .saying(
+                    changes
+                        .iter()
+                        .take(20)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ),
         ); // WHAT: one line for the request. WHY: who opened which folder to whom, without a line per folder of a whole job.
     }
     Ok(Json(serde_json::json!({
@@ -600,7 +723,12 @@ fn file_from_row(r: &rusqlite::Row) -> rusqlite::Result<ProjectFile> {
 }
 
 fn read_file(db: &Connection, id: &str) -> rusqlite::Result<Option<ProjectFile>> {
-    db.query_row(&format!("SELECT {FILE_COLUMNS} FROM files WHERE id = ?1"), params![id], file_from_row).optional() // WHAT: a file by id. WHY: every file route starts here.
+    db.query_row(
+        &format!("SELECT {FILE_COLUMNS} FROM files WHERE id = ?1"),
+        params![id],
+        file_from_row,
+    )
+    .optional() // WHAT: a file by id. WHY: every file route starts here.
 }
 
 /// The gate for a file: its project's, then its folder's. A file nobody can
@@ -624,7 +752,9 @@ fn file_name(sent: &str) -> Answer<String> {
         return Err(Denied::wrong("A file needs a name.")); // WHAT: no name. WHY: a file is listed by it.
     }
     if name.chars().any(char::is_control) || name.chars().count() > 255 {
-        return Err(Denied::wrong("A file's name is at most 255 characters of ordinary text.")); // WHAT: a name no file window would show. WHY: refused rather than mangled.
+        return Err(Denied::wrong(
+            "A file's name is at most 255 characters of ordinary text.",
+        )); // WHAT: a name no file window would show. WHY: refused rather than mangled.
     }
     Ok(name.to_string())
 }
@@ -646,11 +776,20 @@ fn saved_at(sent: &str) -> Answer<Option<String>> {
 /// the project answer with that file (`already_here`); the same name in the
 /// same folder is the file saved again, and replaces it in place, the one
 /// before kept as its history (`replaces`).
-pub async fn upload_file(State(server): State<Shared>, headers: HeaderMap, mut form: Multipart) -> Answer<Json<ProjectFile>> {
+pub async fn upload_file(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    mut form: Multipart,
+) -> Answer<Json<ProjectFile>> {
     let who = writer(&server, &headers)?; // WHAT: somebody who may change drawings. WHY: putting a file in a project is a change.
-    let (mut project, mut folder, mut modified, mut sent_name) = (String::new(), String::new(), String::new(), String::new()); // WHAT: the form's fields. WHY: read below.
+    let (mut project, mut folder, mut modified, mut sent_name) =
+        (String::new(), String::new(), String::new(), String::new()); // WHAT: the form's fields. WHY: read below.
     let mut bytes: Vec<u8> = Vec::new(); // WHAT: the file. WHY: read below.
-    while let Some(field) = form.next_field().await.map_err(|e| Denied::wrong(format!("That upload was malformed: {e}")))? {
+    while let Some(field) = form
+        .next_field()
+        .await
+        .map_err(|e| Denied::wrong(format!("That upload was malformed: {e}")))?
+    {
         match field.name().unwrap_or("") {
             "project" => project = field.text().await.unwrap_or_default(), // WHAT: its project. WHY: the file goes in it.
             "folder" => folder = field.text().await.unwrap_or_default(), // WHAT: its folder. WHY: listed there.
@@ -660,7 +799,11 @@ pub async fn upload_file(State(server): State<Shared>, headers: HeaderMap, mut f
                 if sent_name.is_empty() {
                     sent_name = field.file_name().unwrap_or("").to_string(); // WHAT: the file's own name. WHY: how a file is listed.
                 }
-                bytes = field.bytes().await.map_err(|e| Denied::wrong(format!("That file did not arrive whole: {e}")))?.to_vec(); // WHAT: its bytes. WHY: stored.
+                bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| Denied::wrong(format!("That file did not arrive whole: {e}")))?
+                    .to_vec(); // WHAT: its bytes. WHY: stored.
             }
             _ => {} // WHAT: anything else. WHY: ignored, as /sets does.
         }
@@ -673,14 +816,26 @@ pub async fn upload_file(State(server): State<Shared>, headers: HeaderMap, mut f
     let folder = crate::projects::folders(&folder, "A file's folder").map_err(Denied::wrong)?; // WHAT: the folder, checked as a set's is. WHY: one rule for folders.
     let known = server
         .store
-        .with(|db| Ok(db.query_row("SELECT 1 FROM projects WHERE id = ?1", params![project], |_| Ok(())).optional()?.is_some()))
+        .with(|db| {
+            Ok(db
+                .query_row(
+                    "SELECT 1 FROM projects WHERE id = ?1",
+                    params![project],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some())
+        })
         .map_err(|e| Denied::broke("check that project", e))?; // WHAT: whether the project is there. WHY: not found otherwise.
     if !known {
         return Err(Denied::missing("project")); // WHAT: no such project. WHY: as /sets answers.
     }
     may_reach_project(&server, &who, &project)?; // WHAT: the project's gate. WHY: as every route under a project.
     may_see_folder(&server, &who, &project, folder.as_deref(), "project")?; // WHAT: the folder's gate. WHY: nobody puts a file where they couldn't see it.
-    let digest = server.store.put_blob(&bytes).map_err(|e| Denied::broke("store that file", e))?; // WHAT: the bytes kept once, by their digest. WHY: the same file twice costs one copy.
+    let digest = server
+        .store
+        .put_blob(&bytes)
+        .map_err(|e| Denied::broke("store that file", e))?; // WHAT: the bytes kept once, by their digest. WHY: the same file twice costs one copy.
     let by_program = who.is_key(auth::purpose::SYNC); // WHAT: a program's sync key. WHY: its new folders are the office's.
     let file = server
         .store
@@ -767,29 +922,51 @@ pub async fn files_of(
             Ok(rows)
         })
         .map_err(|e| Denied::broke("list that project's files", e))?;
-    Ok(Json(list.into_iter().filter(|f| sight.sees(f.folder.as_deref())).collect())) // WHAT: only what they may see. WHY: a hidden folder's files are not there for them.
+    Ok(Json(
+        list.into_iter()
+            .filter(|f| sight.sees(f.folder.as_deref()))
+            .collect(),
+    )) // WHAT: only what they may see. WHY: a hidden folder's files are not there for them.
 }
 
 /// `GET /files/{id}/file`: the file's bytes, as they were sent.
-pub async fn file_bytes(State(server): State<Shared>, headers: HeaderMap, Path(id): Path<String>) -> Answer<Response> {
+pub async fn file_bytes(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Answer<Response> {
     let who = caller(&server, &headers)?; // WHAT: anybody signed in, or a key. WHY: reading.
     let file = may_reach_file(&server, &who, &id)?; // WHAT: the file, if theirs to see. WHY: not found otherwise.
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::DOWNLOADED_FILE, &who.email).by(&who.id).about(file.name.clone()),
+        crate::audit::Entry::new(crate::audit::action::DOWNLOADED_FILE, &who.email)
+            .by(&who.id)
+            .about(file.name.clone()),
     ); // WHAT: written down. WHY: reaching a file is the line an auditor wants.
-    if let Some(have) = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) {
+    if let Some(have) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
         if have.trim_matches('"') == file.digest {
             return Ok(StatusCode::NOT_MODIFIED.into_response()); // WHAT: they have these bytes. WHY: nothing need move.
         }
     }
-    let bytes = server.store.get_blob(&file.digest).map_err(|e| Denied::broke("read that file", e))?; // WHAT: the bytes. WHY: sent back.
+    let bytes = server
+        .store
+        .get_blob(&file.digest)
+        .map_err(|e| Denied::broke("read that file", e))?; // WHAT: the bytes. WHY: sent back.
     Ok((
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "application/octet-stream".to_string()), // WHAT: plain bytes. WHY: the kind is told by its name; the server never guesses.
             (header::ETAG, format!("\"{}\"", file.digest)), // WHAT: its digest. WHY: a copy already held need not come again.
-            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", crate::api::safe_filename(&file.name))), // WHAT: to be saved, under its name. WHY: never shown in a browser as if it were a page.
+            (
+                header::CONTENT_DISPOSITION,
+                format!(
+                    "attachment; filename=\"{}\"",
+                    crate::api::safe_filename(&file.name)
+                ),
+            ), // WHAT: to be saved, under its name. WHY: never shown in a browser as if it were a page.
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()), // WHAT: don't guess its kind. WHY: a file somebody put up must never run as a page.
         ],
         Body::from(bytes),
@@ -805,10 +982,16 @@ pub struct Moving {
 
 /// `POST /files/{id}/folder` `{"folder": "…"}`: a file moved to another
 /// folder of its project, with the files it replaced.
-pub async fn move_file(State(server): State<Shared>, headers: HeaderMap, Path(id): Path<String>, Json(body): Json<Moving>) -> Answer<Json<ProjectFile>> {
+pub async fn move_file(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Moving>,
+) -> Answer<Json<ProjectFile>> {
     let who = writer(&server, &headers)?; // WHAT: somebody who may change drawings. WHY: a move is a change.
     let file = may_reach_file(&server, &who, &id)?; // WHAT: the file, if theirs to see. WHY: not found otherwise.
-    let folder = crate::projects::folders(body.folder.as_deref().unwrap_or(""), "A file's folder").map_err(Denied::wrong)?; // WHAT: the new folder, checked. WHY: as a set's is.
+    let folder = crate::projects::folders(body.folder.as_deref().unwrap_or(""), "A file's folder")
+        .map_err(Denied::wrong)?; // WHAT: the new folder, checked. WHY: as a set's is.
     may_see_folder(&server, &who, &file.project, folder.as_deref(), "file")?; // WHAT: they may see where it goes. WHY: nobody moves a file somewhere they couldn't see.
     let by_program = who.is_key(auth::purpose::SYNC); // WHAT: a program's sync key. WHY: its new folders are the office's.
     let moved = server
@@ -822,11 +1005,21 @@ pub async fn move_file(State(server): State<Shared>, headers: HeaderMap, Path(id
             let mut chain = vec![file.id.clone()]; // WHAT: this file and those it replaced. WHY: its history goes with it.
             let mut at = file.replaces.clone(); // WHAT: the one before. WHY: followed back.
             while let Some(id) = at.take().filter(|id| !chain.contains(id)) {
-                at = db.query_row("SELECT replaces FROM files WHERE id = ?1", params![id], |r| r.get::<_, Option<String>>(0)).optional()?.flatten(); // WHAT: the one before that. WHY: followed back to the first.
+                at = db
+                    .query_row(
+                        "SELECT replaces FROM files WHERE id = ?1",
+                        params![id],
+                        |r| r.get::<_, Option<String>>(0),
+                    )
+                    .optional()?
+                    .flatten(); // WHAT: the one before that. WHY: followed back to the first.
                 chain.push(id); // WHAT: kept. WHY: moved.
             }
             for id in &chain {
-                db.execute("UPDATE files SET folder = ?1 WHERE id = ?2", params![folder, id])?; // WHAT: moved. WHY: its history stays with it.
+                db.execute(
+                    "UPDATE files SET folder = ?1 WHERE id = ?2",
+                    params![folder, id],
+                )?; // WHAT: moved. WHY: its history stays with it.
             }
             let moved = read_file(db, &file.id)?; // WHAT: the file as it is now. WHY: read inside the step, before it is committed.
             tx.commit()?; // WHAT: all at once. WHY: as above.
@@ -860,8 +1053,16 @@ pub async fn move_set(
         .with(|db| Ok(read_set(db, &id)?))
         .map_err(|e| Denied::broke("read that drawing set", e))?
         .ok_or_else(|| Denied::missing("drawing set"))?; // WHAT: the set. WHY: its project and history.
-    let folder = crate::projects::folders(body.folder.as_deref().unwrap_or(""), "A drawing's folder").map_err(Denied::wrong)?; // WHAT: the new folder, checked. WHY: one rule for folders.
-    may_see_folder(&server, &who, &set.project, folder.as_deref(), "drawing set")?; // WHAT: they may see where it goes. WHY: as for a file.
+    let folder =
+        crate::projects::folders(body.folder.as_deref().unwrap_or(""), "A drawing's folder")
+            .map_err(Denied::wrong)?; // WHAT: the new folder, checked. WHY: one rule for folders.
+    may_see_folder(
+        &server,
+        &who,
+        &set.project,
+        folder.as_deref(),
+        "drawing set",
+    )?; // WHAT: they may see where it goes. WHY: as for a file.
     let by_program = who.is_key(auth::purpose::SYNC); // WHAT: a program's sync key. WHY: its new folders are the office's.
     let moved = server
         .store
@@ -873,17 +1074,30 @@ pub async fn move_set(
             }
             let mut chain = vec![set.id.clone()]; // WHAT: this issue. WHY: and those before and after it.
             for column in ["supersedes", "superseded_by"] {
-                let mut at = read_set(db, &set.id)?.and_then(|s| if column == "supersedes" { s.supersedes } else { s.superseded_by }); // WHAT: the next issue that way. WHY: followed to the end.
+                let mut at = read_set(db, &set.id)?.and_then(|s| {
+                    if column == "supersedes" {
+                        s.supersedes
+                    } else {
+                        s.superseded_by
+                    }
+                }); // WHAT: the next issue that way. WHY: followed to the end.
                 while let Some(next) = at.take().filter(|n| !chain.contains(n)) {
                     at = db
-                        .query_row(&format!("SELECT {column} FROM sets WHERE id = ?1"), params![next], |r| r.get::<_, Option<String>>(0))
+                        .query_row(
+                            &format!("SELECT {column} FROM sets WHERE id = ?1"),
+                            params![next],
+                            |r| r.get::<_, Option<String>>(0),
+                        )
                         .optional()?
                         .flatten(); // WHAT: the one after that. WHY: every issue of the drawing.
                     chain.push(next); // WHAT: kept. WHY: moved.
                 }
             }
             for id in &chain {
-                db.execute("UPDATE sets SET folder = ?1 WHERE id = ?2", params![folder, id])?; // WHAT: moved; markups are on the set and stay. WHY: the drawing keeps its takeoff wherever it is filed.
+                db.execute(
+                    "UPDATE sets SET folder = ?1 WHERE id = ?2",
+                    params![folder, id],
+                )?; // WHAT: moved; markups are on the set and stay. WHY: the drawing keeps its takeoff wherever it is filed.
             }
             let moved = read_set(db, &set.id)?; // WHAT: the set as it is now. WHY: read inside the step, before it is committed.
             tx.commit()?; // WHAT: all at once. WHY: as above.
@@ -917,7 +1131,10 @@ mod tests {
     fn a_field_hand_sees_the_field_folders_and_not_the_offices() {
         let rules = [
             ("01 CONTRACT", See::Office),
-            ("10 SHOP DRAWINGS", See::Groups(vec!["Field".into(), "Shop".into()])),
+            (
+                "10 SHOP DRAWINGS",
+                See::Groups(vec!["Field".into(), "Shop".into()]),
+            ),
             ("10 SHOP DRAWINGS/10.9 PRICES", See::Office),
         ]; // WHAT: a job's rules. WHY: the shape the shop asked for.
         let field = viewer_in(&["field"], &rules); // WHAT: somebody in Field. WHY: the person the rules are for.
@@ -933,14 +1150,23 @@ mod tests {
 
     #[test]
     fn a_child_given_everyone_inside_an_office_folder_is_still_the_offices() {
-        let field = viewer_in(&["field"], &[("01 CONTRACT", See::Office), ("01 CONTRACT/PUBLIC", See::Everyone)]); // WHAT: a wide child in a narrow parent. WHY: the rule a child can't break.
+        let field = viewer_in(
+            &["field"],
+            &[
+                ("01 CONTRACT", See::Office),
+                ("01 CONTRACT/PUBLIC", See::Everyone),
+            ],
+        ); // WHAT: a wide child in a narrow parent. WHY: the rule a child can't break.
         assert!(!field.sees(Some("01 CONTRACT/PUBLIC"))); // WHAT: still hidden. WHY: never wider than its parent.
         assert_eq!(field.rule(Some("01 CONTRACT/PUBLIC")), See::Office); // WHAT: what decides. WHY: shown so in the Studio.
     }
 
     #[test]
     fn a_folder_is_one_folder_whatever_its_case_or_spacing() {
-        assert_eq!(key_of("10  Shop Drawings/10.4 FOR FAB"), key_of("10 SHOP DRAWINGS/10.4  for fab")); // WHAT: the same folder. WHY: as a share has it.
+        assert_eq!(
+            key_of("10  Shop Drawings/10.4 FOR FAB"),
+            key_of("10 SHOP DRAWINGS/10.4  for fab")
+        ); // WHAT: the same folder. WHY: as a share has it.
         assert_eq!(and_above("a/b/c"), vec!["a", "a/b", "a/b/c"]); // WHAT: every folder it is in. WHY: their rules apply to it.
     }
 

@@ -23,8 +23,8 @@ pub const INDEX: &str = "kept.json"; // WHAT: which file holds the index. WHY: b
 /// What the server said about one kept set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Seen {
-    Yes, // WHAT: the person may still see it. WHY: the copy stays.
-    No, // WHAT: the server answered "not found". WHY: the copy goes.
+    Yes,      // WHAT: the person may still see it. WHY: the copy stays.
+    No,       // WHAT: the server answered "not found". WHY: the copy goes.
     CantTell, // WHAT: no answer, or another refusal. WHY: the copy stays, and nothing more is asked this time.
 }
 
@@ -36,7 +36,9 @@ fn read_index(folder: &Path) -> BTreeMap<String, String> {
 }
 
 fn write_index(folder: &Path, index: &BTreeMap<String, String>) {
-    let Ok(text) = serde_json::to_vec_pretty(index) else { return }; // WHAT: as JSON. WHY: a person can read it.
+    let Ok(text) = serde_json::to_vec_pretty(index) else {
+        return;
+    }; // WHAT: as JSON. WHY: a person can read it.
     let temp = folder.join(format!("{INDEX}.part")); // WHAT: written beside. WHY: a half-written index is never read.
     if std::fs::write(&temp, text).is_ok() {
         let _ = std::fs::rename(&temp, folder.join(INDEX)); // WHAT: moved into place. WHY: all or nothing.
@@ -45,7 +47,9 @@ fn write_index(folder: &Path, index: &BTreeMap<String, String>) {
 
 /// Writes down that `file`, in `folder`, is the copy of drawing set `set`.
 pub fn remember(folder: &Path, set: &str, file: &Path) {
-    let Some(name) = file.file_name().and_then(|n| n.to_str()) else { return }; // WHAT: the copy's name in the folder. WHY: the index names files, not paths.
+    let Some(name) = file.file_name().and_then(|n| n.to_str()) else {
+        return;
+    }; // WHAT: the copy's name in the folder. WHY: the index names files, not paths.
     let mut index = read_index(folder); // WHAT: the index as it is. WHY: added to.
     index.insert(set.to_string(), name.to_string()); // WHAT: this set's copy. WHY: asked about later.
     write_index(folder, &index); // WHAT: kept. WHY: survives the program closing.
@@ -58,7 +62,11 @@ pub fn remember(folder: &Path, set: &str, file: &Path) {
 /// copies nobody wrote down go only then. Asks `asked` about each kept set;
 /// stops asking at the first it can't tell, and then takes nothing off that
 /// it doesn't know about. Answers the copies taken off.
-pub fn forget_unseen(folder: &Path, signed_in: bool, mut asked: impl FnMut(&str) -> Seen) -> Vec<PathBuf> {
+pub fn forget_unseen(
+    folder: &Path,
+    signed_in: bool,
+    mut asked: impl FnMut(&str) -> Seen,
+) -> Vec<PathBuf> {
     let mut index = read_index(folder); // WHAT: what is kept, and of which set. WHY: each is asked about.
     let mut gone: Vec<PathBuf> = Vec::new(); // WHAT: the copies taken off. WHY: said to the person.
     let mut keep: BTreeMap<String, String> = BTreeMap::new(); // WHAT: the index after. WHY: written back.
@@ -90,9 +98,18 @@ pub fn forget_unseen(folder: &Path, signed_in: bool, mut asked: impl FnMut(&str)
         if let Ok(entries) = std::fs::read_dir(folder) {
             for entry in entries.flatten() {
                 let path = entry.path(); // WHAT: one file in the cache. WHY: checked.
-                let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else { continue }; // WHAT: its name. WHY: compared with the index.
+                let Some(name) = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+                else {
+                    continue;
+                }; // WHAT: its name. WHY: compared with the index.
                 let is_copy = name.to_ascii_lowercase().ends_with(".pdf"); // WHAT: a kept drawing. WHY: the index and anything else are left.
-                if is_copy && !known.iter().any(|k| **k == name) && std::fs::remove_file(&path).is_ok() {
+                if is_copy
+                    && !known.iter().any(|k| **k == name)
+                    && std::fs::remove_file(&path).is_ok()
+                {
                     gone.push(path); // WHAT: an unknown copy taken off. WHY: as above.
                 }
             }
@@ -110,8 +127,12 @@ mod tests {
     fn a_folder() -> PathBuf {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // WHAT: a counter. WHY: each test in this run gets its own folder.
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // WHAT: this test's number. WHY: as above.
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0); // WHAT: the time now. WHY: another run at the same time never shares a folder.
-        let path = std::env::temp_dir().join(format!("hyperview-kept-{}-{stamp}-{n}", std::process::id())); // WHAT: the folder. WHY: a cache of its own.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0); // WHAT: the time now. WHY: another run at the same time never shares a folder.
+        let path =
+            std::env::temp_dir().join(format!("hyperview-kept-{}-{stamp}-{n}", std::process::id())); // WHAT: the folder. WHY: a cache of its own.
         std::fs::create_dir_all(&path).unwrap(); // WHAT: made. WHY: files go in it.
         path
     }
@@ -119,11 +140,20 @@ mod tests {
     #[test]
     fn a_copy_the_server_no_longer_shows_this_person_is_taken_off_and_the_rest_stay() {
         let folder = a_folder(); // WHAT: a cache. WHY: under test.
-        for (set, name) in [("set_field", "aaaaaaaaaaaa-S-101.pdf"), ("set_office", "bbbbbbbbbbbb-Contract.pdf")] {
+        for (set, name) in [
+            ("set_field", "aaaaaaaaaaaa-S-101.pdf"),
+            ("set_office", "bbbbbbbbbbbb-Contract.pdf"),
+        ] {
             std::fs::write(folder.join(name), b"%PDF").unwrap(); // WHAT: a kept copy. WHY: one of each.
             remember(&folder, set, &folder.join(name)); // WHAT: written down. WHY: as `fetch` does.
         }
-        let gone = forget_unseen(&folder, true, |set| if set == "set_office" { Seen::No } else { Seen::Yes }); // WHAT: the contract's folder given to the office only. WHY: the server says not found.
+        let gone = forget_unseen(&folder, true, |set| {
+            if set == "set_office" {
+                Seen::No
+            } else {
+                Seen::Yes
+            }
+        }); // WHAT: the contract's folder given to the office only. WHY: the server says not found.
         assert_eq!(gone, vec![folder.join("bbbbbbbbbbbb-Contract.pdf")]); // WHAT: the contract taken off. WHY: no longer theirs.
         assert!(folder.join("aaaaaaaaaaaa-S-101.pdf").exists()); // WHAT: the shop drawing stays. WHY: still theirs.
         assert!(!folder.join("bbbbbbbbbbbb-Contract.pdf").exists()); // WHAT: gone from the disk. WHY: it can't be reopened from the recent files.
@@ -143,7 +173,10 @@ mod tests {
             Seen::CantTell // WHAT: no signal. WHY: a seat in a truck.
         });
         assert!(gone.is_empty()); // WHAT: nothing taken off. WHY: never on a guess.
-        assert!(folder.join("dddddddddddd-Old.pdf").exists() && folder.join("cccccccccccc-A.pdf").exists()); // WHAT: both kept. WHY: likewise.
+        assert!(
+            folder.join("dddddddddddd-Old.pdf").exists()
+                && folder.join("cccccccccccc-A.pdf").exists()
+        ); // WHAT: both kept. WHY: likewise.
         assert_eq!(asked, 1); // WHAT: one question. WHY: no more once it couldn't be answered.
         let _ = std::fs::remove_dir_all(&folder); // WHAT: cleaned up. WHY: tests leave nothing.
     }

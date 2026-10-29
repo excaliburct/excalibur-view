@@ -2067,7 +2067,7 @@ enum InFolder<'a> {
 
 impl InFolder<'_> {
     /// The folder it is in, or is.
-    fn folder<'b>(&'b self) -> Option<&'b str> {
+    fn folder(&self) -> Option<&str> {
         match self {
             InFolder::Set(set) => set.folder.as_deref(), // WHAT: the set's folder. WHY: shelved there.
             InFolder::File(file) => file.folder.as_deref(), // WHAT: the file's folder. WHY: likewise.

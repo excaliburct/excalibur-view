@@ -23,17 +23,29 @@ pub fn safe_name(name: &str) -> String {
     let name = name.rsplit(['/', '\\']).next().unwrap_or(""); // WHAT: the last part only. WHY: a name never says where to write.
     let kept: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '(' | ')') { c } else { '_' }) // WHAT: ordinary characters only. WHY: nothing that means something to a system.
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '(' | ')') {
+                c
+            } else {
+                '_'
+            }
+        }) // WHAT: ordinary characters only. WHY: nothing that means something to a system.
         .take(120) // WHAT: at most 120 characters. WHY: deep temporary folders on Windows.
         .collect();
     let kept = kept.trim().trim_start_matches('.').to_string(); // WHAT: no leading dots or spaces. WHY: never a hidden file or `..`.
-    if kept.is_empty() { "file".to_string() } else { kept } // WHAT: something, always. WHY: a copy needs a name.
+    if kept.is_empty() {
+        "file".to_string()
+    } else {
+        kept
+    } // WHAT: something, always. WHY: a copy needs a name.
 }
 
 /// Saves `bytes` as a copy of file `id` called `name` in the temporary
 /// folder, and says where.
 pub fn save_copy(id: &str, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
-    let folder = std::env::temp_dir().join("Excalibur View copies").join(crate::server::safe(id)); // WHAT: a folder of its own per file. WHY: two files of the same name never overwrite each other.
+    let folder = std::env::temp_dir()
+        .join("Excalibur View copies")
+        .join(crate::server::safe(id)); // WHAT: a folder of its own per file. WHY: two files of the same name never overwrite each other.
     std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?; // WHAT: made. WHY: the copy goes in it.
     let path = folder.join(safe_name(name)); // WHAT: the copy. WHY: its own name, so the system knows its kind.
     std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?; // WHAT: written. WHY: handed to its program.
@@ -57,7 +69,12 @@ pub fn open(path: &Path) -> Result<(), String> {
     } else {
         std::process::Command::new("xdg-open") // WHAT: the desktop's opener. WHY: the same on Linux.
     };
-    command.arg(path).spawn().map(|_| ()).map_err(|e| format!("The computer couldn't open {}: {e}", path.display())) // WHAT: started, not waited for. WHY: the program stays usable while the file is open.
+    command
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("The computer couldn't open {}: {e}", path.display()))
+    // WHAT: started, not waited for. WHY: the program stays usable while the file is open.
 }
 
 #[cfg(test)]
