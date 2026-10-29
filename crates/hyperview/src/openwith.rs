@@ -61,6 +61,38 @@ pub fn runs_itself(name: &str) -> bool {
     }
 }
 
+/// Where this person's copies go: beside their kept drawings.
+fn copies_folder() -> PathBuf {
+    let drawings = crate::server::cache_folder(); // WHAT: where this person's kept drawings are. WHY: their own folder, not the computer's shared temporary one another account could plant a file in.
+    drawings.parent().unwrap_or(&drawings).join("copies") // WHAT: the copies beside them. WHY: one place to clear.
+}
+
+/// How long a copy is kept after it was opened.
+pub const COPY_KEPT_FOR: std::time::Duration = std::time::Duration::from_secs(60 * 60); // WHAT: an hour. WHY: long enough to read it; a copy is never the company's file, so a folder taken away doesn't stay on a laptop or tablet.
+
+/// Takes off every copy opened longer ago than `age`, and says which went.
+/// A copy still open in its program on Windows can't be removed yet, and is
+/// tried again next time.
+pub fn forget_old_copies(age: std::time::Duration) -> Vec<PathBuf> {
+    forget_old_in(&copies_folder(), age) // WHAT: this person's copies. WHY: the only ones the Studio makes.
+}
+
+fn forget_old_in(folder: &Path, age: std::time::Duration) -> Vec<PathBuf> {
+    let mut gone = Vec::new(); // WHAT: what went. WHY: written in the log.
+    let Ok(each) = std::fs::read_dir(folder) else {
+        return gone; // WHAT: no copies yet. WHY: nothing to do.
+    };
+    for one in each.flatten() {
+        let path = one.path(); // WHAT: one file's folder. WHY: a copy lives in its own.
+        let opened = one.metadata().and_then(|m| m.modified()).ok(); // WHAT: when it was written. WHY: its age.
+        let old = opened.and_then(|t| t.elapsed().ok()).is_none_or(|e| e >= age); // WHAT: older than allowed, or an age that can't be read. WHY: a copy that can't say its age isn't kept on a guess.
+        if old && std::fs::remove_dir_all(&path).is_ok() {
+            gone.push(path); // WHAT: taken off. WHY: said.
+        }
+    }
+    gone
+}
+
 /// Saves `bytes` as a copy of file `id` called `name` in this person's own
 /// cache folder, beside the kept drawings, and says where. Never a program
 /// or a shortcut.
@@ -68,12 +100,7 @@ pub fn save_copy(id: &str, name: &str, bytes: &[u8]) -> Result<PathBuf, String> 
     if runs_itself(name) {
         return Err(RUNS_ITSELF.to_string()); // WHAT: refused before anything is written. WHY: a file somebody put in a job folder must never run on a field hand's computer with a double click.
     }
-    let drawings = crate::server::cache_folder(); // WHAT: where this person's kept drawings are. WHY: their own folder, not the computer's shared temporary one another account could plant a file in.
-    let folder = drawings
-        .parent()
-        .unwrap_or(&drawings)
-        .join("copies")
-        .join(crate::server::safe(id)); // WHAT: a folder of its own per file, beside the drawings. WHY: two files of the same name never overwrite each other.
+    let folder = copies_folder().join(crate::server::safe(id)); // WHAT: a folder of its own per file, beside the drawings. WHY: two files of the same name never overwrite each other.
     std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?; // WHAT: made. WHY: the copy goes in it.
     let path = folder.join(safe_name(name)); // WHAT: the copy. WHY: its own name, so the system knows its kind.
     std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?; // WHAT: written. WHY: handed to its program.
@@ -142,6 +169,17 @@ mod tests {
         for name in ["Estimate.xlsx", "Letter.docx", "Photo.jpg", "Plan.dwg", "notes", "exe.pdf"] {
             assert!(!runs_itself(name), "{name}"); // WHAT: ordinary office files. WHY: opened as before.
         }
-        assert!(!crate::server::cache_folder().parent().unwrap().join("copies").join(crate::server::safe("file_runs")).exists()); // WHAT: no folder made for the refused ones. WHY: nothing was saved.
+        assert!(!copies_folder().join(crate::server::safe("file_runs")).exists()); // WHAT: no folder made for the refused ones. WHY: nothing was saved.
+    }
+
+    #[test]
+    fn a_copy_is_taken_off_once_it_is_older_than_allowed() {
+        let folder = std::env::temp_dir().join(format!("hv-copies-test-{}", std::process::id())); // WHAT: a folder of the test's own. WHY: never the person's real copies.
+        std::fs::create_dir_all(folder.join("file_a")).unwrap(); // WHAT: one copy's folder. WHY: as save_copy makes.
+        std::fs::write(folder.join("file_a").join("Safety.docx"), b"PK").unwrap(); // WHAT: the copy. WHY: what must go.
+        assert!(forget_old_in(&folder, COPY_KEPT_FOR).is_empty()); // WHAT: just opened. WHY: kept while it is being read.
+        assert_eq!(forget_old_in(&folder, std::time::Duration::ZERO).len(), 1); // WHAT: past its time. WHY: taken off.
+        assert!(!folder.join("file_a").exists()); // WHAT: gone from the disk. WHY: a folder taken away doesn't stay on a tablet.
+        let _ = std::fs::remove_dir_all(&folder); // WHAT: cleaned up. WHY: tests leave nothing.
     }
 }

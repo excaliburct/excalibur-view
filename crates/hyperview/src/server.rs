@@ -1533,6 +1533,9 @@ fn look_at_kept(client: &Client) -> usize {
     for path in &gone {
         log::info!("took {} off this computer: its person can no longer see it", path.display()); // WHAT: written in the log. WHY: so a missing file can be explained.
     }
+    for path in crate::openwith::forget_old_copies(crate::openwith::COPY_KEPT_FOR) {
+        log::info!("took {} off this computer: a copy opened over an hour ago", path.display()); // WHAT: an old copy gone, and written down. WHY: a copy of a file in a folder later taken away doesn't stay.
+    }
     gone.len()
 }
 
