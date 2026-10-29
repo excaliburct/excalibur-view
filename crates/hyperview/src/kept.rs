@@ -131,8 +131,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0); // WHAT: the time now. WHY: another run at the same time never shares a folder.
-        let path =
-            std::env::temp_dir().join(format!("hyperview-kept-{}-{stamp}-{n}", std::process::id())); // WHAT: the folder. WHY: a cache of its own.
+        let scratch = std::env::var_os("TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")); // WHAT: the test run's own scratch folder, or the build folder. WHY: somewhere private, as the printing tests use.
+        let path = scratch.join(format!("hyperview-kept-{}-{stamp}-{n}", std::process::id())); // WHAT: the folder. WHY: a cache of its own.
         std::fs::create_dir_all(&path).unwrap(); // WHAT: made. WHY: files go in it.
         path
     }

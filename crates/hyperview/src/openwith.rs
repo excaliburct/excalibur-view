@@ -1,8 +1,8 @@
 //! Opening a file that isn't a drawing (a spreadsheet, a letter, a picture)
 //! with the program the computer opens that kind of file with.
 //!
-//! Excalibur View doesn't edit these yet. So the Studio saves a copy to the
-//! computer's temporary folder and hands it to the system, and says plainly
+//! Excalibur View doesn't edit these yet. So the Studio saves a copy in the
+//! person's own cache folder and hands it to the system, and says plainly
 //! that it is a copy: a change saved in it goes nowhere, and belongs in the
 //! company's own files. On a tablet the copy goes to the system's share and
 //! open-in sheet, where there is one; where there isn't, the person is told
@@ -40,12 +40,15 @@ pub fn safe_name(name: &str) -> String {
     } // WHAT: something, always. WHY: a copy needs a name.
 }
 
-/// Saves `bytes` as a copy of file `id` called `name` in the temporary
-/// folder, and says where.
+/// Saves `bytes` as a copy of file `id` called `name` in this person's own
+/// cache folder, beside the kept drawings, and says where.
 pub fn save_copy(id: &str, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
-    let folder = std::env::temp_dir()
-        .join("Excalibur View copies")
-        .join(crate::server::safe(id)); // WHAT: a folder of its own per file. WHY: two files of the same name never overwrite each other.
+    let drawings = crate::server::cache_folder(); // WHAT: where this person's kept drawings are. WHY: their own folder, not the computer's shared temporary one another account could plant a file in.
+    let folder = drawings
+        .parent()
+        .unwrap_or(&drawings)
+        .join("copies")
+        .join(crate::server::safe(id)); // WHAT: a folder of its own per file, beside the drawings. WHY: two files of the same name never overwrite each other.
     std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?; // WHAT: made. WHY: the copy goes in it.
     let path = folder.join(safe_name(name)); // WHAT: the copy. WHY: its own name, so the system knows its kind.
     std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?; // WHAT: written. WHY: handed to its program.
