@@ -27,9 +27,180 @@ pub fn document(name: &str) -> Value {
                     "description": "A token from POST /auth/token."
                 }
             },
-            "schemas": schemas(),
+            "schemas": joined(schemas(), folder_schemas()),
         },
-        "paths": paths(),
+        "paths": joined(paths(), folder_paths()),
+    })
+}
+
+/// Two objects as one: `more`'s entries added to `first`'s.
+fn joined(mut first: Value, more: Value) -> Value {
+    if let (Some(first), Value::Object(more)) = (first.as_object_mut(), more) {
+        first.extend(more); // WHAT: the entries added. WHY: the description is written in parts, each readable on its own.
+    }
+    first
+}
+
+/// What a folder's `see` can be, in the description.
+fn see_schema(description: &str) -> Value {
+    json!({
+        "description": description,
+        "oneOf": [
+            { "type": "string", "enum": ["office", "everyone"] },
+            { "type": "array", "items": { "type": "string" } }
+        ]
+    }) // WHAT: a word or a list of group names. WHY: how a folder's rule travels.
+}
+
+/// The routes for groups, folders and files that aren't drawings.
+fn folder_paths() -> Value {
+    json!({
+        "/groups": {
+            "get": {
+                "summary": "Every group of people, and who is in each. Administrators only.",
+                "responses": ok_list("Group")
+            },
+            "post": {
+                "summary": "Make a group (\"Shop\", \"Field\"). Administrators only.",
+                "description": "Asking for a name that is already a group, whatever its case, answers with that group.",
+                "requestBody": body("NewGroup"),
+                "responses": ok("Group")
+            }
+        },
+        "/groups/{id}/people": {
+            "post": {
+                "summary": "Put somebody in a group, or take them out. Administrators only.",
+                "description": "`{\"person\": \"usr_…\", \"on\": false}` takes them out. It counts on their next request: the folders given to the group appear or go.",
+                "parameters": [path_param("id", "The group.")],
+                "requestBody": body("GroupMember"),
+                "responses": ok("Group")
+            }
+        },
+        "/projects/{id}/folders": {
+            "get": {
+                "summary": "The project's folders the caller may see, empty ones too, each with who sees it.",
+                "description": "A folder's `see` is `office` (administrators and estimators), `everyone` (everybody who may see the project) or a list of group names (the people in them, and the office always). A folder without its own rule takes its parent's; one with no rule anywhere above it is everyone's. A folder is never seen by more people than the folder it is in. Folders the caller may not see are left out, as if they did not exist.",
+                "parameters": [path_param("id", "The project.")],
+                "responses": ok_list("FolderInfo")
+            },
+            "post": {
+                "summary": "Make folders, and say who sees each. Never takes one away.",
+                "description": "`{\"folders\": [\"01 CONTRACT\", {\"folder\": \"10 SHOP DRAWINGS\", \"see\": [\"Shop\", \"Field\"]}]}`. Each is a folder's name, or a folder and who sees it. Folders not there are made, and the folders above them; a `see` sets or changes that folder's rule; a folder named without one keeps its rule. A group named that does not exist is made empty, and `groups_made` and `notes` say so. A sync key's new folder with no rule above it is `office` until it says otherwise. For an administrator signed in, or a sync key on its own projects. A rule set in the Studio is kept until the program sets that folder again; `set_in`, `set_by` and `set_at` say where, who and when.",
+                "parameters": [path_param("id", "The project.")],
+                "requestBody": body("NewFolders"),
+                "responses": ok("FoldersMade")
+            }
+        },
+        "/projects/{id}/files": {
+            "get": {
+                "summary": "The project's files that aren't drawing sets, in folders the caller may see.",
+                "parameters": [path_param("id", "The project."), query_param("all", "1 includes files replaced since.")],
+                "responses": ok_list("ProjectFile")
+            }
+        },
+        "/files": {
+            "post": {
+                "summary": "Put a file of any kind in a project's folder.",
+                "description": "Multipart, like `POST /sets`: `project`, `folder`, `modified` (when it was saved, ISO 8601) and `file`. Any kind of file up to the server's largest upload; the server keeps a copy of it, once however often it is sent. The same bytes already in the project answer with that file and `already_here: true`. The same name in the same folder (case and spacing aside) is the file saved again: it replaces that one in place, which is kept as its history (`replaces`).",
+                "requestBody": upload("The file and its project, folder and time saved."),
+                "responses": ok("ProjectFile")
+            }
+        },
+        "/files/{id}/file": {
+            "get": {
+                "summary": "A file's bytes, as they were sent.",
+                "parameters": [path_param("id", "The file.")],
+                "responses": { "200": { "description": "The file." } }
+            }
+        },
+        "/files/{id}/folder": {
+            "post": {
+                "summary": "Move a file to another folder of its project, with the files it replaced.",
+                "parameters": [path_param("id", "The file.")],
+                "requestBody": body("Moving"),
+                "responses": ok("ProjectFile")
+            }
+        },
+        "/sets/{id}/folder": {
+            "post": {
+                "summary": "Move a drawing set to another folder of its project, with every issue of it.",
+                "description": "Its markups and takeoff are untouched. Empty or null is the project's own.",
+                "parameters": [path_param("id", "The drawing set.")],
+                "requestBody": body("Moving"),
+                "responses": ok("DrawingSet")
+            }
+        }
+    })
+}
+
+/// The shapes for groups, folders and files.
+fn folder_schemas() -> Value {
+    json!({
+        "Group": object(&[
+            ("id", "string", "grp_…"),
+            ("name", "string", "What the office calls it."),
+            ("people", "array", "The ids of the people in it."),
+            ("made", "string", ""),
+            ("made_by", "string", ""),
+        ]),
+        "NewGroup": object(&[("name", "string", "Shop, Field. At most 60 characters.")]),
+        "GroupMember": object(&[
+            ("person", "string", "The person's id."),
+            ("on", "boolean", "false takes them out. Default true."),
+        ]),
+        "FolderInfo": {
+            "type": "object",
+            "properties": {
+                "folder": { "type": "string", "description": "Folders written with /." },
+                "see": see_schema("Who sees it now, the folders above it counted."),
+                "own": see_schema("Its own rule; absent when it takes its parent's."),
+                "set_in": { "type": "string", "description": "program or view: where its rule was last set." },
+                "set_by": { "type": "string", "description": "Who set it." },
+                "set_at": { "type": "string", "description": "When." },
+                "sets": { "type": "integer", "description": "Current drawing sets in it, not its subfolders." },
+                "files": { "type": "integer", "description": "Current files in it, not its subfolders." }
+            }
+        },
+        "NewFolders": {
+            "type": "object",
+            "properties": {
+                "folders": {
+                    "type": "array",
+                    "description": "Each a folder's name, or {\"folder\": ..., \"see\": ...}.",
+                    "items": { "oneOf": [
+                        { "type": "string" },
+                        { "type": "object", "properties": { "folder": { "type": "string" }, "see": see_schema("Who sees it.") } }
+                    ] }
+                }
+            }
+        },
+        "FoldersMade": {
+            "type": "object",
+            "properties": {
+                "project": { "type": "string" },
+                "holds": { "type": "integer", "description": "How many folders the project has now." },
+                "made": { "type": "integer", "description": "Folders made by this request." },
+                "changed": { "type": "integer", "description": "Folders whose rule this request changed." },
+                "groups_made": { "type": "array", "items": { "type": "string" }, "description": "Groups made empty because a rule named them." },
+                "notes": { "type": "array", "items": { "type": "string" }, "description": "What the caller should know: a rule wider than its parent's, groups made empty." },
+                "folders": { "type": "array", "items": { "$ref": "#/components/schemas/FolderInfo" } }
+            }
+        },
+        "ProjectFile": object(&[
+            ("id", "string", "file_…"),
+            ("project", "string", ""),
+            ("folder", "string", "Absent for the project's own."),
+            ("name", "string", "Its name, with its extension."),
+            ("bytes", "integer", ""),
+            ("modified", "string", "When it was saved where it came from."),
+            ("digest", "string", "SHA-256 of its bytes."),
+            ("uploaded", "string", ""),
+            ("uploaded_by", "string", ""),
+            ("replaces", "string", "The file this one replaced, kept as its history."),
+            ("replaced_by", "string", "The file that replaced this one."),
+            ("already_here", "boolean", "These bytes were already in the project: nothing new was made."),
+        ]),
+        "Moving": object(&[("folder", "string", "Where to; empty or null is the project's own.")]),
     })
 }
 

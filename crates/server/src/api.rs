@@ -231,7 +231,10 @@ pub(crate) fn administrator(server: &Server, headers: &HeaderMap) -> Answer<Who>
 /// - `POST /projects/:id/archive` — put away, or brought back;
 /// - `POST /sets` — a drawing put up into one of its projects;
 /// - `GET /projects/:id/stamp` — whether anything changed, without pulling;
-/// - `GET /projects/:id/markuplist` — the markups, to read the takeoff back.
+/// - `GET /projects/:id/markuplist` — the markups, to read the takeoff back;
+/// - `POST /files` — a file that isn't a drawing put in one of its folders;
+/// - `POST /projects/:id/folders` — its folders made, and who sees each;
+/// - `POST /sets/:id/folder`, `POST /files/:id/folder` — a move followed.
 ///
 /// Every other route refuses a sync key before it runs, whoever made the key.
 /// Adding a route here is giving every sync key in every office a new power,
@@ -243,6 +246,10 @@ pub const SYNC_ROUTES: &[(&str, &str)] = &[
     ("POST", "/sets"), // WHAT: upload a drawing. WHY: the program's drawings go up into its projects.
     ("GET", "/projects/:id/stamp"), // WHAT: the project's change stamp. WHY: a cheap "did anything change?" before a pull.
     ("GET", "/projects/:id/markuplist"), // WHAT: the project's markups. WHY: the takeoff read back into the program.
+    ("POST", "/files"), // WHAT: a file that isn't a PDF put in one of its projects' folders. WHY: the program mirrors the job's whole folder.
+    ("POST", "/projects/:id/folders"), // WHAT: its projects' folders made, and who sees each. WHY: empty folders show, and the office's papers stay the office's.
+    ("POST", "/sets/:id/folder"), // WHAT: a drawing set moved to another folder. WHY: a move in the company files is followed.
+    ("POST", "/files/:id/folder"), // WHAT: a file moved to another folder. WHY: likewise.
 ];
 
 /// Holds every key to what it was made for, before any route runs. A `sync`
@@ -286,8 +293,18 @@ async fn keys_keep_to_their_purpose(
                 .saying(auth::purpose::SYNC.to_string()),
         );
     }
-    Denied::not_with_this_key(&format!("{method} {path} with a sync key: it is for keeping a program's own projects in step")).into_response()
+    let read_whole = axum::body::to_bytes(request.into_body(), REFUSAL_READS_UP_TO).await.is_ok(); // WHAT: the rest of what the program sent, read and thrown away, up to a small limit. WHY: an answer sent while the request's body is still unread makes the server close the connection with data waiting, and the system then resets it; on a Mac the reset can arrive before the program has read the refusal, so it saw a 403 with an empty body.
+    let mut refused = Denied::not_with_this_key(&format!("{method} {path} with a sync key: it is for keeping a program's own projects in step")).into_response(); // WHAT: the refusal, as before. WHY: the same words and the same 403 every route gives a sync key.
+    if !read_whole {
+        refused.headers_mut().insert(header::CONNECTION, header::HeaderValue::from_static("close")); // WHAT: says the connection ends after this answer. WHY: a body too big to read is never read; the program is told plainly not to send another request on this connection.
+    }
+    refused // WHAT: the refusal. WHY: sent whole, with the request read first.
 }
+
+/// How much of a refused request's body is read before the refusal goes. A
+/// sync key's ordinary mistakes are small JSON bodies; a big upload sent to
+/// the wrong route is not read at all, and the connection is closed instead.
+const REFUSAL_READS_UP_TO: usize = 64 * 1024; // WHAT: 64 KiB. WHY: far more than any JSON a program sends by mistake, far less than an upload worth reading for nothing.
 
 /// How long a key's refusals go unwritten after one is written.
 const KEY_REFUSAL_QUIET: std::time::Duration = std::time::Duration::from_secs(60); // WHAT: one minute. WHY: enough to see a key straying, never enough lines to fill the disk.
@@ -382,6 +399,14 @@ pub fn router(server: Shared) -> Router {
         .route("/admin/releases/:version/ready", post(release_ready))
         .route("/update/latest", get(update_latest))
         .route("/update/:version/download", get(update_download))
+        .route("/groups", get(crate::folders::groups).post(crate::folders::make_group)) // WHAT: groups of people. WHY: a folder can be given to groups.
+        .route("/groups/:id/people", post(crate::folders::change_group)) // WHAT: somebody put in a group or taken out. WHY: that decides the folders they see.
+        .route("/projects/:id/folders", get(crate::folders::folders_of).post(crate::folders::make_folders)) // WHAT: a project's folders, and who sees each. WHY: empty folders show, and each says who sees it.
+        .route("/projects/:id/files", get(crate::folders::files_of)) // WHAT: a project's files that aren't drawings. WHY: listed in their folders.
+        .route("/files", post(crate::folders::upload_file)) // WHAT: a file of any kind put in a folder. WHY: a job's folder holds more than PDFs.
+        .route("/files/:id/file", get(crate::folders::file_bytes)) // WHAT: a file's bytes. WHY: opened with its own program.
+        .route("/files/:id/folder", post(crate::folders::move_file)) // WHAT: a file moved. WHY: follows a move in the company files.
+        .route("/sets/:id/folder", post(crate::folders::move_set)) // WHAT: a drawing set moved, with its issues. WHY: likewise.
         // WHAT: every matched route first checks that a key keeps to its purpose. WHY: one gate in front of all of them, so a new route is closed to sync keys unless it is put on SYNC_ROUTES on purpose.
         .route_layer(axum::middleware::from_fn_with_state(server.clone(), keys_keep_to_their_purpose))
         .layer(DefaultBodyLimit::max(limit))
@@ -469,6 +494,16 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/plugins/{id}/remove"),
     ("GET", "/update/latest"),
     ("GET", "/update/{version}/download"),
+    ("GET", "/groups"), // WHAT: every group. WHY: described, so the test holds the two together.
+    ("POST", "/groups"), // WHAT: a group made. WHY: likewise.
+    ("POST", "/groups/{id}/people"), // WHAT: who is in a group. WHY: likewise.
+    ("GET", "/projects/{id}/folders"), // WHAT: a project's folders. WHY: likewise.
+    ("POST", "/projects/{id}/folders"), // WHAT: folders made, and who sees them. WHY: likewise.
+    ("GET", "/projects/{id}/files"), // WHAT: a project's files. WHY: likewise.
+    ("POST", "/files"), // WHAT: a file put up. WHY: likewise.
+    ("GET", "/files/{id}/file"), // WHAT: a file's bytes. WHY: likewise.
+    ("POST", "/files/{id}/folder"), // WHAT: a file moved. WHY: likewise.
+    ("POST", "/sets/{id}/folder"), // WHAT: a set moved. WHY: likewise.
 ];
 
 // ---- is it there ----------------------------------------------------------
@@ -1105,9 +1140,9 @@ pub(crate) fn may_reach_set(server: &Server, who: &Who, set: &str) -> Answer<()>
         .with(|db| {
             Ok(db
                 .query_row(
-                    "SELECT project FROM sets WHERE id = ?1",
+                    "SELECT project, folder FROM sets WHERE id = ?1", // WHAT: the set's project and its folder. WHY: both decide who may reach it.
                     params![set],
-                    |r| r.get::<_, String>(0),
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
                 )
                 .optional()?)
         })
@@ -1116,7 +1151,10 @@ pub(crate) fn may_reach_set(server: &Server, who: &Who, set: &str) -> Answer<()>
         // A set nobody can find is refused the same way as one somebody may
         // not have, so the two are indistinguishable from outside.
         None => Err(Denied::missing("drawing set")),
-        Some(project) => may_reach_project(server, who, &project),
+        Some((project, folder)) => {
+            may_reach_project(server, who, &project)?; // WHAT: the project's gate, as before. WHY: a job they are not on is not there for them.
+            crate::folders::may_see_folder(server, who, &project, folder.as_deref(), "drawing set") // WHAT: the folder's gate. WHY: every route that reads a set (its file, sheets, markups, takeoff, markup list, copy, the assistant's tools) comes through here, so a folder they may not see hides its sets everywhere.
+        }
     }
 }
 
@@ -1130,7 +1168,7 @@ pub(crate) fn read_set(db: &Connection, id: &str) -> rusqlite::Result<Option<Dra
 }
 
 #[derive(Deserialize, Default)]
-pub struct Everything {
+pub struct Everything { // WHAT: `?all=1`. WHY: used by the files listing as well.
     /// Include what is normally left off: archived projects, superseded sets.
     #[serde(default, deserialize_with = "said_yes")]
     pub all: bool,
@@ -1161,7 +1199,8 @@ async fn sets_of(
             Ok(rows)
         })
         .map_err(|e| Denied::broke("list the drawing sets", e))?;
-    Ok(Json(list))
+    let sight = crate::folders::sight(&server, &project, &who)?; // WHAT: which of the project's folders this person sees. WHY: a set in a folder they may not see is left off the list.
+    Ok(Json(list.into_iter().filter(|s| sight.sees(s.folder.as_deref())).collect())) // WHAT: only the sets they may see. WHY: the list and a direct fetch must agree.
 }
 
 async fn one_set(
@@ -1432,7 +1471,7 @@ async fn set_file(
 
 /// A filename going into a header, with anything that could break out of the
 /// quoting taken out.
-fn safe_filename(name: &str) -> String {
+pub(crate) fn safe_filename(name: &str) -> String { // WHAT: crate-wide now. WHY: a file's download uses the same quoting.
     name.chars()
         .filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n'))
         .take(120)
@@ -2171,20 +2210,23 @@ async fn project_markuplist(
     let who = caller(&server, &headers)?;
     may_reach_project(&server, &who, &project)?;
     type Listed = (String, String, Option<String>, i64);
+    let sight = crate::folders::sight(&server, &project, &who)?; // WHAT: which folders this person sees. WHY: a hidden folder's sets are left out of the pull, its stamp included.
     let (sets, stamp): (Vec<Listed>, Option<crate::projects::Stamp>) = server
         .store
         .with(|db| {
             let mut statement = db.prepare(
                 "SELECT s.id, s.name, s.superseded_by,
-                        (SELECT count(*) FROM markups m WHERE m.set_id = s.id AND m.removed = 0)
+                        (SELECT count(*) FROM markups m WHERE m.set_id = s.id AND m.removed = 0),
+                        s.folder
                  FROM sets s WHERE s.project = ?1 ORDER BY s.uploaded",
-            )?;
+            )?; // WHAT: each set with its folder. WHY: the folder decides whether it is listed.
             let rows = statement
                 .query_map(params![project], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                    Ok(((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?), r.get::<_, Option<String>>(4)?))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok((rows, crate::projects::stamp_of(db, &project)?))
+            let rows: Vec<Listed> = rows.into_iter().filter(|(_, folder)| sight.sees(folder.as_deref())).map(|(row, _)| row).collect(); // WHAT: only the sets they may see. WHY: a takeoff pulled by a person, or a program acting for one, never carries a folder hidden from them.
+            Ok((rows, crate::projects::stamp_seen(db, &project, &sight)?)) // WHAT: the stamp of what they see. WHY: a change in a hidden folder must not show as a change.
         })
         .map_err(|e| Denied::broke("list that project's drawing sets", e))?;
     let Some(stamp) = stamp else {
@@ -3106,7 +3148,7 @@ pub(crate) fn seen_from(headers: &HeaderMap) -> String {
     String::new()
 }
 
-fn record(server: &Server, entry: crate::audit::Entry) {
+pub(crate) fn record(server: &Server, entry: crate::audit::Entry) { // WHAT: crate-wide now. WHY: the folders' and files' routes write the same log.
     if let Err(e) = server.store.audit(&entry) {
         tracing::warn!("the audit log could not be written: {e}");
     }
@@ -4045,9 +4087,15 @@ pub fn mcp_projects(server: &Server, who: &Who) -> Result<String, String> {
                         p.archived
                  FROM projects p WHERE {SEEN_BY} ORDER BY p.archived IS NOT NULL, p.number"
             ))?; // WHAT: only the jobs this person may see. WHY: an assistant key must never list a job its person is not on.
-            let rows = statement
+            let mut rows: Vec<(String, String, String, i64, Option<String>)> = statement
                 .query_map(params![everything, who.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
+            if !crate::folders::is_office(who) {
+                for row in &mut rows {
+                    let sight = crate::folders::sight_of(db, &row.0, who)?; // WHAT: what this person sees of the job. WHY: its count of sets is only theirs.
+                    row.3 = crate::folders::current_sets_seen(db, &row.0, &sight)? as i64; // WHAT: the sets they can read. WHY: a hidden folder is not even counted for an assistant.
+                }
+            }
             Ok(rows)
         })
         .map_err(|e| broke("read the jobs", e))?;
@@ -4074,7 +4122,7 @@ pub fn mcp_projects(server: &Server, who: &Who) -> Result<String, String> {
 pub fn mcp_sets(server: &Server, who: &Who, project: Option<&str>) -> Result<String, String> {
     type Row = (String, String, String, i64, i64, Option<String>, Option<String>, i64);
     let everything = who.role == hub::Role::Admin; // WHAT: whether this person sees every job. WHY: the same administrator rule as everywhere else.
-    let list: Vec<Row> = server
+    let rows_seen: Vec<(Row, String, Option<String>)> = server
         .store
         .with(|db| {
             // The job by its id, its number (26-114) or another program's
@@ -4084,7 +4132,8 @@ pub fn mcp_sets(server: &Server, who: &Who, project: Option<&str>) -> Result<Str
                         (SELECT n.name FROM sets n WHERE n.id = s.superseded_by),
                         s.superseded_by,
                         (SELECT count(*) FROM markups m
-                          WHERE m.set_id = s.id AND m.removed = 0 AND m.carried_from IS NOT NULL)
+                          WHERE m.set_id = s.id AND m.removed = 0 AND m.carried_from IS NOT NULL),
+                        s.project, s.folder
                  FROM sets s
                  WHERE (?3 IS NULL OR s.project = ?3
                         OR s.project IN (SELECT id FROM projects WHERE number = ?3 OR reference = ?3))
@@ -4093,12 +4142,23 @@ pub fn mcp_sets(server: &Server, who: &Who, project: Option<&str>) -> Result<Str
             ))?; // WHAT: only sets on jobs this person may see. WHY: a job they are not on reads as having no sets, the same as one that does not exist.
             let rows = statement
                 .query_map(params![everything, who.id, project], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+                    Ok(((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?), r.get(8)?, r.get(9)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
         })
         .map_err(|e| broke("read the drawing sets", e))?;
+    let mut sights: std::collections::HashMap<String, crate::folders::Sight> = std::collections::HashMap::new(); // WHAT: what this person sees of each job, read once per job. WHY: a set in a folder hidden from them is left off.
+    let mut list: Vec<Row> = Vec::with_capacity(rows_seen.len()); // WHAT: the sets they may see. WHY: the same as the API's list.
+    for (row, on, folder) in rows_seen {
+        if !sights.contains_key(&on) {
+            let sight = crate::folders::sight(server, &on, who).map_err(|_| broke("read the drawing sets", "the folders could not be read"))?; // WHAT: their sight of that job. WHY: refused rather than shown when it can't be read.
+            sights.insert(on.clone(), sight); // WHAT: kept. WHY: once per job.
+        }
+        if sights.get(&on).is_some_and(|s| s.sees(folder.as_deref())) {
+            list.push(row); // WHAT: kept. WHY: theirs to see.
+        }
+    }
     if list.is_empty() {
         return Ok(match project {
             Some(p) => format!("There are no drawing sets on job {p}."),

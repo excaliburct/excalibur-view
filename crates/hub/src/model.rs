@@ -587,9 +587,189 @@ pub struct Joining {
     pub run_out: bool,
 }
 
+// ---- groups of people, and who sees which folder --------------------------
+
+/// A group of people an administrator made: "Shop", "Field". A person can be
+/// in several. A folder can be given to groups, so the people in them see it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Group {
+    pub id: String, // WHAT: the group's id, `grp_…`. WHY: members are added and taken off by it.
+    pub name: String, // WHAT: what the office calls it. WHY: a folder's rule names groups by name.
+    #[serde(default)]
+    pub people: Vec<String>, // WHAT: the ids of the people in it. WHY: the Studio ticks them against the people list.
+    #[serde(default)]
+    pub made: String, // WHAT: when it was made. WHY: shown, and kept for the record.
+    #[serde(default)]
+    pub made_by: String, // WHAT: who made it, or the program that named it first. WHY: somebody will ask where a group came from.
+}
+
+/// Who sees a folder of a project.
+///
+/// `office`: administrators and estimators only. `everyone`: everybody who
+/// may see the project. A list of groups: the people in those groups, and the
+/// office always. On the wire it is the word, or the list of names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum See {
+    Office, // WHAT: administrators and estimators. WHY: the office's own papers: contracts, prices.
+    Everyone, // WHAT: everybody who may see the project. WHY: what every folder was before folders had rules.
+    Groups(Vec<String>), // WHAT: the people in these groups, plus the office. WHY: the drawings the shop or the field needs and nothing else.
+}
+
+impl See {
+    /// Read from what a program or the Studio sent: `"office"`,
+    /// `"everyone"`, or a list of group names. An empty list is the office
+    /// only. Names are trimmed, kept once whatever their case, and sorted.
+    pub fn from_value(value: &serde_json::Value) -> Result<See, String> {
+        match value {
+            serde_json::Value::String(word) => match word.trim().to_ascii_lowercase().as_str() {
+                "office" => Ok(See::Office), // WHAT: the office only. WHY: the word as documented.
+                "everyone" => Ok(See::Everyone), // WHAT: everybody on the project. WHY: likewise.
+                _ => Err(format!("Who sees a folder is \"office\", \"everyone\" or a list of group names: \"{word}\" isn't one.")), // WHAT: a word nobody defined. WHY: refused rather than guessed, since a guess could open a folder to everybody.
+            },
+            serde_json::Value::Array(names) => {
+                let mut groups: Vec<String> = Vec::new(); // WHAT: the names, once each. WHY: a list said twice is the same list.
+                for name in names {
+                    let Some(name) = name.as_str() else {
+                        return Err("A group's name is text.".into()); // WHAT: a number or an object in the list. WHY: only names name groups.
+                    };
+                    let name = name.split_whitespace().collect::<Vec<_>>().join(" "); // WHAT: spacing tidied. WHY: " Shop " is the group Shop.
+                    if name.is_empty() || name.chars().count() > LONGEST_GROUP_NAME || name.chars().any(char::is_control) {
+                        return Err(format!("A group's name is 1 to {LONGEST_GROUP_NAME} characters of ordinary text.")); // WHAT: an empty, huge or odd name. WHY: a name a person can read in the Studio.
+                    }
+                    if !groups.iter().any(|g| g.eq_ignore_ascii_case(&name)) {
+                        groups.push(name); // WHAT: kept, the first spelling. WHY: Shop and shop are one group.
+                    }
+                }
+                groups.sort_by_key(|g| g.to_lowercase()); // WHAT: in order. WHY: the same rule always reads and compares the same.
+                if groups.is_empty() { Ok(See::Office) } else { Ok(See::Groups(groups)) } // WHAT: no groups is the office alone. WHY: the office always sees a group's folder, so that is what is left.
+            }
+            _ => Err("Who sees a folder is \"office\", \"everyone\" or a list of group names.".into()), // WHAT: anything else. WHY: refused, never read as everyone.
+        }
+    }
+
+    /// The rule as it goes on the wire.
+    pub fn to_value(&self) -> serde_json::Value {
+        match self {
+            See::Office => serde_json::Value::String("office".into()), // WHAT: the word. WHY: as documented.
+            See::Everyone => serde_json::Value::String("everyone".into()), // WHAT: the word. WHY: as documented.
+            See::Groups(groups) => serde_json::Value::Array(groups.iter().cloned().map(serde_json::Value::String).collect()), // WHAT: the names. WHY: as documented.
+        }
+    }
+
+    /// What is left of this rule inside a folder whose own rule is `parent`:
+    /// a folder is never seen by anybody who can't see the folder it is in.
+    pub fn within(&self, parent: &See) -> See {
+        match (self, parent) {
+            (_, See::Office) | (See::Office, _) => See::Office, // WHAT: the office only, either way. WHY: nothing is narrower.
+            (mine, See::Everyone) => mine.clone(), // WHAT: its own rule. WHY: a parent everybody sees takes nothing away.
+            (See::Everyone, theirs) => theirs.clone(), // WHAT: the parent's groups. WHY: a child can't be wider than its parent.
+            (See::Groups(mine), See::Groups(theirs)) => {
+                let both: Vec<String> = mine.iter().filter(|g| theirs.iter().any(|t| t.eq_ignore_ascii_case(g))).cloned().collect(); // WHAT: the groups named on both. WHY: only those people see both folders.
+                if both.is_empty() { See::Office } else { See::Groups(both) } // WHAT: none in common is the office alone. WHY: as an empty list is.
+            }
+        }
+    }
+
+    /// Whether this rule lets more people in than `parent` does.
+    pub fn wider_than(&self, parent: &See) -> bool {
+        self.within(parent) != *self // WHAT: narrowing it to the parent changed it. WHY: then some of it is wider.
+    }
+
+    /// The rule in words, for the Studio: "Everyone", "Office only", "Shop,
+    /// Field and the office".
+    pub fn words(&self) -> String {
+        match self {
+            See::Office => "Office only".into(), // WHAT: plain words. WHY: what the Studio shows.
+            See::Everyone => "Everyone on the job".into(), // WHAT: plain words. WHY: likewise.
+            See::Groups(groups) => format!("{} and the office", groups.join(", ")), // WHAT: the groups, then the office. WHY: the office always sees it, and should be told so.
+        }
+    }
+}
+
+impl Serialize for See {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.to_value().serialize(serializer) // WHAT: the word or the list. WHY: one shape on the wire everywhere.
+    }
+}
+
+impl<'de> Deserialize<'de> for See {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<See, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?; // WHAT: whatever came. WHY: a word or a list.
+        See::from_value(&value).map_err(serde::de::Error::custom) // WHAT: read as a rule. WHY: refused in the same words as everywhere else.
+    }
+}
+
+/// The longest a group's name may be.
+pub const LONGEST_GROUP_NAME: usize = 60; // WHAT: sixty characters. WHY: long enough for any crew's name, short enough to show on a line.
+
+/// One folder of a project, as `GET /projects/{id}/folders` lists it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FolderInfo {
+    pub folder: String, // WHAT: the folder, as folders written with `/`. WHY: the same spelling a set's `folder` uses.
+    pub see: See, // WHAT: who sees it now, its parents' rules counted. WHY: what actually decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own: Option<See>, // WHAT: its own rule, when it has one; none when it takes its parent's. WHY: the Studio shows which folder a rule was set on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_in: Option<String>, // WHAT: `program` or `view`: where its rule was last set. WHY: a rule changed in the Studio stays until the program sets that folder again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_by: Option<String>, // WHAT: who set it. WHY: somebody will ask who opened a folder to the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_at: Option<String>, // WHAT: when. WHY: likewise.
+    #[serde(default)]
+    pub sets: usize, // WHAT: the current drawing sets in it, not in its subfolders. WHY: the Studio shows an empty folder as empty.
+    #[serde(default)]
+    pub files: usize, // WHAT: the current other files in it. WHY: likewise.
+}
+
+/// A file in a project's folder that is not a drawing set: a Word or Excel
+/// file, a picture, a model. Kept by its bytes, as a drawing is.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectFile {
+    pub id: String, // WHAT: `file_…`. WHY: moved and downloaded by it.
+    pub project: String, // WHAT: its project. WHY: every file is in one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>, // WHAT: the folder it is in. WHY: shown there; none is the project's own.
+    pub name: String, // WHAT: its name with its extension. WHY: the kind of file is told by it.
+    pub bytes: u64, // WHAT: its size. WHY: shown, as a file window does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified: Option<String>, // WHAT: when it was saved where it came from, RFC 3339. WHY: shown, as a file window does.
+    pub digest: String, // WHAT: SHA-256 of its bytes. WHY: the same bytes are one file, and a copy can be checked.
+    pub uploaded: String, // WHAT: when it arrived here. WHY: kept for the record.
+    pub uploaded_by: String, // WHAT: who sent it. WHY: likewise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<String>, // WHAT: the file this one replaced: the same name in the same folder, saved again. WHY: the old one is kept as its history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_by: Option<String>, // WHAT: the file that replaced this one. WHY: a listing leaves it off unless asked for everything.
+    #[serde(default)]
+    pub already_here: bool, // WHAT: true when these bytes were already in the project. WHY: nothing new was made, and this is the one there.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_is_never_seen_by_more_people_than_the_folder_it_is_in() {
+        let shop = See::Groups(vec!["Shop".into()]); // WHAT: the shop's folder. WHY: a parent narrower than everyone.
+        let both = See::Groups(vec!["Field".into(), "Shop".into()]); // WHAT: the shop and the field. WHY: wider than the shop alone.
+        assert_eq!(both.within(&shop), shop); // WHAT: narrowed to the shop. WHY: the field can't see inside a shop folder.
+        assert!(both.wider_than(&shop)); // WHAT: said to be wider. WHY: the answer says so.
+        assert_eq!(See::Everyone.within(&See::Office), See::Office); // WHAT: everyone inside the office's folder. WHY: the office only.
+        assert_eq!(See::Groups(vec!["Field".into()]).within(&shop), See::Office); // WHAT: no group in common. WHY: the office alone is left.
+        assert!(!shop.wider_than(&See::Everyone)); // WHAT: narrower than its parent. WHY: allowed, and nothing said.
+    }
+
+    #[test]
+    fn who_sees_a_folder_travels_as_a_word_or_a_list() {
+        let read = |text: &str| See::from_value(&serde_json::from_str(text).unwrap()); // WHAT: a rule read from JSON. WHY: as it arrives.
+        assert_eq!(read("\"office\""), Ok(See::Office)); // WHAT: the word. WHY: documented.
+        assert_eq!(read("\" Everyone \""), Ok(See::Everyone)); // WHAT: any case and spacing. WHY: a person typed it.
+        assert_eq!(read("[\"shop\",\"Field\",\"Shop\"]"), Ok(See::Groups(vec!["Field".into(), "shop".into()]))); // WHAT: once each, in order. WHY: the same list always compares the same.
+        assert_eq!(read("[]"), Ok(See::Office)); // WHAT: no groups. WHY: the office alone.
+        assert!(read("\"all\"").is_err()); // WHAT: a word nobody defined. WHY: never read as everyone.
+        assert!(read("3").is_err()); // WHAT: a number. WHY: likewise.
+        assert_eq!(serde_json::to_string(&See::Groups(vec!["Shop".into()])).unwrap(), "[\"Shop\"]"); // WHAT: written back as a list. WHY: the same shape both ways.
+    }
 
     #[test]
     fn a_takeoff_that_left_something_out_says_so() {

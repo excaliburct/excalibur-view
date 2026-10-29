@@ -138,9 +138,15 @@ pub async fn list(
                                    WHERE m.project = p.id AND m.person = ?3))
                  ORDER BY p.number"
             ))?;
-            let rows = statement
+            let mut rows = statement
                 .query_map(params![everything.all, everybodys, who.id], project_from_row)?
                 .collect::<Result<Vec<_>, _>>()?;
+            if !crate::folders::is_office(&who) {
+                for project in &mut rows {
+                    let sight = crate::folders::sight_of(db, &project.id, &who)?; // WHAT: what this person sees of the project. WHY: its count of sets counts only those.
+                    project.sets = crate::folders::current_sets_seen(db, &project.id, &sight)?; // WHAT: the sets they can open. WHY: a hidden folder's sets are not even counted for them.
+                }
+            }
             Ok(rows)
         })
         .map_err(|e| Denied::broke("list the projects", e))?;
@@ -244,7 +250,14 @@ pub async fn one(
     }
     server
         .store
-        .with(|db| Ok(read_project(db, &id)?))
+        .with(|db| {
+            let Some(mut project) = read_project(db, &id)? else { return Ok(None) }; // WHAT: the project. WHY: not found otherwise.
+            if !crate::folders::is_office(&who) {
+                let sight = crate::folders::sight_of(db, &id, &who)?; // WHAT: what this person sees of it. WHY: the count of sets is theirs.
+                project.sets = crate::folders::current_sets_seen(db, &id, &sight)?; // WHAT: only the sets they can open. WHY: as the list says.
+            }
+            Ok(Some(project))
+        })
         .map_err(|e| Denied::broke("read that project", e))?
         .map(Json)
         .ok_or_else(|| Denied::missing("project"))
@@ -423,32 +436,42 @@ pub async fn stamp(
 ) -> Answer<Json<Stamp>> {
     let who = caller(&server, &headers)?;
     crate::api::may_reach_project(&server, &who, &id)?;
+    let sight = crate::folders::sight(&server, &id, &who)?; // WHAT: which folders this caller sees. WHY: a change in a hidden folder is not a change for them.
     server
         .store
-        .with(|db| stamp_of(db, &id))
+        .with(|db| stamp_seen(db, &id, &sight))
         .map_err(|e| Denied::broke("read that project", e))?
         .map(Json)
         .ok_or_else(|| Denied::missing("project"))
 }
 
-pub(crate) fn stamp_of(db: &Connection, id: &str) -> anyhow::Result<Option<Stamp>> {
+/// The stamp of what `sight` sees of a project: a set in a folder hidden from
+/// it changes nothing and counts for nothing.
+pub(crate) fn stamp_seen(db: &Connection, id: &str, sight: &crate::folders::Sight) -> anyhow::Result<Option<Stamp>> {
     let Some(project) = read_project(db, id)? else {
         return Ok(None);
     };
     let mut statement = db.prepare(
-        "SELECT id, revision, superseded_by IS NOT NULL FROM sets WHERE project = ?1 ORDER BY id",
-    )?;
+        "SELECT id, revision, superseded_by IS NOT NULL, folder FROM sets WHERE project = ?1 ORDER BY id",
+    )?; // WHAT: each set with its folder. WHY: the folder decides whether it counts here.
     let sets: Vec<(String, i64, bool)> = statement
-        .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
+        .query_map(params![id], |r| Ok(((r.get(0)?, r.get(1)?, r.get(2)?), r.get::<_, Option<String>>(3)?)))?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|(_, folder)| sight.sees(folder.as_deref())) // WHAT: only the sets this sight sees. WHY: a hidden folder must not show in a count or a change.
+        .map(|(set, _)| set)
+        .collect();
     let current: Vec<&(String, i64, bool)> = sets.iter().filter(|s| !s.2).collect();
-    let (markups, carried): (i64, i64) = db.query_row(
-        "SELECT count(*), count(m.carried_from) FROM markups m
-         JOIN sets s ON s.id = m.set_id
-         WHERE s.project = ?1 AND s.superseded_by IS NULL AND m.removed = 0",
-        params![id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
+    let (mut markups, mut carried) = (0i64, 0i64); // WHAT: the markups on the current sets seen. WHY: added up set by set.
+    for (set, _, _) in &current {
+        let (here, brought): (i64, i64) = db.query_row(
+            "SELECT count(*), count(carried_from) FROM markups WHERE set_id = ?1 AND removed = 0",
+            params![set],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?; // WHAT: this set's markups, and how many were carried forward. WHY: the same counts as before, over only what is seen.
+        markups += here; // WHAT: added. WHY: the project's total.
+        carried += brought; // WHAT: added. WHY: likewise.
+    }
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
     for (set, revision, _) in &current {

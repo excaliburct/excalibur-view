@@ -28,6 +28,8 @@ pub mod host;
 pub mod install;
 pub mod instance;
 pub mod joined;
+pub mod kept; // WHAT: the office's drawings kept on this computer, against the set each came from. WHY: a copy its person may no longer see is taken off.
+pub mod openwith; // WHAT: a file that isn't a drawing opened with its own program. WHY: a job's folder holds spreadsheets and documents too.
 pub mod layout;
 pub mod markuplist;
 pub mod modelview;

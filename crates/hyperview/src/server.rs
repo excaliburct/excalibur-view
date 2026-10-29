@@ -179,6 +179,27 @@ pub enum Ask {
         new: String,
     },
     Quit,
+    /// A file that isn't a drawing: save a copy and open it with its program.
+    OpenFile {
+        file: String, // WHAT: the file's id. WHY: downloaded by it.
+        name: String, // WHAT: its name. WHY: the copy keeps it, so the system knows its kind.
+    },
+    /// Say who sees one folder of a project. Administrators only.
+    SetFolderRule {
+        project: String, // WHAT: the project. WHY: the folder is one of its.
+        folder: String, // WHAT: the folder. WHY: the one changed.
+        see: hub::See, // WHAT: the new rule. WHY: sent.
+    },
+    /// Every group of people. Administrators only.
+    Groups,
+    /// Make a group.
+    MakeGroup(String),
+    /// Put somebody in a group, or take them out.
+    ChangeGroup {
+        group: String, // WHAT: the group's id. WHY: the one changed.
+        person: String, // WHAT: the person's id. WHY: who.
+        on: bool, // WHAT: in or out. WHY: one ask for both.
+    },
 }
 
 /// What comes back.
@@ -304,6 +325,21 @@ pub enum Told {
     UpdateNote(String),
     /// Something did not work. Already a sentence somebody can act on.
     Trouble(String),
+    /// A project's folders and its files that aren't drawings, for the Studio.
+    Folders {
+        project: String, // WHAT: whose. WHY: a late answer for another project is ignored.
+        folders: Vec<hub::FolderInfo>, // WHAT: every folder this person sees, empty ones too. WHY: shown.
+        files: Vec<hub::ProjectFile>, // WHAT: the files in them. WHY: shown after the drawings.
+    },
+    /// Every group of people. Administrators only.
+    Groups(Vec<hub::Group>),
+    /// A copy of a file saved, ready to open with its own program.
+    FileReady {
+        path: PathBuf, // WHAT: where the copy is. WHY: handed to the system.
+        name: String, // WHAT: what it is called. WHY: said.
+    },
+    /// A sentence for the status line.
+    Said(String),
 }
 
 /// What an administrator looks after, in one answer.
@@ -348,6 +384,8 @@ pub fn start(repaint: egui::Context) -> Link {
         .name("hyperview-server".into())
         .spawn(move || {
             let mut client: Option<Client> = None;
+            let mut last_kept_look: Option<std::time::Instant> = None; // WHAT: when the kept drawings were last checked. WHY: every few minutes, not on every ask.
+            let mut kept_for: Option<String> = None; // WHAT: the sign-in they were checked for. WHY: a new sign-in checks at once.
             let say = |told: &Sender<Told>, message: Told| {
                 let _ = told.send(message);
                 repaint.request_repaint();
@@ -578,7 +616,10 @@ pub fn start(repaint: egui::Context) -> Link {
                     Ask::Sets(project) => match connected(&client) {
                         Err(message) => say(&told, Told::Trouble(message)),
                         Ok(client) => match client.sets(&project) {
-                            Ok(list) => say(&told, Told::Sets(list)),
+                            Ok(list) => {
+                                say(&told, Told::Sets(list));
+                                folders_now(client, &told, &project); // WHAT: its folders and other files too. WHY: the Studio shows every folder, the empty ones and the files after the drawings.
+                            }
                             Err(e) => say(&told, Told::Trouble(e.to_string())),
                         },
                     },
@@ -1194,6 +1235,69 @@ pub fn start(repaint: egui::Context) -> Link {
                             Err(e) => say(&told, Told::Trouble(e.to_string())),
                         },
                     },
+
+                    Ask::OpenFile { file, name } => match connected(&client) {
+                        Err(message) => say(&told, Told::Trouble(message)), // WHAT: not signed in. WHY: said.
+                        Ok(client) => match client.file_bytes(&file) {
+                            Ok(bytes) => match crate::openwith::save_copy(&file, &name, &bytes) {
+                                Ok(path) => say(&told, Told::FileReady { path, name }), // WHAT: the copy, ready to hand to its program. WHY: the window opens it, or offers it on a tablet.
+                                Err(message) => say(&told, Told::Trouble(message)), // WHAT: it couldn't be saved. WHY: said.
+                            },
+                            Err(e) => say(&told, Told::Trouble(e.to_string())), // WHAT: refused or unreachable. WHY: said.
+                        },
+                    },
+
+                    Ask::SetFolderRule { project, folder, see } => match connected(&client) {
+                        Err(message) => say(&told, Told::Trouble(message)), // WHAT: not signed in. WHY: said.
+                        Ok(client) => match client.set_folder_rule(&project, &folder, &see) {
+                            Ok(answer) => {
+                                let notes: Vec<String> = answer["notes"].as_array().map(|n| n.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default(); // WHAT: what the server wants said. WHY: a rule wider than its parent, a group made empty.
+                                let said = if notes.is_empty() { format!("{folder}: {}.", see.words()) } else { notes.join(" ") }; // WHAT: the sentence for the status line. WHY: the person sees what happened.
+                                folders_now(client, &told, &project); // WHAT: the folders read again. WHY: the Studio shows the new rule.
+                                say(&told, Told::Said(said)); // WHAT: the sentence. WHY: shown.
+                            }
+                            Err(e) => say(&told, Told::Trouble(e.to_string())), // WHAT: refused. WHY: said.
+                        },
+                    },
+
+                    Ask::Groups => match connected(&client) {
+                        Err(_) => {} // WHAT: not signed in. WHY: the section just doesn't show.
+                        Ok(client) => {
+                            if let Ok(groups) = client.groups() {
+                                say(&told, Told::Groups(groups)); // WHAT: the groups. WHY: Studio, Office, People.
+                            } // WHAT: an older server has none. WHY: the section stays empty rather than showing an error.
+                        }
+                    },
+
+                    Ask::MakeGroup(name) => match connected(&client) {
+                        Err(message) => say(&told, Told::Trouble(message)), // WHAT: not signed in. WHY: said.
+                        Ok(client) => match client.make_group(&name).and_then(|_| client.groups()) {
+                            Ok(groups) => {
+                                say(&told, Told::Groups(groups)); // WHAT: the groups now. WHY: the new one shows.
+                                say(&told, Told::Said(format!("Made the group {name}. Tick the people in it."))); // WHAT: what to do next. WHY: an empty group gives nobody anything.
+                            }
+                            Err(e) => say(&told, Told::Trouble(e.to_string())), // WHAT: refused. WHY: said.
+                        },
+                    },
+
+                    Ask::ChangeGroup { group, person, on } => match connected(&client) {
+                        Err(message) => say(&told, Told::Trouble(message)), // WHAT: not signed in. WHY: said.
+                        Ok(client) => match client.change_group(&group, &person, on).and_then(|_| client.groups()) {
+                            Ok(groups) => say(&told, Told::Groups(groups)), // WHAT: the groups now. WHY: the tick shows.
+                            Err(e) => say(&told, Told::Trouble(e.to_string())), // WHAT: refused. WHY: said.
+                        },
+                    },
+                }
+                if let Some(signed_in) = client.as_ref() {
+                    let fresh_sign_in = kept_for.as_deref() != signed_in.token(); // WHAT: whether this is a sign-in not yet checked for. WHY: somebody else signing in on this seat must not open the last person's copies.
+                    if fresh_sign_in || last_kept_look.is_none_or(|at: std::time::Instant| at.elapsed() >= KEPT_LOOK_EVERY) {
+                        last_kept_look = Some(std::time::Instant::now()); // WHAT: looked now. WHY: not again for a while.
+                        kept_for = signed_in.token().map(str::to_string); // WHAT: the sign-in checked for. WHY: as above.
+                        let gone = look_at_kept(signed_in); // WHAT: kept copies this person may no longer see, taken off. WHY: an administrator's change reaches this computer too.
+                        if gone > 0 {
+                            say(&told, Told::Said(format!("Took {gone} drawing(s) off this computer that you can no longer see on the server."))); // WHAT: said. WHY: nobody wonders where a drawing went.
+                        }
+                    }
                 }
             }
         })
@@ -1413,6 +1517,32 @@ fn role_said(role: hub::Role) -> &'static str {
     }
 }
 
+/// How often a signed-in seat asks about the drawings it keeps.
+const KEPT_LOOK_EVERY: Duration = Duration::from_secs(5 * 60); // WHAT: five minutes. WHY: soon enough that a folder taken away goes from a tablet the same morning, rarely enough to cost nothing.
+
+/// Asks the server about every drawing this seat keeps, and takes off the
+/// ones its person may no longer see. How many went.
+fn look_at_kept(client: &Client) -> usize {
+    let folder = cache_folder(); // WHAT: where the copies are. WHY: checked.
+    let gone = crate::kept::forget_unseen(&folder, true, |set| match client.set(set) {
+        Ok(_) => crate::kept::Seen::Yes, // WHAT: still theirs. WHY: the server answered it.
+        Err(hub::client::Trouble::Refused(problem)) if problem.error == "not_found" => crate::kept::Seen::No, // WHAT: not found for this person. WHY: taken away, or never theirs.
+        Err(_) => crate::kept::Seen::CantTell, // WHAT: anything else. WHY: never taken off on a guess.
+    }); // WHAT: asked, and the copies taken off. WHY: an administrator's change reaches this computer too.
+    for path in &gone {
+        log::info!("took {} off this computer: its person can no longer see it", path.display()); // WHAT: written in the log. WHY: so a missing file can be explained.
+    }
+    gone.len()
+}
+
+/// A project's folders and files read again, and told. An older server that
+/// has neither is told as none, without a message.
+fn folders_now(client: &Client, told: &Sender<Told>, project: &str) {
+    let folders = client.folders(project).unwrap_or_default(); // WHAT: its folders. WHY: an older server has no such route, which is no folders.
+    let files = client.files(project).unwrap_or_default(); // WHAT: its files. WHY: likewise.
+    let _ = told.send(Told::Folders { project: project.to_string(), folders, files }); // WHAT: told. WHY: the Studio shows them.
+}
+
 fn connected(client: &Option<Client>) -> Result<&Client, String> {
     client
         .as_ref()
@@ -1450,6 +1580,7 @@ fn fetch(
                 .map(|b| format!("{b:02x}"))
                 .collect();
             if have == details.digest {
+                crate::kept::remember(&folder, set, &path); // WHAT: written down against its set. WHY: taken off again if its person stops being allowed it.
                 return Ok((path, true));
             }
         }
@@ -1466,6 +1597,7 @@ fn fetch(
     let temp = path.with_extension("part");
     std::fs::write(&temp, &bytes).map_err(|e| format!("{}: {e}", temp.display()))?;
     std::fs::rename(&temp, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+    crate::kept::remember(&folder, set, &path); // WHAT: written down against its set. WHY: as above.
     Ok((path, false))
 }
 

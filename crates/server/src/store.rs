@@ -213,6 +213,60 @@ CREATE TABLE IF NOT EXISTS audit (
 CREATE INDEX IF NOT EXISTS audit_at ON audit (at);
 CREATE INDEX IF NOT EXISTS audit_person ON audit (person, at);
 
+-- Groups of people an administrator makes ("Shop", "Field"), and who is in
+-- each. A person can be in several. A folder given to groups is seen by the
+-- people in them and by the office. See folders.rs.
+CREATE TABLE IF NOT EXISTS groups (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    made        TEXT NOT NULL,
+    made_by     TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS group_people (
+    grp         TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    person      TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+    added       TEXT NOT NULL,
+    added_by    TEXT NOT NULL,
+    PRIMARY KEY (grp, person)
+);
+
+-- A project's folders, written down so an empty one shows, and so each can
+-- say who sees it. `key` is the folder as compared (case and spacing aside),
+-- `path` as it was first written. `see` is its own rule, NULL when it takes
+-- its parent's; a folder with no rule anywhere above it is everybody's, as
+-- every folder was before folders had rules. Never removed.
+CREATE TABLE IF NOT EXISTS folders (
+    project     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    key         TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    see         TEXT,
+    set_in      TEXT,
+    set_by      TEXT,
+    set_at      TEXT,
+    made        TEXT NOT NULL,
+    made_by     TEXT NOT NULL,
+    PRIMARY KEY (project, key)
+);
+
+-- Files in a project's folders that are not drawing sets: Word, Excel,
+-- pictures, models. The bytes are kept once, by their digest, as a drawing's
+-- are. One saved again under the same name in the same folder replaces the
+-- one before, which is kept as its history.
+CREATE TABLE IF NOT EXISTS files (
+    id          TEXT PRIMARY KEY,
+    project     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    folder      TEXT,
+    name        TEXT NOT NULL,
+    digest      TEXT NOT NULL,
+    bytes       INTEGER NOT NULL,
+    modified    TEXT,
+    uploaded    TEXT NOT NULL,
+    uploaded_by TEXT NOT NULL,
+    replaces    TEXT,
+    replaced_by TEXT
+);
+CREATE INDEX IF NOT EXISTS files_by_project ON files(project);
+
 -- Keys for programs rather than people: an assistant that reads the takeoffs
 -- (MCP only, read-only), or another system such as FabWire that uses the API
 -- as the person who made the key. Stored as a digest, shown once, never

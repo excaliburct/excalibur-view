@@ -268,6 +268,40 @@ none empty, none `.` or `..`, at most 260 characters and twelve deep. A project
 with no place is under **Other projects**, and a server where nothing has a
 place shows the list it always did.
 
+### A job's whole folder, and who sees each part (0.6.25)
+
+From 0.6.25 a program can mirror a job's whole folder, not only its PDFs, and
+say who in the office sees each part. All of these are on a sync key's list,
+on projects filed under its reference.
+
+| | |
+|---|---|
+| `POST /files` | Multipart, like `/sets`: `project`, `folder`, `modified` (when it was saved, ISO 8601) and `file`. Any kind of file up to the server's largest upload. Answers `{id: "file_…", project, folder, name, bytes, modified, digest, uploaded, uploaded_by, replaces, already_here}`. The same bytes already in the project answer that file with `already_here: true`; the same name in the same folder (case and spacing aside) replaces it in place, the old one kept as its history and named in `replaces`. |
+| `POST /projects/{id}/folders` | `{"folders": ["01 CONTRACT", {"folder": "10 SHOP DRAWINGS", "see": ["Shop", "Field"]}]}`. Makes each folder that isn't there (and the folders above it), empty ones too; sets who sees each that says. Never takes a folder away. Answers `{project, holds, made, changed, groups_made, notes, folders}`. |
+| `POST /sets/{id}/folder` | `{"folder": "…"}` moves a drawing set, with every issue of it, to another folder of its project. Its markups are untouched. |
+| `POST /files/{id}/folder` | The same for a file, with the files it replaced. |
+| `GET /projects/{id}/folders`, `GET /projects/{id}/files`, `GET /files/{id}/file` | For the Studio and for keys acting as a person: the folders and files that person may see, and a file's bytes. |
+
+**Who sees a folder** (`see`) is `"office"` (administrators and estimators),
+`"everyone"` (everybody who may see the project) or a list of group names (the
+people in those groups, and the office always). A group named that doesn't
+exist yet is made empty; `groups_made` and `notes` say so, and an
+administrator puts people in it under Studio, Office, People. A folder without
+its own rule takes its parent's; a folder with no rule anywhere above it is
+everyone's, as every folder was before. A folder is never seen by more people
+than the folder it is in: a rule wider than its parent's is kept but narrowed,
+and `notes` says so. **A folder a sync key makes without a rule, with no rule
+above it, is `office`**, so a mirrored job is never open to everybody by
+accident; send `see` for the folders the shop and the field should have. A
+folder named again without `see` keeps its rule, so a rule an administrator
+changed in the Studio stays until the program sends that folder's `see` again.
+`set_in` (`program` or `view`), `set_by` and `set_at` say where, who and when.
+
+The server holds the rule everywhere: a set or file in a folder somebody may
+not see is left out of every list, count, stamp, markup list, takeoff and
+download for them, and answered exactly as one that does not exist. A sync key
+acts as the office on its own projects and reads every folder of them.
+
 ### Being told instead of asking
 
 Studio → Office → Change notices, or `POST /notices` with a `url`, and the

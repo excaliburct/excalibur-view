@@ -405,6 +405,49 @@ fn a_sync_key_is_refused_by_every_route_not_on_its_list_even_when_an_administrat
     ); // WHAT: no jobs. WHY: /mcp refuses it as nobody.
 }
 
+/// One answer read off a raw connection: its status line and its body.
+fn read_answer(stream: &mut std::net::TcpStream) -> (String, String) {
+    use std::io::Read; // WHAT: reading bytes. WHY: the answer comes off the socket.
+    let mut head = Vec::new(); // WHAT: the status line and headers. WHY: read up to the blank line.
+    let mut byte = [0u8; 1]; // WHAT: one byte at a time. WHY: so nothing past the headers is read early.
+    while !head.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).expect("the answer's headers"); // WHAT: the next byte. WHY: a connection reset here is the fault under test.
+        head.push(byte[0]); // WHAT: kept. WHY: parsed below.
+    }
+    let head = String::from_utf8_lossy(&head).to_string(); // WHAT: as text. WHY: parsed.
+    let length: usize = head
+        .lines()
+        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+        .unwrap_or(0); // WHAT: how long the body is. WHY: read exactly that much, so the next answer starts clean.
+    let mut body = vec![0u8; length]; // WHAT: the body. WHY: read whole.
+    stream.read_exact(&mut body).expect("the answer's whole body"); // WHAT: all of it. WHY: an empty body here was the Mac's symptom.
+    (head.lines().next().unwrap_or_default().to_string(), String::from_utf8_lossy(&body).to_string())
+}
+
+#[test]
+fn a_sync_key_refused_with_a_body_is_answered_only_after_its_body_is_read_and_can_ask_again() {
+    use std::io::Write; // WHAT: writing bytes. WHY: the request goes out by hand.
+    let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
+    let admin = session(&office, "sam@example.com"); // WHAT: the administrator. WHY: makes the key.
+    let key = a_key(&office, &admin, "sync", "Program"); // WHAT: a sync key. WHY: refused by /signout.
+    let mut stream = std::net::TcpStream::connect(office.base.trim_start_matches("http://")).expect("a connection"); // WHAT: one plain connection. WHY: the test controls when each byte goes.
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap(); // WHAT: never wait for ever. WHY: a hang is a failure, not a stuck test.
+    write!(stream, "POST /api/v1/signout HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer {key}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n").unwrap(); // WHAT: the request's head, its body not yet sent. WHY: the order a slow network gives.
+    std::thread::sleep(std::time::Duration::from_millis(300)); // WHAT: a pause. WHY: long enough for a server that answers without reading to have answered.
+    stream.set_nonblocking(true).unwrap(); // WHAT: look without waiting. WHY: to see whether an answer came early.
+    let mut early = [0u8; 1]; // WHAT: room for one byte. WHY: any byte means it answered early.
+    let answered_early = matches!(stream.peek(&mut early), Ok(n) if n > 0); // WHAT: whether anything came back yet. WHY: the cause of the Mac's empty refusals.
+    stream.set_nonblocking(false).unwrap(); // WHAT: back to waiting. WHY: the rest reads normally.
+    assert!(!answered_early, "the server answered before reading the body it was sent"); // WHAT: nothing yet. WHY: the server reads the body first, so the connection is never reset under the answer.
+    stream.write_all(b"{}").unwrap(); // WHAT: the body. WHY: now the server may answer.
+    let (status, body) = read_answer(&mut stream); // WHAT: the refusal, whole. WHY: the Mac saw a 403 with an empty body.
+    assert!(status.contains(" 403 "), "{status}"); // WHAT: refused. WHY: /signout is not a sync key's.
+    assert!(body.contains("key_not_allowed"), "{body}"); // WHAT: the body arrived whole. WHY: the fault was its going missing.
+    write!(stream, "GET /api/v1/me HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer {key}\r\n\r\n").unwrap(); // WHAT: a second request on the same connection. WHY: a connection closed under the refusal would fail here.
+    let (status, body) = read_answer(&mut stream); // WHAT: its answer. WHY: the connection is still good.
+    assert!(status.contains(" 200 "), "{status}: {body}"); // WHAT: answered. WHY: /me is on the list, and the connection was kept.
+}
+
 #[test]
 fn a_sync_key_does_its_list_and_only_on_projects_filed_under_a_reference() {
     let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
