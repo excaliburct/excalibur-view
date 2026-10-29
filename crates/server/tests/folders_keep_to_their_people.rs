@@ -1085,3 +1085,34 @@ fn every_change_to_who_sees_what_is_written_in_the_audit_log() {
         ); // WHAT: each written. WHY: an auditor asks who opened what to whom.
     }
 }
+
+#[test]
+fn a_long_request_writes_every_rule_change_and_every_group_it_made_in_the_audit_log() {
+    let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
+    let admin = &office.admin; // WHAT: Sam. WHY: sets up.
+    let project = office.post(
+        admin,
+        "/projects",
+        json!({ "number": "26-620", "name": "Long list", "reference": "program:job:620" }),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string(); // WHAT: a job a program keeps in step. WHY: its sync key may reach it.
+    let sync = office.key(admin, "sync"); // WHAT: the program's sync key. WHY: it sends the long request.
+    let mut folders: Vec<Value> = (1..=20)
+        .map(|n| json!({ "folder": format!("{n:02} HARMLESS"), "see": "everyone" }))
+        .collect(); // WHAT: twenty harmless changes. WHY: they used to fill the one audit line.
+    folders.push(json!({ "folder": "21 CONTRACT", "see": ["Crew"] })); // WHAT: the twenty-first, given to a group nobody made. WHY: the one that must not be hidden.
+    office.post(&sync, &format!("/projects/{project}/folders"), json!({ "folders": folders })); // WHAT: sent at once. WHY: one request.
+    let (_, log) = office.get(admin, "/audit"); // WHAT: the log. WHY: checked.
+    let text = log.to_string(); // WHAT: all of it as text. WHY: searched.
+    assert!(text.contains("21 CONTRACT"), "{text}"); // WHAT: the twenty-first change is there. WHY: nothing past twenty is dropped.
+    assert!(text.contains("of 21"), "{text}"); // WHAT: the total said. WHY: anybody reading knows how many there were.
+    let made: Vec<&Value> = log
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["action"] == "made a group of people")
+        .collect(); // WHAT: the group lines. WHY: checked.
+    assert!(made.iter().any(|e| e.to_string().contains("Crew")), "{text}"); // WHAT: the group the request made. WHY: groups decide who sees folders.
+}

@@ -674,21 +674,28 @@ pub async fn make_folders(
             groups_made.join(", ")
         )); // WHAT: the groups made. WHY: nobody sees those folders until somebody is put in them.
     }
-    if changed > 0 {
+    for name in &groups_made {
+        record(
+            &server,
+            crate::audit::Entry::new(crate::audit::action::MADE_GROUP, &who.email)
+                .by(&who.id)
+                .about(name.clone()),
+        ); // WHAT: each group the request made, written down. WHY: groups decide who sees folders, however they were made.
+    }
+    let total = changes.len(); // WHAT: how many rules changed. WHY: every line says it, so none can be missed.
+    for (n, part) in changes.chunks(20).enumerate() {
         record(
             &server,
             crate::audit::Entry::new(crate::audit::action::CHANGED_FOLDER, &who.email)
                 .by(&who.id)
                 .about(project.clone())
-                .saying(
-                    changes
-                        .iter()
-                        .take(20)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                ),
-        ); // WHAT: one line for the request. WHY: who opened which folder to whom, without a line per folder of a whole job.
+                .saying(format!(
+                    "{}–{} of {total}: {}",
+                    n * 20 + 1,
+                    n * 20 + part.len(),
+                    part.join("; ")
+                )),
+        ); // WHAT: a line per twenty changes, numbered. WHY: every folder opened to somebody is written down, and a long request can't hide one past the first twenty.
     }
     Ok(Json(serde_json::json!({
         "project": project,
