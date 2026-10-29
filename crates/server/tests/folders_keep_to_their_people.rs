@@ -682,6 +682,32 @@ fn a_folder_with_no_rule_is_everybodys_as_before_and_a_program_s_new_folders_are
 }
 
 #[test]
+fn a_drawing_a_program_sends_into_a_new_folder_is_the_offices_before_any_folder_is_made() {
+    let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
+    let admin = &office.admin; // WHAT: Sam. WHY: sets up.
+    let project = office.post(
+        admin,
+        "/projects",
+        json!({ "number": "26-610", "name": "Mirror first", "reference": "program:job:610" }),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string(); // WHAT: a job a program keeps in step. WHY: its sync key may reach it.
+    let sync = office.key(admin, "sync"); // WHAT: the program's sync key. WHY: the mirror.
+    let sent = office.drawing(&sync, &project, "Contract", "01 CONTRACT", "sent first"); // WHAT: a drawing sent before its folder was ever made. WHY: the order a mirror may send things in.
+    assert_eq!(
+        office.bytes(&office.nan, &format!("/sets/{sent}/file")).0,
+        404
+    ); // WHAT: Nan can't open it. WHY: a program's new folder is the office's until it says, whatever came first.
+    let (_, nan) = office.get(&office.nan, &format!("/projects/{project}/sets")); // WHAT: her set list. WHY: it mustn't be listed either.
+    assert!(!names(&nan, "name").contains(&"Contract".to_string()), "{nan}"); // WHAT: not there. WHY: hidden looks like missing.
+    assert_eq!(
+        office.bytes(admin, &format!("/sets/{sent}/file")).0,
+        200
+    ); // WHAT: Sam still opens it. WHY: the office's, not nobody's.
+}
+
+#[test]
 fn a_rule_changed_in_the_studio_stays_until_the_program_sets_that_folder_again() {
     let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
     let job = a_job(&office); // WHAT: the job. WHY: under test.

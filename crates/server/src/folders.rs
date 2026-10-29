@@ -218,7 +218,7 @@ pub fn current_sets_seen(db: &Connection, project: &str, sight: &Sight) -> rusql
 /// office's, so a mirrored job is safe until somebody says who sees what;
 /// anybody else's new folder takes its parent's rule, as before. Answers how
 /// many were made.
-fn make_folder(
+pub(crate) fn make_folder(
     db: &Connection,
     project: &str,
     path: &str,
