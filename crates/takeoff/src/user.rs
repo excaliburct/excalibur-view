@@ -147,9 +147,34 @@ fn number(text: &str) -> Option<f64> {
 /// `+ - * /` and brackets. Anything it cannot read is no value.
 pub fn evaluate(formula: &str, look: &mut dyn FnMut(&str) -> Option<f64>) -> Option<f64> {
     let tokens = tokens(formula)?;
+    if too_deep(&tokens) {
+        return None; // WHAT: a formula nested past any real one has no value. WHY: it is read recursively, and a tool chest must not choose how deep the stack goes.
+    }
     let mut at = 0;
     let value = sum(&tokens, &mut at, look)?;
     (at == tokens.len() && value.is_finite()).then_some(value)
+}
+
+/// The deepest a formula's brackets, or a run of signs, may go.
+const DEEPEST: usize = 64; // WHAT: sixty-four. WHY: no column formula comes near it; a hundred thousand ran a seat or the server out of stack.
+
+/// Whether a formula nests deeper than [`DEEPEST`]: brackets inside brackets,
+/// or signs one after another (`- - - 1`), each of which is read by a call
+/// inside the last.
+fn too_deep(tokens: &[Token]) -> bool {
+    let (mut open, mut signs) = (0usize, 0usize); // WHAT: brackets open now, and signs in a row. WHY: either is a level of reading.
+    for token in tokens {
+        match token {
+            Token::Open => open += 1, // WHAT: one bracket deeper. WHY: counted.
+            Token::Close => open = open.saturating_sub(1), // WHAT: one out. WHY: counted.
+            _ => {}
+        }
+        signs = if matches!(token, Token::Op(_)) { signs + 1 } else { 0 }; // WHAT: the run of signs so far. WHY: a sign before a sign is read one inside the other.
+        if open > DEEPEST || signs > DEEPEST {
+            return true; // WHAT: too deep. WHY: refused before reading.
+        }
+    }
+    false
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -331,6 +356,20 @@ mod tests {
         assert_eq!(evaluate("1 / 0", &mut none), None);
         assert_eq!(evaluate("2 +", &mut none), None);
         assert_eq!(evaluate("SUM(1)", &mut none), None);
+    }
+
+    #[test]
+    fn a_formula_nested_past_any_real_one_has_no_value_and_does_not_run_out_of_stack() {
+        // WHAT: brackets and signs a hundred thousand deep, worked out on a thread with a small stack. WHY: a tool chest's formula is read recursively, and one shared to the office reached every seat and the server.
+        let brackets = format!("{}1{}", "(".repeat(100_000), ")".repeat(100_000));
+        let signs = format!("{}1", "-".repeat(100_000));
+        let worked = std::thread::Builder::new()
+            .stack_size(512 * 1024) // WHAT: a small stack. WHY: an unlimited reader runs out of it here first.
+            .spawn(move || (evaluate(&brackets, &mut |_| None), evaluate(&signs, &mut |_| None)))
+            .unwrap()
+            .join(); // WHAT: the thread finished. WHY: a stack overflow would end the test process instead.
+        assert_eq!(worked.ok(), Some((None, None)), "too deep is no value, and the reader lived");
+        assert_eq!(evaluate("((2 + 3)) * -(-4)", &mut |_| None), Some(20.0), "ordinary nesting still works");
     }
 
     #[test]

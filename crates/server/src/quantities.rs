@@ -146,7 +146,11 @@ pub fn takeoff(set: &str, revision: u64, markups: &[Stored], sheets: &[SheetScal
 
 /// Parses a stored annotation dictionary back into a markup.
 pub fn read_markup(bytes: &[u8]) -> Option<Markup> {
-    let object = pdf::Reader::new(bytes).object().ok()?;
+    let mut reader = pdf::Reader::new(bytes); // WHAT: a reader over the markup's bytes. WHY: asked afterwards whether it went too deep.
+    let object = reader.object().ok()?;
+    if reader.went_too_deep() {
+        return None; // WHAT: a markup nested past any real one is not a markup. WHY: its bytes are kept and handed to every seat as they came, and a seat older than this one runs out of stack reading them.
+    }
     let dict = object.as_dict()?.clone();
     Some(Markup { dict, picture: None })
 }

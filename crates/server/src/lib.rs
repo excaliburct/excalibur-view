@@ -24,6 +24,7 @@ pub mod config;
 pub mod fleet;
 pub mod folders; // WHAT: groups, who sees which folder, and files that aren't drawings. WHY: the field and the shop see only the folders given to them.
 pub mod license;
+pub mod lockdown; // WHAT: the service folder made the service's own. WHY: ProgramData lets every account read it and add files.
 pub mod mcp;
 pub mod notices;
 pub mod openapi;

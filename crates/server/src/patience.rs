@@ -96,19 +96,39 @@ impl Patience {
             return None;
         }
         let held = self.wrong.lock().ok()?;
-        let seen = held.get(who)?;
-        // `free` wrong answers cost nothing. The attempt after that waits.
-        // So the test is on what has already been got wrong, not on what is
-        // being tried now: at `free` wrongs the allowance is spent.
-        let spent = seen.times.checked_sub(rule.free)?;
-        let owed = penalty(rule, spent);
-        let waited = seen.last.elapsed();
-        (waited < owed).then(|| owed - waited)
+        owed_by(rule, held.get(who)?) // WHAT: what this one owes, if anything. WHY: the same sum `begin` does.
     }
 
     /// The first of these that has to wait, in the order given.
     pub fn wait_for_any(&self, rule: Rule, who: &[&str]) -> Option<Duration> {
         who.iter().filter_map(|one| self.wait_for(rule, one)).max()
+    }
+
+    /// Asks and counts in one step: the longest wait any of `who` owes, or,
+    /// when none owes one, this try counted against each of them as wrong
+    /// before it is checked. A right answer then clears it with [`right`].
+    ///
+    /// Asking and counting apart let tries sent together all be asked before
+    /// any was counted, so a burst of fifty got fifty guesses where five were
+    /// allowed. Done under one lock, each try sees every try before it.
+    ///
+    /// [`right`]: Patience::right
+    pub fn begin(&self, rule: Rule, who: &[&str]) -> Result<(), Duration> {
+        let Ok(mut held) = self.wrong.lock() else {
+            return Ok(()); // WHAT: a poisoned lock lets the try through uncounted. WHY: the same as `wait_for` did; a panic elsewhere must not lock the whole office out.
+        };
+        let owed = who
+            .iter()
+            .filter(|one| !one.is_empty())
+            .filter_map(|one| owed_by(rule, held.get(*one)?))
+            .max(); // WHAT: the longest wait any of them owes. WHY: the worst of the account and the address decides.
+        if let Some(owed) = owed {
+            return Err(owed); // WHAT: refused, and not counted again. WHY: a refused try checks nothing, so it is not a guess.
+        }
+        for one in who.iter().filter(|one| !one.is_empty()) {
+            count_wrong(&mut held, one); // WHAT: counted as wrong before it is checked. WHY: the next try, however soon, sees it.
+        }
+        Ok(())
     }
 
     /// That was wrong. Count it.
@@ -117,12 +137,7 @@ impl Patience {
             return;
         }
         let Ok(mut held) = self.wrong.lock() else { return };
-        if held.len() >= MOST_KEPT && !held.contains_key(who) {
-            forget_the_stalest(&mut held);
-        }
-        let seen = held.entry(who.to_string()).or_insert(Wrong { times: 0, last: Instant::now() });
-        seen.times = seen.times.saturating_add(1);
-        seen.last = Instant::now();
+        count_wrong(&mut held, who); // WHAT: one more wrong. WHY: the same counting `begin` does.
     }
 
     /// That was right. Forget everything about them.
@@ -141,6 +156,27 @@ impl Patience {
     }
 }
 
+/// What one entry owes under `rule`, if anything.
+fn owed_by(rule: Rule, seen: &Wrong) -> Option<Duration> {
+    // `free` wrong answers cost nothing. The attempt after that waits.
+    // So the test is on what has already been got wrong, not on what is
+    // being tried now: at `free` wrongs the allowance is spent.
+    let spent = seen.times.checked_sub(rule.free)?;
+    let owed = penalty(rule, spent);
+    let waited = seen.last.elapsed();
+    (waited < owed).then(|| owed - waited)
+}
+
+/// Counts one wrong answer against `who`, making room first when full.
+fn count_wrong(held: &mut HashMap<String, Wrong>, who: &str) {
+    if held.len() >= MOST_KEPT && !held.contains_key(who) {
+        forget_the_least_guessed_at(held); // WHAT: room made. WHY: the map never grows past its size.
+    }
+    let seen = held.entry(who.to_string()).or_insert(Wrong { times: 0, last: Instant::now() }); // WHAT: this one's count, new or kept. WHY: added to.
+    seen.times = seen.times.saturating_add(1); // WHAT: one more. WHY: counted.
+    seen.last = Instant::now(); // WHAT: when. WHY: the wait runs from the last wrong one.
+}
+
 /// The wait owed once the free ones are spent: the first wait, then double
 /// it for each further wrong answer, then flat forever.
 fn penalty(rule: Rule, spent: u32) -> Duration {
@@ -150,14 +186,20 @@ fn penalty(rule: Rule, spent: u32) -> Duration {
         .min(rule.longest)
 }
 
-/// Drops a tenth of the entries, oldest first, so this is not done on every
-/// call once the map is full.
-fn forget_the_stalest(held: &mut HashMap<String, Wrong>) {
-    let mut ages: Vec<(Instant, String)> =
-        held.iter().map(|(k, v)| (v.last, k.clone())).collect();
-    ages.sort_by_key(|(when, _)| *when);
-    for (_, key) in ages.into_iter().take(MOST_KEPT / 10) {
-        held.remove(&key);
+/// Drops a tenth of the entries, those with the fewest wrong answers first
+/// and the stalest of those, so this is not done on every call once the map
+/// is full.
+///
+/// Fewest first, not oldest first: an account somebody is guessing at has
+/// many wrong answers against it, and four thousand made-up names tried once
+/// each must not be able to push it out and give the guesser five free tries
+/// again. Oldest first did exactly that.
+fn forget_the_least_guessed_at(held: &mut HashMap<String, Wrong>) {
+    let mut least: Vec<(u32, Instant, String)> =
+        held.iter().map(|(k, v)| (v.times, v.last, k.clone())).collect(); // WHAT: each entry's count, age and name. WHY: sorted below.
+    least.sort_by_key(|(times, when, _)| (*times, *when)); // WHAT: fewest wrong first, then oldest. WHY: as said above.
+    for (_, _, key) in least.into_iter().take(MOST_KEPT / 10) {
+        held.remove(&key); // WHAT: forgotten. WHY: room for new ones.
     }
 }
 
@@ -279,6 +321,37 @@ mod tests {
         assert!(either > Duration::from_secs(19), "the account decided it: {either:?}");
         assert!(p.wait_for(QUICK, "their-address").is_none());
         assert!(p.wait_for_any(QUICK, &["nobody", "no-one"]).is_none());
+    }
+
+    #[test]
+    fn tries_sent_together_are_each_counted_before_the_next_is_let_in() {
+        let p = std::sync::Arc::new(Patience::default()); // WHAT: one ledger. WHY: shared by many threads at once, as the server's is.
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(32)); // WHAT: a starting gate. WHY: every try goes at the same instant.
+        let threads: Vec<_> = (0..32)
+            .map(|_| {
+                let (p, barrier) = (p.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait(); // WHAT: all at once. WHY: the burst a script sends.
+                    p.begin(QUICK, &["their-account", "their-address"]).is_ok() // WHAT: whether this try was let in. WHY: counted below.
+                })
+            })
+            .collect();
+        let let_in = threads.into_iter().filter_map(|t| t.join().ok()).filter(|got_in| *got_in).count(); // WHAT: how many got to be checked. WHY: the free ones and no more.
+        assert_eq!(let_in, QUICK.free as usize, "a burst got {let_in} tries where {} are free", QUICK.free);
+    }
+
+    #[test]
+    fn a_flood_of_made_up_names_does_not_push_out_the_account_being_guessed_at() {
+        let p = Patience::default(); // WHAT: a ledger. WHY: filled below.
+        for _ in 0..(QUICK.free + 1) {
+            let _ = p.begin(QUICK, &["the-victim"]); // WHAT: wrong tries at one account. WHY: until it owes a wait.
+        }
+        assert!(p.wait_for(QUICK, "the-victim").is_some(), "the account owes a wait");
+        for n in 0..(MOST_KEPT * 2) {
+            p.wrong(&format!("made-up-{n}@example.com")); // WHAT: a name nobody has, tried once. WHY: what a guesser sends to fill the ledger.
+        }
+        assert!(p.wait_for(QUICK, "the-victim").is_some(), "the account still owes its wait after the flood");
+        assert!(p.watching() <= MOST_KEPT, "and the ledger stayed its size: {}", p.watching());
     }
 
     #[test]

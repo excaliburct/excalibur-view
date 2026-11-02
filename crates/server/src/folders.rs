@@ -597,16 +597,36 @@ pub async fn make_folders(
     State(server): State<Shared>,
     headers: HeaderMap,
     Path(project): Path<String>,
-    Json(body): Json<serde_json::Value>,
-) -> Answer<Json<serde_json::Value>> {
-    let who = caller(&server, &headers)?; // WHAT: who is asking. WHY: checked just below.
+    body: Body,
+) -> Response {
+    let gate = folders_gate(&server, &headers, &project); // WHAT: who may make this project's folders, asked before the body is read. WHY: a stranger's list of ten thousand folders is never read.
+    let who = match gate {
+        Ok(who) => who, // WHAT: let in. WHY: the list is read next.
+        Err(denied) => return crate::api::turned_away(body, denied).await, // WHAT: refused with the body unread. WHY: as above.
+    };
+    let body: serde_json::Value = match crate::api::json_once_let_in(body, crate::api::MIDDLING_BODY).await {
+        Ok(body) => body, // WHAT: the folders asked for. WHY: made below.
+        Err(denied) => return denied.into_response(), // WHAT: too big or not JSON. WHY: said plainly.
+    };
+    folders_made(&server, &who, &project, &body).into_response() // WHAT: the folders made, as before. WHY: unchanged once let in.
+}
+
+/// Whether the caller may make and rule `project`'s folders: an administrator
+/// signed in, or a sync key on its own project, while sharing is allowed.
+fn folders_gate(server: &Shared, headers: &HeaderMap, project: &str) -> Answer<Who> {
+    let who = caller(server, headers)?; // WHAT: who is asking. WHY: checked just below.
     let by_program = who.is_key(auth::purpose::SYNC); // WHAT: a program keeping its projects in step. WHY: its new folders are the office's until it says.
     if !by_program {
-        administrator(&server, &headers)?; // WHAT: otherwise an administrator signed in. WHY: deciding who sees a folder is theirs.
+        administrator(server, headers)?; // WHAT: otherwise an administrator signed in. WHY: deciding who sees a folder is theirs.
     }
-    crate::api::sharing(&server)?; // WHAT: new work can be shared. WHY: the same rule as every write.
-    may_reach_project(&server, &who, &project)?; // WHAT: the project's gate; a sync key's own projects only. WHY: as every route under a project.
-    let asked = asked(&body)?; // WHAT: the folders asked for. WHY: all checked before anything is written.
+    crate::api::sharing(server)?; // WHAT: new work can be shared. WHY: the same rule as every write.
+    may_reach_project(server, &who, project)?; // WHAT: the project's gate; a sync key's own projects only. WHY: as every route under a project.
+    Ok(who) // WHAT: let in. WHY: every check above passed.
+}
+
+fn folders_made(server: &Shared, who: &Who, project: &str, body: &serde_json::Value) -> Answer<Json<serde_json::Value>> {
+    let by_program = who.is_key(auth::purpose::SYNC); // WHAT: a program keeping its projects in step. WHY: its new folders are the office's until it says.
+    let asked = asked(body)?; // WHAT: the folders asked for. WHY: all checked before anything is written.
     let set_in = if by_program { "program" } else { "view" }; // WHAT: where the rule was set. WHY: a rule changed in the Studio is kept until the program sets that folder again.
     let (made, changed, groups_made, changes) = server
         .store
@@ -618,7 +638,7 @@ pub async fn make_folders(
             let mut groups_made: Vec<String> = Vec::new(); // WHAT: groups made empty. WHY: the answer says so, for an administrator to fill.
             let mut changes: Vec<String> = Vec::new(); // WHAT: the folders whose rule changed. WHY: for the audit line.
             for one in &asked {
-                made += make_folder(db, &project, &one.path, &who, by_program)?; // WHAT: the folder and those above it. WHY: an empty folder shows.
+                made += make_folder(db, project, &one.path, who, by_program)?; // WHAT: the folder and those above it. WHY: an empty folder shows.
                 let Some(see) = &one.see else { continue }; // WHAT: no rule said. WHY: left as it is.
                 if let See::Groups(names) = see {
                     for name in names {
@@ -650,8 +670,8 @@ pub async fn make_folders(
         .store
         .with(|db| {
             Ok((
-                listing(db, &project, &sight_of(db, &project, &who)?)?,
-                rules_of(db, &project)?,
+                listing(db, project, &sight_of(db, project, who)?)?,
+                rules_of(db, project)?,
             ))
         }) // WHAT: the whole tree, with its rules. WHY: only the office or the project's program gets here.
         .map_err(|e| Denied::broke("list that project's folders", e))?;
@@ -683,7 +703,7 @@ pub async fn make_folders(
     }
     for name in &groups_made {
         record(
-            &server,
+            server,
             crate::audit::Entry::new(crate::audit::action::MADE_GROUP, &who.email)
                 .by(&who.id)
                 .about(name.clone()),
@@ -692,10 +712,10 @@ pub async fn make_folders(
     let total = changes.len(); // WHAT: how many rules changed. WHY: every line says it, so none can be missed.
     for (n, part) in changes.chunks(20).enumerate() {
         record(
-            &server,
+            server,
             crate::audit::Entry::new(crate::audit::action::CHANGED_FOLDER, &who.email)
                 .by(&who.id)
-                .about(project.clone())
+                .about(project)
                 .saying(format!(
                     "{}–{} of {total}: {}",
                     n * 20 + 1,

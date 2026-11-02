@@ -301,10 +301,68 @@ async fn keys_keep_to_their_purpose(
     refused // WHAT: the refusal. WHY: sent whole, with the request read first.
 }
 
+/// Writes a line in the server's log for every request a door turned away
+/// with 403: the route as the router names it, never the address asked
+/// for, its query or its body, and where it came from. Only 403s: those
+/// come from somebody signed in or holding a key, so a stranger can't fill
+/// the log with them the way they could with 401s.
+async fn refusals_logged(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let method = request.method().clone(); // WHAT: GET, POST... WHY: half of which door.
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_default(); // WHAT: the route's pattern (`/sets/:id/file`). WHY: names the door without anything the caller typed.
+    let from = seen_from(request.headers()); // WHAT: the caller's address, as `where_from` found it. WHY: one machine or forty.
+    let answer = next.run(request).await; // WHAT: the route's answer. WHY: logged only when it was a refusal.
+    if answer.status() == StatusCode::FORBIDDEN {
+        tracing::warn!("refused {method} {route} from {}", if from.is_empty() { "an unknown address" } else { from.as_str() }); // WHAT: one line. WHY: an administrator reading the log sees who tried which door.
+    }
+    answer
+}
+
 /// How much of a refused request's body is read before the refusal goes. A
 /// sync key's ordinary mistakes are small JSON bodies; a big upload sent to
 /// the wrong route is not read at all, and the connection is closed instead.
 const REFUSAL_READS_UP_TO: usize = 64 * 1024; // WHAT: 64 KiB. WHY: far more than any JSON a program sends by mistake, far less than an upload worth reading for nothing.
+
+/// The most a route that takes JSON, or nothing, reads of a body. The routes
+/// that take a whole file are given the upload limit instead (see `router`).
+pub const SMALL_BODY: usize = 1024 * 1024; // WHAT: 1 MiB. WHY: far more than any sign-in, setting or form; small enough that nobody can make the server hold much by sending it.
+
+/// The most a route that takes a large JSON body or a plugin's input reads:
+/// a batch of markups, a whole job's folders, a plugin's sheets. Read only
+/// once the caller has been let in (see [`body_once_let_in`]).
+pub const MIDDLING_BODY: usize = 64 * 1024 * 1024; // WHAT: 64 MiB. WHY: a whole set's markups or text comes in well under it; it is read only after the gate, never for a stranger.
+
+/// A refusal for a caller whose body has not been read: a little of it is
+/// read and thrown away first, as `keys_keep_to_their_purpose` does, and the
+/// connection is closed after the answer when there was more than that.
+pub(crate) async fn turned_away(body: Body, denied: Denied) -> Response {
+    let read_whole = axum::body::to_bytes(body, REFUSAL_READS_UP_TO).await.is_ok(); // WHAT: up to 64 KiB of the body, thrown away. WHY: an answer sent with the body unread can be lost to a reset on a Mac.
+    let mut refused = denied.into_response(); // WHAT: the refusal. WHY: the same words the route always gave.
+    if !read_whole {
+        refused.headers_mut().insert(header::CONNECTION, header::HeaderValue::from_static("close")); // WHAT: says the connection ends here. WHY: the rest of a big body is never read for somebody turned away.
+    }
+    refused
+}
+
+/// The body of a request whose caller has already been let in, up to `limit`
+/// bytes; past it, a plain 413.
+pub(crate) async fn body_once_let_in(body: Body, limit: usize) -> Answer<axum::body::Bytes> {
+    axum::body::to_bytes(body, limit).await.map_err(|_| {
+        Denied(
+            StatusCode::PAYLOAD_TOO_LARGE, // WHAT: 413. WHY: the body was bigger than this route takes.
+            Problem::new("too_large", format!("That is more than this server takes in one request ({} MiB).", limit / (1024 * 1024))), // WHAT: the limit in words. WHY: whoever sent it can see what to change.
+        )
+    })
+}
+
+/// JSON read from a body once its caller has been let in.
+pub(crate) async fn json_once_let_in<T: serde::de::DeserializeOwned>(body: Body, limit: usize) -> Answer<T> {
+    let bytes = body_once_let_in(body, limit).await?; // WHAT: the body, within its limit. WHY: read only after the gate.
+    serde_json::from_slice(&bytes).map_err(|e| Denied::wrong(format!("That is not the JSON this route takes: {e}"))) // WHAT: parsed, or a plain refusal. WHY: as the Json extractor refused before.
+}
 
 /// How long a key's refusals go unwritten after one is written.
 const KEY_REFUSAL_QUIET: std::time::Duration = std::time::Duration::from_secs(60); // WHAT: one minute. WHY: enough to see a key straying, never enough lines to fill the disk.
@@ -341,7 +399,8 @@ pub fn fresh_id(prefix: &str) -> String {
 // ---- the routes -----------------------------------------------------------
 
 pub fn router(server: Shared) -> Router {
-    let limit = server.config.largest_upload as usize;
+    let limit = server.config.largest_upload as usize; // WHAT: the largest drawing or file the office takes. WHY: only the routes that take a whole file are given it.
+    let uploads = DefaultBodyLimit::max(limit); // WHAT: the upload limit, as a layer. WHY: put on each upload route below, and nowhere else.
     let api = Router::new()
         .route("/health", get(health))
         .route("/openapi.json", get(openapi))
@@ -371,7 +430,7 @@ pub fn router(server: Shared) -> Router {
         .route("/projects/:id/place", post(crate::projects::place))
         .route("/projects/:id/stamp", get(crate::projects::stamp))
         .route("/projects/:id/sets", get(sets_of))
-        .route("/sets", post(upload_set))
+        .route("/sets", post(upload_set).layer(uploads)) // WHAT: a drawing set, up to the upload limit. WHY: a stamped structural package is hundreds of megabytes; nothing else needs that much.
         .route("/sets/:id", get(one_set))
         .route("/sets/:id/file", get(set_file))
         .route("/sets/:id/sheets", get(sheets_of))
@@ -382,7 +441,7 @@ pub fn router(server: Shared) -> Router {
         .route("/people", get(people).post(add_person))
         .route("/people/:id/role", post(change_role))
         .route("/people/:id/remove", post(remove_person))
-        .route("/chests", get(chests).post(upload_chest))
+        .route("/chests", get(chests).post(upload_chest).layer(uploads)) // WHAT: a tool chest file. WHY: the same limit as any upload.
         .route("/chests/:id/file", get(chest_file))
         .route("/plugins", get(plugins).post(add_plugin))
         .route("/plugins/:id/file", get(plugin_file))
@@ -395,7 +454,7 @@ pub fn router(server: Shared) -> Router {
         .route("/audit", get(read_audit))
         .route("/audit.csv", get(audit_csv))
         .route("/admin/pin", post(set_pin))
-        .route("/admin/releases", post(upload_release))
+        .route("/admin/releases", post(upload_release).layer(uploads)) // WHAT: an installer. WHY: the same limit as any upload.
         .route("/admin/releases/:version/ready", post(release_ready))
         .route("/update/latest", get(update_latest))
         .route("/update/:version/download", get(update_download))
@@ -403,19 +462,22 @@ pub fn router(server: Shared) -> Router {
         .route("/groups/:id/people", post(crate::folders::change_group)) // WHAT: somebody put in a group or taken out. WHY: that decides the folders they see.
         .route("/projects/:id/folders", get(crate::folders::folders_of).post(crate::folders::make_folders)) // WHAT: a project's folders, and who sees each. WHY: empty folders show, and each says who sees it.
         .route("/projects/:id/files", get(crate::folders::files_of)) // WHAT: a project's files that aren't drawings. WHY: listed in their folders.
-        .route("/files", post(crate::folders::upload_file)) // WHAT: a file of any kind put in a folder. WHY: a job's folder holds more than PDFs.
+        .route("/files", post(crate::folders::upload_file).layer(uploads)) // WHAT: a file of any kind put in a folder. WHY: a job's folder holds more than PDFs.
         .route("/files/:id/file", get(crate::folders::file_bytes)) // WHAT: a file's bytes. WHY: opened with its own program.
         .route("/files/:id/folder", post(crate::folders::move_file)) // WHAT: a file moved. WHY: follows a move in the company files.
         .route("/sets/:id/folder", post(crate::folders::move_set)) // WHAT: a drawing set moved, with its issues. WHY: likewise.
         // WHAT: every matched route first checks that a key keeps to its purpose. WHY: one gate in front of all of them, so a new route is closed to sync keys unless it is put on SYNC_ROUTES on purpose.
         .route_layer(axum::middleware::from_fn_with_state(server.clone(), keys_keep_to_their_purpose))
-        .layer(DefaultBodyLimit::max(limit))
+        .route_layer(axum::middleware::from_fn(refusals_logged)) // WHAT: every 403 written in the server's log. WHY: somebody signed in walking the API for doors they may not open left no trace.
+        // WHAT: every other route takes at most a small body. WHY: a JSON extractor reads the whole body before the handler asks who is calling, so a large limit everywhere let anybody, signed in or not, make the server hold hundreds of megabytes per request.
+        .layer(DefaultBodyLimit::max(SMALL_BODY))
         // Who is connected, for the Fleet's board. Sees every API request,
         // records the signed-in ones, refuses nothing (crate::presence).
         .layer(axum::middleware::from_fn_with_state(
             server.clone(),
             crate::presence::seen,
         ))
+        .layer(axum::middleware::from_fn_with_state(server.clone(), where_from)) // WHAT: the caller's address worked out once, first. WHY: every count of wrong tries and every log line uses it, and no caller can write it.
         .with_state(server.clone());
 
     // The product's API, and beside it the small maintenance surface the
@@ -429,6 +491,30 @@ pub fn router(server: Shared) -> Router {
         // Where an assistant asks about the quantities. Same token as the
         // API, and read-only: see the note at the top of `crate::mcp`.
         .merge(crate::mcp::router(server))
+        .layer(axum::middleware::from_fn(marked)) // WHAT: every answer marked not to be kept, sniffed or framed. WHY: the API said none of it, so a proxy or a browser was left to guess.
+}
+
+/// What every answer says about itself, unless its route already said:
+/// not to be kept by a cache or proxy (it is somebody's drawings, or their
+/// session), not to be read as anything but what it says it is, and never
+/// shown inside another page or run as one.
+const MARKS: &[(&str, &str)] = &[
+    ("cache-control", "no-store"), // WHAT: keep no copy. WHY: a 'Cache Everything' rule in Cloudflare, or a proxy on a hotel network, would otherwise hand one person's answer to the next.
+    ("x-content-type-options", "nosniff"), // WHAT: don't guess the kind. WHY: a file somebody put up must never be read as a page.
+    ("content-security-policy", "default-src 'none'; frame-ancestors 'none'; sandbox"), // WHAT: nothing loads, nothing runs, nothing frames it. WHY: no answer of this server is a web page.
+    ("x-frame-options", "DENY"), // WHAT: never inside a frame. WHY: the same, for browsers that read only this.
+    ("referrer-policy", "no-referrer"), // WHAT: no address passed on. WHY: an address with an id in it stays here.
+];
+
+/// Adds [`MARKS`] to an answer that doesn't already carry them.
+pub async fn marked(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let mut answer = next.run(request).await; // WHAT: the route's own answer. WHY: marked on its way out.
+    for (name, value) in MARKS {
+        if !answer.headers().contains_key(*name) {
+            answer.headers_mut().insert(*name, header::HeaderValue::from_static(value)); // WHAT: added. WHY: a route that set its own keeps it.
+        }
+    }
+    answer
 }
 
 /// Every path this server serves, for the test that keeps the description
@@ -670,9 +756,10 @@ async fn sign_in(
     // address, because each catches what the other misses: one address
     // working through a list of people, and one account guessed at from a
     // hundred addresses.
-    if let Some(owed) = server
+    // WHAT: asked and counted in one step: this try is counted as wrong before it is checked, and a right password clears it below. WHY: asked and counted apart, a burst sent together was all asked before any was counted.
+    if let Err(owed) = server
         .patience
-        .wait_for_any(crate::patience::SIGNING_IN, &[email.as_str(), from.as_str()])
+        .begin(crate::patience::SIGNING_IN, &[email.as_str(), from.as_str()])
     {
         record(
             &server,
@@ -711,12 +798,12 @@ async fn sign_in(
                 .saying("no account with that address")
                 .from(from.clone()),
         );
-        // Counted even though there is no such account: somebody working
-        // through a list of addresses is the case this is for, and not
-        // counting it would leave the one door that answers instantly wide
-        // open.
-        server.patience.wrong(&email);
-        server.patience.wrong(&from);
+        // Counted even though there is no such account (by `begin`, above):
+        // somebody working through a list of addresses is the case this is
+        // for. And checked against a password all the same, so the answer
+        // takes as long as a wrong password does: an answer that came back
+        // at once said which addresses have no account.
+        let _ = auth::password_matches(&body.password, auth::no_such_account()); // WHAT: a password check that can never pass. WHY: the time it takes is the same as a real one, so timing tells nobody whether the account exists.
         return Err(Denied(
             StatusCode::UNAUTHORIZED,
             Problem::new("unauthorised", "That email address and password do not match."),
@@ -730,8 +817,7 @@ async fn sign_in(
                 .saying("the password did not match")
                 .from(from.clone()),
         );
-        server.patience.wrong(&email);
-        server.patience.wrong(&from);
+        // WHAT: nothing more to count. WHY: `begin` counted this try already.
         return Err(Denied(
             StatusCode::UNAUTHORIZED,
             Problem::new("unauthorised", "That email address and password do not match."),
@@ -822,12 +908,10 @@ async fn change_password(
     let who = caller(&server, &headers)?; // WHAT: the signed-in person. WHY: only a session gets this far.
     let email = who.email.trim().to_lowercase(); // WHAT: the account, spelt the way sign-in counts it. WHY: wrong tries here and at sign-in add up against the same account.
     let from = seen_from(&headers); // WHAT: where the request came from. WHY: counted too, as sign-in does.
-    if let Some(owed) = server.patience.wait_for_any(crate::patience::SIGNING_IN, &[email.as_str(), from.as_str()]) {
-        // WHAT: too many wrong current passwords lately: refused before the password is checked. WHY: the same limit as sign-in, so this door is no faster for guessing.
+    check_password(&body.new)?; // WHAT: the new password's length checked first. WHY: a short one is refused without counting as a guess at the current one.
+    if let Err(owed) = server.patience.begin(crate::patience::SIGNING_IN, &[email.as_str(), from.as_str()]) {
+        // WHAT: too many wrong current passwords lately: refused before the password is checked; otherwise this try is counted until it proves right. WHY: the same limit as sign-in, so this door is no faster for guessing, even in a burst.
         return Err(Denied(StatusCode::TOO_MANY_REQUESTS, Problem::new("too_many", &crate::patience::refusal(owed))));
-    }
-    if body.new.chars().count() < 12 {
-        return Err(Denied::wrong("A password needs twelve characters at the very least."));
     }
     let stored: String = server
         .store
@@ -840,8 +924,7 @@ async fn change_password(
         })
         .map_err(|e| Denied::broke("look you up", e))?;
     if !auth::password_matches(&body.current, &stored) {
-        server.patience.wrong(&email); // WHAT: a wrong try counted against the account. WHY: the same count sign-in keeps.
-        server.patience.wrong(&from); // WHAT: and against the address. WHY: likewise.
+        // WHAT: nothing more to count. WHY: `begin` counted this try against the account and the address already.
         return Err(Denied(
             StatusCode::UNAUTHORIZED,
             Problem::new("unauthorised", "That is not your current password."),
@@ -1286,28 +1369,10 @@ async fn upload_set(
 
     // Read the sheets out of the drawing now, so a client that only wants the
     // list does not have to download sixty megabytes to get it.
-    let document = pdf::Document::from_bytes(bytes.clone());
-    let count = document.page_count();
-    let mut sheets = Vec::with_capacity(count);
-    for page in 0..count {
-        let Some(dict) = document.page(page) else {
-            continue;
-        };
-        let area = document.page_box(&dict);
-        let rotation = document.page_rotation(&dict);
-        let frame = annot::Frame::new(area, rotation);
-        let (width, height) = frame.size();
-        let scale = annot::viewport::scale_of(&document, &dict).map(|m| m.ratio);
-        sheets.push(Sheet {
-            page,
-            number: String::new(),
-            title: String::new(),
-            width,
-            height,
-            rotation,
-            scale,
-        });
-    }
+    let reading = bytes.clone(); // WHAT: a copy for the reading thread. WHY: the bytes are stored below as well.
+    let sheets = tokio::task::spawn_blocking(move || sheets_in(reading))
+        .await
+        .map_err(|e| Denied::broke("read that drawing's sheets", e))?; // WHAT: read off the threads that answer requests. WHY: a slow or hostile file then holds up one reading thread, not the whole server.
 
     let digest = server
         .store
@@ -1420,6 +1485,33 @@ async fn upload_set(
         .map_err(|e| Denied::broke("record that drawing set", e))?;
 
     Ok(Json(settled))
+}
+
+/// The sheets of a drawing, as an upload records them.
+fn sheets_in(bytes: Vec<u8>) -> Vec<Sheet> {
+    let document = pdf::Document::from_bytes(bytes); // WHAT: the drawing, opened. WHY: its pages are read below.
+    let count = document.page_count(); // WHAT: how many pages. WHY: one sheet each.
+    let mut sheets = Vec::with_capacity(count.min(200_000)); // WHAT: room for them. WHY: the page walk stops at 200,000 anyway.
+    for page in 0..count {
+        let Some(dict) = document.page(page) else {
+            continue;
+        };
+        let area = document.page_box(&dict);
+        let rotation = document.page_rotation(&dict);
+        let frame = annot::Frame::new(area, rotation);
+        let (width, height) = frame.size();
+        let scale = annot::viewport::scale_of(&document, &dict).map(|m| m.ratio);
+        sheets.push(Sheet {
+            page,
+            number: String::new(),
+            title: String::new(),
+            width,
+            height,
+            rotation,
+            scale,
+        });
+    }
+    sheets
 }
 
 async fn set_file(
@@ -1588,11 +1680,22 @@ async fn add_markups(
     State(server): State<Shared>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Json(incoming): Json<Vec<NewMarkup>>,
-) -> Answer<Json<MarkupPage>> {
+    body: Body,
+) -> Response {
+    let gate = writer(&server, &headers).and_then(|who| may_reach_set(&server, &who, &id).map(|_| who)); // WHAT: who may mark this set up, asked before the body is read. WHY: a stranger's batch is never read.
+    let who = match gate {
+        Ok(who) => who, // WHAT: let in. WHY: their batch is read next.
+        Err(denied) => return turned_away(body, denied).await, // WHAT: refused, with the body read no further than a little. WHY: as above.
+    };
+    let incoming: Vec<NewMarkup> = match json_once_let_in(body, MIDDLING_BODY).await {
+        Ok(incoming) => incoming, // WHAT: the batch. WHY: saved below.
+        Err(denied) => return denied.into_response(), // WHAT: too big, or not JSON. WHY: said plainly.
+    };
+    markups_added(&server, &who, &id, incoming).into_response() // WHAT: the batch saved. WHY: what the route did before, unchanged.
+}
+
+fn markups_added(server: &Shared, who: &Who, id: &str, incoming: Vec<NewMarkup>) -> Answer<Json<MarkupPage>> {
     use base64::Engine;
-    let who = writer(&server, &headers)?;
-    may_reach_set(&server, &who, &id)?;
 
     // Everything is parsed and checked before anything is written, so a batch
     // with one bad markup in it does not leave half of itself in the file.
@@ -1613,11 +1716,11 @@ async fn add_markups(
     let result = server
         .store
         .with(|db| {
-            if read_set(db, &id)?.is_none() {
+            if read_set(db, id)?.is_none() {
                 return Ok(None);
             }
-            let sheets = sheets_for(db, &id)?;
-            let revision = Store::bump(db, &id)?;
+            let sheets = sheets_for(db, id)?;
+            let revision = Store::bump(db, id)?;
 
             for (one, bytes, markup) in &ready {
                 // A replacement is a removal and an addition, so a client
@@ -1667,14 +1770,14 @@ async fn add_markups(
             }
 
             Ok(Some(MarkupPage {
-                markups: markups_since(db, &id, revision - 1)?,
+                markups: markups_since(db, id, revision - 1)?,
                 revision,
             }))
         })
         .map_err(|e| Denied::broke("save those markups", e))?;
 
     if result.is_some() {
-        crate::notices::changed(&server, &id);
+        crate::notices::changed(server, id);
     }
     result.map(Json).ok_or_else(|| Denied::missing("drawing set"))
 }
@@ -2390,9 +2493,20 @@ async fn run_plugin(
     State(server): State<Shared>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    body: axum::body::Bytes,
-) -> Answer<Json<plugin_api::Answer>> {
-    let who = caller(&server, &headers)?;
+    body: Body,
+) -> Response {
+    let who = match caller(&server, &headers) {
+        Ok(who) => who, // WHAT: somebody signed in, or a program's key. WHY: anybody who may read may run the office's plugins.
+        Err(denied) => return turned_away(body, denied).await, // WHAT: refused before the input is read. WHY: a stranger's input is never read.
+    };
+    let body = match body_once_let_in(body, MIDDLING_BODY).await {
+        Ok(body) => body, // WHAT: the plugin's input. WHY: handed to it below.
+        Err(denied) => return denied.into_response(), // WHAT: too big. WHY: said plainly.
+    };
+    plugin_ran(server, who, id, body).await.into_response() // WHAT: the run, as before. WHY: unchanged once the caller is let in.
+}
+
+async fn plugin_ran(server: Shared, who: Who, id: String, body: axum::body::Bytes) -> Answer<Json<plugin_api::Answer>> {
     let digest = server
         .store
         .with(|db| {
@@ -2461,10 +2575,21 @@ async fn plugin_file(
 async fn add_plugin(
     State(server): State<Shared>,
     headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Answer<Json<hub::PluginInfo>> {
-    let who = administrator(&server, &headers)?;
-    sharing(&server)?;
+    body: Body,
+) -> Response {
+    let gate = administrator(&server, &headers).and_then(|who| sharing(&server).map(|_| who)); // WHAT: an administrator, while sharing is allowed, asked first. WHY: a plugin file is read only for them.
+    let who = match gate {
+        Ok(who) => who, // WHAT: let in. WHY: the file is read next.
+        Err(denied) => return turned_away(body, denied).await, // WHAT: refused before the file is read. WHY: as above.
+    };
+    let body = match body_once_let_in(body, server.config.largest_upload as usize).await {
+        Ok(body) => body, // WHAT: the plugin file. WHY: checked below.
+        Err(denied) => return denied.into_response(), // WHAT: bigger than any upload. WHY: said plainly.
+    };
+    plugin_added(&server, who, body).into_response() // WHAT: the plugin checked and kept, as before. WHY: unchanged once let in.
+}
+
+fn plugin_added(server: &Shared, who: Who, body: axum::body::Bytes) -> Answer<Json<hub::PluginInfo>> {
     if body.is_empty() {
         return Err(Denied::wrong("No plugin came with that."));
     }
@@ -2762,9 +2887,8 @@ async fn add_person(
     let who = administrator(&server, &headers)?;
     crate::license::room_for_another(&server).map_err(Denied::license_users)?;
     let email = body.email.trim().to_lowercase();
-    if !email.contains('@') {
-        return Err(Denied::wrong("That does not look like an email address."));
-    }
+    check_email(&email)?; // WHAT: the same check as joining. WHY: one rule for every address.
+    check_name(body.name.trim())?; // WHAT: one line of ordinary text. WHY: as at setup.
     // Short passwords are the commonest way a shop server ends up open, and
     // the only moment anybody will listen about it is when one is being set.
     if body.password.chars().count() < 12 {
@@ -3135,20 +3259,73 @@ async fn copy_set(
 /// looking at a string of refusals wants to know whether they came from one
 /// machine or forty.
 pub(crate) fn seen_from(headers: &HeaderMap) -> String {
-    // Behind a tunnel or a reverse proxy the socket is the proxy, so the
-    // forwarded address is the one worth keeping when there is one. First
-    // entry only: the rest is whatever the client claimed on the way in.
-    for name in ["x-forwarded-for", "x-real-ip"] {
-        if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) {
-            if let Some(first) = value.split(',').next() {
-                let first = first.trim();
-                if !first.is_empty() {
-                    return first.to_string();
-                }
-            }
+    headers
+        .get(PEER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string() // WHAT: the address `where_from` worked out for this request. WHY: never a header the caller wrote; that one is thrown away before any route runs.
+}
+
+/// The header `where_from` writes the caller's address into. Whatever a
+/// caller sends under this name is removed first.
+const PEER: &str = "x-excalibur-peer"; // WHAT: a header only this server writes. WHY: the routes read the caller's address from one place.
+
+/// Works out where a request came from and writes it where `seen_from`
+/// reads it. Runs in front of every API route.
+///
+/// The address is the socket's: the machine that actually connected. A
+/// forwarded header is believed only from this machine itself, and only when
+/// a proxy is expected here (remote access is on, or `HYPERVIEW_BEHIND_PROXY=1`
+/// says a proxy somebody set up by hand passes requests on): that is the tunnel's connector, which runs beside the server.
+/// Before this, the first `X-Forwarded-For` entry of any request was
+/// believed, so anybody could be anybody, and a request with none was not
+/// counted at all: guessing at the join code from the shop network had no
+/// limit, and a new made-up address per guess had none from anywhere.
+pub(crate) async fn where_from(
+    State(server): State<Shared>,
+    connected: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let proxied = behind_proxy() || !matches!(server.tunnel.state_now(), crate::tunnel::State::Off | crate::tunnel::State::Sealed); // WHAT: whether a proxy on this machine is expected. WHY: only then is a forwarded header anybody's but the caller's own.
+    let peer = connected.map(|axum::extract::ConnectInfo(at)| at); // WHAT: the socket's other end, when the server knows it. WHY: what actually connected.
+    let address = address_of(peer, request.headers(), proxied); // WHAT: the caller's address. WHY: counted and written in the log.
+    request.headers_mut().remove(PEER); // WHAT: anything the caller sent under that name, gone. WHY: it is this server's to write.
+    if let Ok(value) = header::HeaderValue::from_str(&address) {
+        request.headers_mut().insert(PEER, value); // WHAT: written. WHY: `seen_from` reads it.
+    }
+    next.run(request).await
+}
+
+/// Whether a reverse proxy somebody set up by hand on this machine passes
+/// requests on (`HYPERVIEW_BEHIND_PROXY=1`), read once. Remote access turned
+/// on in the program implies it without this. Without a proxy, a caller could
+/// name its own address; with one and without this, every remote caller would
+/// share the proxy's address and one could hold up all of them.
+fn behind_proxy() -> bool {
+    static SAID: std::sync::OnceLock<bool> = std::sync::OnceLock::new(); // WHAT: read once. WHY: the environment doesn't change under a running server.
+    *SAID.get_or_init(|| std::env::var("HYPERVIEW_BEHIND_PROXY").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes"))) // WHAT: said outright by whoever runs the server. WHY: only then is a hand-made proxy's forwarded address believed.
+}
+
+/// The address a request came from: the socket's, or, from a proxy on this
+/// machine, the address the proxy says it is passing on. Empty when the
+/// server was not told the socket (only ever in a test).
+pub fn address_of(peer: Option<std::net::SocketAddr>, headers: &HeaderMap, proxied: bool) -> String {
+    let Some(peer) = peer else {
+        return String::new(); // WHAT: nothing known. WHY: as before, such a request is not counted with the others.
+    };
+    if proxied && peer.ip().is_loopback() {
+        let said = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string); // WHAT: one header's text. WHY: read twice below.
+        // WHAT: Cloudflare's own header first. WHY: Cloudflare sets it and overwrites any a caller sent.
+        if let Some(ip) = said("cf-connecting-ip").and_then(|v| v.trim().parse::<std::net::IpAddr>().ok()) {
+            return ip.to_string();
+        }
+        // WHAT: else the last X-Forwarded-For entry. WHY: the one the nearest proxy added; the ones before it are whatever the caller claimed.
+        if let Some(ip) = said("x-forwarded-for").and_then(|v| v.rsplit(',').next().and_then(|last| last.trim().parse::<std::net::IpAddr>().ok())) {
+            return ip.to_string();
         }
     }
-    String::new()
+    peer.ip().to_string() // WHAT: the machine that connected. WHY: the only address a caller can't make up.
 }
 
 pub(crate) fn record(server: &Server, entry: crate::audit::Entry) { // WHAT: crate-wide now. WHY: the folders' and files' routes write the same log.
@@ -3240,6 +3417,8 @@ async fn claim(State(server): State<Shared>, Json(body): Json<Setup>) -> Answer<
         ));
     }
     check_email(&email)?;
+    check_name(&name)?; // WHAT: one line of ordinary text. WHY: it goes in the log and on every markup.
+    check_name(&company)?; // WHAT: likewise. WHY: it shows in everybody's title bar and answers on the network.
     check_password(&body.password)?;
 
     let hashed =
@@ -3312,7 +3491,8 @@ async fn join(
     // one string that names nobody, never expires and is not used up. Three
     // tries free and then an hour is the difference between a shared code
     // being a convenience and a shared code being the way in.
-    if let Some(owed) = server.patience.wait_for(crate::patience::JOINING, &from) {
+    // WHAT: asked and counted in one step, from the address `where_from` worked out; a right code clears it below. WHY: a burst is held to the limit, and nobody can make up a new address per guess.
+    if let Err(owed) = server.patience.begin(crate::patience::JOINING, &[from.as_str()]) {
         return Err(Denied(
             StatusCode::TOO_MANY_REQUESTS,
             Problem::new("too_many", &crate::patience::refusal(owed)),
@@ -3330,7 +3510,7 @@ async fn join(
         // holding a dead invitation learns nothing about why.
         let dead = invite.used.is_some() || ran_out(&invite.expires, &crate::audit::now());
         if dead {
-            server.patience.wrong(&from);
+            // WHAT: counted already. WHY: `begin` counted this try.
             record(
                 &server,
                 crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &invite.email)
@@ -3360,13 +3540,13 @@ async fn join(
 
     match how.as_str() {
         _ if invited.is_some() => {}
-        "open" => {}
+        "open" => server.patience.right(&from), // WHAT: no code asked for, so nothing was guessed. WHY: `begin` counted the try in advance.
         "code" => {
             // A code with a date that has gone by is not a code. Checked
             // before the code itself and answered the same way, so somebody
             // guessing cannot tell a wrong code from an expired one.
             if join_has_run_out(&server) {
-                server.patience.wrong(&from);
+                // WHAT: counted already. WHY: `begin` counted this try.
                 record(
                     &server,
                     crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, "")
@@ -3385,7 +3565,7 @@ async fn join(
             // The same refusal whether the code is wrong or the server is not
             // taking anybody, so guessing tells nobody anything.
             if !auth::secret_matches(&body.code, &code) {
-                server.patience.wrong(&from);
+                // WHAT: counted already. WHY: `begin` counted this try.
                 record(
                     &server,
                     crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, "")
@@ -3404,6 +3584,7 @@ async fn join(
             server.patience.right(&from);
         }
         _ => {
+            server.patience.right(&from); // WHAT: not a guess at anything: the server is closed. WHY: `begin` counted the try in advance.
             return Err(Denied(
                 StatusCode::FORBIDDEN,
                 Problem::new(
@@ -3423,6 +3604,7 @@ async fn join(
         ));
     }
     check_email(&email)?;
+    check_name(&name)?; // WHAT: one line of ordinary text. WHY: as at setup.
     check_password(&body.password)?;
 
     let hashed =
@@ -3716,6 +3898,17 @@ fn check_email(email: &str) -> Answer<()> {
     // wrong box, not to adjudicate RFC 5322.
     if email.len() < 3 || !email.contains('@') || email.starts_with('@') || email.ends_with('@') {
         return Err(Denied::wrong("That does not look like an email address."));
+    }
+    if email.chars().count() > 254 || email.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(Denied::wrong("That does not look like an email address.")); // WHAT: too long, or with a space or a line break in it. WHY: no address has them, and a line break in one wrote a false line into the server's log.
+    }
+    Ok(())
+}
+
+/// A person's name as somebody typed it: one line of ordinary text.
+fn check_name(name: &str) -> Answer<()> {
+    if name.chars().count() > 200 || name.chars().any(char::is_control) {
+        return Err(Denied::wrong("A name is one line of ordinary text, two hundred characters at most.")); // WHAT: refused. WHY: a name goes on every markup and in the log, where a line break would write a false line.
     }
     Ok(())
 }
@@ -4337,7 +4530,13 @@ pub fn mcp_shop_list(
                     nest.sticks_to_buy(),
                     nest.yield_of() * 100.0
                 ));
-                if !nest.is_whole() {
+                if nest.unnested > 0 {
+                    out.push_str(&format!(
+                        "      {} piece(s) were NOT nested: a shape with more than {} pieces is not nested one by one, so none of them is on a stick\n",
+                        nest.unnested,
+                        takeoff::shoplist::MOST_NESTED
+                    )); // WHAT: said plainly. WHY: an answer with no sticks must not read as nothing to buy.
+                } else if !nest.is_whole() {
                     out.push_str(&format!(
                         "      {} piece(s) WILL NOT come out of {stock} ft stock and are on \
                          no stick: {}\n",
@@ -4518,5 +4717,39 @@ mod a_join_code_that_runs_out {
         // "forever" on a secret that lets people in.
         assert!(ran_out("soon", "2026-09-24T00:00:00Z"));
         assert!(ran_out("2026", "2026-09-24T00:00:00Z"));
+    }
+}
+
+#[cfg(test)]
+mod where_a_request_came_from {
+    //! The address counted against wrong guesses and written in the log.
+
+    use super::address_of; // WHAT: the function under test. WHY: pure, so tested without a server.
+    use axum::http::HeaderMap; // WHAT: request headers. WHY: what a caller can write.
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new(); // WHAT: empty headers. WHY: filled below.
+        for (name, value) in pairs {
+            map.insert(*name, value.parse().unwrap()); // WHAT: one header. WHY: as a caller sent it.
+        }
+        map
+    }
+
+    #[test]
+    fn a_caller_on_the_network_is_its_socket_whatever_it_writes() {
+        let said = headers(&[("x-forwarded-for", "203.0.113.9"), ("cf-connecting-ip", "198.51.100.4"), ("x-real-ip", "192.0.2.1")]); // WHAT: every header a caller could use to claim an address. WHY: none is believed from the network.
+        let lan = Some("192.168.1.50:51000".parse().unwrap()); // WHAT: a machine on the shop network. WHY: what really connected.
+        assert_eq!(address_of(lan, &said, true), "192.168.1.50", "a LAN caller can't name itself, even with remote access on");
+        let local = Some("127.0.0.1:51000".parse().unwrap()); // WHAT: this machine. WHY: the only place a proxy runs.
+        assert_eq!(address_of(local, &said, false), "127.0.0.1", "with no proxy expected, not even this machine is believed");
+    }
+
+    #[test]
+    fn behind_the_tunnel_the_address_is_the_one_the_proxy_added() {
+        let local = Some("127.0.0.1:51000".parse().unwrap()); // WHAT: the tunnel's connector, on this machine. WHY: the proxy.
+        assert_eq!(address_of(local, &headers(&[("cf-connecting-ip", "198.51.100.4"), ("x-forwarded-for", "1.2.3.4, 198.51.100.4")]), true), "198.51.100.4", "Cloudflare's own header first");
+        assert_eq!(address_of(local, &headers(&[("x-forwarded-for", "1.2.3.4, 203.0.113.9")]), true), "203.0.113.9", "else the last entry, the one the proxy added, not the caller's first");
+        assert_eq!(address_of(local, &headers(&[("x-forwarded-for", "not an address")]), true), "127.0.0.1", "nonsense is not an address");
+        assert_eq!(address_of(None, &headers(&[]), true), "", "no socket known, nothing to say");
     }
 }

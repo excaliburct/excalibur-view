@@ -29,7 +29,21 @@ pub struct Document {
     objects: RefCell<HashMap<u32, Rc<Object>>>,
     bundles: RefCell<HashMap<u32, Rc<Bundle>>>,
     pages: RefCell<Option<Rc<Vec<Ref>>>>,
+    /// How many bytes of object streams have been decoded and kept so far.
+    decoded: std::cell::Cell<usize>, // WHAT: a running total. WHY: each object stream is held to a limit, and so are all of them together.
+    /// How many objects have been searched for through the whole file.
+    hunts: std::cell::Cell<usize>, // WHAT: a running count. WHY: each search reads the whole file, so a file of wrong offsets must not ask for one per object.
 }
+
+/// The most a document's object streams may decode to, all together. One
+/// stream is held to `filters::LARGEST_DECODED`; a file of a thousand of them
+/// is held to this.
+pub const LARGEST_BUNDLES: usize = 1024 * 1024 * 1024; // WHAT: 1 GiB. WHY: many times any real drawing set, short of a server's memory.
+
+/// The most objects one document may search the whole file for. Each search
+/// reads every byte; a damaged file with a hundred thousand wrong offsets
+/// otherwise reads itself a hundred thousand times.
+pub const MOST_HUNTS: usize = 64; // WHAT: sixty-four searches. WHY: enough for a file with a few bad offsets, which is the case this is for.
 
 /// A decoded object stream and the offsets of the objects packed into it.
 struct Bundle {
@@ -56,6 +70,8 @@ impl Document {
             objects: RefCell::new(HashMap::new()),
             bundles: RefCell::new(HashMap::new()),
             pages: RefCell::new(None),
+            decoded: std::cell::Cell::new(0), // WHAT: nothing decoded yet. WHY: counted as object streams are read.
+            hunts: std::cell::Cell::new(0), // WHAT: nothing searched for yet. WHY: counted as objects are hunted.
         }
     }
 
@@ -194,6 +210,10 @@ impl Document {
 
     /// Last resort for one object whose offset is wrong: scan for its header.
     fn hunt(&self, reference: Ref) -> Object {
+        if self.hunts.get() >= MOST_HUNTS {
+            return Object::Null; // WHAT: no more searching. WHY: a missing object reads as null, which every caller already handles.
+        }
+        self.hunts.set(self.hunts.get() + 1); // WHAT: one more search. WHY: counted against the limit.
         let needle = format!("{} {} obj", reference.number, reference.generation);
         let mut at = 0usize;
         while let Some(found) = crate::parse::find(&self.bytes, needle.as_bytes(), at) {
@@ -247,7 +267,9 @@ impl Document {
         // decrypted it yet -- and it has to be, before the filters see it.
         let object = self.unscramble(found, object);
         let stream = object.as_stream()?;
-        let data = filters::decode(stream).ok()?;
+        let left = LARGEST_BUNDLES.saturating_sub(self.decoded.get()).min(filters::LARGEST_DECODED); // WHAT: what this stream may still decode to. WHY: its own limit, and what is left of the document's.
+        let data = filters::decode_within(stream, left).ok()?; // WHAT: decoded within that. WHY: past it, the stream reads as missing, like any damaged one.
+        self.decoded.set(self.decoded.get() + data.len()); // WHAT: added to the total. WHY: the next stream gets what is left.
         let count = stream.dict.get("N").and_then(|o| o.as_i64()).unwrap_or(0).max(0) as usize;
         let first = stream
             .dict
@@ -472,6 +494,24 @@ mod tests {
             ],
             1,
         ))
+    }
+
+    #[test]
+    fn a_file_of_wrong_offsets_is_searched_a_limited_number_of_times() {
+        // WHAT: a page tree naming two thousand pages, every one listed at the catalog's offset, none really there. WHY: each wrong offset searched the whole file, so the file read itself once per object.
+        let count = 2000; // WHAT: how many missing pages. WHY: far more than the limit, few enough that the unlimited reader still finishes.
+        let kids: String = (0..count).map(|n| format!("{} 0 R ", n + 3)).collect(); // WHAT: references to them all. WHY: the walk asks for each.
+        let mut file = build(&[("catalog", "<</Type/Catalog/Pages 2 0 R>>"), ("pages", &format!("<</Type/Pages/Kids[{kids}]/Count {count}>>"))], 1); // WHAT: the two real objects. WHY: the rest are missing.
+        let first = file.windows(5).position(|w| w == b"xref\n").expect("the first table"); // WHAT: where the first table is. WHY: the second points back to it.
+        let table = file.len(); // WHAT: a second table, added after. WHY: it lists the missing ones, all at the catalog's offset.
+        file.extend_from_slice(format!("xref\n3 {count}\n").as_bytes());
+        for _ in 0..count {
+            file.extend_from_slice(b"0000000009 00000 n \n"); // WHAT: the catalog's offset, for every one. WHY: the object there is not the one asked for, so each is hunted.
+        }
+        file.extend_from_slice(format!("trailer\n<</Size {}/Root 1 0 R/Prev {first}>>\nstartxref\n{table}\n%%EOF\n", count + 3).as_bytes());
+        let doc = Document::from_bytes(file); // WHAT: opened. WHY: as an upload is.
+        let _ = doc.page_count(); // WHAT: the page tree walked. WHY: what reads every page.
+        assert!(doc.hunts.get() <= MOST_HUNTS, "searched the whole file {} times", doc.hunts.get());
     }
 
     #[test]

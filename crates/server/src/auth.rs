@@ -43,6 +43,17 @@ pub fn password_matches(password: &str, stored: &str) -> bool {
         .is_ok()
 }
 
+/// A stored password nobody has, checked against when an account does not
+/// exist so that the answer takes as long as a wrong password on a real one.
+pub fn no_such_account() -> &'static str {
+    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new(); // WHAT: made once. WHY: hashing is slow on purpose.
+    HASH.get_or_init(|| {
+        let mut random = [0u8; 32]; // WHAT: random bytes. WHY: a password nobody could type.
+        rand::Rng::fill(&mut rand::thread_rng(), &mut random); // WHAT: filled. WHY: as above.
+        hash_password(&hex(&random)).unwrap_or_default() // WHAT: its hash, with the same settings as every real one. WHY: the check costs the same.
+    })
+}
+
 /// A new session token: what the client keeps, and what the server stores.
 ///
 /// They are not the same. The server keeps only the hash, so somebody who

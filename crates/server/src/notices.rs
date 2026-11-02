@@ -42,7 +42,33 @@ pub fn acceptable(url: &str) -> Result<(), String> {
     if !scheme_ok || url.len() > 2000 || url.contains(char::is_whitespace) {
         return Err("A notice address is a web address, starting http:// or https://.".into());
     }
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or_default(); // WHAT: what follows the scheme. WHY: the host is in it.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default(); // WHAT: host and port. WHY: checked below.
+    if authority.contains('@') {
+        return Err("A notice address carries no name or password before its host.".into()); // WHAT: user:password@ refused. WHY: a secret has no place in an address kept and shown in the Studio, and the form hides where it really goes.
+    }
+    let host = authority.trim_start_matches('[').split(']').next().unwrap_or_default(); // WHAT: an IPv6 host without its brackets. WHY: parsed as an address below.
+    let host = if authority.starts_with('[') { host } else { authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority) }; // WHAT: the host without its port. WHY: the same.
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if never_a_notice(ip) {
+            return Err("That address is never another program's: link-local and 'any' addresses, where a cloud machine keeps its own secrets, are refused.".into()); // WHAT: refused. WHY: an administrator's session, or a stolen one, must not point the server at its own cloud metadata.
+        }
+    }
     hub::web::outbound("Sending change notices", url)
+}
+
+/// Addresses a notice is never sent to: link-local (169.254.0.0/16, where a
+/// cloud machine answers with its own credentials, and fe80::/10), the
+/// "any" address, multicast and broadcast. The office's own network and this
+/// machine stay allowed: that is where FabWire lives.
+fn never_a_notice(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_link_local() || v4.is_unspecified() || v4.is_multicast() || v4.is_broadcast(), // WHAT: the IPv4 ones. WHY: as above.
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => never_a_notice(std::net::IpAddr::V4(v4)), // WHAT: an IPv4 address written as IPv6. WHY: judged as itself.
+            None => v6.is_unspecified() || v6.is_multicast() || (v6.segments()[0] & 0xffc0) == 0xfe80, // WHAT: the IPv6 ones. WHY: as above.
+        },
+    }
 }
 
 /// A new secret: 32 random bytes, as hex.
@@ -160,7 +186,7 @@ fn deliver(url: &str, secret: &str, event: &str, body: &str) -> String {
     if let Err(why) = hub::web::outbound("Sending change notices", url) {
         return why;
     }
-    let agent = hub::web::agent().timeout(Duration::from_secs(15)).build();
+    let agent = hub::web::agent().timeout(Duration::from_secs(15)).redirects(0).build(); // WHAT: no redirects followed. WHY: a notice goes to the address an administrator gave, never to one an answer names.
     let signature = format!("sha256={}", sign(secret, body.as_bytes()));
     let mut last = String::new();
     for attempt in 0..=AGAIN_AFTER.len() {
@@ -218,5 +244,22 @@ mod tests {
         assert!(super::acceptable("ftp://example.com").is_err());
         assert!(super::acceptable("file:///etc/passwd").is_err());
         assert!(super::acceptable("https://example.com/a b").is_err());
+    }
+
+    #[test]
+    fn a_notice_is_never_sent_where_a_cloud_machine_keeps_its_secrets() {
+        for refused in [
+            "http://169.254.169.254/latest/meta-data/", // WHAT: the cloud metadata address. WHY: it answers with the machine's own credentials.
+            "http://169.254.169.254:80/x",
+            "http://[fe80::1]/x",
+            "http://[::ffff:169.254.169.254]/x",
+            "http://0.0.0.0:8080/x",
+            "https://user:secret@fabwire.example.lan/hooks",
+        ] {
+            assert!(super::acceptable(refused).is_err(), "{refused} was taken");
+        }
+        for allowed in ["http://10.0.0.7:8080/notice", "http://127.0.0.1:5000/hook", "https://[2001:db8::1]/x", "https://fabwire.example.lan/hooks/excalibur"] {
+            assert!(super::acceptable(allowed).is_ok(), "{allowed} was refused"); // WHAT: the office's own network and this machine. WHY: where the programs a notice is for live.
+        }
     }
 }
