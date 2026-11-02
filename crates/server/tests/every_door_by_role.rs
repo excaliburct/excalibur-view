@@ -32,18 +32,20 @@ enum Knock {
     Admin,            // WHAT: an administrator signed in. WHY: the one who runs the server.
     Integration,      // WHAT: an administrator's key for another program. WHY: never carries the administrator's power.
     DemotedProgram,   // WHAT: a program key whose maker is now an estimator. WHY: acts with its maker's role as it is now.
+    ViewerProgram,    // WHAT: a program key whose maker is now a viewer. WHY: reads, and changes nothing, as its maker may now.
     Sync,             // WHAT: a sync key. WHY: its own short list of routes and nothing else.
     Assistant,        // WHAT: an assistant key. WHY: the assistant's door only, never the API.
     Expired,          // WHAT: a program key past its end. WHY: answered exactly as no key.
 }
 
-const EVERYBODY: [Knock; 9] = [
+const EVERYBODY: [Knock; 10] = [
     Knock::Nobody,
     Knock::Viewer,
     Knock::Estimator,
     Knock::Admin,
     Knock::Integration,
     Knock::DemotedProgram,
+    Knock::ViewerProgram,
     Knock::Sync,
     Knock::Assistant,
     Knock::Expired,
@@ -161,7 +163,7 @@ fn let_in(route: &Route, knock: Knock) -> bool {
         Door::Public => true, // WHAT: anybody. WHY: a token is not needed, and one that is no good is not looked at.
         Door::Signed => matches!(
             knock,
-            Knock::Viewer | Knock::Estimator | Knock::Admin | Knock::Integration | Knock::DemotedProgram
+            Knock::Viewer | Knock::Estimator | Knock::Admin | Knock::Integration | Knock::DemotedProgram | Knock::ViewerProgram
         ), // WHAT: a person or a program's key. WHY: reading; an assistant key is for /mcp only, and a key run out is nobody.
         Door::Writer => matches!(knock, Knock::Estimator | Knock::Admin | Knock::Integration | Knock::DemotedProgram), // WHAT: anybody who may change drawings. WHY: a viewer reads only.
         Door::Person => matches!(knock, Knock::Viewer | Knock::Estimator | Knock::Admin), // WHAT: a person signed in. WHY: a key can't make keys, change a password or sign out.
@@ -287,6 +289,7 @@ fn token_for(office: &Office, knock: Knock) -> Option<String> {
         Knock::Admin => Some(session(office, ADMIN)),
         Knock::Integration => Some(key(office, ADMIN, "integration", None).0),
         Knock::DemotedProgram => Some(key(office, ESTIMATOR, "integration", None).0), // WHAT: an integration key standing for one whose maker was made an estimator. WHY: it must act as an estimator now.
+        Knock::ViewerProgram => Some(key(office, VIEWER, "integration", None).0), // WHAT: an integration key whose maker was made a viewer. WHY: it must read and change nothing, as a viewer does.
         Knock::Sync => Some(key(office, ADMIN, "sync", None).0),
         Knock::Assistant => Some(key(office, ADMIN, "assistant", None).0),
         Knock::Expired => Some(key(office, ADMIN, "integration", Some("2020-01-01T00:00:00Z")).0),
@@ -477,7 +480,7 @@ fn every_route_lets_in_exactly_the_callers_its_door_is_for() {
             let refused = status == 401 || status == 403; // WHAT: turned away. WHY: what a door says when it holds.
             let expected = let_in(route, knock); // WHAT: what the table says. WHY: compared.
             // WHAT: a key that asks to sign out is told so with 400, which lets nothing happen. WHY: it is not a session, and the route says why rather than refusing.
-            let key_told_off = route.path == "/signout" && matches!(knock, Knock::Integration | Knock::DemotedProgram) && status == 400;
+            let key_told_off = route.path == "/signout" && matches!(knock, Knock::Integration | Knock::DemotedProgram | Knock::ViewerProgram) && status == 400;
             if refused == expected && !key_told_off {
                 wrong.push(format!(
                     "{} {} as {knock:?}: {status} ({}) {said}",
@@ -503,7 +506,7 @@ fn the_assistant_door_is_for_people_assistants_and_programs_never_sync_keys() {
         assert_eq!(status, 200, "{knock:?}: {said}"); // WHAT: the protocol answers 200. WHY: a refusal is inside the answer.
         let answer: Value = serde_json::from_str(&said).unwrap(); // WHAT: the JSON-RPC answer. WHY: read.
         let turned_away = answer.get("error").is_some(); // WHAT: refused. WHY: how /mcp says no.
-        let should = matches!(knock, Knock::Viewer | Knock::Estimator | Knock::Admin | Knock::Integration | Knock::DemotedProgram | Knock::Assistant); // WHAT: who the door is for. WHY: an assistant's key works here and only here; a sync key never.
+        let should = matches!(knock, Knock::Viewer | Knock::Estimator | Knock::Admin | Knock::Integration | Knock::DemotedProgram | Knock::ViewerProgram | Knock::Assistant); // WHAT: who the door is for. WHY: an assistant's key works here and only here; a sync key never.
         assert_eq!(!turned_away, should, "{knock:?} at /mcp: {said}");
     }
 }

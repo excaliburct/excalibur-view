@@ -46,6 +46,10 @@ impl Node {
     }
 }
 
+/// The deepest an element may sit inside others. Revu profiles and tool
+/// sets nest a handful deep.
+pub const DEEPEST: usize = 256; // WHAT: 256 levels. WHY: far past any real file, far short of the stack.
+
 pub fn parse(bytes: &[u8]) -> Option<Node> {
     // Strip a byte order mark; these files all have one.
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
@@ -58,7 +62,12 @@ pub fn parse(bytes: &[u8]) -> Option<Node> {
     let mut buffer = Vec::new();
     loop {
         match reader.read_event_into(&mut buffer) {
-            Ok(Event::Start(e)) => stack.push(open(&e)),
+            Ok(Event::Start(e)) => {
+                if stack.len() >= DEEPEST {
+                    return None; // WHAT: a file nested past any real one is not a tool chest. WHY: the tree is searched and let go one level per call, so its depth must not be the file's to choose.
+                }
+                stack.push(open(&e)) // WHAT: one level deeper. WHY: closed by its end tag.
+            }
             Ok(Event::Empty(e)) => {
                 let node = open(&e);
                 match stack.last_mut() {
@@ -130,6 +139,26 @@ fn open(e: &quick_xml::events::BytesStart) -> Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_chest_nested_past_any_real_one_is_refused_and_the_reader_lives() {
+        // WHAT: elements a hundred thousand deep, read, searched and let go on a thread with a small stack. WHY: the tree was searched and dropped one level per call, so a tool chest shared to the office ran the server and every seat that fetched it out of stack.
+        let deep = format!("<BluebeamRevuToolSet>{}{}</BluebeamRevuToolSet>", "<a>".repeat(100_000), "</a>".repeat(100_000));
+        let lived = std::thread::Builder::new()
+            .stack_size(512 * 1024) // WHAT: half a megabyte. WHY: less than any real thread has, so an unlimited reader fails here first.
+            .spawn(move || {
+                let read = parse(deep.as_bytes()); // WHAT: read. WHY: must come back.
+                let mut found = Vec::new(); // WHAT: what a search finds. WHY: profiles and tool sets search the whole tree.
+                if let Some(root) = &read {
+                    root.find_all("Column", &mut found); // WHAT: searched as a profile is. WHY: the search went one level per call.
+                }
+                read.is_none() // WHAT: whether it was refused. WHY: checked below.
+            })
+            .unwrap()
+            .join(); // WHAT: the thread finished. WHY: a stack overflow ends the whole test process instead.
+        assert_eq!(lived.ok(), Some(true), "too deep is refused, and the reader lived");
+        assert!(parse(b"<a><b><c><d/></c></b></a>").is_some(), "ordinary nesting still reads");
+    }
 
     #[test]
     fn a_nested_document_reads_into_a_tree() {

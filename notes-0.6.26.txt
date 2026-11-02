@@ -59,9 +59,33 @@ the drawings folder; a file named like a Windows device (NUL.docx, COM1.txt)
 is saved under a name that is a file; and help files, Excel add-ins, disk
 images and app packages join the kinds Open with its program never opens.
 
+A second check of these fixes closed what they left open. On a server
+taking nobody without an invitation, invitations could still be guessed at
+without limit; they are counted now like a join code. A guesser on IPv6 is
+counted by its whole network (its /64), so taking a new address per guess
+no longer gives it new tries, and a real account's count can't be pushed
+out of the server's memory by a flood of other names. A change notice is
+checked against what its address really points at when it is sent, so an
+address written as a number or a name made to point at the cloud's secret
+address is refused too. A key's name with a line break in it is refused.
+On Windows, whoever made a file in the service's folder before it was
+locked no longer keeps a way back in: the folder's own permissions are
+cleared, everything in it inherits from it alone, administrators own all of
+it, and a DLL left beside the program is taken away; the installer does
+this before the service is put in place. Takeoff, cut list and model
+spreadsheets write anything that looks like a formula as text, as the audit
+log's already did. A drawing listing a few hundred thousand missing pages, a
+stream naming thousands of filters, a tool chest nested a hundred thousand
+deep, a formula column naming itself over and over, and a cut list of
+dozens of shapes each just under the nesting limit each have a limit now.
+A tool chest or plugin the server names like a Windows device (NUL, CON,
+COM1) is kept as a file, and an update or license signature that isn't
+plain text is refused rather than closing the program.
+
 A test now knocks on every door of the server as everybody who could: no
-one, a viewer, an estimator, an administrator, a program's key, a sync key,
-an assistant's key and a key that has run out. A door that lets in the wrong
+one, a viewer, an estimator, an administrator, a program's key (including
+one whose maker is now a viewer), a sync key, an assistant's key and a key
+that has run out. A door that lets in the wrong
 one, or a new door nobody has said who it is for, fails the build.
 
 This carries 0.6.25 with it.

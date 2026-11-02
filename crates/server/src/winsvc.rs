@@ -94,6 +94,7 @@ pub fn standing() -> Standing {
 pub fn install() -> Result<(), String> {
     let home = home();
     std::fs::create_dir_all(&home).map_err(|e| format!("could not make {}: {e}", home.display()))?;
+    crate::lockdown::lock_down(&home); // WHAT: the folder made the system's and administrators' only, and any DLL beside the program taken away, before the program is put there or started. WHY: the service loads a DLL beside it before its own code runs, so doing this only when it starts was too late for one left there already.
 
     let manager = ServiceManager::local_computer(
         None::<&str>,

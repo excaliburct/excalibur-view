@@ -1616,7 +1616,8 @@ pub fn platform() -> &'static str {
 
 /// Makes a name safe to be part of a filename.
 pub(crate) fn safe(name: &str) -> String {
-    name.chars()
+    let kept = name
+        .chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' {
                 c
@@ -1627,7 +1628,8 @@ pub(crate) fn safe(name: &str) -> String {
         .take(60)
         .collect::<String>()
         .trim()
-        .to_string()
+        .to_string(); // WHAT: letters, digits, dashes, underscores and spaces, sixty at most. WHY: nothing a path reads as a folder, a drive or a stream.
+    crate::openwith::not_a_device(kept) // WHAT: a Windows device's name (`NUL`, `CON`, `COM1`) given `_` in front. WHY: a tool chest or plugin the server names `NUL` was otherwise written to a device, not a file.
 }
 
 /// What the window remembers about a server between sessions.
@@ -1729,6 +1731,15 @@ mod tests {
     fn a_very_long_name_is_cut_rather_than_refused() {
         let long = "W".repeat(500);
         assert!(safe(&long).len() <= 60);
+
+    }
+
+    #[test]
+    fn a_tool_chest_or_plugin_named_like_a_windows_device_is_kept_as_a_file() {
+        for device in ["NUL", "con", "COM1", "Lpt9", "aux", "PRN", "com\u{b9}"] {
+            assert!(safe(device).starts_with('_'), "{device} -> {}", safe(device)); // WHAT: a device's name made a file's. WHY: a tool chest the server names `NUL` was written to the null device on Windows, and `CON` to the console.
+        }
+        assert_eq!(safe("Connections"), "Connections", "a name that only starts like one is left alone");
     }
 
     #[test]

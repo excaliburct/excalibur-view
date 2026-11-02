@@ -43,6 +43,7 @@ pub fn safe_name(name: &str) -> String {
 /// The names Windows keeps for devices, whatever comes after a dot.
 const DEVICES: &[&str] = &[
     "con", "prn", "aux", "nul", "conin$", "conout$", "com0", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    "com\u{b9}", "com\u{b2}", "com\u{b3}", "lpt\u{b9}", "lpt\u{b2}", "lpt\u{b3}", // WHAT: COM and LPT with a superscript 1, 2 or 3. WHY: Windows keeps these for devices too, and they are letters and digits to every filter here.
 ]; // WHAT: the device names. WHY: writing to `CON.docx` on Windows 10 writes to the console, `NUL.xlsx` to nowhere, `COM1.txt` to a serial port.
 
 /// A name that is a Windows device's, with `_` put in front so it is a file.
@@ -179,7 +180,7 @@ mod tests {
 
     #[test]
     fn a_name_windows_keeps_for_a_device_is_saved_as_a_file_instead() {
-        for device in ["NUL.docx", "con.xlsx", "COM1.txt", "lpt9", "Aux.tar.gz", "nul .pdf"] {
+        for device in ["NUL.docx", "con.xlsx", "COM1.txt", "lpt9", "Aux.tar.gz", "nul .pdf", "COM\u{b9}.txt", "lpt\u{b3}"] {
             let saved = super::safe_name(device); // WHAT: the name the copy gets. WHY: checked.
             assert!(saved.starts_with('_'), "{device} saved as {saved}");
         }

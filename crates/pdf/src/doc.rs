@@ -45,6 +45,10 @@ pub const LARGEST_BUNDLES: usize = 1024 * 1024 * 1024; // WHAT: 1 GiB. WHY: many
 /// otherwise reads itself a hundred thousand times.
 pub const MOST_HUNTS: usize = 64; // WHAT: sixty-four searches. WHY: enough for a file with a few bad offsets, which is the case this is for.
 
+/// The most page tree nodes one document's walk visits, pages and the nodes
+/// above them, found or not.
+pub const MOST_NODES: usize = 400_000; // WHAT: four hundred thousand. WHY: twice the most pages ever kept; a tree naming millions of missing kids is walked no further.
+
 /// A decoded object stream and the offsets of the objects packed into it.
 struct Bundle {
     data: Vec<u8>,
@@ -333,7 +337,7 @@ impl Document {
         let mut found = Vec::new();
         let catalog = self.catalog();
         if let Some(root) = catalog.get("Pages").and_then(|o| o.as_ref()) {
-            let mut seen = Vec::new();
+            let mut seen = std::collections::HashSet::new(); // WHAT: the nodes already walked. WHY: asked once per node; a list was searched end to end each time, which made a wide tree take the square of its width.
             self.walk(root, &mut found, &mut seen, 0);
         }
         if found.is_empty() {
@@ -358,11 +362,10 @@ impl Document {
         pages
     }
 
-    fn walk(&self, node: Ref, out: &mut Vec<Ref>, seen: &mut Vec<Ref>, depth: usize) {
-        if depth > 64 || seen.contains(&node) || out.len() > 200_000 {
-            return;
+    fn walk(&self, node: Ref, out: &mut Vec<Ref>, seen: &mut std::collections::HashSet<Ref>, depth: usize) {
+        if depth > 64 || out.len() > 200_000 || seen.len() >= MOST_NODES || !seen.insert(node) {
+            return; // WHAT: too deep, enough pages, enough nodes, or one walked already. WHY: a loop or a tree of nothing must end, and quickly.
         }
-        seen.push(node);
         let object = self.get(node);
         let Some(dict) = object.as_dict() else { return };
         let kids = self.at(dict, "Kids");
@@ -512,6 +515,17 @@ mod tests {
         let doc = Document::from_bytes(file); // WHAT: opened. WHY: as an upload is.
         let _ = doc.page_count(); // WHAT: the page tree walked. WHY: what reads every page.
         assert!(doc.hunts.get() <= MOST_HUNTS, "searched the whole file {} times", doc.hunts.get());
+    }
+
+    #[test]
+    fn a_page_tree_of_a_great_many_missing_kids_is_walked_in_a_moment() {
+        // WHAT: one page tree node listing three hundred thousand pages that aren't there. WHY: each was checked against every one seen before it, so the walk took the square of the count, from two megabytes of file.
+        let count = 300_000u32; // WHAT: how many. WHY: far past any drawing set; quadratic, it takes minutes.
+        let kids: String = (0..count).map(|n| format!("{} 0 R ", n + 10)).collect(); // WHAT: references to objects that don't exist. WHY: none costs a byte of object.
+        let doc = Document::from_bytes(build(&[("catalog", "<</Type/Catalog/Pages 2 0 R>>"), ("pages", &format!("<</Type/Pages/Kids[{kids}]/Count {count}>>"))], 1)); // WHAT: opened. WHY: as an upload is.
+        let started = std::time::Instant::now(); // WHAT: now. WHY: timed.
+        assert_eq!(doc.page_count(), 0, "none of them is a page");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "walking the tree took {:?}", started.elapsed());
     }
 
     #[test]

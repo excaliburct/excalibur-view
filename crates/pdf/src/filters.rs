@@ -92,8 +92,15 @@ pub fn decode_to(stream: &Stream) -> std::result::Result<(Vec<u8>, Vec<String>),
     decode_to_within(stream, LARGEST_DECODED) // WHAT: to the usual limit. WHY: as `decode`.
 }
 
+/// The most filters one stream may name. Real files name one, now and then
+/// two or three.
+pub const LONGEST_CHAIN: usize = 8; // WHAT: eight. WHY: well past any real file; each filter is a pass over the whole stream, so the file must not choose how many.
+
 fn decode_to_within(stream: &Stream, limit: usize) -> std::result::Result<(Vec<u8>, Vec<String>), Trouble> {
     let names = filter_names(&stream.dict);
+    if names.len() > LONGEST_CHAIN {
+        return Err(Trouble::Corrupt(format!("a stream names {} filters, which no drawing does", names.len()))); // WHAT: refused as damage before any is run. WHY: forty thousand filters over a few megabytes was a hundred gigabytes of copying.
+    }
     let parms = decode_parms(&stream.dict, names.len());
     let mut data = stream.data.clone();
     for (i, name) in names.iter().enumerate() {
@@ -489,6 +496,19 @@ mod tests {
         let lzw = stream(dict! {"Filter" => Object::name("LZWDecode")}, lzw_bytes);
         assert!(decode_within(&lzw, 1000).is_err());
         assert_eq!(decode_within(&lzw, big.len()).unwrap().len(), big.len());
+    }
+
+    #[test]
+    fn a_chain_of_filters_longer_than_any_real_one_is_refused_before_it_is_run() {
+        // WHAT: four megabytes put through forty thousand Crypt filters. WHY: each one copied the whole stream, so a few hundred kilobytes of names made the reader copy 160 GB.
+        let names: Vec<Object> = (0..40_000).map(|_| Object::name("Crypt")).collect();
+        let s = stream(dict! {"Filter" => Object::Array(names)}, vec![7u8; 4 * 1024 * 1024]);
+        let started = std::time::Instant::now(); // WHAT: now. WHY: the refusal must be at once.
+        assert!(decode(&s).is_err(), "a chain of forty thousand filters was run");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "took {:?}", started.elapsed());
+        let hexed: String = deflate(b"hello").iter().map(|b| format!("{b:02x}")).collect(); // WHAT: "hello", deflated, written as hex. WHY: a real two-filter chain.
+        let ordinary = stream(dict! {"Filter" => Object::Array(vec![Object::name("ASCIIHexDecode"), Object::name("FlateDecode")])}, format!("{hexed}>").into_bytes()); // WHAT: the chain. WHY: still read.
+        assert_eq!(decode(&ordinary).unwrap(), b"hello", "an ordinary chain still reads");
     }
 
     #[test]

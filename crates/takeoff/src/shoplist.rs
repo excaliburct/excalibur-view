@@ -227,10 +227,13 @@ pub const MOST_PLACES_EACH: usize = 1000; // WHAT: a thousand. WHY: past any rea
 /// shape is not nested and says so (`Nest::unnested`).
 pub const MOST_NESTED: usize = 20_000; // WHAT: twenty thousand pieces. WHY: more than a job's whole schedule of one shape, few enough to nest in a moment.
 
+/// One markup's pieces on a cut list: its cut length, how many pieces it
+/// stands for, its sheet and its grid place.
+type Entry = (f64, usize, usize, String); // WHAT: (length, how many, sheet, place). WHY: named, so the map that holds them reads plainly.
+
 pub fn build(rows: &[Row], weights: WeightColumns, step: f64) -> ShopList {
     // WHAT: each shape's cuts as (length, how many, sheet, place). WHY: a markup standing for several is kept as one entry with its count, never one entry per piece: a markup claiming a billion pieces used to ask for a billion entries and close the program.
-    let mut shapes: BTreeMap<String, (Vec<(f64, usize, usize, String)>, Option<f64>)> =
-        BTreeMap::new();
+    let mut shapes: BTreeMap<String, (Vec<Entry>, Option<f64>)> = BTreeMap::new(); // WHAT: each shape's entries and its unit weight. WHY: gathered below.
     let mut out = ShopList::default();
 
     for row in rows {
@@ -492,8 +495,31 @@ pub fn nest(shape: &Shape, stock: f64, kerf: f64) -> Nest {
 /// case: one length for the lot. The app hands a length per shape when
 /// somebody has set one.
 pub fn nest_all(list: &ShopList, stock: f64, kerf: f64) -> Vec<Nest> {
-    list.shapes.iter().map(|s| nest(s, stock, kerf)).collect()
+    let mut left = MOST_NESTED_IN_ALL; // WHAT: how many pieces the whole list may still have nested. WHY: the limit per shape alone left sixty shapes of twenty thousand, minutes of work.
+    list.shapes
+        .iter()
+        .map(|shape| {
+            if shape.pieces > left {
+                return Nest {
+                    shape: shape.name.clone(), // WHAT: the shape's name. WHY: answered for, with nothing tried.
+                    stock,
+                    kerf: kerf.max(0.0),
+                    sticks: Vec::new(),
+                    too_long: Vec::new(),
+                    bought: 0.0,
+                    used: 0.0,
+                    waste: 0.0,
+                    unnested: shape.pieces, // WHAT: all of its pieces, said to be left out. WHY: never hidden, as for one shape too big to nest.
+                };
+            }
+            left -= shape.pieces; // WHAT: this shape's pieces taken off what is left. WHY: the next shapes get the rest.
+            nest(shape, stock, kerf) // WHAT: nested one by one. WHY: within the whole list's budget.
+        })
+        .collect()
 }
+
+/// The most pieces one list has nested one by one, all its shapes together.
+pub const MOST_NESTED_IN_ALL: usize = 50_000; // WHAT: fifty thousand. WHY: more than a whole job's members; past it the remaining shapes are said to be un-nested rather than worked through for minutes.
 
 /// What somebody has told the program about how they buy steel and cut it.
 ///
@@ -535,11 +561,7 @@ impl Buying {
 // ---- writing it out ---------------------------------------------------------
 
 fn quote(field: &str) -> String {
-    if field.contains(',') || field.contains('"') || field.contains('\n') {
-        format!("\"{}\"", field.replace('"', "\"\""))
-    } else {
-        field.to_string()
-    }
+    crate::export::csv_cell(field) // WHAT: quoted, and a formula written as text. WHY: a subject, a shape or a place is whatever somebody typed, and a spreadsheet must not run it.
 }
 
 /// The cut list as a spreadsheet: one line per cutting length.
@@ -899,6 +921,25 @@ mod tests {
         assert_eq!(nest.unnested, 1_000_000_000);
         assert!(!nest.is_whole(), "a shape left un-nested is not a whole nesting");
         assert!(nest.sticks.is_empty() && nest.too_long.is_empty());
+    }
+
+    #[test]
+    fn many_shapes_each_just_under_the_limit_are_not_all_nested_one_by_one() {
+        // WHAT: sixty shapes, each twenty thousand pieces just over half a stick long. WHY: each piece then needs a stick of its own and is tried against every stick before it; the limit per shape left sixty of those, minutes of work, for anybody who can draw sixty markups.
+        let rows: Vec<Row> = (0..60)
+            .map(|n| {
+                let mut row = a_row(&format!("W{n}x26"), 24.0, 0, Some(26.0)); // WHAT: a beam of its own shape. WHY: one shape each.
+                row.quantity = MOST_NESTED as f64; // WHAT: as many as one shape may have nested. WHY: the most each is allowed.
+                row // WHAT: the beam. WHY: one per shape.
+            })
+            .collect();
+        let list = build(&rows, crate::WeightColumns::default(), INCH); // WHAT: the cut list. WHY: what is nested.
+        let started = std::time::Instant::now(); // WHAT: now. WHY: timed.
+        let nests = nest_all(&list, 40.0, INCH / 8.0); // WHAT: every shape nested. WHY: what the server's assistant and the shop window do.
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "nesting took {:?}", started.elapsed());
+        assert_eq!(nests.len(), 60, "every shape is still answered for");
+        assert!(nests.iter().any(|n| n.unnested > 0), "some shapes are said to be left un-nested");
+        assert!(nests.iter().map(|n| n.unnested).sum::<usize>() + nests.iter().map(|n| n.sticks.iter().map(|s| s.pieces.len()).sum::<usize>()).sum::<usize>() == list.pieces, "every piece is either nested or said not to be");
     }
 
     // ---- writing it out ---------------------------------------------------

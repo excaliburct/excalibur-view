@@ -68,6 +68,7 @@ pub const JOINING: Rule = Rule {
 struct Wrong {
     times: u32,
     last: Instant,
+    kept: bool, // WHAT: whether this is a real account's count. WHY: those are never forgotten to make room, so no flood of other names can wipe the wait on an account being guessed at.
 }
 
 /// The counts, and the lock around them.
@@ -114,6 +115,17 @@ impl Patience {
     ///
     /// [`right`]: Patience::right
     pub fn begin(&self, rule: Rule, who: &[&str]) -> Result<(), Duration> {
+        self.begin_keeping(rule, who, &[]) // WHAT: nothing in `who` is a real account. WHY: every count may be forgotten to make room.
+    }
+
+    /// [`begin`], with the names in `keep` (real accounts) counted so that
+    /// they are never forgotten to make room. A real account's count is
+    /// bounded by the number of people on the server, so keeping it costs
+    /// nothing a stranger can grow; letting it be pushed out handed whoever
+    /// filled the ledger five fresh guesses at it every time.
+    ///
+    /// [`begin`]: Patience::begin
+    pub fn begin_keeping(&self, rule: Rule, who: &[&str], keep: &[&str]) -> Result<(), Duration> {
         let Ok(mut held) = self.wrong.lock() else {
             return Ok(()); // WHAT: a poisoned lock lets the try through uncounted. WHY: the same as `wait_for` did; a panic elsewhere must not lock the whole office out.
         };
@@ -126,7 +138,7 @@ impl Patience {
             return Err(owed); // WHAT: refused, and not counted again. WHY: a refused try checks nothing, so it is not a guess.
         }
         for one in who.iter().filter(|one| !one.is_empty()) {
-            count_wrong(&mut held, one); // WHAT: counted as wrong before it is checked. WHY: the next try, however soon, sees it.
+            count_wrong(&mut held, one, keep.contains(one)); // WHAT: counted as wrong before it is checked, kept for good when it is a real account. WHY: the next try, however soon, sees it.
         }
         Ok(())
     }
@@ -137,7 +149,7 @@ impl Patience {
             return;
         }
         let Ok(mut held) = self.wrong.lock() else { return };
-        count_wrong(&mut held, who); // WHAT: one more wrong. WHY: the same counting `begin` does.
+        count_wrong(&mut held, who, false); // WHAT: one more wrong. WHY: the same counting `begin` does.
     }
 
     /// That was right. Forget everything about them.
@@ -168,13 +180,14 @@ fn owed_by(rule: Rule, seen: &Wrong) -> Option<Duration> {
 }
 
 /// Counts one wrong answer against `who`, making room first when full.
-fn count_wrong(held: &mut HashMap<String, Wrong>, who: &str) {
+fn count_wrong(held: &mut HashMap<String, Wrong>, who: &str, kept: bool) {
     if held.len() >= MOST_KEPT && !held.contains_key(who) {
         forget_the_least_guessed_at(held); // WHAT: room made. WHY: the map never grows past its size.
     }
-    let seen = held.entry(who.to_string()).or_insert(Wrong { times: 0, last: Instant::now() }); // WHAT: this one's count, new or kept. WHY: added to.
+    let seen = held.entry(who.to_string()).or_insert(Wrong { times: 0, last: Instant::now(), kept }); // WHAT: this one's count, new or kept. WHY: added to.
     seen.times = seen.times.saturating_add(1); // WHAT: one more. WHY: counted.
     seen.last = Instant::now(); // WHAT: when. WHY: the wait runs from the last wrong one.
+    seen.kept |= kept; // WHAT: once a real account, always kept. WHY: a later count of the same name must not make it forgettable again.
 }
 
 /// The wait owed once the free ones are spent: the first wait, then double
@@ -195,11 +208,30 @@ fn penalty(rule: Rule, spent: u32) -> Duration {
 /// each must not be able to push it out and give the guesser five free tries
 /// again. Oldest first did exactly that.
 fn forget_the_least_guessed_at(held: &mut HashMap<String, Wrong>) {
-    let mut least: Vec<(u32, Instant, String)> =
-        held.iter().map(|(k, v)| (v.times, v.last, k.clone())).collect(); // WHAT: each entry's count, age and name. WHY: sorted below.
+    let only_kept = held.values().all(|v| v.kept); // WHAT: whether every entry is a real account. WHY: then one of them has to go, or the map would grow past its size.
+    let mut least: Vec<(u32, Instant, String)> = held
+        .iter()
+        .filter(|(_, v)| only_kept || !v.kept)
+        .map(|(k, v)| (v.times, v.last, k.clone()))
+        .collect(); // WHAT: each forgettable entry's count, age and name; a real account's count is never among them. WHY: made-up names and addresses with more wrong tries than the account could otherwise push it out.
     least.sort_by_key(|(times, when, _)| (*times, *when)); // WHAT: fewest wrong first, then oldest. WHY: as said above.
     for (_, _, key) in least.into_iter().take(MOST_KEPT / 10) {
         held.remove(&key); // WHAT: forgotten. WHY: room for new ones.
+    }
+}
+
+/// The name an address is counted under. An IPv4 address is itself. An
+/// IPv6 address is its /64: one home, office or cloud machine is handed a
+/// whole /64 and can take a new address from it for every request, so
+/// counting the address alone let it make a new one per guess.
+pub fn counted_as(address: &str) -> String {
+    match address.parse::<std::net::IpAddr>().map(|ip| ip.to_canonical()) {
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let s = v6.segments(); // WHAT: its eight groups. WHY: the first four are the network.
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3]) // WHAT: the network it is on. WHY: what one caller can't step out of.
+        }
+        Ok(v4) => v4.to_string(), // WHAT: an IPv4 address, or one written as IPv6, as itself. WHY: one machine.
+        Err(_) => address.to_string(), // WHAT: not an address (empty, in a test). WHY: counted as it is, or not at all when empty.
     }
 }
 
@@ -352,6 +384,51 @@ mod tests {
         }
         assert!(p.wait_for(QUICK, "the-victim").is_some(), "the account still owes its wait after the flood");
         assert!(p.watching() <= MOST_KEPT, "and the ledger stayed its size: {}", p.watching());
+    }
+
+    #[test]
+    fn an_account_being_guessed_at_outlives_a_flood_of_names_guessed_at_more_often() {
+        let p = Patience::default(); // WHAT: a ledger. WHY: filled below.
+        for _ in 0..(QUICK.free + 1) {
+            let _ = p.begin_keeping(QUICK, &["the-victim@example.com"], &["the-victim@example.com"]); // WHAT: wrong tries at a real account. WHY: until it owes a wait.
+        }
+        assert!(p.wait_for(QUICK, "the-victim@example.com").is_some(), "the account owes a wait");
+        for n in 0..(MOST_KEPT * 2) {
+            for _ in 0..(QUICK.free + 5) {
+                p.wrong(&format!("made-up-{n}@example.com")); // WHAT: a made-up name with more wrong tries than the account. WHY: fewest-first alone forgot the account before these.
+            }
+        }
+        assert!(p.wait_for(QUICK, "the-victim@example.com").is_some(), "a real account's wait survives names guessed at more often than it");
+        assert!(p.watching() <= MOST_KEPT, "and the ledger stayed its size: {}", p.watching());
+    }
+
+    #[test]
+    fn a_ledger_of_nothing_but_real_accounts_still_keeps_its_size() {
+        let p = Patience::default(); // WHAT: a ledger. WHY: filled with kept names only.
+        for n in 0..(MOST_KEPT + 50) {
+            let name = format!("person-{n}@example.com"); // WHAT: a real account. WHY: kept.
+            let _ = p.begin_keeping(QUICK, &[name.as_str()], &[name.as_str()]); // WHAT: one wrong try. WHY: kept for good.
+        }
+        assert!(p.watching() <= MOST_KEPT, "held {}", p.watching());
+    }
+
+    #[test]
+    fn an_ipv6_caller_is_counted_by_its_64_and_cannot_step_out_of_it() {
+        assert_eq!(counted_as("2001:db8:1:2:aaaa::1"), counted_as("2001:db8:1:2:ffff:ffff:ffff:fffe"), "two addresses in one /64 are one caller");
+        assert_ne!(counted_as("2001:db8:1:2::1"), counted_as("2001:db8:1:3::1"), "the next /64 is somebody else");
+        assert_eq!(counted_as("2001:db8:1:2::1"), "2001:db8:1:2::/64");
+        assert_eq!(counted_as("203.0.113.9"), "203.0.113.9", "IPv4 is itself");
+        assert_eq!(counted_as("::ffff:203.0.113.9"), "203.0.113.9", "IPv4 written as IPv6 is the IPv4 address");
+        assert_eq!(counted_as(""), "", "nothing known stays nothing");
+        let p = Patience::default(); // WHAT: a ledger. WHY: a caller rotating through its /64.
+        let mut let_in = 0; // WHAT: how many guesses got through. WHY: the free ones and no more.
+        for n in 0..50u32 {
+            let address = counted_as(&format!("2001:db8:1:2::{n:x}")); // WHAT: a fresh address per guess. WHY: what an IPv6 caller can do for free.
+            if p.begin(QUICK, &[address.as_str()]).is_ok() {
+                let_in += 1; // WHAT: one more let in. WHY: counted.
+            }
+        }
+        assert_eq!(let_in, QUICK.free as usize, "a new address per guess got {let_in} guesses");
     }
 
     #[test]

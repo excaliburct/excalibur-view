@@ -2118,6 +2118,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "url",
  "wat",
  "windows-service",
 ]

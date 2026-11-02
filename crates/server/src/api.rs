@@ -751,28 +751,11 @@ async fn sign_in(
     let email = body.email.trim().to_lowercase();
     let from = seen_from(&headers);
 
-    // Asked before anything is looked up, so a refusal costs this server one
-    // lock and no database work. Counted against the account and against the
-    // address, because each catches what the other misses: one address
-    // working through a list of people, and one account guessed at from a
-    // hundred addresses.
-    // WHAT: asked and counted in one step: this try is counted as wrong before it is checked, and a right password clears it below. WHY: asked and counted apart, a burst sent together was all asked before any was counted.
-    if let Err(owed) = server
-        .patience
-        .begin(crate::patience::SIGNING_IN, &[email.as_str(), from.as_str()])
-    {
-        record(
-            &server,
-            crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email)
-                .saying("too many wrong tries")
-                .from(from.clone()),
-        );
-        return Err(Denied(
-            StatusCode::TOO_MANY_REQUESTS,
-            Problem::new("too_many", &crate::patience::refusal(owed)),
-        ));
-    }
-
+    // The account is looked up first (one indexed read, no password check),
+    // so that a real account's count can be kept for good. Counted against
+    // the account and against the address, because each catches what the
+    // other misses: one address working through a list of people, and one
+    // account guessed at from a hundred addresses.
     let session = server
         .store
         .with(|db| {
@@ -783,9 +766,28 @@ async fn sign_in(
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()?;
-            Ok(found)
+            Ok(found) // WHAT: the account, if there is one. WHY: decides whether its count is kept for good.
         })
         .map_err(|e| Denied::broke("look you up", e))?;
+
+    let counted = crate::patience::counted_as(&from); // WHAT: the address as it is counted: an IPv6 caller by its /64. WHY: a new address from the same /64 is the same caller.
+    let real: &[&str] = if session.is_some() { &[email.as_str()] } else { &[] }; // WHAT: the account, when there is one. WHY: a real account's count is never forgotten to make room.
+    // WHAT: asked and counted in one step: this try is counted as wrong before it is checked, and a right password clears it below. WHY: asked and counted apart, a burst sent together was all asked before any was counted.
+    if let Err(owed) = server
+        .patience
+        .begin_keeping(crate::patience::SIGNING_IN, &[email.as_str(), counted.as_str()], real)
+    {
+        record(
+            &server,
+            crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email)
+                .saying("too many wrong tries")
+                .from(from.clone()),
+        );
+        return Err(Denied(
+            StatusCode::TOO_MANY_REQUESTS,
+            Problem::new("too_many", crate::patience::refusal(owed)), // WHAT: the wait, in words. WHY: said to whoever is told to wait.
+        ));
+    }
 
     // The same answer whether the address is unknown or the password is wrong.
     // Telling somebody which one they got right is telling them half of it.
@@ -826,7 +828,7 @@ async fn sign_in(
 
     // Right. Whatever was held against them goes.
     server.patience.right(&email);
-    server.patience.right(&from);
+    server.patience.right(&counted); // WHAT: the address's count, as it was counted. WHY: the same name `begin` used.
 
     let (token, hashed) = auth::new_token();
     let issued = time::OffsetDateTime::now_utc();
@@ -907,9 +909,9 @@ async fn change_password(
     }
     let who = caller(&server, &headers)?; // WHAT: the signed-in person. WHY: only a session gets this far.
     let email = who.email.trim().to_lowercase(); // WHAT: the account, spelt the way sign-in counts it. WHY: wrong tries here and at sign-in add up against the same account.
-    let from = seen_from(&headers); // WHAT: where the request came from. WHY: counted too, as sign-in does.
+    let from = crate::patience::counted_as(&seen_from(&headers)); // WHAT: where the request came from, as it is counted. WHY: counted too, as sign-in does.
     check_password(&body.new)?; // WHAT: the new password's length checked first. WHY: a short one is refused without counting as a guess at the current one.
-    if let Err(owed) = server.patience.begin(crate::patience::SIGNING_IN, &[email.as_str(), from.as_str()]) {
+    if let Err(owed) = server.patience.begin_keeping(crate::patience::SIGNING_IN, &[email.as_str(), from.as_str()], &[email.as_str()]) {
         // WHAT: too many wrong current passwords lately: refused before the password is checked; otherwise this try is counted until it proves right. WHY: the same limit as sign-in, so this door is no faster for guessing, even in a burst.
         return Err(Denied(StatusCode::TOO_MANY_REQUESTS, Problem::new("too_many", &crate::patience::refusal(owed))));
     }
@@ -2051,6 +2053,7 @@ async fn make_key(
     if name.is_empty() {
         return Err(Denied::wrong("Give the key a name, so it can be recognised later."));
     }
+    check_name(name)?; // WHAT: one line of ordinary text. WHY: the name goes in the server's log, where a line break wrote a false line.
     let (key, digest) = auth::fresh_key();
     let id = fresh_id("key");
     let made = now();
@@ -3314,7 +3317,7 @@ pub fn address_of(peer: Option<std::net::SocketAddr>, headers: &HeaderMap, proxi
     let Some(peer) = peer else {
         return String::new(); // WHAT: nothing known. WHY: as before, such a request is not counted with the others.
     };
-    if proxied && peer.ip().is_loopback() {
+    if proxied && peer.ip().to_canonical().is_loopback() {
         let said = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string); // WHAT: one header's text. WHY: read twice below.
         // WHAT: Cloudflare's own header first. WHY: Cloudflare sets it and overwrites any a caller sent.
         if let Some(ip) = said("cf-connecting-ip").and_then(|v| v.trim().parse::<std::net::IpAddr>().ok()) {
@@ -3325,7 +3328,7 @@ pub fn address_of(peer: Option<std::net::SocketAddr>, headers: &HeaderMap, proxi
             return ip.to_string();
         }
     }
-    peer.ip().to_string() // WHAT: the machine that connected. WHY: the only address a caller can't make up.
+    peer.ip().to_canonical().to_string() // WHAT: the machine that connected, an IPv4 address written as IPv6 as itself. WHY: the only address a caller can't make up, written one way whatever the socket listens on.
 }
 
 pub(crate) fn record(server: &Server, entry: crate::audit::Entry) { // WHAT: crate-wide now. WHY: the folders' and files' routes write the same log.
@@ -3485,6 +3488,7 @@ async fn join(
 ) -> Answer<Json<Session>> {
     let (how, code, role) = how_joining(&server);
     let from = seen_from(&headers);
+    let counted = crate::patience::counted_as(&from); // WHAT: the address as it is counted: an IPv6 caller by its /64. WHY: a new address from the same /64 is the same caller.
 
     // Harder than signing in, and on purpose. A join code has no username in
     // front of it: a guess is a guess at the whole secret, and the secret is
@@ -3492,7 +3496,7 @@ async fn join(
     // tries free and then an hour is the difference between a shared code
     // being a convenience and a shared code being the way in.
     // WHAT: asked and counted in one step, from the address `where_from` worked out; a right code clears it below. WHY: a burst is held to the limit, and nobody can make up a new address per guess.
-    if let Err(owed) = server.patience.begin(crate::patience::JOINING, &[from.as_str()]) {
+    if let Err(owed) = server.patience.begin(crate::patience::JOINING, &[counted.as_str()]) {
         return Err(Denied(
             StatusCode::TOO_MANY_REQUESTS,
             Problem::new("too_many", &crate::patience::refusal(owed)),
@@ -3529,7 +3533,7 @@ async fn join(
                 ),
             ));
         }
-        server.patience.right(&from);
+        server.patience.right(&counted); // WHAT: a live invitation, so not a guess. WHY: `begin` counted the try in advance.
         invited = Some(invite);
     }
 
@@ -3540,7 +3544,7 @@ async fn join(
 
     match how.as_str() {
         _ if invited.is_some() => {}
-        "open" => server.patience.right(&from), // WHAT: no code asked for, so nothing was guessed. WHY: `begin` counted the try in advance.
+        "open" => server.patience.right(&counted), // WHAT: no code asked for, so nothing was guessed. WHY: `begin` counted the try in advance.
         "code" => {
             // A code with a date that has gone by is not a code. Checked
             // before the code itself and answered the same way, so somebody
@@ -3581,10 +3585,12 @@ async fn join(
                     ),
                 ));
             }
-            server.patience.right(&from);
+            server.patience.right(&counted); // WHAT: the right code clears the count. WHY: `begin` counted the try in advance.
         }
         _ => {
-            server.patience.right(&from); // WHAT: not a guess at anything: the server is closed. WHY: `begin` counted the try in advance.
+            if body.code.trim().is_empty() {
+                server.patience.right(&counted); // WHAT: no code given, so nothing was guessed. WHY: `begin` counted the try in advance.
+            } // WHAT: a code that was given stays counted. WHY: on a closed server the only way in is an invitation, and a code that isn't one is a guess at one; cleared here, invitations could be guessed at without limit.
             return Err(Denied(
                 StatusCode::FORBIDDEN,
                 Problem::new(
@@ -4532,9 +4538,10 @@ pub fn mcp_shop_list(
                 ));
                 if nest.unnested > 0 {
                     out.push_str(&format!(
-                        "      {} piece(s) were NOT nested: a shape with more than {} pieces is not nested one by one, so none of them is on a stick\n",
+                        "      {} piece(s) were NOT nested: a shape with more than {} pieces, or one past the first {} pieces of the whole list, is not nested one by one, so none of them is on a stick\n",
                         nest.unnested,
-                        takeoff::shoplist::MOST_NESTED
+                        takeoff::shoplist::MOST_NESTED,
+                        takeoff::shoplist::MOST_NESTED_IN_ALL
                     )); // WHAT: said plainly. WHY: an answer with no sticks must not read as nothing to buy.
                 } else if !nest.is_whole() {
                     out.push_str(&format!(

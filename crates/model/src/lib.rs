@@ -301,10 +301,12 @@ pub fn thousands(value: f64) -> String {
 }
 
 fn csv(text: &str) -> String {
-    if text.contains([',', '"', '\n']) {
-        format!("\"{}\"", text.replace('"', "\"\""))
+    let formula = text.starts_with(['=', '+', '-', '@', '\t', '\r']) && text.trim().parse::<f64>().is_err(); // WHAT: starts like a formula and is not a plain number. WHY: a model's names and marks are whatever its author typed, and a spreadsheet must not run them.
+    let text = if formula { format!("'{text}") } else { text.to_string() }; // WHAT: a quote mark in front. WHY: read as text.
+    if text.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", text.replace('"', "\"\"")) // WHAT: quoted. WHY: one cell, whatever is in it.
     } else {
-        text.to_string()
+        text // WHAT: as it is. WHY: nothing to quote.
     }
 }
 
@@ -769,3 +771,14 @@ fn looks_like_an_id(mark: &str) -> bool {
 /// Each part's shape as triangles, for drawing. See `shapes.rs`.
 #[cfg(feature = "geometry")]
 pub mod shapes;
+
+#[cfg(test)]
+mod a_model_written_to_a_spreadsheet {
+    #[test]
+    fn a_name_a_spreadsheet_would_run_is_written_as_text() {
+        assert_eq!(super::csv("=HYPERLINK(\"http://x.test\")"), "\"'=HYPERLINK(\"\"http://x.test\"\")\""); // WHAT: a formula a model's author typed as a part's name. WHY: before, it ran in the spreadsheet of whoever opened the parts list.
+        assert_eq!(super::csv("@SUM(A1)"), "'@SUM(A1)"); // WHAT: the same, with @. WHY: Excel reads that as a formula too.
+        assert_eq!(super::csv("-3.5"), "-3.5"); // WHAT: a negative number. WHY: stays a number.
+        assert_eq!(super::csv("B12"), "B12"); // WHAT: an ordinary mark. WHY: left alone.
+    }
+}

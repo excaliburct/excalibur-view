@@ -38,6 +38,10 @@ time = { version = "0.3", features = ["formatting", "parsing"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+# Reading a web address the way the connection will: a host written as
+# `2852039166` or `0xa9fea9fe` is an IP address to it, and a change notice
+# is judged by what it really points at. Already in the build through ureq.
+url = "2"
 
 # Being a real Windows service: answering the service manager, so Windows
 # starts it at boot, stops it cleanly at shutdown, and restarts it after an

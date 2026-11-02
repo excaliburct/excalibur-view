@@ -168,6 +168,28 @@ fn guessing_the_join_code_is_limited_from_one_machine_whatever_it_claims_to_be()
 }
 
 #[test]
+fn guessing_at_invitations_on_a_closed_server_is_limited_too() {
+    let office = an_office(); // WHAT: a running office that takes nobody without an invitation. WHY: the door guessed at.
+    office.server.store.set_setting("joining", "closed").unwrap(); // WHAT: closed. WHY: an invitation is then the only way in, and a code is a guess at one.
+    let mut said = Vec::new(); // WHAT: each answer's status. WHY: checked below.
+    for n in 0..6 {
+        let (status, _) = post(&office, "/api/v1/join", None, &[], json!({"code": format!("beam-beam-beam-beam-beam-{n:04x}"), "name": "Guesser", "email": format!("g{n}@example.com"), "password": PASSWORD}));
+        said.push(status); // WHAT: kept. WHY: checked below.
+    }
+    // WHAT: three guesses free, then a wait. WHY: before, a closed server cleared the count on every refusal, so invitations could be guessed at without limit.
+    assert_eq!(&said[..3], &[403, 403, 403], "{said:?}");
+    assert!(said[3..].iter().all(|s| *s == 429), "guessing at invitations went on: {said:?}");
+}
+
+#[test]
+fn a_key_named_with_a_line_break_is_refused() {
+    let office = an_office(); // WHAT: a running office. WHY: a key is asked for.
+    let estimator = session(&office, "usr_estimator"); // WHAT: anybody signed in. WHY: everybody may make an assistant key.
+    let (status, said) = post(&office, "/api/v1/me/keys", Some(&estimator), &[], json!({"purpose": "assistant", "name": "laptop\n2026-11-02T00:00:00Z INFO sam@example.com turned remote access off"}));
+    assert_eq!(status, 400, "{said}"); // WHAT: refused. WHY: before, the name was written into the server's log, line break and all, as a line nobody wrote.
+}
+
+#[test]
 fn an_address_or_a_name_with_a_line_break_in_it_is_refused() {
     let office = an_office(); // WHAT: a running office, taking anybody. WHY: the join door.
     office.server.store.set_setting("joining", "open").unwrap(); // WHAT: no code needed. WHY: only the name and address are judged.

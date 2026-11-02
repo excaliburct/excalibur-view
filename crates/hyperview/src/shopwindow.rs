@@ -521,9 +521,10 @@ fn nest_table(
                 if nest.unnested > 0 {
                     ui.label(
                         RichText::new(format!(
-                            "{} pieces were not nested: a shape with more than {} pieces is not nested one by one. None of them is on a stick above.",
+                            "{} pieces were not nested: a shape with more than {} pieces, or one past the first {} pieces of the whole list, is not nested one by one. None of them is on a stick above.",
                             nest.unnested,
-                            takeoff::shoplist::MOST_NESTED
+                            takeoff::shoplist::MOST_NESTED,
+                            takeoff::shoplist::MOST_NESTED_IN_ALL
                         ))
                         .color(theme.warn),
                     ); // WHAT: said plainly. WHY: a shape with no sticks must not read as nothing to buy.
