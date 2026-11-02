@@ -217,9 +217,23 @@ pub fn cut_to(length: f64, step: f64) -> f64 {
 ///
 /// `step` is the cutting increment in the primary unit: [`INCH`] on an
 /// imperial job, 0.01 for centimetres on a metric one.
+/// The most places one markup lists for the pieces it stands for. A markup
+/// standing for six beams lists its grid place six times, as it always has;
+/// one claiming a million lists it this many times, not a million.
+pub const MOST_PLACES_EACH: usize = 1000; // WHAT: a thousand. WHY: past any real quantity, short of a list nobody could read or hold.
+
+/// The most pieces of one shape that are nested one by one. Nesting is
+/// first-fit, so its work grows with the square of the pieces; past this a
+/// shape is not nested and says so (`Nest::unnested`).
+pub const MOST_NESTED: usize = 20_000; // WHAT: twenty thousand pieces. WHY: more than a job's whole schedule of one shape, few enough to nest in a moment.
+
+/// One markup's pieces on a cut list: its cut length, how many pieces it
+/// stands for, its sheet and its grid place.
+type Entry = (f64, usize, usize, String); // WHAT: (length, how many, sheet, place). WHY: named, so the map that holds them reads plainly.
+
 pub fn build(rows: &[Row], weights: WeightColumns, step: f64) -> ShopList {
-    let mut shapes: BTreeMap<String, (Vec<(f64, usize, String)>, Option<f64>)> =
-        BTreeMap::new();
+    // WHAT: each shape's cuts as (length, how many, sheet, place). WHY: a markup standing for several is kept as one entry with its count, never one entry per piece: a markup claiming a billion pieces used to ask for a billion entries and close the program.
+    let mut shapes: BTreeMap<String, (Vec<Entry>, Option<f64>)> = BTreeMap::new(); // WHAT: each shape's entries and its unit weight. WHY: gathered below.
     let mut out = ShopList::default();
 
     for row in rows {
@@ -248,11 +262,8 @@ pub fn build(rows: &[Row], weights: WeightColumns, step: f64) -> ShopList {
         };
         let entry = shapes.entry(name).or_insert_with(|| (Vec::new(), None));
         // A member standing for several is several pieces to cut.
-        for _ in 0..(row.quantity.round().max(1.0) as usize) {
-            entry
-                .0
-                .push((cut_to(length, step), row.page, row.grid.clone()));
-        }
+        let many = row.quantity.round().max(1.0) as usize; // WHAT: how many pieces it stands for. WHY: counted, not written out one by one.
+        entry.0.push((cut_to(length, step), many, row.page, row.grid.clone())); // WHAT: one entry, with its count. WHY: as above.
         // The unit weight the tool chest carried, kept the first time it is
         // seen. Two different weights under one shape name is a tool chest
         // problem, and taking the first is at least consistent.
@@ -268,17 +279,19 @@ pub fn build(rows: &[Row], weights: WeightColumns, step: f64) -> ShopList {
     for (name, (lengths, per_foot)) in shapes {
         let mut by_length: BTreeMap<u64, (f64, usize, Vec<usize>, Vec<String>)> =
             BTreeMap::new();
-        for (length, page, place) in &lengths {
+        for (length, many, page, place) in &lengths {
             let key = (length * 100_000.0).round() as u64;
             let slot = by_length
                 .entry(key)
                 .or_insert((*length, 0, Vec::new(), Vec::new()));
-            slot.1 += 1;
+            slot.1 = slot.1.saturating_add(*many); // WHAT: all the pieces it stands for. WHY: the same count as one entry per piece gave.
             if !slot.2.contains(page) {
                 slot.2.push(*page);
             }
             if !place.trim().is_empty() {
-                slot.3.push(place.clone());
+                for _ in 0..(*many).min(MOST_PLACES_EACH) {
+                    slot.3.push(place.clone()); // WHAT: its place once per piece, as before, up to the limit. WHY: a list of places can't be made to grow without end.
+                }
             }
         }
         let mut cuts: Vec<Cut> = by_length
@@ -302,7 +315,7 @@ pub fn build(rows: &[Row], weights: WeightColumns, step: f64) -> ShopList {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let pieces: usize = cuts.iter().map(|c| c.count).sum();
+        let pieces: usize = cuts.iter().fold(0usize, |n, c| n.saturating_add(c.count)); // WHAT: every piece of the shape. WHY: added without overflowing, whatever the counts claim.
         let total_length: f64 = cuts.iter().map(|c| c.length * c.count as f64).sum();
         let pounds = per_foot.map(|per| total_length * per);
 
@@ -310,7 +323,7 @@ pub fn build(rows: &[Row], weights: WeightColumns, step: f64) -> ShopList {
             Some(pounds) => out.pounds += pounds,
             None => out.unweighed.push(name.clone()),
         }
-        out.pieces += pieces;
+        out.pieces = out.pieces.saturating_add(pieces); // WHAT: added to the whole list's count. WHY: without overflowing.
         out.shapes.push(Shape {
             name,
             cuts,
@@ -368,6 +381,9 @@ pub struct Nest {
     pub used: f64,
     /// Everything that falls on the floor, kerf included.
     pub waste: f64,
+    /// Pieces not nested at all, because the shape has more than
+    /// [`MOST_NESTED`]. Zero for any real job; said, never hidden.
+    pub unnested: usize, // WHAT: how many pieces were left out of the nesting. WHY: a list too long to nest is reported, not worked through for an hour.
 }
 
 impl Nest {
@@ -398,7 +414,7 @@ impl Nest {
 
     /// Whether every piece found a stick.
     pub fn is_whole(&self) -> bool {
-        self.too_long.is_empty()
+        self.too_long.is_empty() && self.unnested == 0 // WHAT: nothing too long and nothing left out. WHY: either means some pieces are on no stick.
     }
 }
 
@@ -424,7 +440,12 @@ pub fn nest(shape: &Shape, stock: f64, kerf: f64) -> Nest {
         bought: 0.0,
         used: 0.0,
         waste: 0.0,
+        unnested: 0,
     };
+    if shape.pieces > MOST_NESTED {
+        out.unnested = shape.pieces; // WHAT: none nested, and how many. WHY: too many to nest one by one; said rather than tried.
+        return out;
+    }
     if !(stock > 0.0) {
         // Nothing is nested until somebody says what the stock is.
         out.too_long = shape.every_piece();
@@ -474,8 +495,31 @@ pub fn nest(shape: &Shape, stock: f64, kerf: f64) -> Nest {
 /// case: one length for the lot. The app hands a length per shape when
 /// somebody has set one.
 pub fn nest_all(list: &ShopList, stock: f64, kerf: f64) -> Vec<Nest> {
-    list.shapes.iter().map(|s| nest(s, stock, kerf)).collect()
+    let mut left = MOST_NESTED_IN_ALL; // WHAT: how many pieces the whole list may still have nested. WHY: the limit per shape alone left sixty shapes of twenty thousand, minutes of work.
+    list.shapes
+        .iter()
+        .map(|shape| {
+            if shape.pieces > left {
+                return Nest {
+                    shape: shape.name.clone(), // WHAT: the shape's name. WHY: answered for, with nothing tried.
+                    stock,
+                    kerf: kerf.max(0.0),
+                    sticks: Vec::new(),
+                    too_long: Vec::new(),
+                    bought: 0.0,
+                    used: 0.0,
+                    waste: 0.0,
+                    unnested: shape.pieces, // WHAT: all of its pieces, said to be left out. WHY: never hidden, as for one shape too big to nest.
+                };
+            }
+            left -= shape.pieces; // WHAT: this shape's pieces taken off what is left. WHY: the next shapes get the rest.
+            nest(shape, stock, kerf) // WHAT: nested one by one. WHY: within the whole list's budget.
+        })
+        .collect()
 }
+
+/// The most pieces one list has nested one by one, all its shapes together.
+pub const MOST_NESTED_IN_ALL: usize = 50_000; // WHAT: fifty thousand. WHY: more than a whole job's members; past it the remaining shapes are said to be un-nested rather than worked through for minutes.
 
 /// What somebody has told the program about how they buy steel and cut it.
 ///
@@ -517,11 +561,7 @@ impl Buying {
 // ---- writing it out ---------------------------------------------------------
 
 fn quote(field: &str) -> String {
-    if field.contains(',') || field.contains('"') || field.contains('\n') {
-        format!("\"{}\"", field.replace('"', "\"\""))
-    } else {
-        field.to_string()
-    }
+    crate::export::csv_cell(field) // WHAT: quoted, and a formula written as text. WHY: a subject, a shape or a place is whatever somebody typed, and a spreadsheet must not run it.
 }
 
 /// The cut list as a spreadsheet: one line per cutting length.
@@ -868,6 +908,38 @@ mod tests {
         for (got, want) in back.iter().zip(&want) {
             assert!((got - want).abs() < 1e-9, "{got} vs {want}");
         }
+    }
+
+    #[test]
+    fn a_markup_claiming_a_billion_pieces_is_counted_not_written_out() {
+        // WHAT: one beam standing for a billion. WHY: written out one entry per piece, it asked for gigabytes and closed the program, on a seat or on the office server.
+        let mut row = a_row("W12x26", 20.0, 0, Some(26.0)); // WHAT: a measured beam. WHY: a row as the takeoff makes one.
+        row.quantity = 1e9; // WHAT: a billion of it. WHY: what a markup's quantity can say.
+        let list = build(&[row], crate::WeightColumns::default(), INCH); // WHAT: the cut list. WHY: must come back at once.
+        assert_eq!(list.pieces, 1_000_000_000, "every piece is still counted");
+        let nest = nest(&list.shapes[0], 40.0, INCH / 8.0); // WHAT: nested against forty-foot stock. WHY: must not try a billion.
+        assert_eq!(nest.unnested, 1_000_000_000);
+        assert!(!nest.is_whole(), "a shape left un-nested is not a whole nesting");
+        assert!(nest.sticks.is_empty() && nest.too_long.is_empty());
+    }
+
+    #[test]
+    fn many_shapes_each_just_under_the_limit_are_not_all_nested_one_by_one() {
+        // WHAT: sixty shapes, each twenty thousand pieces just over half a stick long. WHY: each piece then needs a stick of its own and is tried against every stick before it; the limit per shape left sixty of those, minutes of work, for anybody who can draw sixty markups.
+        let rows: Vec<Row> = (0..60)
+            .map(|n| {
+                let mut row = a_row(&format!("W{n}x26"), 24.0, 0, Some(26.0)); // WHAT: a beam of its own shape. WHY: one shape each.
+                row.quantity = MOST_NESTED as f64; // WHAT: as many as one shape may have nested. WHY: the most each is allowed.
+                row // WHAT: the beam. WHY: one per shape.
+            })
+            .collect();
+        let list = build(&rows, crate::WeightColumns::default(), INCH); // WHAT: the cut list. WHY: what is nested.
+        let started = std::time::Instant::now(); // WHAT: now. WHY: timed.
+        let nests = nest_all(&list, 40.0, INCH / 8.0); // WHAT: every shape nested. WHY: what the server's assistant and the shop window do.
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "nesting took {:?}", started.elapsed());
+        assert_eq!(nests.len(), 60, "every shape is still answered for");
+        assert!(nests.iter().any(|n| n.unnested > 0), "some shapes are said to be left un-nested");
+        assert!(nests.iter().map(|n| n.unnested).sum::<usize>() + nests.iter().map(|n| n.sticks.iter().map(|s| s.pieces.len()).sum::<usize>()).sum::<usize>() == list.pieces, "every piece is either nested or said not to be");
     }
 
     // ---- writing it out ---------------------------------------------------

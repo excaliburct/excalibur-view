@@ -216,11 +216,7 @@ pub fn summary_csv_with(summary: &Summary, sheet: &dyn Fn(usize) -> String) -> S
 }
 
 fn quote(field: &str) -> String {
-    if field.contains(',') || field.contains('"') || field.contains('\n') {
-        format!("\"{}\"", field.replace('"', "\"\""))
-    } else {
-        field.to_string()
-    }
+    crate::export::csv_cell(field) // WHAT: quoted, and a formula written as text. WHY: a subject, a shape or a place is whatever somebody typed, and a spreadsheet must not run it.
 }
 
 #[cfg(test)]

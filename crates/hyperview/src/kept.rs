@@ -28,6 +28,16 @@ pub enum Seen {
     CantTell, // WHAT: no answer, or another refusal. WHY: the copy stays, and nothing more is asked this time.
 }
 
+/// Whether `name` is the name of one file in the cache folder, and nothing
+/// that reaches outside it: no folder, no drive, no parent.
+fn a_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', ':']) // WHAT: no separator and no drive. WHY: either names somewhere else.
+        && Path::new(name).file_name().is_some_and(|n| n == name) // WHAT: the path is that one name. WHY: as the system reads it.
+}
+
 fn read_index(folder: &Path) -> BTreeMap<String, String> {
     std::fs::read(folder.join(INDEX)) // WHAT: the index's bytes. WHY: read back.
         .ok()
@@ -72,6 +82,9 @@ pub fn forget_unseen(
     let mut keep: BTreeMap<String, String> = BTreeMap::new(); // WHAT: the index after. WHY: written back.
     let mut stopped = false; // WHAT: whether a question couldn't be answered. WHY: then no more are asked.
     for (set, name) in index.iter() {
+        if !a_plain_name(name) {
+            continue; // WHAT: an entry that isn't one file's name in this folder is dropped from the index, and nothing is done with it. WHY: the index is a file on disk; a name like `../../Documents/x` in it must never become a path to remove.
+        }
         let answer = if stopped { Seen::CantTell } else { asked(set) }; // WHAT: whether this person may still see the set. WHY: the server decides.
         match answer {
             Seen::No => {
@@ -123,6 +136,24 @@ pub fn forget_unseen(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_name_in_the_index_that_reaches_outside_the_cache_is_never_removed() {
+        let folder = a_folder(); // WHAT: a cache of its own. WHY: the test's.
+        let outside = folder.parent().unwrap().join(format!("{}-outside.pdf", folder.file_name().unwrap().to_string_lossy())); // WHAT: a file beside the cache, not in it. WHY: what a doctored index would point at.
+        std::fs::write(&outside, b"%PDF").unwrap(); // WHAT: made. WHY: must survive.
+        let mut index = BTreeMap::new(); // WHAT: an index somebody changed. WHY: it is a file anybody with the account can edit.
+        index.insert("set_x".to_string(), format!("../{}", outside.file_name().unwrap().to_string_lossy())); // WHAT: a climb out of the cache. WHY: joined as it was, it named the file outside.
+        index.insert("set_y".to_string(), outside.to_string_lossy().into_owned()); // WHAT: a whole path. WHY: joining a whole path replaces the folder.
+        write_index(&folder, &index); // WHAT: written. WHY: read back by the seat.
+        let gone = forget_unseen(&folder, false, |_| Seen::No); // WHAT: the server says neither is theirs. WHY: what would remove them.
+        let survived = outside.exists(); // WHAT: whether the file outside is still there. WHY: the point.
+        let _ = std::fs::remove_file(&outside); // WHAT: cleaned up. WHY: tests leave nothing.
+        let _ = std::fs::remove_dir_all(&folder); // WHAT: likewise. WHY: the same.
+        assert!(survived, "a file outside the cache was removed: {gone:?}");
+        assert!(gone.is_empty(), "{gone:?}");
+        assert!(a_plain_name("0123456789ab-S-101.pdf"), "an ordinary kept name");
+    }
 
     fn a_folder() -> PathBuf {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // WHAT: a counter. WHY: each test in this run gets its own folder.

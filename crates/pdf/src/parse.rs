@@ -41,15 +41,29 @@ pub fn is_regular(b: u8) -> bool {
 pub struct Reader<'a> {
     pub bytes: &'a [u8],
     pub at: usize,
+    /// How many arrays and dictionaries the object being read is inside.
+    depth: usize, // WHAT: the nesting so far. WHY: reading is recursive, and a file must not choose how deep the stack goes.
+    too_deep: bool, // WHAT: whether anything was refused for nesting too deep. WHY: a caller keeping the bytes as they came can refuse them whole.
 }
+
+/// The deepest an array or dictionary may sit inside others. Real files
+/// nest a handful deep; a file nested a hundred thousand deep would run the
+/// program out of stack and close it, taking the office server with it.
+pub const DEEPEST: usize = 256; // WHAT: 256 levels. WHY: far past any real file, far short of the stack.
 
 impl<'a> Reader<'a> {
     pub fn new(bytes: &'a [u8]) -> Reader<'a> {
-        Reader { bytes, at: 0 }
+        Reader { bytes, at: 0, depth: 0, too_deep: false }
     }
 
     pub fn at(bytes: &'a [u8], at: usize) -> Reader<'a> {
-        Reader { bytes, at }
+        Reader { bytes, at, depth: 0, too_deep: false }
+    }
+
+    /// Whether anything this reader read was nested deeper than [`DEEPEST`]
+    /// and left out. What came back is then not what the bytes say.
+    pub fn went_too_deep(&self) -> bool {
+        self.too_deep // WHAT: the flag. WHY: read by whoever keeps the bytes.
     }
 
     fn fail<T>(&self, why: impl Into<String>) -> Result<T> {
@@ -280,6 +294,18 @@ impl<'a> Reader<'a> {
     }
 
     fn array(&mut self) -> Result<Object> {
+        if self.depth >= DEEPEST {
+            self.at += 1; // WHAT: past the bracket. WHY: whoever called this steps on rather than trying the same byte again.
+            self.too_deep = true; // WHAT: noted. WHY: what comes back is not all the bytes say.
+            return self.fail("nested too deep"); // WHAT: refused. WHY: deeper would be the file choosing how deep the stack goes.
+        }
+        self.depth += 1; // WHAT: one level deeper. WHY: counted while this array is read.
+        let read = self.array_inside(); // WHAT: the array itself. WHY: read with the level counted.
+        self.depth -= 1; // WHAT: back out. WHY: the next object starts where this one did.
+        read
+    }
+
+    fn array_inside(&mut self) -> Result<Object> {
         self.at += 1; // '['
         let mut items = Vec::new();
         loop {
@@ -309,6 +335,18 @@ impl<'a> Reader<'a> {
     }
 
     pub fn dictionary(&mut self) -> Result<Dict> {
+        if self.depth >= DEEPEST {
+            self.at += 2; // WHAT: past the `<<`. WHY: as for an array.
+            self.too_deep = true; // WHAT: noted. WHY: as for an array.
+            return self.fail("nested too deep"); // WHAT: refused. WHY: as for an array.
+        }
+        self.depth += 1; // WHAT: one level deeper. WHY: as for an array.
+        let read = self.dictionary_inside(); // WHAT: the dictionary itself. WHY: read with the level counted.
+        self.depth -= 1; // WHAT: back out. WHY: as for an array.
+        read
+    }
+
+    fn dictionary_inside(&mut self) -> Result<Dict> {
         self.at += 2; // '<<'
         let mut d = Dict::new();
         loop {
@@ -544,6 +582,25 @@ mod tests {
         assert_eq!(read(".5"), Object::Real(0.5));
         assert_eq!(read("4."), Object::Real(4.0));
         assert_eq!(read("-.002"), Object::Real(-0.002));
+    }
+
+    #[test]
+    fn an_object_nested_past_any_real_file_is_refused_rather_than_read_to_the_bottom() {
+        // WHAT: arrays and dictionaries a hundred thousand deep, read on a thread with a small stack. WHY: unlimited, reading them ran out of stack and closed the whole program; on the office server, one markup or drawing did that to everybody.
+        let deep_arrays = format!("{}1{}", "[".repeat(100_000), "]".repeat(100_000));
+        let deep_dicts = format!("{}1{}", "<</A ".repeat(100_000), ">>".repeat(100_000));
+        let read = std::thread::Builder::new()
+            .stack_size(512 * 1024) // WHAT: half a megabyte of stack. WHY: less than a server's threads have, so an unlimited reader fails here first.
+            .spawn(move || {
+                let arrays = Reader::new(deep_arrays.as_bytes()).object(); // WHAT: read. WHY: must come back, whatever it says.
+                let dicts = Reader::new(deep_dicts.as_bytes()).object(); // WHAT: read. WHY: the same.
+                (arrays.is_ok(), dicts.is_ok()) // WHAT: whether each came back at all. WHY: what matters is that the thread lived.
+            })
+            .unwrap()
+            .join(); // WHAT: the reader's thread finished. WHY: a stack overflow would end the test process instead.
+        assert!(read.is_ok(), "reading a deeply nested object did not come back");
+        let shallow = Reader::new(b"[[[1 2] <</K [3]>>]]").object().unwrap(); // WHAT: ordinary nesting. WHY: still read whole.
+        assert_eq!(shallow.as_array().map(|a| a.len()), Some(1));
     }
 
     #[test]

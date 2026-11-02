@@ -52,6 +52,12 @@ pub async fn serve(
 ) -> Result<()> {
     std::fs::create_dir_all(&config.data)
         .with_context(|| format!("making {}", config.data.display()))?;
+    #[cfg(windows)]
+    if config.replace_self {
+        if let Some(home) = config.data.parent() {
+            crate::lockdown::lock_down(home); // WHAT: the installed service's folder, program and drawings made its own, every start. WHY: an office already installed is fixed by its next update, not only a new one.
+        }
+    }
     let store = Store::open(&config.database(), &config.blobs())?;
 
     let listener = tokio::net::TcpListener::bind(config.listen)

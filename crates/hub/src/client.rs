@@ -143,6 +143,21 @@ fn in_words(e: &ureq::Error) -> String {
     }
 }
 
+/// A set whose digest is a digest: sixty-four lower-case hexadecimal
+/// characters, as the server makes it. Anything else is refused as an answer
+/// that can't be read, because a seat builds the name of its kept copy from
+/// it: a server that is not the office's, or anybody in between on the
+/// office's plain-HTTP network, could otherwise send `..\..\` or a share's
+/// address and have the seat write there.
+pub fn fingerprinted(set: DrawingSet) -> Answer<DrawingSet> {
+    let real = set.digest.len() == 64 && set.digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)); // WHAT: exactly a SHA-256 in lower-case hex. WHY: nothing else may reach a path.
+    if real {
+        Ok(set) // WHAT: as it came. WHY: a real digest.
+    } else {
+        Err(Trouble::Unreadable(format!("drawing set {} came with a fingerprint that isn't one", set.id))) // WHAT: refused. WHY: said, rather than written to disk.
+    }
+}
+
 /// Anything that can go wrong on the way to a server.
 #[derive(Debug)]
 pub enum Trouble {
@@ -650,11 +665,12 @@ impl Client {
     }
 
     pub fn sets(&self, project: &str) -> Answer<Vec<DrawingSet>> {
-        Self::read(self.get(&format!("/projects/{project}/sets")).call())
+        let sets: Vec<DrawingSet> = Self::read(self.get(&format!("/projects/{project}/sets")).call())?; // WHAT: the project's sets. WHY: each checked below.
+        sets.into_iter().map(fingerprinted).collect() // WHAT: every one's digest checked. WHY: as `set`.
     }
 
     pub fn set(&self, id: &str) -> Answer<DrawingSet> {
-        Self::read(self.get(&format!("/sets/{id}")).call())
+        fingerprinted(Self::read(self.get(&format!("/sets/{id}")).call())?) // WHAT: the set, with its digest checked. WHY: a seat names its kept copy from the digest.
     }
 
     /// A copy of a drawing set to mark up, so the issued set stays clean.
@@ -893,6 +909,19 @@ fn multipart(fields: &[(&str, &str)], filename: &str, file: &[u8]) -> (String, V
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_set_whose_fingerprint_is_not_a_digest_is_refused_before_a_seat_names_a_file_after_it() {
+        let set = |digest: &str| crate::DrawingSet {
+            id: "set_a".into(), project: "prj_a".into(), name: "S-101".into(), filename: "S-101.pdf".into(), digest: digest.into(),
+            bytes: 1, sheets: 1, uploaded: String::new(), uploaded_by: String::new(), revision: 0, supersedes: None, superseded_by: None,
+            already_here: false, carried_forward: 0, carry_note: None, folder: None,
+        }; // WHAT: a set as a server could describe it. WHY: only its digest varies.
+        assert!(super::fingerprinted(set("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")).is_ok(), "a real digest");
+        for hostile in ["../../../../0123456789abcdef0123456789abcdef0123456789abcdef0123", "\\\\10.0.0.9\\share\\x", "C:\\Users\\Public\\x", "short", "aé0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd"] {
+            assert!(super::fingerprinted(set(hostile)).is_err(), "{hostile:?} was taken as a digest");
+        }
+    }
+
     use super::*;
 
     #[test]

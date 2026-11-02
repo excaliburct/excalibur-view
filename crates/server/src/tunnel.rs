@@ -279,13 +279,34 @@ pub fn start(tunnel: &Tunnel, data: &Path, token: String, hostname: String) {
 }
 
 fn run_once(connector: &Path, token: &str) -> Result<std::process::Child, String> {
-    std::process::Command::new(connector)
-        .args(["tunnel", "--no-autoupdate", "run", "--token", token])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+    // WHAT: the file checked again, every time, just before it is run. WHY: it was checked only when fetched; restarts ran whatever was at that path since, and on a server whose folder others can write, that could be anything, run as the service.
+    if want_matches(connector).is_none() {
+        return Err("the connector on this server is not the one that was checked, so it was not run. Turn remote access off and on again to fetch it afresh.".into());
+    }
+    connector_command(connector, token)
         .spawn()
         .map_err(|e| format!("the connector would not start: {e}"))
+}
+
+/// Whether the file at `connector` is the checked connector: `Some` only
+/// when this build has a digest for this machine and the file hashes to it.
+fn want_matches(connector: &Path) -> Option<()> {
+    let want = expected_digest(); // WHAT: the digest built in. WHY: what the file must hash to.
+    (!want.is_empty() && digest_of(connector).as_deref() == Some(want)).then_some(()) // WHAT: matched, or not. WHY: an empty digest matches nothing.
+}
+
+/// How the connector is started: its token handed over in its environment,
+/// as `TUNNEL_TOKEN`, never on its command line, where anybody on the
+/// computer who can list programs could read it.
+pub fn connector_command(connector: &Path, token: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(connector); // WHAT: the connector. WHY: run as a child of the server.
+    command
+        .args(["tunnel", "--no-autoupdate", "run"]) // WHAT: run the tunnel the token names. WHY: the token alone says which.
+        .env("TUNNEL_TOKEN", token) // WHAT: the token, in its environment. WHY: cloudflared reads it from there; a command line is visible to every account.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
 }
 
 /// Asks the public internet for this server, the way a seat in a truck will.
@@ -486,6 +507,11 @@ pub fn forget(store: &crate::store::Store) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// A folder for one test, inside the build folder.
+    fn scratch(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(name) // WHAT: under target. WHY: a connector a test writes is never somewhere another account shares.
+    }
+
     #[test]
     fn a_hostname_is_a_hostname() {
         assert_eq!(a_hostname("drawings.example.com").unwrap(), "drawings.example.com");
@@ -566,7 +592,7 @@ mod tests {
     fn the_connector_is_never_fetched_without_a_digest_to_check_it_against() {
         // The failure that matters: a build with no pinned digest for its own
         // platform must refuse rather than run whatever comes down the wire.
-        let dir = std::env::temp_dir().join("excalibur-tunnel-test-nodigest");
+        let dir = scratch("excalibur-tunnel-test-nodigest"); // WHAT: a folder of the test's own. WHY: inside the build folder, not the shared temporary one.
         let asked = std::cell::Cell::new(false);
         let get = |_: &str| -> Result<Vec<u8>, String> {
             asked.set(true);
@@ -581,7 +607,7 @@ mod tests {
 
     #[test]
     fn a_connector_whose_digest_is_wrong_is_not_kept() {
-        let dir = std::env::temp_dir().join("excalibur-tunnel-test-baddigest");
+        let dir = scratch("excalibur-tunnel-test-baddigest"); // WHAT: a folder of the test's own. WHY: as above.
         let _ = std::fs::remove_dir_all(&dir);
         if expected_digest().is_empty() {
             return; // covered by the test above on this platform
@@ -592,6 +618,43 @@ mod tests {
             !connector_path(&dir).exists(),
             "a connector that did not check out was written to disk anyway"
         );
+    }
+
+    #[test]
+    fn the_token_never_goes_on_the_connectors_command_line() {
+        let token = "eyJhIjoiYWJjIiwidCI6ImRlZiIsInMiOiJnaGkifQ-a-real-looking-token-0123456789"; // WHAT: a token. WHY: looked for below.
+        let command = connector_command(std::path::Path::new("cloudflared"), token); // WHAT: how the connector would be started. WHY: inspected, never run.
+        let args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect(); // WHAT: its command line. WHY: anybody on the computer can read it.
+        assert!(!args.iter().any(|a| a.contains(token)), "the token is on the command line: {args:?}");
+        assert!(!args.iter().any(|a| a == "--token"), "{args:?}");
+        let env: Vec<(String, String)> = command
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
+            .collect(); // WHAT: what it is handed in its environment. WHY: where the token goes instead.
+        assert!(env.contains(&("TUNNEL_TOKEN".to_string(), token.to_string())), "{env:?}");
+    }
+
+    #[test]
+    fn a_connector_changed_after_it_was_checked_is_never_run() {
+        let dir = scratch(&format!("excalibur-tunnel-test-swapped-{}", std::process::id())); // WHAT: a folder of the test's own. WHY: as above.
+        let _ = std::fs::create_dir_all(&dir); // WHAT: made. WHY: the stand-in goes in it.
+        let path = dir.join("cloudflared"); // WHAT: where the connector would be. WHY: swapped below.
+        std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap(); // WHAT: something that is not the checked connector. WHY: what a swap leaves.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt; // WHAT: Unix file modes. WHY: the stand-in must be runnable, or refusing it proves nothing.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap(); // WHAT: made runnable. WHY: as above.
+        }
+        let ran = run_once(&path, "a-token-long-enough-to-be-one-0123456789-abcdef"); // WHAT: an attempt to run it. WHY: must be refused before starting.
+        let _ = std::fs::remove_dir_all(&dir); // WHAT: cleaned up. WHY: tests leave nothing.
+        let started = match ran {
+            Ok(mut child) => {
+                let _ = child.wait(); // WHAT: the stand-in left to finish. WHY: no stray process after the test.
+                true
+            }
+            Err(_) => false,
+        }; // WHAT: whether it was started. WHY: checked below.
+        assert!(!started, "a file that isn't the checked connector was started");
     }
 
     #[test]

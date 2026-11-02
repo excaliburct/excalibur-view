@@ -530,8 +530,8 @@ pub fn hex(bytes: &[u8]) -> String {
 
 pub fn unhex(text: &str) -> Option<Vec<u8>> {
     let text = text.trim();
-    if text.len() % 2 != 0 {
-        return None;
+    if !text.len().is_multiple_of(2) || !text.is_ascii() {
+        return None; // WHAT: an odd length, or anything outside plain ASCII, is not hex. WHY: the text is sliced two bytes at a time, and a slice through the middle of a character closed the program; a signature is whatever a server or a file says it is.
     }
     (0..text.len() / 2)
         .map(|i| u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).ok())
@@ -557,6 +557,14 @@ pub(crate) fn verify(key: &[u8; 32], message: &[u8], signature: &[u8]) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_signature_that_is_not_plain_ascii_is_refused_rather_than_closing_the_program() {
+        for hostile in ["0é0", "€0", "€€", "ab\u{1F600}cd"] {
+            assert_eq!(super::unhex(hostile), None, "{hostile:?}"); // WHAT: refused. WHY: before, slicing it two bytes at a time panicked.
+        }
+        assert_eq!(super::unhex("0aff"), Some(vec![0x0a, 0xff]), "real hex still reads");
+    }
+
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
 

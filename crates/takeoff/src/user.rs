@@ -76,17 +76,25 @@ pub fn name_of(columns: &[UserColumn], index: usize) -> String {
 
 /// The slot as a number: typed in, or worked out.
 pub fn value(row: &Row, columns: &[UserColumn], index: usize) -> Option<f64> {
-    value_at(row, columns, index, 0)
+    let budget = std::cell::Cell::new(MOST_LOOKUPS); // WHAT: how many more columns this one value may look at. WHY: shared by every level below it.
+    value_at(row, columns, index, 0, &budget) // WHAT: worked out from the top level. WHY: with the whole budget.
 }
 
-fn value_at(row: &Row, columns: &[UserColumn], index: usize, depth: usize) -> Option<f64> {
+/// The most columns one value may look at, all the levels together. A
+/// formula naming a column twice looks at it twice, so nine levels of a
+/// formula that names itself twelve times was twelve to the ninth lookups.
+const MOST_LOOKUPS: usize = 10_000; // WHAT: ten thousand. WHY: far past any real sheet of formulas; one value can't take minutes.
+
+fn value_at(row: &Row, columns: &[UserColumn], index: usize, depth: usize, budget: &std::cell::Cell<usize>) -> Option<f64> {
     // A formula that refers to itself, however indirectly, has no value.
     if depth > 8 {
         return None;
     }
+    let left = budget.get().checked_sub(1)?; // WHAT: one lookup spent, or none left. WHY: past the budget the value is no value, as for a formula that refers to itself.
+    budget.set(left); // WHAT: spent. WHY: the levels below see what is left.
     match columns.iter().find(|c| c.index == index).and_then(|c| c.formula.as_deref()) {
         Some(formula) if !formula.trim().is_empty() => {
-            let mut look = |name: &str| reference(row, columns, name, depth + 1);
+            let mut look = |name: &str| reference(row, columns, name, depth + 1, budget);
             evaluate(formula, &mut look)
         }
         _ => number(row.columns.get(index)?),
@@ -108,7 +116,7 @@ pub fn text(row: &Row, columns: &[UserColumn], index: usize) -> String {
 }
 
 /// What a name in a formula stands for, for this markup.
-fn reference(row: &Row, columns: &[UserColumn], name: &str, depth: usize) -> Option<f64> {
+fn reference(row: &Row, columns: &[UserColumn], name: &str, depth: usize, budget: &std::cell::Cell<usize>) -> Option<f64> {
     let key: String = name.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
     // Measured values only count on a sheet with a scale, as everywhere else.
     let measured = |v: Option<f64>| if row.scaled { v } else { None };
@@ -129,7 +137,7 @@ fn reference(row: &Row, columns: &[UserColumn], name: &str, depth: usize) -> Opt
                 c.name.chars().filter(|ch| ch.is_alphanumeric()).collect::<String>().to_lowercase()
                     == key
             })?;
-            value_at(row, columns, column.index, depth)
+            value_at(row, columns, column.index, depth, budget) // WHAT: the named column's value. WHY: from what is left of the budget.
         }
     }
 }
@@ -147,9 +155,34 @@ fn number(text: &str) -> Option<f64> {
 /// `+ - * /` and brackets. Anything it cannot read is no value.
 pub fn evaluate(formula: &str, look: &mut dyn FnMut(&str) -> Option<f64>) -> Option<f64> {
     let tokens = tokens(formula)?;
+    if too_deep(&tokens) {
+        return None; // WHAT: a formula nested past any real one has no value. WHY: it is read recursively, and a tool chest must not choose how deep the stack goes.
+    }
     let mut at = 0;
     let value = sum(&tokens, &mut at, look)?;
     (at == tokens.len() && value.is_finite()).then_some(value)
+}
+
+/// The deepest a formula's brackets, or a run of signs, may go.
+const DEEPEST: usize = 64; // WHAT: sixty-four. WHY: no column formula comes near it; a hundred thousand ran a seat or the server out of stack.
+
+/// Whether a formula nests deeper than [`DEEPEST`]: brackets inside brackets,
+/// or signs one after another (`- - - 1`), each of which is read by a call
+/// inside the last.
+fn too_deep(tokens: &[Token]) -> bool {
+    let (mut open, mut signs) = (0usize, 0usize); // WHAT: brackets open now, and signs in a row. WHY: either is a level of reading.
+    for token in tokens {
+        match token {
+            Token::Open => open += 1, // WHAT: one bracket deeper. WHY: counted.
+            Token::Close => open = open.saturating_sub(1), // WHAT: one out. WHY: counted.
+            _ => {}
+        }
+        signs = if matches!(token, Token::Op(_)) { signs + 1 } else { 0 }; // WHAT: the run of signs so far. WHY: a sign before a sign is read one inside the other.
+        if open > DEEPEST || signs > DEEPEST {
+            return true; // WHAT: too deep. WHY: refused before reading.
+        }
+    }
+    false
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -334,6 +367,20 @@ mod tests {
     }
 
     #[test]
+    fn a_formula_nested_past_any_real_one_has_no_value_and_does_not_run_out_of_stack() {
+        // WHAT: brackets and signs a hundred thousand deep, worked out on a thread with a small stack. WHY: a tool chest's formula is read recursively, and one shared to the office reached every seat and the server.
+        let brackets = format!("{}1{}", "(".repeat(100_000), ")".repeat(100_000));
+        let signs = format!("{}1", "-".repeat(100_000));
+        let worked = std::thread::Builder::new()
+            .stack_size(512 * 1024) // WHAT: a small stack. WHY: an unlimited reader runs out of it here first.
+            .spawn(move || (evaluate(&brackets, &mut |_| None), evaluate(&signs, &mut |_| None)))
+            .unwrap()
+            .join(); // WHAT: the thread finished. WHY: a stack overflow would end the test process instead.
+        assert_eq!(worked.ok(), Some((None, None)), "too deep is no value, and the reader lived");
+        assert_eq!(evaluate("((2 + 3)) * -(-4)", &mut |_| None), Some(20.0), "ordinary nesting still works");
+    }
+
+    #[test]
     fn a_formula_that_refers_to_itself_has_no_value() {
         let columns = vec![UserColumn {
             index: 0,
@@ -342,5 +389,20 @@ mod tests {
             precision: 2,
         }];
         assert_eq!(value(&beam(1.0, "1"), &columns, 0), None);
+    }
+
+    #[test]
+    fn a_chain_of_formulas_each_naming_the_last_many_times_comes_back_at_once() {
+        // WHAT: eight columns, each adding the one before it to itself twelve times. WHY: each name is looked up again, level by level, so eight short formulas asked for twelve to the eighth lookups for every markup, on every seat and the server.
+        let mut columns = vec![UserColumn::plain(0, "Base")]; // WHAT: a typed-in number. WHY: the bottom of the chain.
+        for level in 1..=8 {
+            let below = if level == 1 { "Base".to_string() } else { format!("L{}", level - 1) }; // WHAT: the column below. WHY: named twelve times.
+            columns.push(UserColumn { index: level, name: format!("L{level}"), formula: Some(vec![format!("[{below}]"); 12].join(" + ")), precision: 2 }); // WHAT: twelve times the one below. WHY: the fan-out.
+        }
+        let started = std::time::Instant::now(); // WHAT: now. WHY: timed.
+        assert_eq!(value(&beam(1.0, "1"), &columns, 8), None, "past the budget, no value");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "took {:?}", started.elapsed());
+        let ok = vec![UserColumn::plain(0, "Rate"), UserColumn { index: 1, name: "Twice".into(), formula: Some("[Rate] + [Rate]".into()), precision: 2 }]; // WHAT: an ordinary formula using another column twice. WHY: still worked out.
+        assert_eq!(value(&beam(1.0, "3"), &ok, 1), Some(6.0));
     }
 }

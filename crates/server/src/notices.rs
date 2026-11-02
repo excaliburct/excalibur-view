@@ -42,7 +42,49 @@ pub fn acceptable(url: &str) -> Result<(), String> {
     if !scheme_ok || url.len() > 2000 || url.contains(char::is_whitespace) {
         return Err("A notice address is a web address, starting http:// or https://.".into());
     }
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or_default(); // WHAT: what follows the scheme. WHY: the host is in it.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default(); // WHAT: host and port. WHY: checked below.
+    if authority.contains('@') {
+        return Err("A notice address carries no name or password before its host.".into()); // WHAT: user:password@ refused. WHY: a secret has no place in an address kept and shown in the Studio, and the form hides where it really goes.
+    }
+    let host = authority.trim_start_matches('[').split(']').next().unwrap_or_default(); // WHAT: an IPv6 host without its brackets. WHY: parsed as an address below.
+    let host = if authority.starts_with('[') { host } else { authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority) }; // WHAT: the host without its port. WHY: the same.
+    let read_as = match url::Url::parse(url).ok().and_then(|u| u.host().map(|h| h.to_owned())) {
+        Some(url::Host::Ipv4(v4)) => Some(std::net::IpAddr::V4(v4)), // WHAT: the host as the address library reads it. WHY: `2852039166`, `0xa9fea9fe` and `169.254.43518` are all 169.254.169.254 to it, and to the connection.
+        Some(url::Host::Ipv6(v6)) => Some(std::net::IpAddr::V6(v6)), // WHAT: likewise for IPv6. WHY: the same.
+        _ => host.parse::<std::net::IpAddr>().ok(), // WHAT: a name, or nothing the library could read. WHY: a name is checked again when it is looked up (`only_allowed`).
+    };
+    if read_as.is_some_and(never_a_notice) {
+        return Err("That address is never another program's: link-local and 'any' addresses, where a cloud machine keeps its own secrets, are refused.".into()); // WHAT: refused. WHY: an administrator's session, or a stolen one, must not point the server at its own cloud metadata.
+    }
     hub::web::outbound("Sending change notices", url)
+}
+
+/// Looks a notice's host up and keeps only the addresses a notice may go
+/// to. Checking the address as typed was not enough: a name can be made to
+/// look up to 169.254.169.254, and can change what it looks up to between the
+/// check and the send. The connection is made only to what this returns.
+fn only_allowed(netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    use std::net::ToSocketAddrs; // WHAT: the system's look-up. WHY: what the connection would use anyway.
+    let found: Vec<std::net::SocketAddr> = netloc.to_socket_addrs()?.filter(|at| !never_a_notice(at.ip())).collect(); // WHAT: every address it looks up to, less the refused ones. WHY: only those are connected to.
+    if found.is_empty() {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "that address is never another program's (link-local or 'any')")); // WHAT: nothing left. WHY: refused, never sent.
+    }
+    Ok(found) // WHAT: only the allowed addresses. WHY: the connection is made to nothing else.
+}
+
+/// Addresses a notice is never sent to: link-local (169.254.0.0/16, where a
+/// cloud machine answers with its own credentials, and fe80::/10), the
+/// "any" address, multicast and broadcast. The office's own network and this
+/// machine stay allowed: that is where FabWire lives.
+fn never_a_notice(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_link_local() || v4.is_unspecified() || v4.is_multicast() || v4.is_broadcast(), // WHAT: the IPv4 ones. WHY: as above.
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => never_a_notice(std::net::IpAddr::V4(v4)), // WHAT: an IPv4 address written as IPv6. WHY: judged as itself.
+            None => v6.is_unspecified() || v6.is_multicast() || (v6.segments()[0] & 0xffc0) == 0xfe80, // WHAT: the IPv6 ones. WHY: as above.
+        },
+    }
 }
 
 /// A new secret: 32 random bytes, as hex.
@@ -160,7 +202,7 @@ fn deliver(url: &str, secret: &str, event: &str, body: &str) -> String {
     if let Err(why) = hub::web::outbound("Sending change notices", url) {
         return why;
     }
-    let agent = hub::web::agent().timeout(Duration::from_secs(15)).build();
+    let agent = hub::web::agent().timeout(Duration::from_secs(15)).redirects(0).resolver(only_allowed).build(); // WHAT: no redirects followed, and only allowed addresses connected to. WHY: a notice goes to the address an administrator gave, never to one an answer names or one a name was made to look up to.
     let signature = format!("sha256={}", sign(secret, body.as_bytes()));
     let mut last = String::new();
     for attempt in 0..=AGAIN_AFTER.len() {
@@ -218,5 +260,29 @@ mod tests {
         assert!(super::acceptable("ftp://example.com").is_err());
         assert!(super::acceptable("file:///etc/passwd").is_err());
         assert!(super::acceptable("https://example.com/a b").is_err());
+    }
+
+    #[test]
+    fn a_notice_is_never_sent_where_a_cloud_machine_keeps_its_secrets() {
+        for refused in [
+            "http://169.254.169.254/latest/meta-data/", // WHAT: the cloud metadata address. WHY: it answers with the machine's own credentials.
+            "http://169.254.169.254:80/x",
+            "http://[fe80::1]/x",
+            "http://[::ffff:169.254.169.254]/x",
+            "http://0.0.0.0:8080/x",
+            "https://user:secret@fabwire.example.lan/hooks",
+        ] {
+            assert!(super::acceptable(refused).is_err(), "{refused} was taken");
+        }
+        for refused in ["http://2852039166/latest/meta-data/", "http://0xa9fea9fe/x", "http://169.254.43518/x", "http://0251.0376.0251.0376/x", "http://0/x"] {
+            assert!(super::acceptable(refused).is_err(), "{refused} was taken: it is 169.254.169.254 or 0.0.0.0 written another way"); // WHAT: the metadata address written as the address library and the connection read it. WHY: checked only as typed, these went straight past.
+        }
+        for refused in ["169.254.169.254:80", "[fe80::1]:80", "0.0.0.0:80"] {
+            assert!(super::only_allowed(refused).is_err(), "{refused} would be connected to"); // WHAT: what a name looked up to, refused at the connection. WHY: a name can be made to look up to anything, and to change between the check and the send.
+        }
+        assert!(super::only_allowed("127.0.0.1:5000").is_ok(), "this machine is still allowed"); // WHAT: FabWire on the server itself. WHY: where notices go.
+        for allowed in ["http://10.0.0.7:8080/notice", "http://127.0.0.1:5000/hook", "https://[2001:db8::1]/x", "https://fabwire.example.lan/hooks/excalibur"] {
+            assert!(super::acceptable(allowed).is_ok(), "{allowed} was refused"); // WHAT: the office's own network and this machine. WHY: where the programs a notice is for live.
+        }
     }
 }

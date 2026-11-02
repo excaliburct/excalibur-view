@@ -259,6 +259,11 @@ firewall rules and leaves the drawings where they are.
 Elsewhere, `hyperview-server --console` runs it in a window, keeping
 `hyperview-data` beside the program; `HYPERVIEW_FIRST_ADMIN=1` prints a
 password for a first administrator on a box nobody will open Hyperview near.
+Wrong passwords and join codes are counted by the machine that connected; a
+forwarded address is believed only from the remote-access connector on the
+server itself, or from a reverse proxy set up by hand on the same machine
+when `HYPERVIEW_BEHIND_PROXY=1` says so. The installed service makes its
+folder readable by the system and administrators only each time it starts.
 
 It serves the API on port 8714 and answers on the local network on 8715, so
 seats find it without anybody typing an address —
