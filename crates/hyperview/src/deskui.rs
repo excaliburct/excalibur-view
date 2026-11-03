@@ -857,7 +857,7 @@ impl App {
 /// Whether something handed to the window is a `hyperview://` link rather
 /// than a drawing.
 pub fn is_link(s: &str) -> bool {
-    s.len() > 12 && s[..12].eq_ignore_ascii_case("hyperview://")
+    s.len() > 12 && s.get(..12).is_some_and(|start| start.eq_ignore_ascii_case("hyperview://")) // WHAT: the first twelve bytes, only when they end on a character. WHY: cutting inside an accent closed the program; such a start is no link anyway.
 }
 
 /// The name the assistant's proposals go under in the window's findings list.
@@ -934,13 +934,13 @@ fn percent_decode(s: &str) -> String {
     while i < bytes.len() {
         match bytes[i] {
             b'%' if i + 2 < bytes.len() => {
-                match u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    Ok(b) => {
+                match s.get(i + 1..i + 3).filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit())).map(|h| u8::from_str_radix(h, 16)) { // WHAT: the two after the percent, only when they are two hex digits. WHY: slicing bytes landed inside an accent and closed the program, from any link anyone sends.
+                    Some(Ok(b)) => {
                         out.push(b);
                         i += 3;
                         continue;
                     }
-                    Err(_) => out.push(b'%'),
+                    _ => out.push(b'%'), // WHAT: not a code; the percent kept. WHY: as before for a stray percent.
                 }
             }
             b'+' => out.push(b' '),
@@ -972,6 +972,15 @@ mod tests {
         assert_eq!(percent_decode("set_abc%2D1"), "set_abc-1");
         assert_eq!(percent_decode("S-101+Framing"), "S-101 Framing");
         assert_eq!(percent_decode("100%"), "100%", "a stray percent is kept, not dropped");
+    }
+
+    #[test]
+    fn a_link_with_an_accent_where_a_code_should_be_is_read_not_a_crash() {
+        assert_eq!(percent_decode("%a\u{e9}x"), "%a\u{e9}x"); // WHAT: a percent, a hex digit, then an accent. WHY: reading the two after the percent as bytes landed inside the accent and closed the program, from any link anyone sends.
+        assert_eq!(percent_decode("%\u{e9}"), "%\u{e9}"); // WHAT: an accent straight after the percent. WHY: the same, the other way.
+        assert_eq!(percent_decode("A%2"), "A%2"); // WHAT: a code cut short at the end. WHY: kept as it is.
+        assert!(!is_link("hyperview:/\u{e9}open")); // WHAT: an accent across the twelfth byte. WHY: cutting the first twelve bytes landed inside it and closed the program.
+        assert!(is_link("HYPERVIEW://open?set=s1")); // WHAT: a real link, any case. WHY: still read as one.
     }
 }
 
