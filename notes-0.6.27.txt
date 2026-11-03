@@ -10,10 +10,11 @@ and never a program, a script, a shortcut, a web page or one of Excalibur
 View's own trusted files (plugins, licenses, tool chests). A file that breaks
 these rules gets no Save button, and the window says why.
 
-Plugins are also told where and when they are being run: this program's
-version, who is running it, the office project and drawing set the drawing
-came from, and the time. That lets a file a plugin writes say where it came
-from.
+Plugins are also told this program's version and the time. A plugin that
+asks for it in its signed manifest is told, as well, who is running it and
+the office project and drawing set the drawing came from, and the Plugins
+window says so beside it. That lets a file a plugin writes say where it came
+from, and a plugin that doesn't ask learns nothing new about the office.
 
 Nothing else changes for a plugin. It is still sandboxed: no files, no
 network, no clock of its own. It is still signed, and it still runs only when

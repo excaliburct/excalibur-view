@@ -97,6 +97,13 @@ pub struct Needs {
     pub words: bool,
     #[serde(default)]
     pub lines: bool,
+    /// Whether it is told who is running it and the office project and
+    /// drawing set the drawing came from ([`Context::user`],
+    /// [`Context::project`], [`Context::drawing_set`]). Off unless it asks,
+    /// so a plugin only learns them when its manifest, which its publisher
+    /// signed, says it wants them, and the Plugins window says so.
+    #[serde(default)] // WHAT: missing reads as not asked. WHY: an older plugin asked for nothing, and an older program ignores the field.
+    pub context: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

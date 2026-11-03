@@ -186,7 +186,7 @@ impl App {
             name: if whole { "Saving the drawing".into() } else { "Saving the sheet".into() },
             description: String::new(),
             scope: if whole { Scope::Drawing } else { Scope::Sheet },
-            needs: plugin_api::Needs { words: true, lines: true },
+            needs: plugin_api::Needs { words: true, lines: true, context: false }, // WHAT: words and lines, but not who or which project. WHY: a saved test sheet is handed to whoever writes the plugin, and they need the drawing, not the person's name or the office's projects.
         };
         let input = self.plugin_input(&command, &pages, BTreeMap::new());
         self.next_plugin_job += 1;
@@ -286,6 +286,7 @@ impl App {
             columns: (0..6).map(|n| takeoff::user::name_of(&user, n)).collect(),
             // WHAT: where and when it is being run: the person, the office project and set the drawing came from, and the time. WHY: a plugin has no clock and can ask nothing, so a file it writes can only say where it came from if it is told.
             context: plugins::context_for(
+                &command.needs, // WHAT: what the command's manifest asked to be told. WHY: who and which project go only to a plugin that asked.
                 &self.author,
                 doc.attached.as_ref().and_then(|a| self.standing.sets.iter().find(|s| s.id == a.set)), // WHAT: the server's set this drawing is attached to. WHY: its name and project.
                 &self.standing.projects,
@@ -1016,6 +1017,9 @@ impl App {
                         .color(theme.faint)
                         .size(11.0),
                     );
+                    if m.commands.iter().any(|c| c.needs.context) { // WHAT: a plugin that asks to be told who runs it and which project. WHY: whoever adds or shares it should see that before they do.
+                        ui.label(RichText::new("Is told who runs it, and the office project and drawing set").color(theme.faint).size(11.0)); // WHAT: said in plain words. WHY: the one thing it learns beyond the drawing.
+                    }
                     ui.horizontal(|ui| {
                         if plugin.from_office {
                             if admin && connected && ui.button("Take off the office's list").clicked() {

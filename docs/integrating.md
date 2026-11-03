@@ -98,14 +98,17 @@ macro is written for.
 
 `Input` carries the command id, the drawing's name, which sheet was on screen,
 the sheets, the markups, the person's settings, the office's custom column
-names, and a `context`: the program and its version, who is running it, the
-office project and drawing set the drawing came from (empty for a drawing
-opened from a folder), and the time it was run (`2026-11-03T14:05:00Z`, UTC).
-A plugin has no clock and can ask nothing, so a file it writes can only say
-where it came from because it is told. Every field may be empty on a copy of
-Excalibur View older than 0.6.27. A `Command` declares what it `needs` — `words`, `lines`, both or
-neither — because reading the line-work of a three-hundred-sheet set takes a
-while and a command that only needs text should not pay for it.
+names, and a `context`: the program and its version and the time it was run
+(`2026-11-03T14:05:00Z`, UTC). A plugin has no clock and can ask nothing, so a
+file it writes can only say when it was made because it is told. Who is
+running it and the office project and drawing set the drawing came from
+(empty for a drawing opened from a folder) are told only to a command whose
+`needs` has `context: true`; the Plugins window shows that a plugin asks, and
+`--plugin-check` says so. Every field may be empty on a copy of Excalibur View
+older than 0.6.27, which ignores `context` in `needs`. A `Command` declares
+what else it `needs` — `words`, `lines`, both or neither — because reading the
+line-work of a three-hundred-sheet set takes a while and a command that only
+needs text should not pay for it.
 
 **Coordinates are sheet space**: points (1/72 inch of paper), measured right
 and down from the top left of the sheet as it is shown. Real lengths are in

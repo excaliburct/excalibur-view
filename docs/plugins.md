@@ -26,11 +26,12 @@ the words printed on it and its straight line-work with each line's pen
 width, all in sheet space (points, from the top left of the sheet as shown).
 Then every markup on those sheets: kind, subject, label, points, length in
 feet up any slope, area, count, quantity, custom columns and pounds. And the
-command's settings, as the person running it left them, and where and when it
-is being run: the program's name and version, who is running it, the office
-project and drawing set the drawing came from, and the time (UTC). A plugin
-has no clock of its own, so that is the only way a file it writes can say when
-it was made.
+command's settings, as the person running it left them, the program's name
+and version, and the time (UTC). A plugin has no clock of its own, so that is
+the only way a file it writes can say when it was made. A command that asks
+for it in its signed manifest is also told who is running it and the office
+project and drawing set the drawing came from; the Plugins window says which
+plugins ask.
 
 ### What it hands back
 

@@ -304,6 +304,10 @@ pub fn checkup(wasm_path: &Path, input_path: Option<&Path>) -> Checkup {
     for command in &manifest.commands {
         let mut input = base.clone();
         input.command = command.id.clone();
+        input.context = only_what_was_asked(&command.needs, input.context); // WHAT: the test sheet's context, cut to what the command asked for. WHY: the check runs it as View would, so a plugin that forgot to ask finds out here, not on a seat.
+        if command.needs.context { // WHAT: the command asks to be told who and which project. WHY: whoever signs it should see that it does.
+            lines.push(format!("  {}: asks to be told who runs it, and the office project and drawing set.", command.id)); // WHAT: said in the report. WHY: the same.
+        }
         let mut settings = settings_for(&manifest, &Settings::new());
         settings.extend(base.settings.clone());
         input.settings = settings;
@@ -477,8 +481,12 @@ pub fn iso_from_pdf_date(pdf: &str) -> Option<String> {
 
 /// What a plugin is told about where and when it is being run. `set` is the
 /// office server's drawing set the drawing came from, with its project, when
-/// it came from one; otherwise the drawing set is the file's own name.
+/// it came from one; otherwise the drawing set is the file's own name. Who is
+/// running it, the project and the set are told only to a command whose
+/// manifest asks for them (`needs.context`); every command is told the
+/// program, its version and the time.
 pub fn context_for(
+    needs: &plugin_api::Needs,
     user: &str,
     set: Option<&hub::DrawingSet>,
     projects: &[hub::Project],
@@ -489,14 +497,26 @@ pub fn context_for(
         .and_then(|s| projects.iter().find(|p| p.id == s.project)) // WHAT: the project the set belongs to. WHY: a set names its project by id only.
         .map(|p| p.name.clone()) // WHAT: the project's name. WHY: what people call it.
         .unwrap_or_default(); // WHAT: empty when it has none. WHY: a drawing from a folder belongs to no project.
-    plugin_api::Context {
+    let full = plugin_api::Context {
         app: "Excalibur View".into(), // WHAT: this program. WHY: a plugin's file says what made it.
         app_version: env!("CARGO_PKG_VERSION").into(), // WHAT: this build's version. WHY: the same, to the version.
         user: user.trim().into(), // WHAT: the person, as their markups name them. WHY: who ran it.
         project,
         drawing_set: set.map(|s| s.name.clone()).unwrap_or_else(|| file_stem.into()), // WHAT: the set's name, or the file's. WHY: always something a person recognises.
         now: iso_from_pdf_date(pdf_now).unwrap_or_default(), // WHAT: the time, in RFC 3339. WHY: a plugin has no clock of its own.
+    };
+    only_what_was_asked(needs, full) // WHAT: cut to what the command asked for. WHY: who and which project go only to a plugin whose signed manifest asks.
+}
+
+/// `context` with who is running it, the project and the drawing set
+/// emptied unless the command asked for them. The program, its version and
+/// the time say nothing about the office, so every command keeps those.
+#[must_use] // WHAT: a caller that drops the context gets a warning. WHY: cutting it has no other effect.
+pub fn only_what_was_asked(needs: &plugin_api::Needs, context: plugin_api::Context) -> plugin_api::Context {
+    if needs.context { // WHAT: the command's signed manifest asks to be told. WHY: then it is told everything.
+        return context;
     }
+    plugin_api::Context { user: String::new(), project: String::new(), drawing_set: String::new(), ..context } // WHAT: the three emptied, the rest kept. WHY: a plugin that didn't ask learns nothing about who or which job.
 }
 
 pub fn kind_word(kind: annot::Kind) -> &'static str {
@@ -809,13 +829,24 @@ mod tests {
         let project: hub::Project = serde_json::from_value(serde_json::json!({"id":"p1","number":"2630","name":"North Yard Storm","created":"","sets":1})).unwrap(); // WHAT: a project. WHY: the set below belongs to it.
         let set: hub::DrawingSet = serde_json::from_value(serde_json::json!({"id":"s1","project":"p1","name":"C-Sheets Rev 2","filename":"c.pdf","digest":"","bytes":0,"sheets":2,"uploaded":"","uploaded_by":"","revision":0})).unwrap(); // WHAT: a drawing set in that project. WHY: where the drawing came from.
         let other: hub::Project = serde_json::from_value(serde_json::json!({"id":"p0","number":"2601","name":"Another job","created":"","sets":1})).unwrap(); // WHAT: a project listed first that the set isn't in. WHY: the set's own project must be found, not the first.
-        let from_server = context_for(" Sam ", Some(&set), &[other, project], "c", "D:20261103140500Z"); // WHAT: a drawing opened from the office server. WHY: the full case.
+        let asks = plugin_api::Needs { context: true, ..Default::default() }; // WHAT: a command whose manifest asks to be told. WHY: the full case.
+        let from_server = context_for(&asks, " Sam ", Some(&set), &[other, project], "c", "D:20261103140500Z"); // WHAT: a drawing opened from the office server. WHY: the full case.
         assert_eq!((from_server.project.as_str(), from_server.drawing_set.as_str(), from_server.user.as_str()), ("North Yard Storm", "C-Sheets Rev 2", "Sam")); // WHAT: project and set by name, the user trimmed. WHY: what the person sees.
         assert_eq!(from_server.now, "2026-11-03T14:05:00Z"); // WHAT: the time. WHY: in the form a plugin can write as it is.
         assert_eq!(from_server.app, "Excalibur View"); // WHAT: the program's name. WHY: provenance.
         assert!(!from_server.app_version.is_empty()); // WHAT: a version. WHY: the same.
-        let from_folder = context_for("Sam", None, &[], "North Yard C-Sheets", "D:20261103140500Z"); // WHAT: a drawing opened from a folder. WHY: no project to name.
+        let from_folder = context_for(&asks, "Sam", None, &[], "North Yard C-Sheets", "D:20261103140500Z"); // WHAT: a drawing opened from a folder. WHY: no project to name.
         assert_eq!((from_folder.project.as_str(), from_folder.drawing_set.as_str()), ("", "North Yard C-Sheets")); // WHAT: no project, the file's name as the set. WHY: never a made-up project.
+    }
+
+    #[test]
+    fn a_plugin_that_didnt_ask_is_told_when_but_not_who_or_which_project() {
+        let project: hub::Project = serde_json::from_value(serde_json::json!({"id":"p1","number":"2630","name":"North Yard Storm","created":"","sets":1})).unwrap(); // WHAT: a project. WHY: the set below belongs to it.
+        let set: hub::DrawingSet = serde_json::from_value(serde_json::json!({"id":"s1","project":"p1","name":"C-Sheets Rev 2","filename":"c.pdf","digest":"","bytes":0,"sheets":2,"uploaded":"","uploaded_by":"","revision":0})).unwrap(); // WHAT: a drawing set in that project. WHY: where the drawing came from.
+        let quiet = plugin_api::Needs::default(); // WHAT: a command that asked for nothing. WHY: every plugin written before the field, and any that doesn't need to know.
+        let told = context_for(&quiet, "Sam", Some(&set), &[project], "c", "D:20261103140500Z"); // WHAT: the same drawing as before. WHY: only the asking differs.
+        assert_eq!((told.user.as_str(), told.project.as_str(), told.drawing_set.as_str()), ("", "", "")); // WHAT: no name, project or set. WHY: a third party's plugin learns them only when its signed manifest says it wants them.
+        assert_eq!((told.app.as_str(), told.now.as_str()), ("Excalibur View", "2026-11-03T14:05:00Z")); // WHAT: the program and the time, still. WHY: neither says anything about the office.
     }
 
     #[test]
