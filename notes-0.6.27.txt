@@ -26,4 +26,8 @@ chest::native::check. It names every tool the import would leave out, every
 colour it would change and every column it would drop, where the import alone
 passes over them without a word.
 
+Two ways to close the program are gone: a tool chest with an accent in a
+colour, and a hyperview:// link with an accent where a %-code should be. Both
+are now read as broken rather than crashing.
+
 Nothing needs doing.

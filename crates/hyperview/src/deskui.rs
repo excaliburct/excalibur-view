@@ -935,7 +935,7 @@ fn percent_decode(s: &str) -> String {
         match bytes[i] {
             b'%' if i + 2 < bytes.len() => {
                 match s.get(i + 1..i + 3).filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit())).map(|h| u8::from_str_radix(h, 16)) { // WHAT: the two after the percent, only when they are two hex digits. WHY: slicing bytes landed inside an accent and closed the program, from any link anyone sends.
-                    Some(Ok(b)) => {
+                    Some(Ok(b)) => { // WHAT: a real code. WHY: its byte goes in.
                         out.push(b);
                         i += 3;
                         continue;

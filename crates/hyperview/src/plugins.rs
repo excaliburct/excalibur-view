@@ -486,7 +486,7 @@ pub fn iso_from_pdf_date(pdf: &str) -> Option<String> {
 /// manifest asks for them (`needs.context`); every command is told the
 /// program, its version and the time.
 pub fn context_for(
-    needs: &plugin_api::Needs,
+    needs: &plugin_api::Needs, // WHAT: what the command asked for. WHY: decides whether who and which project are told.
     user: &str,
     set: Option<&hub::DrawingSet>,
     projects: &[hub::Project],
@@ -497,7 +497,7 @@ pub fn context_for(
         .and_then(|s| projects.iter().find(|p| p.id == s.project)) // WHAT: the project the set belongs to. WHY: a set names its project by id only.
         .map(|p| p.name.clone()) // WHAT: the project's name. WHY: what people call it.
         .unwrap_or_default(); // WHAT: empty when it has none. WHY: a drawing from a folder belongs to no project.
-    let full = plugin_api::Context {
+    let full = plugin_api::Context { // WHAT: everything this program knows. WHY: cut below to what was asked.
         app: "Excalibur View".into(), // WHAT: this program. WHY: a plugin's file says what made it.
         app_version: env!("CARGO_PKG_VERSION").into(), // WHAT: this build's version. WHY: the same, to the version.
         user: user.trim().into(), // WHAT: the person, as their markups name them. WHY: who ran it.
@@ -514,7 +514,7 @@ pub fn context_for(
 #[must_use] // WHAT: a caller that drops the context gets a warning. WHY: cutting it has no other effect.
 pub fn only_what_was_asked(needs: &plugin_api::Needs, context: plugin_api::Context) -> plugin_api::Context {
     if needs.context { // WHAT: the command's signed manifest asks to be told. WHY: then it is told everything.
-        return context;
+        return context; // WHAT: all of it. WHY: it asked.
     }
     plugin_api::Context { user: String::new(), project: String::new(), drawing_set: String::new(), ..context } // WHAT: the three emptied, the rest kept. WHY: a plugin that didn't ask learns nothing about who or which job.
 }

@@ -103,7 +103,7 @@ pub struct Needs {
     /// so a plugin only learns them when its manifest, which its publisher
     /// signed, says it wants them, and the Plugins window says so.
     #[serde(default)] // WHAT: missing reads as not asked. WHY: an older plugin asked for nothing, and an older program ignores the field.
-    pub context: bool,
+    pub context: bool, // WHAT: asks to be told who and which project. WHY: see above.
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -677,7 +677,7 @@ impl Output {
             let left = self.files.len() - MOST_FILES; // WHAT: how many were past the limit. WHY: said in the refusal.
             offered.push((extra, Err(format!("a plugin may offer at most {MOST_FILES} files at once; {left} more were left out")))); // WHAT: one refusal for the lot. WHY: a plugin naming a hundred thousand files must not get a hundred thousand lines in the window, every frame.
         }
-        offered
+        offered // WHAT: at most one more than the limit. WHY: the window's list stays short.
     }
 }
 
