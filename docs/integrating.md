@@ -149,13 +149,15 @@ takeoff in another program's format, or a report. A plugin still writes
 nothing: Excalibur View shows a **Save** button for each file, and writes it
 only where the person picks in the save box. A file is offered only when:
 
-- its name is a plain file name: no folder, drive, `..`, control or
-  direction-override characters, no leading or trailing dot or space, not a
-  Windows device name, at most 120 characters;
+- its name is a plain file name: no folder, drive, `..`, control, invisible or
+  direction characters, no leading or trailing dot or space, not a Windows
+  device name (`CON`, `COM1`, `COM¹`, `CONIN$`…), at most 120 characters;
 - it has an extension of plain letters and digits that isn't something a
-  computer runs or opens as instructions (`.exe`, `.bat`, `.ps1`, `.js`,
-  `.html`, `.svg`, `.lnk`, `.sh`, `.app`…) or one of this program's own trusted
-  files (`.hvplugin`, `.evlicense`, `.evtools`);
+  computer runs, mounts, installs or opens as instructions on Windows, the Mac
+  or Linux (`.exe`, `.bat`, `.ps1`, `.js`, `.html`, `.svg`, `.lnk`, `.scf`,
+  `.xlsm`, `.iso`, `.rdp`, `.webloc`, `.sh`, `.app`, `.desktop`, `.appimage`…)
+  or one of this program's own trusted files (`.hvplugin`, `.evlicense`,
+  `.evtools`);
 - its text is UTF-8 and at most 16 MB, and the answer offers at most 8 files.
 
 `OutFile::check()` is the rule itself, so a plugin can check its own file

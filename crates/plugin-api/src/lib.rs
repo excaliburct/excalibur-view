@@ -569,6 +569,24 @@ const NEVER_OFFERED: &[&str] = &[
     "command", "tool", "app", "pkg", "dmg", "terminal", "workflow", "scpt", "applescript", "desktop", "run", "bin",
     "elf", "so", "dylib", "py", "pyw", "pl", "rb", "php", "svg", "html", "htm", "xhtml", "mht", "mhtml", "shtml",
     "hvplugin", "evlicense", "evtools", "bpx", "btx", "wasm",
+    // WHAT: more of Windows' own: Explorer commands, pinned sites, search connectors, management consoles, updates, PowerShell's other files, script components, remote desktop and theme files that reach out to a server, disk images that mount, certificates that install, installers, help, old program groups and desktop.ini. WHY: each runs something, reaches out or installs when it is opened.
+    "scf", "website", "searchconnector-ms", "msc", "msu", "mst", "msh", "msh1", "msh2", "mshxml", "msh1xml", "msh2xml",
+    "ps1xml", "ps2", "ps2xml", "psc1", "psc2", "pssc", "cdxml", "vb", "ws", "wsc", "sct", "shb", "shs", "xbap", "xnk",
+    "appinstaller", "appxbundle", "msixbundle", "diagcab", "diagcfg", "diagpkg", "theme", "themepack",
+    "deskthemepack", "rdp", "ins", "isp", "its", "jnlp", "hlp", "grp", "crt", "cer", "der", "p7b", "p7c", "pfx", "p12",
+    "iso", "img", "vhd", "vhdx", "cab", "ax", "drv", "efi", "ini", "printerexport", "glk", "swf", "xap",
+    // WHAT: Office files that carry macros or load add-ins, Access databases, and Excel's web and link queries. WHY: they run code, or fetch from a server, when opened.
+    "xll", "xla", "xlam", "xlsm", "xltm", "xlsb", "docm", "dotm", "pptm", "potm", "ppam", "ppsm", "sldm", "ppa", "mdb",
+    "accdb", "mde", "accde", "ade", "adp", "iqy", "slk", "dqy", "rqy", "oqy",
+    // WHAT: the Mac's links, installers, profiles and the bundles it loads code from. WHY: the same, on a Mac.
+    "webloc", "inetloc", "fileloc", "afploc", "ftploc", "mpkg", "prefpane", "plugin", "kext", "bundle", "framework",
+    "osax", "xpc", "scptd", "jxa", "action", "mobileconfig", "configprofile", "saver", "qlgenerator", "mdimporter",
+    "service", "widget", "wdgt",
+    // WHAT: Linux's packages, app images, links and modules, and more scripts and compiled scripts. WHY: the same, on Linux and anywhere a script runs.
+    "appimage", "deb", "rpm", "snap", "flatpak", "flatpakref", "flatpakrepo", "directory", "kdelnk", "ko", "fish",
+    "tcsh", "pyc", "pyo", "pyz", "pyzw", "mjs", "cjs", "lua", "tcl", "awk", "cgi", "phar", "phtml", "asp", "aspx", "jsp",
+    // WHAT: the rest of the web page types, and stylesheets a browser runs. WHY: a browser runs the script inside them.
+    "xht", "xhtm", "shtm", "svgz", "xsl", "xslt",
 ];
 
 /// Names Windows keeps for devices, which no file may be called whatever its
@@ -576,7 +594,22 @@ const NEVER_OFFERED: &[&str] = &[
 const WINDOWS_DEVICES: &[&str] = &[
     "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt1",
     "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    // WHAT: port nought, the superscript ports, the console's two halves and the old clock. WHY: Windows keeps these too, so COM¹.txt is a device as surely as COM1.txt.
+    "com0", "lpt0", "com\u{b9}", "com\u{b2}", "com\u{b3}", "lpt\u{b9}", "lpt\u{b2}", "lpt\u{b3}", "conin$", "conout$", "clock$",
 ];
+
+/// Whether a character is invisible, or reorders the text round it: format
+/// characters, zero-width spaces and joiners, the byte-order mark, the soft
+/// hyphen, line and paragraph separators, fillers, variation selectors and
+/// tags. A name with one of these can read on screen as a name it isn't.
+fn invisible(c: char) -> bool {
+    // WHAT: every such character Unicode has, by range. WHY: the person must see every character of the name they save.
+    matches!(c,
+        '\u{00ad}' | '\u{034f}' | '\u{061c}' | '\u{115f}' | '\u{1160}' | '\u{17b4}' | '\u{17b5}' | '\u{180b}'..='\u{180f}'
+        | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}'
+        | '\u{feff}' | '\u{ffa0}' | '\u{fff0}'..='\u{fffb}' | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}'
+        | '\u{e0000}'..='\u{e0fff}')
+}
 
 impl OutFile {
     /// Whether this file may be offered for saving, and why not when it may
@@ -592,7 +625,7 @@ impl OutFile {
             return Err(format!("its name is empty or longer than {MOST_FILE_NAME} characters")); // WHAT: refused. WHY: says which limit.
         }
         // WHAT: any character that is a folder separator, a drive colon, a wildcard or quote Windows refuses, a control character, or a direction override. WHY: a name alone, nothing that reaches into another folder, and nothing that could make "txt.exe" look like "exe.txt" on screen.
-        let bad = |c: char| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+        let bad = |c: char| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() || invisible(c); // WHAT: now every invisible or reordering character, not only the direction marks. WHY: the Arabic letter mark, zero-width characters, fillers and tags hid in a name just as well.
         if name.chars().any(bad) { // WHAT: one of those is in the name. WHY: see above.
             return Err("its name has a folder, a drive or a character a file name can't have".into()); // WHAT: refused. WHY: the plain reason.
         }
@@ -628,15 +661,16 @@ impl OutFile {
 
 impl Output {
     /// Each offered file with whether it may be saved: the first
-    /// [`MOST_FILES`] are checked, and any past that are refused for being
-    /// too many.
+    /// [`MOST_FILES`] are checked, and past that one more stands for the rest,
+    /// refused, saying how many there were.
     #[must_use] // WHAT: a caller that drops the list gets a warning. WHY: working it out has no other effect.
     pub fn offered_files(&self) -> Vec<(&OutFile, Result<(), String>)> {
-        self.files
-            .iter()
-            .enumerate() // WHAT: each file with its place. WHY: the ones past the limit are refused by place.
-            .map(|(n, f)| (f, if n < MOST_FILES { f.check() } else { Err(format!("a plugin may offer at most {MOST_FILES} files at once")) })) // WHAT: checked, or refused for being one too many. WHY: a cap on how much one answer can ask to write.
-            .collect()
+        let mut offered: Vec<(&OutFile, Result<(), String>)> = self.files.iter().take(MOST_FILES).map(|f| (f, f.check())).collect(); // WHAT: the first ones, each checked. WHY: within the limit.
+        if let Some(extra) = self.files.get(MOST_FILES) { // WHAT: the first one past the limit, if any. WHY: it stands for all of them.
+            let left = self.files.len() - MOST_FILES; // WHAT: how many were past the limit. WHY: said in the refusal.
+            offered.push((extra, Err(format!("a plugin may offer at most {MOST_FILES} files at once; {left} more were left out")))); // WHAT: one refusal for the lot. WHY: a plugin naming a hundred thousand files must not get a hundred thousand lines in the window, every frame.
+        }
+        offered
     }
 }
 
@@ -1107,6 +1141,45 @@ mod tests {
         }
         assert!(file("readme").check().unwrap_err().contains("no extension")); // WHAT: no extension at all. WHY: opened by guesswork.
         assert!(file("a.j$on").check().unwrap_err().contains("plain letters")); // WHAT: an odd extension. WHY: real formats have plain ones.
+    }
+
+    #[test]
+    fn the_other_things_that_run_or_reach_out_when_opened_are_never_offered() {
+        // WHAT: types that run code, load an add-in, mount a disk, install a profile or certificate, or fetch from a server when opened, on Windows, the Mac and Linux. WHY: each was missing from the list, and each can do harm from a double-click.
+        let names = [
+            "a.scf", "a.website", "a.xll", "a.xlam", "a.docm", "a.XLSM", "a.pptm", "a.iqy", "a.slk",
+            "a.msc", "a.msu", "a.rdp", "a.theme", "a.themepack", "a.iso", "a.img", "a.vhd", "a.vhdx", "a.cer", "a.crt",
+            "a.appinstaller", "a.jnlp", "a.webloc", "a.inetloc", "a.fileloc", "a.mobileconfig", "a.AppImage", "a.deb", "a.rpm",
+            "a.flatpakref", "a.pyz", "a.mjs", "a.xht", "a.svgz", "desktop.ini", "a.wsc", "a.sct", "a.ps1xml", "a.diagcab",
+        ];
+        for name in names {
+            assert!(file(name).check().unwrap_err().contains("may not offer"), "{name}"); // WHAT: refused, saying so. WHY: the same guard as for a program.
+        }
+        assert!(file("a.searchconnector-ms").check().is_err()); // WHAT: a search connector. WHY: refused too; its extension is past the length limit, which catches it first.
+    }
+
+    #[test]
+    fn an_invisible_character_cannot_hide_in_a_name() {
+        // WHAT: an Arabic letter mark (a direction mark), zero-width space and joiner, byte-order mark, soft hyphen, line separator, Hangul filler and a tag character. WHY: each is invisible or reorders text, so the name on the Save button need not be the name written.
+        for name in ["a\u{061c}b.json", "a\u{200b}.json", "a\u{200d}.json", "a\u{feff}.json", "a\u{00ad}.json", "a\u{2028}.json", "a\u{3164}.json", "a\u{e0041}.json", "a\u{fe0f}.json"] {
+            assert!(file(name).check().unwrap_err().contains("character"), "{:?}", name); // WHAT: refused for the character. WHY: a person must see every character of the name.
+        }
+    }
+
+    #[test]
+    fn every_name_windows_keeps_for_a_device_is_refused() {
+        // WHAT: the console's input and output, the old clock, port nought, and the superscript ports Windows also keeps. WHY: each was missing, and each writes to a device rather than a file.
+        for name in ["CONIN$.json", "conout$.txt", "CLOCK$.csv", "COM0.json", "lpt0.json", "COM\u{b9}.json", "LPT\u{b2}.txt", "com\u{b3}.csv"] {
+            assert!(file(name).check().unwrap_err().contains("device"), "{name}"); // WHAT: refused. WHY: the plain reason.
+        }
+    }
+
+    #[test]
+    fn a_flood_of_offered_files_is_one_refusal_not_one_each() {
+        let output = Output { files: (0..100_000).map(|n| file(&format!("f{n}.json"))).collect(), ..Default::default() }; // WHAT: a hundred thousand files. WHY: one answer under the size cap can name that many, and the window lists them every frame.
+        let offered = output.offered_files(); // WHAT: what the window would list. WHY: the flood.
+        assert_eq!(offered.len(), MOST_FILES + 1); // WHAT: the allowed ones and one refusal. WHY: the window stays quick whatever the plugin sends.
+        assert!(offered[MOST_FILES].1.as_ref().unwrap_err().contains("99992 more"), "{:?}", offered[MOST_FILES].1); // WHAT: the refusal says how many were left out. WHY: nothing is hidden from the person.
     }
 
     #[test]
