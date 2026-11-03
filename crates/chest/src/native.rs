@@ -250,7 +250,7 @@ fn hex_colour(c: [f32; 3]) -> String {
 
 fn parse_colour(text: &str) -> Option<[f32; 3]> {
     let hex = text.trim().strip_prefix('#')?;
-    if hex.len() != 6 {
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) { // WHAT: exactly six hex digits, nothing else. WHY: slicing byte pairs out of anything else could land inside a character and panic, and from_str_radix takes a sign.
         return None;
     }
     let part = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok().map(|v| v as f32 / 255.0);
@@ -473,6 +473,28 @@ mod tests {
         assert!(check(one_tool("Count", "#00ff00", &count, twice).as_bytes()).problems.iter().any(|p| p.contains("two columns"))); // WHAT: named. WHY: the same.
         let odd = r#"[{"slot":1,"name":"A","kind":"Wordy"}]"#; // WHAT: a kind nobody knows. WHY: treated as text.
         assert!(check(one_tool("Count", "#00ff00", &count, odd).as_bytes()).problems.iter().any(|p| p.contains("Wordy"))); // WHAT: named. WHY: the same.
+    }
+
+    #[test]
+    fn a_colour_that_isnt_plain_hex_is_refused_not_a_crash() {
+        let count = b64("<</Type /Annot/Subtype /Polygon/IT /PolygonCount/MeasurementTypes 128>>"); // WHAT: a good count template. WHY: only the colour is wrong.
+        let text = one_tool("Count", "#a\u{e9}bcd", &count, "[]"); // WHAT: six bytes after the '#', with an accent across the first pair. WHY: cutting it into byte pairs lands inside the accent.
+        let read_back = std::panic::catch_unwind(|| read(text.as_bytes())); // WHAT: the import, watched for a panic. WHY: a chest anyone shares must never close the program or a server request.
+        assert!(read_back.is_ok(), "the import panicked on a colour"); // WHAT: no panic. WHY: the same.
+        assert!(check(text.as_bytes()).problems.iter().any(|p| p.contains("#rrggbb"))); // WHAT: named as a bad colour. WHY: the checker says what the import does with it.
+        for odd in ["#\u{e9}\u{e9}\u{e9}", "#ab\u{e9}cd", "#+1+2+3", "#-1-2-3"] { // WHAT: accents on the pair lines, and signs from_str_radix would take. WHY: none is #rrggbb.
+            assert_eq!(parse_colour(odd), None, "{odd}"); // WHAT: refused. WHY: only six hex digits are a colour.
+        }
+    }
+
+    #[test]
+    fn a_hostile_chest_is_refused_without_a_crash() {
+        let deep = format!(r#"{{"format":"excalibur-view-tools","version":1,"name":"x","junk":{}{},"sets":[]}}"#, "[".repeat(100_000), "]".repeat(100_000)); // WHAT: a hundred thousand nested lists in a field nobody reads. WHY: a reader that recursed without a limit would run out of stack.
+        assert!(check(deep.as_bytes()).profile.is_some()); // WHAT: read, the junk skipped. WHY: the JSON reader steps over a field nobody reads without recursing into it.
+        for numbers in [r#""slot":18446744073709551616"#, r#""slot":-1"#, r#""slot":1e999"#, r#""slot":5,"decimals":18446744073709551615"#] { // WHAT: past usize, negative, infinite, and the largest decimals there is. WHY: numbers a hand-made file can hold.
+            let text = format!(r#"{{"format":"excalibur-view-tools","version":1,"name":"x","columns":[{{{numbers},"name":"A","kind":"Number"}}],"sets":[]}}"#); // WHAT: a chest with that column. WHY: one odd number each.
+            let _ = check(text.as_bytes()); // WHAT: checked. WHY: whatever it says, it must not panic.
+        }
     }
 
     #[test]
