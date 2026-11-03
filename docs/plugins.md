@@ -26,7 +26,11 @@ the words printed on it and its straight line-work with each line's pen
 width, all in sheet space (points, from the top left of the sheet as shown).
 Then every markup on those sheets: kind, subject, label, points, length in
 feet up any slope, area, count, quantity, custom columns and pounds. And the
-command's settings, as the person running it left them.
+command's settings, as the person running it left them, and where and when it
+is being run: the program's name and version, who is running it, the office
+project and drawing set the drawing came from, and the time (UTC). A plugin
+has no clock of its own, so that is the only way a file it writes can say when
+it was made.
 
 ### What it hands back
 
@@ -45,10 +49,18 @@ list of actions from a short, fixed list:
 
 Hyperview carries a fix out only when somebody clicks it, as one undo step.
 
+It can also offer text files: a takeoff for an estimating program, a report.
+It still writes nothing. Each file gets a **Save** button, and Hyperview writes
+it only where the person picks in the save box. A file is offered only under a
+plain name with a data extension (never a program, script, shortcut, web page
+or one of this program's own trusted files), at most 16 MB, and at most 8 at
+once. See `OutFile::check` in the contract.
+
 ### What it cannot do
 
 Import anything. A module with any import is refused, so it has no file
-system, no network, no clock and no way to reach the program. It gets
+system, no network, no clock and no way to reach the program; a file it
+offers reaches the disk only through the person's own click and save box. It gets
 sixty billion instructions' worth of work and a gigabyte and a half of
 memory per run, and is thrown away after each.
 

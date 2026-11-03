@@ -391,6 +391,7 @@ pub fn proposals(
         ),
         findings,
         tables: Vec::new(),
+        files: Vec::new(), // WHAT: no files. WHY: the assistant only proposes markups; it has nothing to save.
     })
 }
 

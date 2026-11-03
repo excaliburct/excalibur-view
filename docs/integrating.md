@@ -97,8 +97,13 @@ macro is written for.
 ### What it is handed
 
 `Input` carries the command id, the drawing's name, which sheet was on screen,
-the sheets, the markups, the person's settings, and the office's custom column
-names. A `Command` declares what it `needs` — `words`, `lines`, both or
+the sheets, the markups, the person's settings, the office's custom column
+names, and a `context`: the program and its version, who is running it, the
+office project and drawing set the drawing came from (empty for a drawing
+opened from a folder), and the time it was run (`2026-11-03T14:05:00Z`, UTC).
+A plugin has no clock and can ask nothing, so a file it writes can only say
+where it came from because it is told. Every field may be empty on a copy of
+Excalibur View older than 0.6.27. A `Command` declares what it `needs` — `words`, `lines`, both or
 neither — because reading the line-work of a three-hundred-sheet set takes a
 while and a command that only needs text should not pay for it.
 
@@ -138,6 +143,24 @@ proposes `W14X38` gets the shop's own W14x38, not a generic line.
 
 A `Table` has columns, rows and an optional totals line, and comes with
 `to_csv()`.
+
+An `Output` may also offer **files**: `files: [OutFile { name, text }]`, for a
+takeoff in another program's format, or a report. A plugin still writes
+nothing: Excalibur View shows a **Save** button for each file, and writes it
+only where the person picks in the save box. A file is offered only when:
+
+- its name is a plain file name: no folder, drive, `..`, control or
+  direction-override characters, no leading or trailing dot or space, not a
+  Windows device name, at most 120 characters;
+- it has an extension of plain letters and digits that isn't something a
+  computer runs or opens as instructions (`.exe`, `.bat`, `.ps1`, `.js`,
+  `.html`, `.svg`, `.lnk`, `.sh`, `.app`…) or one of this program's own trusted
+  files (`.hvplugin`, `.evlicense`, `.evtools`);
+- its text is UTF-8 and at most 16 MB, and the answer offers at most 8 files.
+
+`OutFile::check()` is the rule itself, so a plugin can check its own file
+before offering it; `--plugin-check` reports any file that would be refused as
+a reason the plugin isn't ready to sign.
 
 ### Packaging and signing
 

@@ -163,6 +163,38 @@ pub struct Input {
     /// The office's custom columns, by position: "LBS Per FT" and the rest.
     #[serde(default)]
     pub columns: Vec<String>,
+    /// Where and when the run is happening, as the program knows it. Empty
+    /// from a program older than this field.
+    #[serde(default)] // WHAT: missing reads as an empty context. WHY: an input saved by an older program, or a test file written by hand, still reads.
+    pub context: Context,
+}
+
+/// Where and when a command is being run: what a plugin needs to say where
+/// its answer came from, since it has no clock and cannot ask anything.
+///
+/// Every field is plain text the person running it can already see on their
+/// screen. Any of them may be empty when the program doesn't know it: a
+/// drawing opened from a folder belongs to no project.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Context {
+    /// The program running it: "Excalibur View".
+    #[serde(default)] // WHAT: missing reads as empty. WHY: every field is optional, so an older program's input still reads.
+    pub app: String,
+    /// Its version: "0.6.27".
+    #[serde(default)] // WHAT: missing reads as empty. WHY: the same.
+    pub app_version: String,
+    /// The person running it, as the program names them.
+    #[serde(default)] // WHAT: missing reads as empty. WHY: the same.
+    pub user: String,
+    /// The office project the drawing belongs to, when it came from one.
+    #[serde(default)] // WHAT: missing reads as empty. WHY: the same.
+    pub project: String,
+    /// The drawing set's name on the office server, or the file's name.
+    #[serde(default)] // WHAT: missing reads as empty. WHY: the same.
+    pub drawing_set: String,
+    /// When the run started, UTC, to the second: `2026-11-03T14:05:00Z`.
+    #[serde(default)] // WHAT: missing reads as empty. WHY: the same.
+    pub now: String,
 }
 
 impl Input {
@@ -357,6 +389,7 @@ fn packed(input: &Input) -> Option<Vec<u8>> {
         markups: input.markups.clone(),
         settings: input.settings.clone(),
         columns: input.columns.clone(),
+        context: input.context.clone(), // WHAT: the context goes in the JSON part. WHY: it is small text, and leaving it out would hand every plugin an empty one.
     };
     let json = serde_json::to_vec(&light).unwrap_or_default();
     let bulk: usize = input
@@ -498,6 +531,113 @@ pub struct Output {
     pub findings: Vec<Finding>,
     #[serde(default)]
     pub tables: Vec<Table>,
+    /// Text files the plugin offers to save: a takeoff for another program,
+    /// a report. Nothing is written until the person clicks Save and picks
+    /// where, the same as a table's Save as CSV.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] // WHAT: missing reads as none, and none is not written. WHY: an older program reads a newer plugin's answer, and a newer one an older plugin's, without either noticing.
+    pub files: Vec<OutFile>,
+}
+
+/// One text file a plugin offers. It is only ever offered: Hyperview shows a
+/// Save button, and writes it only where the person chooses in the save box.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct OutFile {
+    /// The name the save box starts with: `North Yard.estimate`. A
+    /// name alone, never a folder; see [`OutFile::check`].
+    pub name: String,
+    /// What goes in the file, as UTF-8 text.
+    pub text: String,
+}
+
+/// The most files one answer may offer.
+pub const MOST_FILES: usize = 8;
+
+/// The most text one offered file may hold.
+pub const MOST_FILE_BYTES: usize = 16 << 20;
+
+/// The longest name a file may be offered under, in characters.
+pub const MOST_FILE_NAME: usize = 120;
+
+/// Extensions a plugin may never offer a file under: things a computer runs
+/// or opens as instructions when they are double-clicked, and this program's
+/// own trusted files. A plugin's file is data for a person or a program to
+/// read, never something to run.
+const NEVER_OFFERED: &[&str] = &[
+    "exe", "com", "bat", "cmd", "ps1", "psm1", "psd1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi", "msp", "msix",
+    "appx", "scr", "pif", "lnk", "url", "hta", "cpl", "dll", "sys", "ocx", "jar", "reg", "inf", "chm", "gadget",
+    "application", "appref-ms", "settingcontent-ms", "library-ms", "search-ms", "sh", "bash", "zsh", "csh", "ksh",
+    "command", "tool", "app", "pkg", "dmg", "terminal", "workflow", "scpt", "applescript", "desktop", "run", "bin",
+    "elf", "so", "dylib", "py", "pyw", "pl", "rb", "php", "svg", "html", "htm", "xhtml", "mht", "mhtml", "shtml",
+    "hvplugin", "evlicense", "evtools", "bpx", "btx", "wasm",
+];
+
+/// Names Windows keeps for devices, which no file may be called whatever its
+/// extension: `CON.txt` opens the console, not a file.
+const WINDOWS_DEVICES: &[&str] = &[
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt1",
+    "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+impl OutFile {
+    /// Whether this file may be offered for saving, and why not when it may
+    /// not. The name must be a plain file name with an extension that isn't
+    /// something a computer runs; the text must be within [`MOST_FILE_BYTES`].
+    ///
+    /// # Errors
+    ///
+    /// The reason, in words for the person.
+    pub fn check(&self) -> Result<(), String> {
+        let name = self.name.as_str(); // WHAT: the offered name. WHY: everything below reads it.
+        if name.is_empty() || name.chars().count() > MOST_FILE_NAME { // WHAT: no name, or one past the limit. WHY: an empty name has nothing to save under, and a huge one is only ever a mistake or a trick.
+            return Err(format!("its name is empty or longer than {MOST_FILE_NAME} characters")); // WHAT: refused. WHY: says which limit.
+        }
+        // WHAT: any character that is a folder separator, a drive colon, a wildcard or quote Windows refuses, a control character, or a direction override. WHY: a name alone, nothing that reaches into another folder, and nothing that could make "txt.exe" look like "exe.txt" on screen.
+        let bad = |c: char| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+        if name.chars().any(bad) { // WHAT: one of those is in the name. WHY: see above.
+            return Err("its name has a folder, a drive or a character a file name can't have".into()); // WHAT: refused. WHY: the plain reason.
+        }
+        if name.starts_with('.') || name.starts_with(' ') || name.ends_with('.') || name.ends_with(' ') { // WHAT: a leading or trailing dot or space. WHY: a hidden file, `..`, or a name Windows quietly changes when it saves it.
+            return Err("its name starts or ends with a dot or a space".into()); // WHAT: refused. WHY: the plain reason.
+        }
+        let Some((stem, extension)) = name.rsplit_once('.') else { // WHAT: the name split at its last dot. WHY: the extension decides what opens the file.
+            return Err("its name has no extension, so nothing would know what it is".into()); // WHAT: refused. WHY: a file with no extension is opened by guesswork.
+        };
+        if extension.is_empty() || extension.len() > 16 || !extension.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') { // WHAT: an extension that is empty, long, or not plain letters, digits and dashes. WHY: every real data format's extension is short and plain.
+            return Err("its extension isn't plain letters and digits".into()); // WHAT: refused. WHY: the plain reason.
+        }
+        if NEVER_OFFERED.contains(&extension.to_ascii_lowercase().as_str()) { // WHAT: an extension on the never-offered list, in any case. WHY: a plugin's file is data, never something that runs when it's opened.
+            return Err(format!("a plugin may not offer a .{extension} file")); // WHAT: refused, naming the extension. WHY: the person and the plugin's writer both see why.
+        }
+        let device = stem.split('.').next().unwrap_or(stem).trim_end().to_ascii_lowercase(); // WHAT: the name up to its first dot, lower case. WHY: Windows treats `nul.anything` as the device too.
+        if WINDOWS_DEVICES.contains(&device.as_str()) { // WHAT: a name Windows keeps for a device. WHY: saving to it would write to the device, not a file.
+            return Err("its name is one Windows keeps for a device".into()); // WHAT: refused. WHY: the plain reason.
+        }
+        if self.text.len() > MOST_FILE_BYTES { // WHAT: more text than one file may carry. WHY: a cap on what a plugin can make the program write.
+            return Err(format!("it is larger than {} MB", MOST_FILE_BYTES >> 20)); // WHAT: refused, with the limit. WHY: the plain reason.
+        }
+        Ok(()) // WHAT: it may be offered. WHY: every check passed.
+    }
+
+    /// The name's extension, lower case, for the save box's filter. Empty
+    /// when it has none.
+    #[must_use] // WHAT: a caller that drops it gets a warning. WHY: reading it has no other effect.
+    pub fn extension(&self) -> String {
+        self.name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default() // WHAT: after the last dot, lower case. WHY: the same split check uses.
+    }
+}
+
+impl Output {
+    /// Each offered file with whether it may be saved: the first
+    /// [`MOST_FILES`] are checked, and any past that are refused for being
+    /// too many.
+    #[must_use] // WHAT: a caller that drops the list gets a warning. WHY: working it out has no other effect.
+    pub fn offered_files(&self) -> Vec<(&OutFile, Result<(), String>)> {
+        self.files
+            .iter()
+            .enumerate() // WHAT: each file with its place. WHY: the ones past the limit are refused by place.
+            .map(|(n, f)| (f, if n < MOST_FILES { f.check() } else { Err(format!("a plugin may offer at most {MOST_FILES} files at once")) })) // WHAT: checked, or refused for being one too many. WHY: a cap on how much one answer can ask to write.
+            .collect()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -906,6 +1046,101 @@ mod tests {
             Action::SetSheetScale { page: 2, ratio: 48.0, text: "1/4\" = 1'-0\"".into() }
         );
         assert!(matches!(&actions[1], Action::AddLength { subject, .. } if subject == "W12x26"));
+    }
+
+    fn file(name: &str) -> OutFile {
+        OutFile { name: name.into(), text: "{}".into() } // WHAT: a small file under a given name. WHY: the name is what the checks are about.
+    }
+
+    #[test]
+    fn the_context_travels_in_the_packed_input_and_an_older_input_reads_without_it() {
+        let context = Context {
+            app: "Excalibur View".into(),
+            app_version: "0.6.27".into(),
+            user: "Sam".into(),
+            project: "North Yard Storm".into(),
+            drawing_set: "C-Sheets Rev 2".into(),
+            now: "2026-11-03T14:05:00Z".into(),
+        }; // WHAT: every field filled. WHY: any one dropped on the way shows.
+        let input = Input { command: "x".into(), context: context.clone(), ..Default::default() }; // WHAT: an input carrying it. WHY: what a plugin is handed.
+        assert_eq!(unpack(&pack(&input)).unwrap().context, context); // WHAT: comes back whole through the packed form. WHY: the form every real run uses.
+        assert_eq!(unpack(br#"{"command":"x"}"#).unwrap().context, Context::default()); // WHAT: an input with no context reads as an empty one. WHY: saved test sheets from older programs keep working.
+    }
+
+    #[test]
+    fn an_answer_without_files_is_written_as_before_and_one_with_files_reads_back() {
+        let plain = Output { title: "t".into(), ..Default::default() }; // WHAT: an answer offering nothing. WHY: what every existing plugin sends.
+        assert!(!serde_json::to_string(&plain).unwrap().contains("files")); // WHAT: no files key at all. WHY: an older program reading it sees exactly what it always saw.
+        let with = Output { title: "t".into(), files: vec![file("a.json")], ..Default::default() }; // WHAT: one offering a file. WHY: the new case.
+        let back: Output = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap(); // WHAT: written and read again. WHY: it crosses the sandbox as JSON.
+        assert_eq!(back.files, with.files); // WHAT: the same file. WHY: nothing lost on the way.
+        let old: Output = serde_json::from_str(r#"{"title":"t"}"#).unwrap(); // WHAT: an older plugin's answer. WHY: it has no files.
+        assert!(old.files.is_empty()); // WHAT: reads as none. WHY: older plugins keep working.
+    }
+
+    #[test]
+    fn a_plain_data_file_may_be_offered() {
+        for name in ["North Yard Storm.estimate", "takeoff.csv", "S-201 (rev 2).json", "notes.txt", "Bid 2630 & co.md", "Résumé.json"] { // WHAT: ordinary names, spaces, brackets and accents included. WHY: what real files are called.
+            assert_eq!(file(name).check(), Ok(()), "{name}"); // WHAT: allowed. WHY: data under a plain name.
+        }
+        assert_eq!(file("A.Estimate").extension(), "estimate"); // WHAT: the extension, lower case. WHY: the save box filters by it.
+    }
+
+    #[test]
+    fn a_name_that_reaches_into_a_folder_is_refused() {
+        for name in ["../evil.json", "..\\evil.json", "sub/a.json", "C:a.json", "/etc/a.json", "a\u{0}.json", "a\n.json"] { // WHAT: separators, a drive, control characters. WHY: each would write somewhere other than where the person picked, or not as a plain name.
+            assert!(file(name).check().unwrap_err().contains("folder"), "{name}"); // WHAT: refused for that reason. WHY: the guard that keeps a plugin to a file name.
+        }
+    }
+
+    #[test]
+    fn a_name_with_a_hidden_or_trimmed_end_is_refused() {
+        for name in [".hidden.json", "..", "a.json.", "a.json ", " a.json"] { // WHAT: leading or trailing dots and spaces. WHY: hidden files, parent folders, and names Windows changes.
+            assert!(file(name).check().is_err(), "{name}"); // WHAT: refused. WHY: the person must get exactly the name shown.
+        }
+    }
+
+    #[test]
+    fn something_that_runs_is_never_offered_whatever_its_case() {
+        for name in ["setup.exe", "run.BAT", "x.Ps1", "a.lnk", "page.html", "trust.hvplugin", "t.evtools", "x.sh", "x.command", "x.app"] { // WHAT: programs, scripts, shortcuts, pages and this program's own trusted files. WHY: a plugin's file is data, never something that runs.
+            assert!(file(name).check().unwrap_err().contains("may not offer"), "{name}"); // WHAT: refused, saying so. WHY: the guard against a plugin planting a program.
+        }
+        assert!(file("readme").check().unwrap_err().contains("no extension")); // WHAT: no extension at all. WHY: opened by guesswork.
+        assert!(file("a.j$on").check().unwrap_err().contains("plain letters")); // WHAT: an odd extension. WHY: real formats have plain ones.
+    }
+
+    #[test]
+    fn a_direction_override_cannot_disguise_an_extension() {
+        assert!(file("invoice\u{202e}nosj.exe").check().is_err()); // WHAT: a right-to-left override, which shows "invoiceexe.json". WHY: the classic way to dress a program up as data.
+        assert!(file("report\u{202e}vsc.json").check().unwrap_err().contains("character")); // WHAT: an override in a name whose extension is fine. WHY: refused for the override itself, so the guard is proven on its own.
+        assert!(file("report\u{2067}a.json").check().is_err()); // WHAT: an isolate, the newer kind of override. WHY: the same trick.
+    }
+
+    #[test]
+    fn a_windows_device_name_is_refused() {
+        for name in ["CON.json", "nul.txt", "Com1.csv", "lpt9.tar.json"] { // WHAT: device names, any case, any extension. WHY: Windows writes those to a device.
+            assert!(file(name).check().unwrap_err().contains("device"), "{name}"); // WHAT: refused. WHY: the plain reason.
+        }
+        assert_eq!(file("console.json").check(), Ok(())); // WHAT: a name that only starts like one. WHY: only the whole stem counts.
+    }
+
+    #[test]
+    fn a_name_or_text_past_its_limit_is_refused() {
+        let long = format!("{}.json", "a".repeat(MOST_FILE_NAME)); // WHAT: a name past the limit. WHY: the edge.
+        assert!(file(&long).check().unwrap_err().contains("longer")); // WHAT: refused. WHY: names are short.
+        assert!(file("").check().is_err()); // WHAT: no name. WHY: nothing to save under.
+        let big = OutFile { name: "a.json".into(), text: "x".repeat(MOST_FILE_BYTES + 1) }; // WHAT: one byte past the cap. WHY: the edge.
+        assert!(big.check().unwrap_err().contains("larger")); // WHAT: refused. WHY: a cap on what a plugin can have written.
+        let just = OutFile { name: "a.json".into(), text: "x".repeat(MOST_FILE_BYTES) }; // WHAT: exactly at the cap. WHY: the edge from the other side.
+        assert_eq!(just.check(), Ok(())); // WHAT: allowed. WHY: the cap is inclusive.
+    }
+
+    #[test]
+    fn no_more_than_the_most_files_are_offered() {
+        let output = Output { files: (0..=MOST_FILES).map(|n| file(&format!("f{n}.json"))).collect(), ..Default::default() }; // WHAT: one file more than allowed. WHY: the edge.
+        let offered = output.offered_files(); // WHAT: each with its verdict. WHY: what the window shows.
+        assert!(offered[..MOST_FILES].iter().all(|(_, ok)| ok.is_ok())); // WHAT: the first ones may be saved. WHY: they are within the limit.
+        assert!(offered[MOST_FILES].1.as_ref().unwrap_err().contains("at most")); // WHAT: the extra one is refused. WHY: a cap on how much one answer can ask to write.
     }
 
     #[test]

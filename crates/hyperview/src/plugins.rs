@@ -322,6 +322,12 @@ pub fn checkup(wasm_path: &Path, input_path: Option<&Path>) -> Checkup {
                     output.tables.len(),
                     if output.tables.len() == 1 { "" } else { "s" },
                 ));
+                for (file, verdict) in output.offered_files() { // WHAT: each file the command offered. WHY: one the program would refuse to save is a mistake the plugin's writer should hear about before signing.
+                    match verdict {
+                        Ok(()) => lines.push(format!("    offers {} ({} bytes)", file.name, file.text.len())), // WHAT: said in the report. WHY: the writer sees the file would be offered.
+                        Err(why) => problems.push(format!("{}: the file \"{}\" would not be saved: {why}.", command.id, file.name.escape_debug())), // WHAT: a problem, with the name escaped. WHY: not ready to sign while a file it offers would be refused.
+                    }
+                }
                 for finding in &output.findings {
                     for fix in &finding.fixes {
                         if fix.actions.is_empty() {
@@ -445,6 +451,54 @@ pub fn markup_id(index: usize, markup: &annot::Markup) -> String {
     }
 }
 
+/// What the save box for a file a plugin offers starts with: its name and
+/// its extension. Refused, with the reason, when the file fails
+/// [`plugin_api::OutFile::check`], so nothing that fails it ever gets as far
+/// as a save box.
+///
+/// # Errors
+///
+/// Why the file can't be saved.
+pub fn save_plan(file: &plugin_api::OutFile) -> Result<(String, String), String> {
+    file.check()?; // WHAT: the checks, again, here. WHY: the window already checked, but the disk is only reached through this.
+    Ok((file.name.clone(), file.extension())) // WHAT: the name and the type. WHY: what the save box shows and filters by.
+}
+
+/// A PDF date, `D:20261103140500Z`, as RFC 3339 UTC, `2026-11-03T14:05:00Z`.
+/// `None` for anything that isn't one to the second in UTC.
+pub fn iso_from_pdf_date(pdf: &str) -> Option<String> {
+    let digits = pdf.strip_prefix("D:")?.strip_suffix('Z')?; // WHAT: the fourteen digits between "D:" and "Z". WHY: the form annot::place::now writes, UTC to the second.
+    if digits.len() != 14 || !digits.bytes().all(|b| b.is_ascii_digit()) { // WHAT: exactly fourteen digits. WHY: anything else isn't a date this can read, and slicing it would be wrong.
+        return None; // WHAT: not one. WHY: an empty time beats a wrong one.
+    }
+    let part = |from: usize, to: usize| digits.get(from..to).unwrap_or_default(); // WHAT: a run of the digits, never panicking. WHY: the length was checked; the fallback is never taken.
+    Some(format!("{}-{}-{}T{}:{}:{}Z", part(0, 4), part(4, 6), part(6, 8), part(8, 10), part(10, 12), part(12, 14))) // WHAT: year-month-day, T, hours:minutes:seconds, Z. WHY: RFC 3339, which every program reads.
+}
+
+/// What a plugin is told about where and when it is being run. `set` is the
+/// office server's drawing set the drawing came from, with its project, when
+/// it came from one; otherwise the drawing set is the file's own name.
+pub fn context_for(
+    user: &str,
+    set: Option<&hub::DrawingSet>,
+    projects: &[hub::Project],
+    file_stem: &str,
+    pdf_now: &str,
+) -> plugin_api::Context {
+    let project = set
+        .and_then(|s| projects.iter().find(|p| p.id == s.project)) // WHAT: the project the set belongs to. WHY: a set names its project by id only.
+        .map(|p| p.name.clone()) // WHAT: the project's name. WHY: what people call it.
+        .unwrap_or_default(); // WHAT: empty when it has none. WHY: a drawing from a folder belongs to no project.
+    plugin_api::Context {
+        app: "Excalibur View".into(), // WHAT: this program. WHY: a plugin's file says what made it.
+        app_version: env!("CARGO_PKG_VERSION").into(), // WHAT: this build's version. WHY: the same, to the version.
+        user: user.trim().into(), // WHAT: the person, as their markups name them. WHY: who ran it.
+        project,
+        drawing_set: set.map(|s| s.name.clone()).unwrap_or_else(|| file_stem.into()), // WHAT: the set's name, or the file's. WHY: always something a person recognises.
+        now: iso_from_pdf_date(pdf_now).unwrap_or_default(), // WHAT: the time, in RFC 3339. WHY: a plugin has no clock of its own.
+    }
+}
+
 pub fn kind_word(kind: annot::Kind) -> &'static str {
     use annot::Kind;
     match kind {
@@ -467,8 +521,12 @@ mod tests {
     /// A plugin written by hand in WebAssembly's text form: it says what it
     /// is, and answers every run with the same thing.
     fn tiny(run_body: &str) -> Vec<u8> {
+        tiny_answering(run_body, r#"{"done":{"title":"Hello","findings":[{"level":"check","message":"Look here","page":0,"area":[1,2,3,4]}]}}"#) // WHAT: the usual answer. WHY: most tests only need a plugin that answers something.
+    }
+
+    /// The tiny plugin, answering every run with `answer`.
+    fn tiny_answering(run_body: &str, answer: &str) -> Vec<u8> {
         let manifest = r#"{"id":"tiny","name":"Tiny","version":"1.0.0","commands":[{"id":"hello","name":"Hello"}]}"#;
-        let answer = r#"{"done":{"title":"Hello","findings":[{"level":"check","message":"Look here","page":0,"area":[1,2,3,4]}]}}"#;
         let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
         let text = format!(
             r#"(module
@@ -548,6 +606,32 @@ mod tests {
         let not = checkup_of(&wasm);
         assert!(!not.passed && not.report.starts_with("Not ready"), "{}", not.report);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_a_plugin_offers_comes_out_of_the_sandbox_and_a_bad_one_stops_it_being_ready() {
+        let good = r#"{"done":{"title":"T","files":[{"name":"NorthYard.estimate","text":"{\"format\":1}"}]}}"#; // WHAT: an answer offering one data file. WHY: the new way out of the sandbox.
+        let output = run(&tiny_answering("", good), &Input::default()).unwrap(); // WHAT: run in the real sandbox. WHY: the file must survive the trip as the plugin wrote it.
+        assert_eq!(output.files, vec![plugin_api::OutFile { name: "NorthYard.estimate".into(), text: "{\"format\":1}".into() }]); // WHAT: the same name and text. WHY: nothing added or lost.
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/hv-plugin-files").join(std::process::id().to_string()); // WHAT: a folder of this build's own for the checkup's files. WHY: it writes its answers beside the plugin, and a shared temporary folder is anybody's.
+        std::fs::create_dir_all(&dir).unwrap();
+        let wasm = dir.join("tiny.wasm"); // WHAT: where the plugin goes. WHY: checkup reads a file.
+        std::fs::write(&wasm, tiny_answering("", good)).unwrap();
+        let ready = checkup(&wasm, None); // WHAT: checked before signing. WHY: a good file is no reason not to sign.
+        assert!(ready.passed && ready.report.contains("offers NorthYard.estimate"), "{}", ready.report); // WHAT: ready, and the file named. WHY: the writer sees what it offers.
+        let bad = r#"{"done":{"title":"T","files":[{"name":"update.exe","text":"MZ"}]}}"#; // WHAT: an answer offering a program. WHY: what must never reach the disk.
+        std::fs::write(&wasm, tiny_answering("", bad)).unwrap();
+        let refused = checkup(&wasm, None); // WHAT: checked again. WHY: the bad file.
+        assert!(!refused.passed && refused.report.contains("update.exe") && refused.report.contains("may not offer"), "{}", refused.report); // WHAT: not ready, saying which file and why. WHY: it is caught before anybody signs it.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_file_that_passes_the_checks_gets_a_save_box() {
+        let ok = plugin_api::OutFile { name: "NorthYard.Estimate".into(), text: "{}".into() }; // WHAT: a data file. WHY: the ordinary case.
+        assert_eq!(save_plan(&ok), Ok(("NorthYard.Estimate".into(), "estimate".into()))); // WHAT: its name, and its type in lower case. WHY: what the save box starts with.
+        let bad = plugin_api::OutFile { name: "..\\Startup\\run.bat".into(), text: "x".into() }; // WHAT: a program into another folder. WHY: the worst a plugin could try.
+        assert!(save_plan(&bad).is_err()); // WHAT: refused. WHY: no save box is ever opened for it.
     }
 
     fn checkup_of(wasm: &Path) -> Checkup {
@@ -709,6 +793,29 @@ mod tests {
             let output = run(&wasm, &input).unwrap();
             println!("{:12} {:>5} findings, {:>2} tables in {:?} — {}", command.id, output.findings.len(), output.tables.len(), started.elapsed(), output.summary);
         }
+    }
+
+    #[test]
+    fn a_pdf_date_becomes_rfc_3339_and_anything_else_is_nothing() {
+        assert_eq!(iso_from_pdf_date("D:20261103140500Z").as_deref(), Some("2026-11-03T14:05:00Z")); // WHAT: the form annot writes. WHY: what a plugin is told.
+        for odd in ["", "D:2026110314Z", "20261103140500Z", "D:20261103140500", "D:2026110314050aZ", "D:20261103140500+01'00'"] { // WHAT: short, unprefixed, unsuffixed, non-digit, and with an offset. WHY: none is UTC to the second.
+            assert_eq!(iso_from_pdf_date(odd), None, "{odd}"); // WHAT: nothing. WHY: an empty time beats a wrong one.
+        }
+        assert!(iso_from_pdf_date(&annot::place::now()).is_some()); // WHAT: the real clock reads. WHY: the two ends agree on the form.
+    }
+
+    #[test]
+    fn a_plugin_is_told_the_project_and_set_a_drawing_came_from() {
+        let project: hub::Project = serde_json::from_value(serde_json::json!({"id":"p1","number":"2630","name":"North Yard Storm","created":"","sets":1})).unwrap(); // WHAT: a project. WHY: the set below belongs to it.
+        let set: hub::DrawingSet = serde_json::from_value(serde_json::json!({"id":"s1","project":"p1","name":"C-Sheets Rev 2","filename":"c.pdf","digest":"","bytes":0,"sheets":2,"uploaded":"","uploaded_by":"","revision":0})).unwrap(); // WHAT: a drawing set in that project. WHY: where the drawing came from.
+        let other: hub::Project = serde_json::from_value(serde_json::json!({"id":"p0","number":"2601","name":"Another job","created":"","sets":1})).unwrap(); // WHAT: a project listed first that the set isn't in. WHY: the set's own project must be found, not the first.
+        let from_server = context_for(" Sam ", Some(&set), &[other, project], "c", "D:20261103140500Z"); // WHAT: a drawing opened from the office server. WHY: the full case.
+        assert_eq!((from_server.project.as_str(), from_server.drawing_set.as_str(), from_server.user.as_str()), ("North Yard Storm", "C-Sheets Rev 2", "Sam")); // WHAT: project and set by name, the user trimmed. WHY: what the person sees.
+        assert_eq!(from_server.now, "2026-11-03T14:05:00Z"); // WHAT: the time. WHY: in the form a plugin can write as it is.
+        assert_eq!(from_server.app, "Excalibur View"); // WHAT: the program's name. WHY: provenance.
+        assert!(!from_server.app_version.is_empty()); // WHAT: a version. WHY: the same.
+        let from_folder = context_for("Sam", None, &[], "North Yard C-Sheets", "D:20261103140500Z"); // WHAT: a drawing opened from a folder. WHY: no project to name.
+        assert_eq!((from_folder.project.as_str(), from_folder.drawing_set.as_str()), ("", "North Yard C-Sheets")); // WHAT: no project, the file's name as the set. WHY: never a made-up project.
     }
 
     #[test]

@@ -284,6 +284,14 @@ impl App {
             markups,
             settings,
             columns: (0..6).map(|n| takeoff::user::name_of(&user, n)).collect(),
+            // WHAT: where and when it is being run: the person, the office project and set the drawing came from, and the time. WHY: a plugin has no clock and can ask nothing, so a file it writes can only say where it came from if it is told.
+            context: plugins::context_for(
+                &self.author,
+                doc.attached.as_ref().and_then(|a| self.standing.sets.iter().find(|s| s.id == a.set)), // WHAT: the server's set this drawing is attached to. WHY: its name and project.
+                &self.standing.projects,
+                &doc.path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), // WHAT: the file's name without its extension. WHY: the set's name when it came from no server.
+                &annot::place::now(), // WHAT: the time now, UTC. WHY: when the run started.
+            ),
         }
     }
 
@@ -333,7 +341,7 @@ impl App {
         // this one, in the same sandbox, and waits for what it found.
         if !crate::edition::runs_plugins_itself() {
             self.plugin_answer = Some(tx);
-            self.ask(crate::server::Ask::RunPlugin { id: plugin.manifest.id.clone(), input });
+            self.ask(crate::server::Ask::RunPlugin { id: plugin.manifest.id.clone(), input: Box::new(input) }); // WHAT: the server is asked to run it, the input boxed. WHY: see Ask::RunPlugin.
             return;
         }
         let ctx = job.ctx.clone();
@@ -484,6 +492,7 @@ impl App {
         let mut run_again = false;
         let mut go: Option<(u32, Option<[f64; 4]>)> = None;
         let mut fix: Vec<(usize, usize)> = Vec::new();
+        let mut save_file: Option<plugin_api::OutFile> = None; // WHAT: a file the person asked to save this frame. WHY: the save box is opened after the window, outside its borrow of the app.
         let mut open = shown.open;
         let current_doc = self.doc().map(|d| d.id);
         let same_drawing = current_doc == Some(shown.doc);
@@ -590,6 +599,20 @@ impl App {
                         ui.checkbox(&mut shown.hide_notes, "Hide notes");
                     }
                 });
+                // WHAT: one Save button per file the plugin offers, or why it can't be saved. WHY: a plugin can't write anything itself; the person saves its file, where they choose, or nothing is written.
+                for (file, verdict) in output.offered_files() {
+                    ui.horizontal_wrapped(|ui| match verdict {
+                        Ok(()) => {
+                            if ui.button(format!("Save {}…", file.name)).clicked() { // WHAT: the person asked for it. WHY: only a click ever writes a plugin's file.
+                                save_file = Some(file.clone()); // WHAT: remembered for after the window. WHY: the save box needs the app, which the window is borrowing.
+                            }
+                        }
+                        Err(why) => {
+                            // WHAT: the refusal, with the name shown escaped. WHY: a refused name may carry characters meant to mislead, so they are shown as codes.
+                            ui.label(RichText::new(format!("The plugin offered \"{}\", which can't be saved: {why}.", file.name.escape_debug())).color(theme.warn).size(11.0));
+                        }
+                    });
+                }
                 if !same_drawing {
                     ui.label(
                         RichText::new(format!("Switch back to {} to go to these or fix them.", shown.drawing))
@@ -736,6 +759,9 @@ impl App {
         for (i, j) in fix {
             self.apply_plugin_fix(&mut shown, i, j);
         }
+        if let Some(file) = save_file { // WHAT: a Save button was clicked. WHY: open the save box now the window is done with the app.
+            self.save_plugin_file(file);
+        }
         let fire = run_again.then(|| plugins::fire_id(&shown.plugin, &shown.command.id));
         if open {
             self.plugin_shown = Some(shown);
@@ -743,6 +769,26 @@ impl App {
         if let Some(fire) = fire {
             self.start_plugin(&fire, ctx);
         }
+    }
+
+    /// Saves a file a plugin offered, where the person chooses. Checked again
+    /// here, right before anything is written, so nothing reaches the disk
+    /// that [`plugin_api::OutFile::check`] refuses.
+    pub fn save_plugin_file(&mut self, file: plugin_api::OutFile) {
+        let (name, extension) = match plugins::save_plan(&file) { // WHAT: the name and type to offer, or why not. WHY: the last gate before the disk, whatever path led here.
+            Ok(plan) => plan,
+            Err(why) => {
+                self.error = Some(format!("That file can't be saved: {why}.")); // WHAT: says why. WHY: nothing is written, and the person should know.
+                return;
+            }
+        };
+        let choose = crate::files::Choose::save(name) // WHAT: the save box, starting with the plugin's name for it. WHY: the person picks the folder, and may change the name.
+            .filter(format!(".{extension} file"), &[extension.as_str()]) // WHAT: only that type. WHY: the file is what the plugin made, under the extension it said.
+            .title("Save the plugin's file"); // WHAT: the box's title. WHY: says what is being saved.
+        self.filing.one(choose, move |app, path| match std::fs::write(&path, file.text.as_bytes()) { // WHAT: writes the text where the person chose. WHY: the one place a plugin's file reaches the disk.
+            Ok(()) => app.status = format!("Saved {}.", path.display()), // WHAT: says where. WHY: the person knows it worked and where it went.
+            Err(e) => app.error = Some(format!("Could not write {}: {e}", path.display())), // WHAT: says why not. WHY: a failed save is never silent.
+        });
     }
 
     /// Carries out one fix, as one step on the Undo list.
