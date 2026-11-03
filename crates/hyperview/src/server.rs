@@ -110,7 +110,7 @@ pub enum Ask {
     RemovePlugin(String),
     /// Have the server run one of the office's plugins, for a copy that
     /// doesn't run plugins itself.
-    RunPlugin { id: String, input: plugin_api::Input },
+    RunPlugin { id: String, input: Box<plugin_api::Input> }, // WHAT: the input boxed. WHY: it carries the run's context now, and boxed it keeps every other request this enum carries small.
     /// An administrator making a key for another system, such as FabWire.
     MakeIntegrationKey(String),
     /// An administrator making a sync key: for a program that only keeps its
