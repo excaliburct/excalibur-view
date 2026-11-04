@@ -30,4 +30,22 @@ Two ways to close the program are gone: a tool chest with an accent in a
 colour, and a hyperview:// link with an accent where a %-code should be. Both
 are now read as broken rather than crashing.
 
+A plugin can be added the way a tool chest is: double-click the .hvplugin
+file, or drop it on the window. Excalibur View checks the signature first,
+then asks once: add this plugin, signed by this publisher? An unsigned or
+wrongly signed plugin is refused and nothing is kept. An older or same
+version never replaces the one you have, and a newer one asks to update.
+A plugin opened this way is added on this computer only, even for an
+administrator: to share one with everyone in the office, add it with
+Plugins > Add Plugin..., which now also never puts an older version over a
+newer one and asks before an update.
+A tool chest opened the same way asks once first, says how many tools it
+has, and names any of your tool sets it would take the place of, or your
+toolbars if it brings its own. Load Tool Chest still adds one at once. If
+you already have a different chest with the same name, either way asks
+before replacing it. A plugin and a tool chest opened together get one
+answer.
+A tool from a chest no longer carries a script, an action or an attached
+file into the markups drawn with it.
+
 Nothing needs doing.

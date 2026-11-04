@@ -609,7 +609,8 @@ const WINDOWS_DEVICES: &[&str] = &[
 /// characters, zero-width spaces and joiners, the byte-order mark, the soft
 /// hyphen, line and paragraph separators, fillers, variation selectors and
 /// tags. A name with one of these can read on screen as a name it isn't.
-fn invisible(c: char) -> bool {
+#[must_use] // WHAT: a caller that drops the answer gets a warning. WHY: asking has no other effect.
+pub fn invisible(c: char) -> bool { // WHAT: public now. WHY: the program cleans a plugin's name with the same list before showing it in a question.
     // WHAT: every such character Unicode has, by range. WHY: the person must see every character of the name they save.
     matches!(c,
         '\u{00ad}' | '\u{034f}' | '\u{061c}' | '\u{115f}' | '\u{1160}' | '\u{17b4}' | '\u{17b5}' | '\u{180b}'..='\u{180f}'

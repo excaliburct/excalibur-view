@@ -403,9 +403,7 @@ impl App {
     /// Plugins ▸ Add Plugin…
     pub fn add_plugin(&mut self) {
         if !crate::edition::runs_plugins_itself() {
-            self.status = "Plugins come from your office's server on this copy. \
-                           An administrator adds them from Excalibur View on Windows."
-                .into();
+            self.status = plugins::OFFICE_RUNS_PLUGINS.into(); // WHAT: the same words as before, now kept in one place. WHY: a plugin opened from Explorer on this copy is told the same thing.
             return;
         }
         self.filing.one(
@@ -417,20 +415,7 @@ impl App {
     }
 
     fn add_plugin_from(&mut self, path: &std::path::Path) {
-        match plugins::add_from_file(&crate::install::plugin_trusted(), path) {
-            Err(why) => self.status = why,
-            Ok((plugin, _)) => {
-                let name = format!("{} {}", plugin.manifest.name, plugin.manifest.version);
-                self.reload_plugins();
-                let admin = self.standing.who.as_ref().map(|w| w.role) == Some(hub::Role::Admin);
-                if admin && !self.standing.base.is_empty() {
-                    self.status = format!("{name} added. Sharing it with the office…");
-                    self.ask(crate::server::Ask::SharePlugin(plugin.path));
-                } else {
-                    self.status = format!("{name} added on this computer. It is in the Plugins menu.");
-                }
-            }
-        }
+        self.add_chosen_plugin(path); // WHAT: checked, never a downgrade, and an update asked about. WHY: the same rules as a plugin opened from outside, in crate::arrivals.
     }
 
     /// The plugin windows, drawn every frame.

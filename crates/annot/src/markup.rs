@@ -79,6 +79,12 @@ impl Subtype {
     }
 }
 
+/// What a markup started from a tool never takes from it: an action (`A`),
+/// actions on events (`AA`) and an attached file (`FS`). A PDF reader runs
+/// the first two — a script, a program, a web address — and the third
+/// carries any file at all.
+pub const TOOL_NEVER_CARRIES: [&str; 3] = ["A", "AA", "FS"]; // WHAT: the three keys. WHY: no measuring tool needs any of them.
+
 /// What a markup measures, if anything.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -204,7 +210,8 @@ impl Markup {
         self
     }
 
-    /// Starts from a Tool Chest tool, keeping everything it carries.
+    /// Starts from a Tool Chest tool, keeping everything it carries except
+    /// what runs something or carries a file (`TOOL_NEVER_CARRIES`).
     pub fn from_tool(tool: &Dict) -> Markup {
         let mut dict = tool.clone();
         dict.set(Name::new("Type"), Object::name("Annot"));
@@ -214,6 +221,9 @@ impl Markup {
         // Geometry is about to be replaced by where the user actually clicked.
         for key in ["L", "Vertices", "InkList", "QuadPoints", "AP", "Rect"] {
             dict.remove(key);
+        }
+        for key in TOOL_NEVER_CARRIES { // WHAT: each key that runs something or carries a file. WHY: a tool chest is a file anybody can send; what it puts in a markup goes into every drawing saved with it and opened elsewhere.
+            dict.remove(key); // WHAT: taken out. WHY: the same.
         }
         Markup { dict, picture: None }
     }
@@ -806,6 +816,20 @@ mod tests {
         assert!(m.dict.has("BSIColumnData"), "and so does the weight");
         assert!(!m.dict.has("L"), "but the sample geometry goes");
         assert!(!m.dict.has("Rect"));
+    }
+
+    #[test]
+    fn a_tool_cannot_put_an_action_or_a_file_into_the_markups_made_with_it() {
+        let t = tool(
+            "<</Subtype/Link/IT/LineDimension/Subj(W12x26)/A<</S/JavaScript/JS(app.alert(1))>>\
+              /AA<</O<</S/Launch/F(cmd.exe)>>>>/FS<</Type/Filespec/F(x.exe)>>/BSIColumnData[(26.00)]>>",
+        ); // WHAT: a tool template carrying a script, an on-open launch and an attached file. WHY: what a hostile tool chest would put in every markup drawn with it.
+        let m = Markup::from_tool(&t); // WHAT: a markup started from it. WHY: what drawing with the tool does.
+        for key in ["A", "AA", "FS"] { // WHAT: each key that runs or carries something. WHY: none may reach a drawing that is saved and sent on.
+            assert!(!m.dict.has(key), "{key} must not survive"); // WHAT: gone. WHY: the same.
+        }
+        assert_eq!(m.subject(), "W12x26"); // WHAT: the rest of the tool kept. WHY: only what runs or carries a file goes.
+        assert!(m.dict.has("BSIColumnData")); // WHAT: the weight kept. WHY: the same.
     }
 
     #[test]

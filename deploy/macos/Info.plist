@@ -40,8 +40,15 @@
       <key>LSHandlerRank</key>            <string>Owner</string>
       <key>LSItemContentTypes</key>       <array><string>com.excaliburct.evtools</string></array>
     </dict>
+    <!-- WHAT: a plugin opens here, like a tool chest. WHY: double-clicking one adds it after one question. -->
+    <dict>
+      <key>CFBundleTypeName</key>         <string>Excalibur View plugin</string>
+      <key>CFBundleTypeRole</key>         <string>Viewer</string>
+      <key>LSHandlerRank</key>            <string>Owner</string>
+      <key>LSItemContentTypes</key>       <array><string>com.excaliburct.hvplugin</string></array>
+    </dict>
   </array>
-  <!-- The two file types this program owns, declared so the system knows them. -->
+  <!-- The three file types this program owns, declared so the system knows them. -->
   <key>UTExportedTypeDeclarations</key>
   <array>
     <dict>
@@ -57,6 +64,14 @@
       <key>UTTypeConformsTo</key>         <array><string>public.json</string></array>
       <key>UTTypeTagSpecification</key>
       <dict><key>public.filename-extension</key><array><string>evtools</string></array></dict>
+    </dict>
+    <!-- WHAT: the plugin file, declared. WHY: the system knows .hvplugin belongs to this program; it is signed binary data, not JSON. -->
+    <dict>
+      <key>UTTypeIdentifier</key>         <string>com.excaliburct.hvplugin</string>
+      <key>UTTypeDescription</key>        <string>Excalibur View plugin</string>
+      <key>UTTypeConformsTo</key>         <array><string>public.data</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>hvplugin</string></array></dict>
     </dict>
   </array>
   <!-- IFC has no type of its own in macOS, so it is described here, for the
