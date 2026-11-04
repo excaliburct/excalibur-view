@@ -203,14 +203,129 @@ pub fn open(trusted: &Trusted, file: &[u8], path: &Path, from_office: bool) -> R
 
 /// Checks a plugin somebody picked, and puts it in this computer's folder.
 pub fn add_from_file(trusted: &Trusted, source: &Path) -> Result<(Plugin, Vec<u8>), String> {
-    let bytes = std::fs::read(source).map_err(|e| format!("{}: {e}", source.display()))?;
-    let checked = open(trusted, &bytes, source, false)?;
-    let dir = folder();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Could not make the plugins folder: {e}"))?;
-    let path = dir.join(format!("{}.{EXTENSION}", checked.manifest.id));
-    std::fs::write(&path, &bytes).map_err(|e| format!("Could not keep the plugin: {e}"))?;
-    Ok((Plugin { path, ..checked }, bytes))
+    let (checked, bytes) = check_file(trusted, source)?; // WHAT: read and checked, nothing kept yet. WHY: the same check a plugin opened from Explorer gets, in one place.
+    let plugin = keep_in(&folder(), &checked, &bytes)?; // WHAT: the checked bytes kept in this computer's folder. WHY: as before; the menu adds without asking, because the person just chose the file.
+    Ok((plugin, bytes)) // WHAT: the kept plugin and its bytes. WHY: what the callers had before.
 }
+
+/// Reads a plugin file and checks it — the signature against the keys this
+/// program was built with, the sandbox's rules, the manifest — and keeps
+/// nothing. The bytes that were checked come back with it, so what is kept
+/// later is exactly what was checked, not the file read again.
+///
+/// # Errors
+///
+/// Why it can't be added, in words for the person.
+pub fn check_file(trusted: &Trusted, source: &Path) -> Result<(Plugin, Vec<u8>), String> {
+    let bytes = std::fs::read(source).map_err(|e| format!("{}: {e}", source.display()))?; // WHAT: the whole file. WHY: the signature covers every byte.
+    let checked = open(trusted, &bytes, source, false)?; // WHAT: the signature, the sandbox and the manifest, checked. WHY: nothing is asked or kept about a file that fails.
+    Ok((checked, bytes)) // WHAT: the plugin and the bytes checked. WHY: kept as they are, if the person says yes.
+}
+
+/// Keeps checked plugin bytes in `dir`, under the plugin's own id.
+///
+/// # Errors
+///
+/// Why it could not be written.
+pub fn keep_in(dir: &Path, checked: &Plugin, bytes: &[u8]) -> Result<Plugin, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("Could not make the plugins folder: {e}"))?; // WHAT: the folder, made if missing. WHY: the first plugin on this computer.
+    let path = dir.join(format!("{}.{EXTENSION}", checked.manifest.id)); // WHAT: named by its id. WHY: the id was checked to be letters, digits, - and _, so it can't reach another folder, and a newer version lands on the older one.
+    std::fs::write(&path, bytes).map_err(|e| format!("Could not keep the plugin: {e}"))?; // WHAT: the checked bytes written. WHY: the plugin loads from here next time.
+    Ok(Plugin { path, ..checked.clone() }) // WHAT: the plugin, with where it now is. WHY: sharing it with the office reads that file.
+}
+
+/// Text from a plugin or a file — a name, a version, a reason — made fit to
+/// show in a question: control characters become spaces, every invisible or
+/// reordering character is taken out (the same list a plugin's offered file
+/// names are checked against), runs of spaces close up, and it is cut to
+/// `most` characters. A name can then only read as what it is.
+#[must_use] // WHAT: a caller that drops the cleaned text gets a warning. WHY: cleaning it has no other effect.
+pub fn shown(text: &str, most: usize) -> String {
+    let mut out = String::new(); // WHAT: the cleaned text. WHY: built a character at a time.
+    for c in text.chars() { // WHAT: each character. WHY: each is judged on its own.
+        if plugin_api::invisible(c) { // WHAT: a zero-width, direction or other invisible character. WHY: it could make the name read as something else; taken out entirely.
+            continue; // WHAT: dropped. WHY: the same.
+        }
+        let c = if c.is_control() { ' ' } else { c }; // WHAT: a new line, tab or other control character as a space. WHY: a name can't start a new line in the question or carry a terminal code.
+        if c == ' ' && (out.is_empty() || out.ends_with(' ')) { // WHAT: a space at the start or after another. WHY: a name padded with spaces to push the rest of the question out of sight.
+            continue; // WHAT: dropped. WHY: the same.
+        }
+        if out.chars().count() >= most { // WHAT: already as long as allowed. WHY: a name a megabyte long would fill the window.
+            out = out.trim_end().to_string(); // WHAT: no space before the ellipsis. WHY: tidier.
+            out.push('\u{2026}'); // WHAT: an ellipsis. WHY: shows it was cut.
+            return out; // WHAT: done. WHY: the rest is never shown.
+        }
+        out.push(c); // WHAT: kept. WHY: an ordinary character.
+    }
+    out.trim_end().to_string() // WHAT: without a trailing space. WHY: the same as the leading ones.
+}
+
+/// How long a name or version may be in a question.
+pub const SHOWN_NAME: usize = 80; // WHAT: eighty characters. WHY: longer than any real plugin's name, short enough to keep the question on screen.
+
+/// How a plugin that has arrived fits with the ones already here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Fits {
+    /// Not here yet.
+    New,
+    /// An older version is here: `have`.
+    Update { have: String },
+    /// The same version, or a newer one, is here already: `have`.
+    Have { have: String },
+    /// The office's server hands this one out, at version `have`.
+    Office { have: String },
+}
+
+/// Where `incoming` fits on `shelf`. Never a downgrade: the same version or
+/// an older one is [`Fits::Have`].
+#[must_use] // WHAT: a caller that drops the answer gets a warning. WHY: working it out has no other effect.
+pub fn fits(shelf: &Shelf, incoming: &Manifest) -> Fits {
+    let Some(here) = shelf.find(&incoming.id) else { return Fits::New }; // WHAT: nothing with this id. WHY: a new plugin.
+    let have = here.manifest.version.clone(); // WHAT: the version here. WHY: said in the question.
+    if here.from_office { // WHAT: the office's server hands it out. WHY: the office's copy wins on load, so one added here would never run; an administrator updates it for everybody.
+        return Fits::Office { have }; // WHAT: left to the office. WHY: the same.
+    }
+    if hub::update::compare(&incoming.version, &have) == std::cmp::Ordering::Greater { // WHAT: the arriving version is newer, read the way a person reads versions. WHY: only then is it an update.
+        Fits::Update { have } // WHAT: an update. WHY: the same.
+    } else {
+        Fits::Have { have } // WHAT: the same or older. WHY: never put an older version over a newer one.
+    }
+}
+
+/// Who may add a plugin on this copy, and where it goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rule {
+    /// This copy doesn't run plugins: the office's server does, and an
+    /// administrator adds them there.
+    NotOnThisCopy,
+    /// Added on this computer only.
+    Here,
+    /// Added on this computer only; signed in to an office whose plugins only
+    /// an administrator adds for everybody.
+    HereNotOffice,
+    /// Added here and shared with the office: an administrator, signed in.
+    HereAndOffice,
+}
+
+/// The rule for a copy that runs plugins itself or doesn't, signed in or
+/// not, as an administrator or not. The same rule Plugins ▸ Add Plugin…
+/// follows.
+#[must_use] // WHAT: a caller that drops the rule gets a warning. WHY: working it out has no other effect.
+pub fn rule(runs_itself: bool, signed_in: bool, admin_connected: bool) -> Rule {
+    if !runs_itself { // WHAT: the App Store copy. WHY: it doesn't run code it is handed; the office server does.
+        Rule::NotOnThisCopy // WHAT: not here. WHY: the same.
+    } else if admin_connected { // WHAT: an administrator signed in to the office's server. WHY: what they add is shared with the office, as from the menu.
+        Rule::HereAndOffice // WHAT: here and the office. WHY: the same.
+    } else if signed_in { // WHAT: somebody else signed in to an office. WHY: only an administrator adds the office's plugins.
+        Rule::HereNotOffice // WHAT: this computer only, and it says so. WHY: the same.
+    } else {
+        Rule::Here // WHAT: a copy on its own. WHY: this computer is the whole of it.
+    }
+}
+
+/// What a copy that doesn't run plugins says when given one.
+pub const OFFICE_RUNS_PLUGINS: &str = "Plugins come from your office's server on this copy. \
+                                       An administrator adds them from Excalibur View on Windows."; // WHAT: the words Add Plugin… already used. WHY: one sentence, however the plugin arrived.
 
 // ---- checking a plugin before it is signed ------------------------------------
 
@@ -754,6 +869,55 @@ mod tests {
         assert_eq!(menu[0].fire, "Plugin:tiny:hello");
         assert_eq!(from_fire_id(&menu[0].fire), Some(("tiny".into(), "hello".into())));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plugin_opened_from_outside_is_checked_before_anything_and_kept_only_as_checked() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use sha2::{Digest, Sha256};
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/hv-plugin-open").join(std::process::id().to_string()); // WHAT: a folder of this build's own. WHY: a shared temporary folder is anybody's.
+        let (arrived, kept) = (dir.join("Downloads"), dir.join("plugins")); // WHAT: where the file arrives, and the plugins folder. WHY: two folders, as on a real seat.
+        let _ = std::fs::remove_dir_all(&dir); // WHAT: emptied. WHY: a run before must not decide this one.
+        std::fs::create_dir_all(&arrived).unwrap(); // WHAT: made. WHY: the file is written into it.
+        let _ = std::fs::remove_file(folder().join("tiny.hvplugin")); // WHAT: this build's own plugins folder cleared of it. WHY: so the check below proves nothing is kept there.
+        let signing = SigningKey::from_bytes(&[7u8; 32]); // WHAT: the publisher's key. WHY: the one this test trusts.
+        let trusted = Trusted { keys: vec![("test".into(), signing.verifying_key().to_bytes())] }; // WHAT: only that key trusted. WHY: as a real build trusts only its own.
+        let seal = |wasm: &[u8], key: &SigningKey| { // WHAT: seals a plugin as publish.py does. WHY: a real signed file.
+            let sha = hub::update::hex(&Sha256::digest(wasm)); // WHAT: the code's digest. WHY: what is signed.
+            let signature = key.sign(&plugin_api::signing_payload("tiny", "1.0.0", &sha)); // WHAT: signed. WHY: the same.
+            plugin_api::seal(&plugin_api::Header { id: "tiny".into(), version: "1.0.0".into(), name: "Tiny".into(), sha256: sha, bytes: wasm.len() as u64, key: "test".into(), signature: hub::update::hex(&signature.to_bytes()) }, wasm) // WHAT: the file. WHY: the same.
+        };
+        let wasm = tiny(""); // WHAT: the tiny plugin. WHY: real code in the real sandbox.
+        let forged = arrived.join("forged.hvplugin"); // WHAT: signed by a key nobody trusts. WHY: what must be refused.
+        std::fs::write(&forged, seal(&wasm, &SigningKey::from_bytes(&[8u8; 32]))).unwrap();
+        let why = check_file(&trusted, &forged).unwrap_err(); // WHAT: checked. WHY: refused.
+        assert!(why.contains("not signed by its publisher"), "{why}"); // WHAT: the existing plain reason. WHY: the same words as from the menu.
+        let unsigned = arrived.join("unsigned.hvplugin"); // WHAT: plain WebAssembly with the right extension. WHY: no signature at all.
+        std::fs::write(&unsigned, &wasm).unwrap();
+        assert!(check_file(&trusted, &unsigned).is_err()); // WHAT: refused. WHY: unsigned.
+        assert!(!kept.exists(), "a refused plugin leaves nothing behind"); // WHAT: no plugins folder, so nothing kept. WHY: nothing is copied for a file that fails.
+        let good = arrived.join("Tiny.hvplugin"); // WHAT: a properly signed one. WHY: the ordinary case.
+        let sealed = seal(&wasm, &signing); // WHAT: its bytes. WHY: compared with what is kept.
+        std::fs::write(&good, &sealed).unwrap();
+        let (plugin, bytes) = check_file(&trusted, &good).unwrap(); // WHAT: checked. WHY: passes.
+        assert_eq!((plugin.manifest.name.as_str(), plugin.key.as_str()), ("Tiny", "test")); // WHAT: its name and the key that signed it. WHY: what the question says.
+        assert!(!kept.exists(), "checking keeps nothing"); // WHAT: still nothing kept. WHY: kept only after the person says yes.
+        assert!(!folder().join("tiny.hvplugin").exists(), "checking keeps nothing in the real folder either"); // WHAT: nothing in this build's own plugins folder. WHY: the check must not keep a copy anywhere.
+        std::fs::write(&good, b"changed after the check").unwrap(); // WHAT: the file changed while the question was up. WHY: what is kept must be what was checked.
+        let added = keep_in(&kept, &plugin, &bytes).unwrap(); // WHAT: yes. WHY: kept.
+        assert_eq!(added.path, kept.join("tiny.hvplugin")); // WHAT: named by its id. WHY: an update lands on the older one.
+        assert_eq!(std::fs::read(&added.path).unwrap(), sealed); // WHAT: the bytes checked, not the changed file. WHY: the same.
+        let _ = std::fs::remove_dir_all(&dir); // WHAT: tidied. WHY: the folder was the test's.
+    }
+
+    #[test]
+    fn text_shown_in_a_question_has_nothing_hidden_in_it() {
+        assert_eq!(shown("Takeoff Check", SHOWN_NAME), "Takeoff Check"); // WHAT: an ordinary name. WHY: left alone.
+        assert_eq!(shown("  Takeoff\u{202e}kcehC\u{200f}\r\n\tTool  ", SHOWN_NAME), "TakeoffkcehC Tool"); // WHAT: an override, a mark, new lines, a tab and padding. WHY: all gone or made one space.
+        for c in ['\u{061c}', '\u{2066}', '\u{feff}', '\u{00ad}', '\u{e0041}', '\u{1b}'] { // WHAT: more invisible characters, and escape. WHY: each one, on its own.
+            assert_eq!(shown(&format!("a{c}b"), SHOWN_NAME).replace(' ', ""), "ab", "{c:?}"); // WHAT: gone, or a space. WHY: nothing invisible is ever shown.
+        }
+        assert_eq!(shown(&"x".repeat(500), 10), format!("{}\u{2026}", "x".repeat(10))); // WHAT: cut, with an ellipsis. WHY: a long name doesn't fill the window.
     }
 
     /// A real plugin through the sandbox: `HV_TEST_PLUGIN=path/to.wasm

@@ -12,7 +12,7 @@
 //! fails on every machine but one is a test people learn to ignore.
 //!
 //! What it is for: parsing a chest and loading a chest are not the same
-//! thing. `load_chest_from` parses the file, writes it back out in Excalibur
+//! thing. `arrivals::read_chest` parses the file, writes it back out in Excalibur
 //! View's own format, and then reads the seat's whole arrangement off disk
 //! again — and it is that second reading, not the first, that decides what
 //! somebody sees on the toolbar. A chest that parses and then loses its
@@ -86,7 +86,7 @@ fn a_chest_still_weighs_the_same_after_being_loaded() {
         let name = name_of(&path);
         let first = chest::Profile::read(&bytes).unwrap();
 
-        // What `load_chest_from` does with it: written back out in Excalibur
+        // What `arrivals::read_chest` does with it: written back out in Excalibur
         // View's own format, then read again — which is the copy the seat
         // actually uses.
         assert!(

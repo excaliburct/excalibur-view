@@ -3,6 +3,7 @@
 pub mod about;
 pub mod app;
 pub mod arrange;
+pub mod arrivals; // WHAT: plugins and tool chests that arrive to be added. WHY: one window and one set of rules however they come.
 pub mod assistant;
 pub mod batch;
 pub mod batchui;

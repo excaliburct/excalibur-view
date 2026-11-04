@@ -841,6 +841,9 @@ pub struct App {
     /// A license file opened by somebody who was not signed in yet. It goes
     /// on the moment an administrator is.
     pub waiting_license: Option<PathBuf>,
+    /// Plugins and tool chests that arrived: questions still to answer and
+    /// what was done, shown in one window (`crate::arrivals`).
+    pub arrivals: crate::arrivals::Arrivals, // WHAT: what arrived. WHY: one combined answer for files that come together.
     /// Help → Test Assistant Connection: the report, once there is one, and the
     /// test while it runs.
     pub assistant_report: Option<String>,
@@ -1016,6 +1019,7 @@ impl App {
             turn_to: None,
             links_waiting: Vec::new(),
             waiting_license: None,
+            arrivals: Default::default(), // WHAT: nothing arrived yet. WHY: the window shows only once something does.
             assistant_report: None,
             assistant_testing: None,
             bench: crate::bench::REQUESTED.get().cloned().map(crate::bench::Bench::new),
@@ -1321,66 +1325,8 @@ impl App {
                 .filter("Excalibur View tool chest", &[chest::native::EXTENSION])
                 .filter("Import from Revu (profile or tool set)", &["bpx", "btx", "BPX", "BTX"])
                 .title("Load a tool chest"),
-            |app, path| app.load_chest_from(&path),
+            |app, path| app.take_chest(&path), // WHAT: the same path as a chest opened from Explorer. WHY: one set of rules, including asking before replacing a chest by the same name.
         );
-    }
-
-    /// Loads a tool chest file: chosen with Load Tool Chest, or dropped on
-    /// the window.
-    pub fn load_chest_from(&mut self, path: &std::path::Path) {
-        let path = path.to_path_buf();
-        let Ok(bytes) = std::fs::read(&path) else {
-            self.error = Some(format!("{} could not be read.", path.display()));
-            return;
-        };
-        let Some(profile) = chest::Profile::read(&bytes) else {
-            self.error = Some(format!(
-                "{} is not a tool chest this can read. It should be an Excalibur View tool chest \
-                 (.evtools), or a Revu profile (.bpx) or tool set (.btx) to import.",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            ));
-            return;
-        };
-
-        let tools: usize = profile.sets.iter().map(|s| s.tools.len()).sum();
-        let file_name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "tool chest".into());
-        // Whatever it came in as, it is kept as Excalibur View's own file: a
-        // Revu file is read once, here, and never needed again.
-        let native = chest::native::is_native(&bytes);
-        let stem = path
-            .file_stem()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| profile.name.clone());
-        let name = format!("{stem}.{}", chest::native::EXTENSION);
-        let kept_bytes = if native { bytes } else { chest::native::write(&profile, &format!("Revu: {file_name}")) };
-
-        // Kept, so it is there next time. A failure here is worth saying out
-        // loud but is not worth refusing the chest over — it works for this
-        // session either way.
-        let beside = crate::server::profiles_folder();
-        let kept = std::fs::create_dir_all(&beside).is_ok()
-            && std::fs::write(beside.join(&name), &kept_bytes).is_ok();
-
-        // Put together with everything else this seat has.
-        self.profile = if kept {
-            crate::profiles::load().or(Some(profile))
-        } else {
-            Some(profile)
-        };
-        self.status = match (kept, native) {
-            (true, true) => format!("{name}: {tools} tools loaded. It will load again next time."),
-            (true, false) => format!(
-                "{file_name}: {tools} tools imported from Revu and kept as {name}, Excalibur View's \
-                 own tool chest. The Revu file is not needed again."
-            ),
-            (false, _) => format!(
-                "{file_name}: {tools} tools loaded, but they could not be saved beside the program \
-                 — you will have to load them again next time."
-            ),
-        };
     }
 
     /// Saves the tools this seat has as one Excalibur View tool chest: to
@@ -2126,6 +2072,7 @@ impl eframe::App for App {
         self.doubles_window(ctx);
         self.revision_window(ctx);
         self.plugin_windows(ctx);
+        self.arrivals_window(ctx); // WHAT: what arrived, and any question about it. WHY: after the plugin windows, so it sits on top of them.
         self.assistant_window(ctx);
         self.answer_file_questions(ctx);
 
@@ -2392,7 +2339,8 @@ impl App {
             .map(str::to_lowercase)
             .unwrap_or_default();
         match extension.as_str() {
-            "evtools" | "bpx" | "btx" => self.load_chest_from(&path),
+            "evtools" | "bpx" | "btx" => self.take_chest(&path), // WHAT: kept, and said in the Adding window. WHY: see crate::arrivals.
+            crate::plugins::EXTENSION => self.take_plugin(&path), // WHAT: a plugin, checked and then asked about, as Plugins > Add Plugin… adds one. WHY: it used to be opened as a drawing, which it isn't.
             "evlicense" if crate::edition::sells() => self.take_license(path),
             "evlicense" => self.status = crate::edition::not_in_this_copy("Adding a license"),
             "ifc" => self.open_model(path),

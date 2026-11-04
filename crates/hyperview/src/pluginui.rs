@@ -403,9 +403,7 @@ impl App {
     /// Plugins ▸ Add Plugin…
     pub fn add_plugin(&mut self) {
         if !crate::edition::runs_plugins_itself() {
-            self.status = "Plugins come from your office's server on this copy. \
-                           An administrator adds them from Excalibur View on Windows."
-                .into();
+            self.status = plugins::OFFICE_RUNS_PLUGINS.into(); // WHAT: the same words as before, now kept in one place. WHY: a plugin opened from Explorer on this copy is told the same thing.
             return;
         }
         self.filing.one(

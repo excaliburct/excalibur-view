@@ -243,6 +243,7 @@ pub(crate) mod linux_desktop {
     const MIME_FILE: &str = "excalibur-view.xml";
     const LICENSE_TYPE: &str = "application/x-excalibur-view-license";
     const CHEST_TYPE: &str = "application/x-excalibur-view-chest";
+    const PLUGIN_TYPE: &str = "application/x-excalibur-view-plugin"; // WHAT: the plugin file's type. WHY: so a plugin opened on Linux comes to this program, as a tool chest does.
     /// The same mark the Windows icon is made from, at full size.
     static ICON: &[u8] = include_bytes!("../../../assets/icon-1024.png");
 
@@ -268,7 +269,7 @@ pub(crate) mod linux_desktop {
              Icon={icon}\n\
              Terminal=false\n\
              Categories=Graphics;Viewer;Office;\n\
-             MimeType=x-scheme-handler/hyperview;application/pdf;{LICENSE_TYPE};{CHEST_TYPE};\n\
+             MimeType=x-scheme-handler/hyperview;application/pdf;{LICENSE_TYPE};{CHEST_TYPE};{PLUGIN_TYPE};\n\
              StartupWMClass=hyperview\n\
              Actions=uninstall;\n\
              \n\
@@ -279,17 +280,19 @@ pub(crate) mod linux_desktop {
         )
     }
 
-    /// The program's own two file types, by extension, so a license or a tool
-    /// chest sent in an email opens in it.
+    /// The program's own three file types, by extension, so a license, a tool
+    /// chest or a plugin sent in an email opens in it.
     pub fn mime_package() -> String {
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
              <mime-info xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\">\n\
              \x20 <mime-type type=\"{LICENSE_TYPE}\"><comment>Excalibur View Office license</comment><glob pattern=\"*.{license}\"/></mime-type>\n\
              \x20 <mime-type type=\"{CHEST_TYPE}\"><comment>Excalibur View tool chest</comment><glob pattern=\"*.{chest}\"/></mime-type>\n\
+             \x20 <mime-type type=\"{PLUGIN_TYPE}\"><comment>Excalibur View plugin</comment><glob pattern=\"*.{plugin}\"/></mime-type>\n\
              </mime-info>\n",
             license = hub::license::EXTENSION,
             chest = chest::native::EXTENSION,
+            plugin = crate::plugins::EXTENSION, // WHAT: hvplugin. WHY: the glob for the plugin type.
         )
     }
 
@@ -374,6 +377,7 @@ mod windows_shell {
             "ExcaliburView.ToolChest",
             "Excalibur View tool chest",
         ),
+        (crate::plugins::EXTENSION, "ExcaliburView.Plugin", "Excalibur View plugin"), // WHAT: .hvplugin opens in this program, per person, like a tool chest. WHY: a double-click, or another program opening one, adds it after one question; uninstall takes it away with the others.
     ];
     /// "Combine in Excalibur View" on a PDF's right-click menu (under Show
     /// more options on Windows 11), for any number of PDFs selected at once.
@@ -506,7 +510,7 @@ mod windows_shell {
             && key_text(&format!(r"{MODEL_VERB}\command"), "", &format!("\"{exe}\" \"%1\""))
     }
 
-    /// Makes a `.evlicense` or `.evtools` open in this program.
+    /// Makes a `.evlicense`, `.evtools` or `.hvplugin` open in this program.
     fn file_type(exe: &str, extension: &str, class: &str, shown_as: &str) -> bool {
         let class_key = format!(r"Software\Classes\{class}");
         key_text(&format!(r"Software\Classes\.{extension}"), "", class)
@@ -854,6 +858,8 @@ mod linux_tests {
         let mime = linux_desktop::mime_package();
         assert!(mime.contains(&format!("pattern=\"*.{}\"", hub::license::EXTENSION)));
         assert!(mime.contains(&format!("pattern=\"*.{}\"", chest::native::EXTENSION)));
+        assert!(mime.contains(&format!("pattern=\"*.{}\"", crate::plugins::EXTENSION))); // WHAT: plugins have a type. WHY: one opened on Linux comes here.
+        assert!(entry.contains("application/x-excalibur-view-plugin;")); // WHAT: and the menu entry takes it. WHY: the same.
     }
 
     #[test]
