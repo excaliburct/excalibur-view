@@ -47,7 +47,7 @@ pub enum Question {
     /// A plugin that passed every check: add it, or update to it?
     Plugin {
         /// The checked plugin.
-        plugin: Plugin,
+        plugin: Box<Plugin>, // WHAT: the plugin, boxed. WHY: its manifest is far bigger than a pointer, and the queue holds either kind of question.
         /// The very bytes that were checked, which are what is kept.
         bytes: Vec<u8>,
         /// Chosen with Plugins ▸ Add Plugin…, rather than opened from outside.
@@ -401,7 +401,7 @@ impl App {
             return self.say_arrived(line); // WHAT: said. WHY: the same.
         }
         if !self.arrivals.asking_about_plugin(&plugin.digest) { // WHAT: not already being asked about. WHY: one question per file.
-            self.arrivals.asking.push_back(Question::Plugin { plugin, bytes, from_menu: false }); // WHAT: asked in the window. WHY: the one confirmation.
+            self.arrivals.asking.push_back(Question::Plugin { plugin: Box::new(plugin), bytes, from_menu: false }); // WHAT: asked in the window. WHY: the one confirmation.
         }
     }
 
@@ -427,7 +427,7 @@ impl App {
         if self.arrivals.full() { // WHAT: as many questions waiting as may be. WHY: see MOST_ASKING.
             return self.status = "Answer the questions in the Adding to Excalibur View window first, then add it again.".into(); // WHAT: said. WHY: nothing is lost.
         }
-        self.arrivals.asking.push_back(Question::Plugin { plugin, bytes, from_menu: true }); // WHAT: the update asked about. WHY: replacing a plugin somebody uses is asked about, however it arrived.
+        self.arrivals.asking.push_back(Question::Plugin { plugin: Box::new(plugin), bytes, from_menu: true }); // WHAT: the update asked about. WHY: replacing a plugin somebody uses is asked about, however it arrived.
     }
 
     /// Yes to a plugin: kept and the menu rebuilt. Shared with the office
