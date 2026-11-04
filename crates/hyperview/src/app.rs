@@ -1325,7 +1325,7 @@ impl App {
                 .filter("Excalibur View tool chest", &[chest::native::EXTENSION])
                 .filter("Import from Revu (profile or tool set)", &["bpx", "btx", "BPX", "BTX"])
                 .title("Load a tool chest"),
-            |app, path| app.take_chest(&path), // WHAT: the same path as a chest opened from Explorer. WHY: one set of rules, including asking before replacing a chest by the same name.
+            |app, path| app.take_chest(&path, false), // WHAT: chosen from the menu: kept at once unless it would replace one. WHY: the person just chose it; one opened from outside is asked about once.
         );
     }
 
@@ -2339,7 +2339,7 @@ impl App {
             .map(str::to_lowercase)
             .unwrap_or_default();
         match extension.as_str() {
-            "evtools" | "bpx" | "btx" => self.take_chest(&path), // WHAT: kept, and said in the Adding window. WHY: see crate::arrivals.
+            "evtools" | "bpx" | "btx" => self.take_chest(&path, true), // WHAT: asked about once in the Adding window, then kept. WHY: a chest from outside can take over this seat's tool sets and toolbars; see crate::arrivals.
             crate::plugins::EXTENSION => self.take_plugin(&path), // WHAT: a plugin, checked and then asked about, as Plugins > Add Plugin… adds one. WHY: it used to be opened as a drawing, which it isn't.
             "evlicense" if crate::edition::sells() => self.take_license(path),
             "evlicense" => self.status = crate::edition::not_in_this_copy("Adding a license"),

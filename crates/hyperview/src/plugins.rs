@@ -201,13 +201,6 @@ pub fn open(trusted: &Trusted, file: &[u8], path: &Path, from_office: bool) -> R
     })
 }
 
-/// Checks a plugin somebody picked, and puts it in this computer's folder.
-pub fn add_from_file(trusted: &Trusted, source: &Path) -> Result<(Plugin, Vec<u8>), String> {
-    let (checked, bytes) = check_file(trusted, source)?; // WHAT: read and checked, nothing kept yet. WHY: the same check a plugin opened from Explorer gets, in one place.
-    let plugin = keep_in(&folder(), &checked, &bytes)?; // WHAT: the checked bytes kept in this computer's folder. WHY: as before; the menu adds without asking, because the person just chose the file.
-    Ok((plugin, bytes)) // WHAT: the kept plugin and its bytes. WHY: what the callers had before.
-}
-
 /// Reads a plugin file and checks it — the signature against the keys this
 /// program was built with, the sandbox's rules, the manifest — and keeps
 /// nothing. The bytes that were checked come back with it, so what is kept
@@ -217,9 +210,77 @@ pub fn add_from_file(trusted: &Trusted, source: &Path) -> Result<(Plugin, Vec<u8
 ///
 /// Why it can't be added, in words for the person.
 pub fn check_file(trusted: &Trusted, source: &Path) -> Result<(Plugin, Vec<u8>), String> {
-    let bytes = std::fs::read(source).map_err(|e| format!("{}: {e}", source.display()))?; // WHAT: the whole file. WHY: the signature covers every byte.
+    let bytes = read_at_most(source, MOST_PLUGIN_BYTES, "plugin")?; // WHAT: the whole file, but only an ordinary file no bigger than any plugin. WHY: the signature covers every byte; a file opened from outside could be a pipe, a device or many gigabytes, and is read before anything is known about it.
     let checked = open(trusted, &bytes, source, false)?; // WHAT: the signature, the sandbox and the manifest, checked. WHY: nothing is asked or kept about a file that fails.
+    if !plain_version(&checked.manifest.version) { // WHAT: a version that isn't plain numbers. WHY: the no-downgrade check compares numbers; "1.0.0-beta" reads the same as "1.0.0", and text that isn't a version can't be compared at all.
+        return Err(format!(
+            "Its version, '{}', is not one this can compare. A plugin's version is up to three numbers, like 1.4.2.",
+            shown(&checked.manifest.version, SHOWN_NAME)
+        )); // WHAT: refused, with the version cleaned. WHY: said plainly, and nothing is kept.
+    }
     Ok((checked, bytes)) // WHAT: the plugin and the bytes checked. WHY: kept as they are, if the person says yes.
+}
+
+/// The most a plugin file opened from outside may weigh.
+pub const MOST_PLUGIN_BYTES: u64 = 64 * 1024 * 1024; // WHAT: 64 MB. WHY: the office server's own limit for a plugin; real ones are a few megabytes.
+
+/// Whether a version is up to three plain numbers: "2", "1.4", "1.4.2".
+#[must_use] // WHAT: a caller that drops the answer gets a warning. WHY: asking has no other effect.
+pub fn plain_version(version: &str) -> bool {
+    let parts: Vec<&str> = version.split('.').collect(); // WHAT: the numbers between the dots. WHY: each is judged.
+    (1..=3).contains(&parts.len()) // WHAT: one to three of them. WHY: what the comparison reads.
+        && parts.iter().all(|p| (1..=9).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit())) // WHAT: each one to nine ASCII digits. WHY: nothing that compares as something it isn't, and nothing past what a number holds.
+}
+
+/// Reads a file that arrived from outside: only an ordinary file, and no
+/// more than `most` bytes of it. `what` names it in the reason.
+///
+/// # Errors
+///
+/// Why it wasn't read, in words for the person.
+pub fn read_at_most(path: &Path, most: u64, what: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read; // WHAT: reading from an open file. WHY: take() below.
+    let meta = std::fs::metadata(path).map_err(|_| "It could not be read.".to_string())?; // WHAT: what the path is, following a link. WHY: a pipe or a device must be refused before it is opened, since opening a pipe can wait forever.
+    if !meta.is_file() { // WHAT: a folder, a pipe, a device. WHY: none of them is a file anybody was sent.
+        return Err(format!("It is not a {what} file.")); // WHAT: refused. WHY: said plainly.
+    }
+    let too_big = || format!("It is bigger than any {what} ({} MB at most), so it was not read.", most / (1024 * 1024)); // WHAT: the reason for a file too big. WHY: said the same both places below.
+    if meta.len() > most { // WHAT: bigger than allowed, by its size on disk. WHY: refused before a byte is read.
+        return Err(too_big()); // WHAT: refused. WHY: the same.
+    }
+    let file = std::fs::File::open(path).map_err(|_| "It could not be read.".to_string())?; // WHAT: opened. WHY: read below.
+    let mut bytes = Vec::new(); // WHAT: what is read. WHY: filled below.
+    file.take(most + 1).read_to_end(&mut bytes).map_err(|_| "It could not be read.".to_string())?; // WHAT: at most one byte past the limit. WHY: a file that grew after its size was looked at still can't be read past the limit.
+    if bytes.len() as u64 > most { // WHAT: it grew past the limit. WHY: the same.
+        return Err(too_big()); // WHAT: refused. WHY: the same.
+    }
+    Ok(bytes) // WHAT: the file. WHY: checked next.
+}
+
+/// Writes `bytes` to `path` by writing a new file beside it and putting it
+/// in place, so whatever was at `path` — a link to somewhere else, a second
+/// name for another file — is replaced, never written through.
+///
+/// # Errors
+///
+/// What went wrong writing.
+pub fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write; // WHAT: writing to an open file. WHY: write_all below.
+    let dir = path.parent().unwrap_or_else(|| Path::new(".")); // WHAT: the folder it goes in. WHY: the new file is made beside it, so putting it in place is one rename.
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(); // WHAT: its name. WHY: the part file is named after it.
+    let part = dir.join(format!(".{name}.{}.part", std::process::id())); // WHAT: a hidden part file, this run's own. WHY: no folder reader takes a .part file for a plugin or a chest.
+    let _ = std::fs::remove_file(&part); // WHAT: one left by a run that stopped halfway, gone. WHY: made fresh below.
+    let written = (|| { // WHAT: the writing, in one place. WHY: the part file is taken away if any of it fails.
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&part)?; // WHAT: a new file, never an existing one. WHY: create_new will not follow a link somebody put there.
+        file.write_all(bytes)?; // WHAT: every byte. WHY: the file.
+        file.sync_all()?; // WHAT: on the disk. WHY: a file put in place is whole, even after a power cut.
+        drop(file); // WHAT: closed. WHY: Windows renames only a closed file.
+        std::fs::rename(&part, path) // WHAT: put in place. WHY: replaces a link or a second name at `path` rather than writing into what it points at.
+    })();
+    if written.is_err() { // WHAT: something failed. WHY: no part file is left behind.
+        let _ = std::fs::remove_file(&part); // WHAT: taken away. WHY: the same.
+    }
+    written // WHAT: how it went. WHY: the caller says so.
 }
 
 /// Keeps checked plugin bytes in `dir`, under the plugin's own id.
@@ -230,7 +291,7 @@ pub fn check_file(trusted: &Trusted, source: &Path) -> Result<(Plugin, Vec<u8>),
 pub fn keep_in(dir: &Path, checked: &Plugin, bytes: &[u8]) -> Result<Plugin, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("Could not make the plugins folder: {e}"))?; // WHAT: the folder, made if missing. WHY: the first plugin on this computer.
     let path = dir.join(format!("{}.{EXTENSION}", checked.manifest.id)); // WHAT: named by its id. WHY: the id was checked to be letters, digits, - and _, so it can't reach another folder, and a newer version lands on the older one.
-    std::fs::write(&path, bytes).map_err(|e| format!("Could not keep the plugin: {e}"))?; // WHAT: the checked bytes written. WHY: the plugin loads from here next time.
+    write_replacing(&path, bytes).map_err(|e| format!("Could not keep the plugin: {e}"))?; // WHAT: the checked bytes written as a new file put in place. WHY: the plugin loads from here next time, and a link or second name left at that path is replaced, not written through.
     Ok(Plugin { path, ..checked.clone() }) // WHAT: the plugin, with where it now is. WHY: sharing it with the office reads that file.
 }
 
@@ -305,6 +366,23 @@ pub enum Rule {
     HereNotOffice,
     /// Added here and shared with the office: an administrator, signed in.
     HereAndOffice,
+    /// An administrator, signed in, adding a plugin that was opened from
+    /// outside: added on this computer only, and shared with the office
+    /// only from Plugins ▸ Add Plugin….
+    HereShareFromMenu,
+}
+
+impl Rule {
+    /// The rule for a plugin opened from outside — double-clicked, dropped,
+    /// handed over by another program — rather than chosen from the menu.
+    /// Nothing opened that way reaches the rest of the office.
+    #[must_use] // WHAT: a caller that drops the rule gets a warning. WHY: working it out has no other effect.
+    pub fn from_outside(self) -> Rule {
+        match self { // WHAT: only the sharing rule changes. WHY: everything else already stays on this computer.
+            Rule::HereAndOffice => Rule::HereShareFromMenu, // WHAT: here only. WHY: a file somebody was sent must not go to every seat in the office on one click; sharing is the menu's, chosen on purpose.
+            other => other, // WHAT: unchanged. WHY: the same.
+        }
+    }
 }
 
 /// The rule for a copy that runs plugins itself or doesn't, signed in or
@@ -661,7 +739,11 @@ mod tests {
 
     /// The tiny plugin, answering every run with `answer`.
     fn tiny_answering(run_body: &str, answer: &str) -> Vec<u8> {
-        let manifest = r#"{"id":"tiny","name":"Tiny","version":"1.0.0","commands":[{"id":"hello","name":"Hello"}]}"#;
+        tiny_with(r#"{"id":"tiny","name":"Tiny","version":"1.0.0","commands":[{"id":"hello","name":"Hello"}]}"#, run_body, answer) // WHAT: the usual manifest. WHY: most tests need only that.
+    }
+
+    /// The tiny plugin, saying it is `manifest`.
+    fn tiny_with(manifest: &str, run_body: &str, answer: &str) -> Vec<u8> {
         let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
         let text = format!(
             r#"(module
@@ -907,6 +989,66 @@ mod tests {
         let added = keep_in(&kept, &plugin, &bytes).unwrap(); // WHAT: yes. WHY: kept.
         assert_eq!(added.path, kept.join("tiny.hvplugin")); // WHAT: named by its id. WHY: an update lands on the older one.
         assert_eq!(std::fs::read(&added.path).unwrap(), sealed); // WHAT: the bytes checked, not the changed file. WHY: the same.
+        let _ = std::fs::remove_dir_all(&dir); // WHAT: tidied. WHY: the folder was the test's.
+    }
+
+    #[test]
+    fn only_a_version_of_plain_numbers_can_be_added() {
+        for good in ["1", "1.4", "1.4.2", "0.0.1", "123456789.0.0"] { // WHAT: plain versions. WHY: allowed.
+            assert!(plain_version(good), "{good}"); // WHAT: allowed. WHY: the comparison reads them.
+        }
+        for bad in ["", "1.0.0-beta", "1.0.0+build", "v1.0", "1.0.0.0", "1..0", " 1.0", "1.0 ", "\u{0661}.0", "1234567890.0", "1.0\u{200b}"] { // WHAT: versions the comparison would misread. WHY: "1.0.0-beta" compares the same as "1.0.0".
+            assert!(!plain_version(bad), "{bad:?}"); // WHAT: refused. WHY: the same.
+        }
+    }
+
+    #[test]
+    fn a_plugin_with_a_version_that_cant_be_compared_is_refused_from_outside() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use sha2::{Digest, Sha256};
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/hv-plugin-version").join(std::process::id().to_string()); // WHAT: a folder of this build's own. WHY: a shared temporary folder is anybody's.
+        let _ = std::fs::remove_dir_all(&dir); // WHAT: emptied. WHY: a run before must not decide this one.
+        std::fs::create_dir_all(&dir).unwrap(); // WHAT: made. WHY: the file is written into it.
+        let signing = SigningKey::from_bytes(&[7u8; 32]); // WHAT: the publisher's key. WHY: trusted below.
+        let trusted = Trusted { keys: vec![("test".into(), signing.verifying_key().to_bytes())] }; // WHAT: only that key. WHY: as a real build.
+        let wasm = tiny_with(r#"{"id":"tiny","name":"Tiny","version":"1.0.0-beta","commands":[{"id":"hello","name":"Hello"}]}"#, "", r#"{"done":{"title":"Hello","findings":[]}}"#); // WHAT: a properly signed plugin whose version has a tail. WHY: it would never be updated to 1.0.0.
+        let sha = hub::update::hex(&Sha256::digest(&wasm)); // WHAT: its digest. WHY: signed.
+        let signature = signing.sign(&plugin_api::signing_payload("tiny", "1.0.0-beta", &sha)); // WHAT: signed. WHY: it passes every other check.
+        let file = plugin_api::seal(&plugin_api::Header { id: "tiny".into(), version: "1.0.0-beta".into(), name: "Tiny".into(), sha256: sha, bytes: wasm.len() as u64, key: "test".into(), signature: hub::update::hex(&signature.to_bytes()) }, &wasm); // WHAT: the file. WHY: the same.
+        let path = dir.join("Tiny.hvplugin"); // WHAT: where it arrives. WHY: read from there.
+        std::fs::write(&path, file).unwrap(); // WHAT: written. WHY: the same.
+        assert!(open(&trusted, &std::fs::read(&path).unwrap(), &path, false).is_ok(), "signed properly"); // WHAT: every other check passes. WHY: only the version refuses it.
+        let why = check_file(&trusted, &path).unwrap_err(); // WHAT: checked as from outside. WHY: refused.
+        assert!(why.contains("is not one this can compare"), "{why}"); // WHAT: says why. WHY: plain.
+        let big = dir.join("Big.hvplugin"); // WHAT: a file bigger than any plugin. WHY: refused without reading it.
+        std::fs::File::create(&big).unwrap().set_len(MOST_PLUGIN_BYTES + 1).unwrap(); // WHAT: sparse, so it costs nothing. WHY: the same.
+        assert!(check_file(&trusted, &big).unwrap_err().contains("bigger than any plugin")); // WHAT: refused. WHY: the same.
+        assert!(check_file(&trusted, &dir).unwrap_err().contains("not a plugin file")); // WHAT: a folder. WHY: not a file.
+        let _ = std::fs::remove_dir_all(&dir); // WHAT: tidied. WHY: the folder was the test's.
+    }
+
+    #[test]
+    fn keeping_a_plugin_replaces_a_second_name_or_a_link_at_its_place_rather_than_writing_through_it() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/hv-plugin-keep").join(std::process::id().to_string()); // WHAT: a folder of this build's own. WHY: a shared temporary folder is anybody's.
+        let _ = std::fs::remove_dir_all(&dir); // WHAT: emptied. WHY: a run before must not decide this one.
+        let kept = dir.join("plugins"); // WHAT: the plugins folder. WHY: kept into.
+        std::fs::create_dir_all(&kept).unwrap(); // WHAT: made. WHY: the same.
+        let elsewhere = dir.join("someone-elses-file"); // WHAT: a file outside the folder. WHY: what must not be written.
+        std::fs::write(&elsewhere, b"theirs").unwrap(); // WHAT: its contents. WHY: checked after.
+        std::fs::hard_link(&elsewhere, kept.join("tiny.hvplugin")).unwrap(); // WHAT: a second name for it, where the plugin goes. WHY: a plain write would change their file.
+        let plugin = Plugin { manifest: serde_json::from_str(r#"{"id":"tiny","name":"Tiny","version":"1.0.0","commands":[{"id":"go","name":"Go"}]}"#).unwrap(), wasm: Default::default(), digest: String::new(), key: "test".into(), from_office: false, path: PathBuf::new() }; // WHAT: a checked plugin. WHY: only its id is used.
+        keep_in(&kept, &plugin, b"the plugin").unwrap(); // WHAT: kept. WHY: the case.
+        assert_eq!(std::fs::read(&elsewhere).unwrap(), b"theirs"); // WHAT: their file untouched. WHY: the second name was replaced, not written through.
+        assert_eq!(std::fs::read(kept.join("tiny.hvplugin")).unwrap(), b"the plugin"); // WHAT: the plugin is there. WHY: the same.
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(kept.join("tiny.hvplugin")).unwrap(); // WHAT: cleared. WHY: a link this time.
+            std::os::unix::fs::symlink(&elsewhere, kept.join("tiny.hvplugin")).unwrap(); // WHAT: a link to their file, where the plugin goes. WHY: the same.
+            keep_in(&kept, &plugin, b"again").unwrap(); // WHAT: kept. WHY: the case.
+            assert_eq!(std::fs::read(&elsewhere).unwrap(), b"theirs"); // WHAT: their file untouched. WHY: the link was replaced.
+            assert!(!std::fs::symlink_metadata(kept.join("tiny.hvplugin")).unwrap().file_type().is_symlink()); // WHAT: a file now, not a link. WHY: the same.
+        }
+        assert_eq!(std::fs::read_dir(&kept).unwrap().count(), 1, "no part file left behind"); // WHAT: only the plugin. WHY: the part file was put in place.
         let _ = std::fs::remove_dir_all(&dir); // WHAT: tidied. WHY: the folder was the test's.
     }
 
