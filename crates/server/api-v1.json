@@ -292,8 +292,11 @@
     "GET /sets/{id}/markuplist",
     "GET /sets/{id}/markups",
     "GET /sets/{id}/sheets",
+    "GET /sets/{id}/signoffs",
     "GET /sets/{id}/takeoff",
     "GET /sets/{id}/takeoff.csv",
+    "GET /signoffs",
+    "GET /signoffs/{id}/signature.png",
     "GET /update/latest",
     "GET /update/{version}/download",
     "POST /admin/fleet",
@@ -330,7 +333,10 @@
     "POST /sets/{id}/copy",
     "POST /sets/{id}/folder",
     "POST /sets/{id}/markups",
+    "POST /sets/{id}/signoffs",
     "POST /setup",
+    "POST /signoffs/{id}/sign",
+    "POST /signoffs/{id}/withdraw",
     "POST /signout"
   ]
 }

@@ -125,6 +125,11 @@ impl Denied {
         Denied(StatusCode::FORBIDDEN, Problem::new("license_users", message))
     }
 
+    /// Already done, and final: a sign-off signed or withdrawn before.
+    pub(crate) fn taken(message: impl Into<String>) -> Denied {
+        Denied(StatusCode::CONFLICT, Problem::new("conflict", message)) // WHAT: 409. WHY: the request was fine; the thing has moved on.
+    }
+
     pub(crate) fn wrong(message: impl Into<String>) -> Denied {
         Denied(
             StatusCode::BAD_REQUEST,
@@ -250,6 +255,11 @@ pub const SYNC_ROUTES: &[(&str, &str)] = &[
     ("POST", "/projects/:id/folders"), // WHAT: its projects' folders made, and who sees each. WHY: empty folders show, and the office's papers stay the office's.
     ("POST", "/sets/:id/folder"), // WHAT: a drawing set moved to another folder. WHY: a move in the company files is followed.
     ("POST", "/files/:id/folder"), // WHAT: a file moved to another folder. WHY: likewise.
+    ("POST", "/sets/:id/signoffs"), // WHAT: sign-offs asked for on one of its sets. WHY: the program's travelers and tickets are signed on View.
+    ("GET", "/sets/:id/signoffs"), // WHAT: a set's sign-offs. WHY: the program checks what it asked for.
+    ("GET", "/signoffs"), // WHAT: sign-offs changed since it last looked, on its own sets. WHY: the signatures read back. (Signing is never on this list: only a person signs.)
+    ("GET", "/signoffs/:id/signature.png"), // WHAT: a signature's picture. WHY: printed on the program's own form.
+    ("POST", "/signoffs/:id/withdraw"), // WHAT: a line taken back, unsigned. WHY: a station no longer needed.
 ];
 
 /// Holds every key to what it was made for, before any route runs. A `sync`
@@ -465,6 +475,11 @@ pub fn router(server: Shared) -> Router {
         .route("/files", post(crate::folders::upload_file).layer(uploads)) // WHAT: a file of any kind put in a folder. WHY: a job's folder holds more than PDFs.
         .route("/files/:id/file", get(crate::folders::file_bytes)) // WHAT: a file's bytes. WHY: opened with its own program.
         .route("/files/:id/folder", post(crate::folders::move_file)) // WHAT: a file moved. WHY: follows a move in the company files.
+        .route("/sets/:id/signoffs", get(crate::signoffs::of_set).post(crate::signoffs::ask)) // WHAT: a set's sign-offs, and asking for them. WHY: the shop signs travelers and tickets on View.
+        .route("/signoffs", get(crate::signoffs::changes)) // WHAT: sign-offs changed since. WHY: the asker reads the signatures back.
+        .route("/signoffs/:id/sign", post(crate::signoffs::sign)) // WHAT: a person signs a line. WHY: the signature itself.
+        .route("/signoffs/:id/withdraw", post(crate::signoffs::withdraw)) // WHAT: a line taken back. WHY: not needed any more.
+        .route("/signoffs/:id/signature.png", get(crate::signoffs::picture)) // WHAT: a signature as a picture. WHY: printed on the form.
         .route("/sets/:id/folder", post(crate::folders::move_set)) // WHAT: a drawing set moved, with its issues. WHY: likewise.
         // WHAT: every matched route first checks that a key keeps to its purpose. WHY: one gate in front of all of them, so a new route is closed to sync keys unless it is put on SYNC_ROUTES on purpose.
         .route_layer(axum::middleware::from_fn_with_state(server.clone(), keys_keep_to_their_purpose))
@@ -590,6 +605,12 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/files/{id}/file"), // WHAT: a file's bytes. WHY: likewise.
     ("POST", "/files/{id}/folder"), // WHAT: a file moved. WHY: likewise.
     ("POST", "/sets/{id}/folder"), // WHAT: a set moved. WHY: likewise.
+    ("GET", "/sets/{id}/signoffs"), // WHAT: a set's sign-offs. WHY: the shop signs travelers and tickets on View.
+    ("POST", "/sets/{id}/signoffs"), // WHAT: sign-offs asked for. WHY: likewise.
+    ("GET", "/signoffs"), // WHAT: sign-offs changed since. WHY: the signatures read back.
+    ("POST", "/signoffs/{id}/sign"), // WHAT: a person signs. WHY: the signature itself.
+    ("POST", "/signoffs/{id}/withdraw"), // WHAT: a line taken back. WHY: no longer needed.
+    ("GET", "/signoffs/{id}/signature.png"), // WHAT: a signature's picture. WHY: printed on the form.
 ];
 
 // ---- is it there ----------------------------------------------------------

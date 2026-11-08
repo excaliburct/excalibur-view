@@ -723,6 +723,7 @@ pub struct App {
     /// How hard the stroke being drawn is pressed, frame by frame, when the screen says.
     pub ink_pressure: Vec<f32>, // WHAT: the pressures of the stroke so far. WHY: decides the stroke's width when it is put down.
     /// The quick tools down the side, and whether it is being set up.
+    pub signoffs: crate::signoffs::SignOffs, // WHAT: the open drawing's sign-offs, and the pad. WHY: the shop signs on View.
     pub quick: crate::quicktools::Quick, // WHAT: the side bar of each person's own tools. WHY: the few tools somebody uses all day, one tap away.
     /// A grip on the selected markup, while it is being dragged.
     pub gripping: Option<crate::grips::Gripping>,
@@ -987,6 +988,7 @@ impl App {
             touch: Default::default(),
             fingers: false, // WHAT: a mouse until a touch says otherwise. WHY: the first touch event sets it.
             ink_pressure: Vec::new(), // WHAT: no stroke yet. WHY: filled while one is drawn.
+            signoffs: Default::default(), // WHAT: none until an office drawing opens. WHY: asked for then.
             quick: Default::default(), // WHAT: the side bar, read from the settings below. WHY: set once the settings are loaded.
             asking_depth: None,
             shop: Default::default(),
@@ -2033,6 +2035,8 @@ impl eframe::App for App {
         crate::bench::mark(&mut marks, "tabs and navigation");
         self.side_panels(ctx);
         self.quick_tools_bar(ctx); // WHAT: the person's own tools down the right. WHY: before the sheet, which takes whatever room is left.
+        self.signoffs_follow(); // WHAT: the open drawing's sign-offs, asked for when it changes. WHY: the button shows if any are waiting.
+        self.signoffs_panel(ctx); // WHAT: the list down the right, when out. WHY: before the sheet, like the other side panels.
         crate::bench::mark(&mut marks, "side panels");
         // The markups list's bar is always there; open, it is the list.
         self.markups_bar(ctx);
@@ -2044,6 +2048,8 @@ impl eframe::App for App {
         self.run_commands(ctx);
         self.calibrate_dialog(ctx);
         self.quick_tools_window(ctx); // WHAT: setting the quick tools up, when open. WHY: with the other windows.
+        self.signoffs_button(ctx); // WHAT: "Sign-offs: 2 to sign", over the drawing. WHY: found without a menu.
+        self.signoffs_pad(ctx); // WHAT: the signing pad, when open. WHY: with the other windows.
         self.text_dialog(ctx);
         self.signature_window(ctx);
         self.reword_window(ctx);

@@ -682,6 +682,19 @@ impl Client {
         )
     }
 
+    /// A drawing set's sign-off lines, in the order they were asked for.
+    pub fn signoffs(&self, set: &str) -> Answer<Vec<crate::SignOff>> {
+        Self::read(self.get(&format!("/sets/{set}/signoffs")).call()) // WHAT: GET the lines. WHY: shown beside the drawing to sign.
+    }
+
+    /// Signs a line: the name written and the strokes drawn, in `SIGN_PAD` units.
+    pub fn sign_off(&self, id: &str, name: &str, strokes: &[Vec<[f64; 2]>]) -> Answer<crate::SignOff> {
+        Self::read(
+            self.post(&format!("/signoffs/{id}/sign"))
+                .send_json(serde_json::json!({ "name": name, "strokes": strokes })),
+        ) // WHAT: POST the signature. WHY: the server keeps it, final.
+    }
+
     pub fn sheets(&self, id: &str) -> Answer<Vec<Sheet>> {
         Self::read(self.get(&format!("/sets/{id}/sheets")).call())
     }

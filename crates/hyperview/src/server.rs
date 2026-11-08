@@ -200,6 +200,15 @@ pub enum Ask {
         person: String, // WHAT: the person's id. WHY: who.
         on: bool, // WHAT: in or out. WHY: one ask for both.
     },
+    /// A drawing set's sign-off lines.
+    SignOffs(String),
+    /// A person signs a line; the set's lines are read again after.
+    Sign {
+        set: String, // WHAT: the set the line is on. WHY: its lines come back.
+        id: String, // WHAT: the line. WHY: what's signed.
+        name: String, // WHAT: the name written. WHY: printed on the form.
+        strokes: Vec<Vec<[f64; 2]>>, // WHAT: the signature, in the pad's units. WHY: kept by the server.
+    },
 }
 
 /// What comes back.
@@ -320,6 +329,13 @@ pub enum Told {
     /// A sync of this set did not go through. Only said when it was asked
     /// quietly; otherwise it arrives as `Trouble`.
     SyncFailed(String),
+    /// A set's sign-off lines, as the server has them.
+    SignOffs {
+        set: String, // WHAT: the set. WHY: matched to the open drawing.
+        lines: Vec<hub::SignOff>, // WHAT: its lines. WHY: the list.
+    },
+    /// Signing didn't go through, and why.
+    SignFailed(String),
     /// The answer to somebody pressing "Check for Updates" when there is
     /// nothing to install: up to date, held, still coming, or unreachable.
     UpdateNote(String),
@@ -1123,6 +1139,24 @@ pub fn start(repaint: egui::Context) -> Link {
                         }
                     }
 
+                    // Asked quietly: a server older than sign-offs, or a set with none, shows no button.
+                    Ask::SignOffs(set) => {
+                        if let Ok(client) = connected(&client) {
+                            if let Ok(lines) = client.signoffs(&set) {
+                                say(&told, Told::SignOffs { set, lines }); // WHAT: the lines. WHY: the button and the list.
+                            }
+                        }
+                    }
+                    Ask::Sign { set, id, name, strokes } => match connected(&client) {
+                        Err(message) => say(&told, Told::SignFailed(message)), // WHAT: not connected. WHY: said; the pad stays open.
+                        Ok(client) => match client.sign_off(&id, &name, &strokes) {
+                            Ok(_) => match client.signoffs(&set) {
+                                Ok(lines) => say(&told, Told::SignOffs { set, lines }), // WHAT: the lines, this one signed. WHY: the list updates and the pad closes.
+                                Err(e) => say(&told, Told::SignFailed(format!("Signed, but the list couldn't be read again: {e}"))), // WHAT: signed, not refreshed. WHY: said truthfully.
+                            },
+                            Err(e) => say(&told, Told::SignFailed(format!("Not signed: {e}"))), // WHAT: refused (already signed, or off the pad). WHY: the server's own words.
+                        },
+                    },
                     Ask::CopySet { set, name } => match connected(&client) {
                         Err(message) => say(&told, Told::Trouble(message)),
                         Ok(client) => match client.copy_set(&set, "") {

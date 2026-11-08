@@ -487,6 +487,8 @@ impl App {
                     self.standing.update = offer.release.clone();
                 }
                 Told::SyncFailed(_) => self.sync_asked = None,
+                Told::SignOffs { set, lines } => self.take_signoffs(set, lines), // WHAT: a set's lines. WHY: the list and the button.
+                Told::SignFailed(why) => self.signoff_failed(why), // WHAT: not signed. WHY: said, pad left open.
                 Told::NoticeMade(made) => {
                     self.office.notice_url.clear();
                     self.office.notice_note = None;
