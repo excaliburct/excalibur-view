@@ -57,6 +57,17 @@ fn look_for(name: &str) -> Option<hub::discover::Found> {
 
 #[test]
 fn a_seat_finds_the_office_server_without_being_told_where_it_is() {
+    // WHAT: is the asking port free on this computer? WHY: the server only answers seats when it holds the port; something
+    // else holding it (the HP's pen-test copies hold it on purpose, so they never announce themselves) leaves nothing to test.
+    if let Err(e) = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], hub::discover::PORT))) {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            eprintln!(
+                "skipped: UDP port {} is held by another program on this computer, so no server here can answer seats",
+                hub::discover::PORT
+            ); // WHAT: said, not failed. WHY: the computer, not the code, stops it; anywhere the port is free it runs in full.
+            return;
+        }
+    } // WHAT: the probe socket closed at once. WHY: the server under test binds the port next.
     let home = Scratch::new();
     let config = Config {
         name: "Example Steel".into(),
