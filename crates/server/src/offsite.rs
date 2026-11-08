@@ -40,6 +40,9 @@ use sha2::{Digest, Sha256}; // WHAT: SHA-256. WHY: fingerprints, and the drawing
 
 // ---------------------------------------------------------------- what this product backs up
 
+/// Finds one real record and its file's digest: what the drill opens.
+pub type RecordFn = fn(&Connection) -> Result<Option<(String, String)>>; // WHAT: the record finder's type. WHY: named, so the product's shape reads plainly.
+
 /// One product's shape: what its data folder holds and how to check it.
 pub struct Product {
     pub id: &'static str,                                         // WHAT: the short name, in object names. WHY: one bucket can hold several products' folders.
@@ -47,7 +50,7 @@ pub struct Product {
     pub blobs: &'static str,                                      // WHAT: the folder of files kept by digest. WHY: sent once each.
     pub counts: &'static [&'static str],                          // WHAT: the tables counted. WHY: the drill compares them with the manifest.
     pub references: fn(&Connection) -> Result<BTreeSet<String>>,  // WHAT: every digest the database points at. WHY: each must be in the backup.
-    pub record: fn(&Connection) -> Result<Option<(String, String)>>, // WHAT: one real record and its file's digest. WHY: the drill opens it.
+    pub record: RecordFn,                                         // WHAT: one real record and its file's digest. WHY: the drill opens it.
 }
 
 /// Excalibur View's shape.
@@ -155,7 +158,7 @@ pub fn check_recipients(text: &str) -> Result<usize> {
     if text.to_ascii_uppercase().contains("AGE-SECRET-KEY-") { bail!("the recipients file holds a PRIVATE key (AGE-SECRET-KEY-…). Only the public line (age1…) belongs on this server. Remove it now, and keep the private key with Creede, off this machine."); } // WHAT: refuse a private key. WHY: the key that opens every backup must never sit on the machine they are meant to survive.
     let keys: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect(); // WHAT: the key lines. WHY: age-keygen's comments are allowed.
     const CH: &str = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"; // WHAT: the letters an age key uses (bech32). WHY: anything else is a typo.
-    if let Some(bad) = keys.iter().find(|k| !(k.len() == 62 && k.starts_with("age1") && k[4..].chars().all(|c| CH.contains(c)))) { bail!("the recipients file has a line that is not an age public key (age1 and 58 letters and digits): {}…", &bad.chars().take(12).collect::<String>()); } // WHAT: refuse a bad line, naming only its start. WHY: a typo would fail at night, or encrypt to the wrong thing.
+    if let Some(bad) = keys.iter().find(|k| !(k.len() == 62 && k.starts_with("age1") && k[4..].chars().all(|c| CH.contains(c)))) { bail!("the recipients file has a line that is not an age public key (age1 and 58 letters and digits): {}…", bad.chars().take(12).collect::<String>()); } // WHAT: refuse a bad line, naming only its start. WHY: a typo would fail at night, or encrypt to the wrong thing.
     if keys.is_empty() { bail!("the recipients file has no age public key in it (a line starting age1)."); } // WHAT: refuse an empty file. WHY: someone must be able to open the backup.
     Ok(keys.len()) // WHAT: how many keys can open it. WHY: said in the log.
 }
@@ -314,6 +317,11 @@ pub enum Cipher {
 }
 
 impl Cipher {
+    /// The program this runs, if it runs one.
+    pub fn program(&self) -> Option<&Path> {
+        match self { Cipher::Age(exe) => Some(exe), #[cfg(test)] Cipher::Fake => None } // WHAT: age's path; the tests' stand-in runs nothing. WHY: checked before a run starts.
+    }
+
     /// Encrypts what `fill` writes, to the recipients file, into `out`. Nothing unencrypted touches the disk.
     pub fn encrypt_stream(&self, recipients: &Path, out: &Path, fill: impl FnOnce(&mut dyn Write) -> Result<()>) -> Result<()> {
         match self {
@@ -593,7 +601,7 @@ impl Job<'_> {
         let keys = check_recipients(&std::fs::read_to_string(&recipients).unwrap_or_default()).map_err(|e| refuse(2, format!("{e} ({})", recipients.display())))?; // WHAT: check it first. WHY: refuse before anything is copied.
         if let Some(found) = private_key_in(&self.work) { return Err(refuse(2, format!("{} holds a PRIVATE key. Only the public line (age1...) belongs on this server: move that file off this machine, to Creede", found.display()))); } // WHAT: a private key anywhere in the work folder. WHY: the key that opens every backup must never sit beside them.
         if let Target::Rclone { config, exe, .. } = &self.target { if !config.exists() || !exe.exists() { return Err(refuse(2, format!("rclone or its settings are missing ({} / {}). Creede sets these up once (README.md, Off-site backups).", exe.display(), config.display()))); } } // WHAT: the bucket's settings. WHY: say what's missing, not an rclone error at night.
-        if let Cipher::Age(exe) = &self.cipher { if !exe.exists() { return Err(refuse(2, format!("age is missing ({})", exe.display()))); } } // WHAT: the lock program. WHY: the same.
+        if let Some(exe) = self.cipher.program() { if !exe.exists() { return Err(refuse(2, format!("age is missing ({})", exe.display()))); } } // WHAT: the lock program. WHY: the same.
         self.log(&format!("off-site backup of {} starting -> {} ({keys} key{} can open it; none of them is on this machine)", self.product.id, self.target.words(), if keys > 1 { "s" } else { "" })); // WHAT: say what is about to happen. WHY: the log reads like a story.
 
         // 1. a consistent copy of the database, while the server goes on working

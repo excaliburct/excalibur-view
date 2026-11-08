@@ -78,7 +78,7 @@ fn only_the_public_half_of_the_key_may_be_on_the_server() {
 
 fn tar_of(entries: &[(&[u8; 100], u8, &[u8])]) -> Vec<u8> {
     let mut out = Vec::new(); // WHAT: a hand-made archive. WHY: hostile ones the writer would never make.
-    for (name, kind, body) in entries { let mut h = [0u8; 512]; h[..100].copy_from_slice(&name[..]); h[100..108].copy_from_slice(b"0000600\0"); h[124..136].copy_from_slice(format!("{:011o}\0", body.len()).as_bytes()); h[156] = *kind; h[257..263].copy_from_slice(b"ustar\0"); h[148..156].copy_from_slice(b"        "); let s: u32 = h.iter().map(|&b| b as u32).sum(); h[148..156].copy_from_slice(format!("{s:06o}\0 ").as_bytes()); out.extend_from_slice(&h); out.extend_from_slice(body); out.extend(std::iter::repeat(0).take((512 - body.len() % 512) % 512)); } // WHAT: each header and body. WHY: valid checksums, so only the name or kind is wrong.
+    for (name, kind, body) in entries { let mut h = [0u8; 512]; h[..100].copy_from_slice(&name[..]); h[100..108].copy_from_slice(b"0000600\0"); h[124..136].copy_from_slice(format!("{:011o}\0", body.len()).as_bytes()); h[156] = *kind; h[257..263].copy_from_slice(b"ustar\0"); h[148..156].copy_from_slice(b"        "); let s: u32 = h.iter().map(|&b| b as u32).sum(); h[148..156].copy_from_slice(format!("{s:06o}\0 ").as_bytes()); out.extend_from_slice(&h); out.extend_from_slice(body); out.extend(std::iter::repeat_n(0, (512 - body.len() % 512) % 512)); } // WHAT: each header and body. WHY: valid checksums, so only the name or kind is wrong.
     out.extend_from_slice(&[0u8; 1024]); out // WHAT: the end marker. WHY: a complete archive.
 }
 fn name100(s: &str) -> [u8; 100] { let mut n = [0u8; 100]; n[..s.len()].copy_from_slice(s.as_bytes()); n } // WHAT: a padded name field. WHY: the header's form.
@@ -258,7 +258,8 @@ fn plant(w: &World, name: &str, edit: impl FnOnce(&mut serde_json::Value), pad: 
 fn a_planted_manifest_or_an_oversized_sidecar_is_refused_before_it_steers_anything() {
     let w = world(); assert_eq!(job(&w).backup().code, 0); // WHAT: a real backup. WHY: plants are made from it.
     let soon = |m: i64| object_name("view", time::OffsetDateTime::now_utc() + time::Duration::minutes(m)); // WHAT: a name newer than the real ones. WHY: the drill picks the newest.
-    let cases: Vec<(&str, Box<dyn FnOnce(&mut serde_json::Value)>, usize)> = vec![ // WHAT: each planted manifest. WHY: each must be refused.
+    type Edit = Box<dyn FnOnce(&mut serde_json::Value)>; // WHAT: one change to a manifest. WHY: named, so the list reads plainly.
+    let cases: Vec<(&str, Edit, usize)> = vec![ // WHAT: each planted manifest. WHY: each must be refused.
         ("a file named outside", Box::new(|m| m["blobs"][0][0] = "../../../evil".into()), 0), ("a count missing", Box::new(|m| { m["counts"].as_object_mut().unwrap().remove("sets"); }), 0), ("a stranger's count", Box::new(|m| { m["counts"]["planted"] = 1.into(); }), 0),
         ("a short salt", Box::new(|m| m["salt"] = "abc".into()), 0), ("a database fingerprint in capitals", Box::new(|m| m["databaseSha256"] = "A".repeat(64).into()), 0), ("a manifest over 64 MB", Box::new(|_| {}), 64 * 1024 * 1024 + 1)];
     for (i, (why, edit, pad)) in cases.into_iter().enumerate() { let n = soon(10 + i as i64); plant(&w, &n, edit, pad); let e = drill(&w, &w.id, &format!("s-plant{i}")).run(); assert_eq!(e.code, 2, "{why}: {e:?}"); assert!(e.why.contains("manifest"), "{why}: {}", e.why); assert!(!w.root.join(format!("s-plant{i}")).exists(), "{why}: nothing left"); std::fs::remove_file(w.bucket.join("daily").join(&n)).unwrap(); std::fs::remove_file(w.bucket.join("daily").join(format!("{n}.json"))).unwrap(); } // WHAT: refused, nothing left, then taken away. WHY: one plant at a time.
