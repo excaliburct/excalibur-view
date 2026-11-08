@@ -152,6 +152,12 @@ const TABLE: &[Route] = &[
     Route { method: "GET", path: "/files/{id}/file", door: Door::Signed, sync: false },
     Route { method: "POST", path: "/files/{id}/folder", door: Door::Writer, sync: true },
     Route { method: "POST", path: "/sets/{id}/folder", door: Door::Writer, sync: true },
+    Route { method: "GET", path: "/sets/{id}/signoffs", door: Door::Signed, sync: true },
+    Route { method: "POST", path: "/sets/{id}/signoffs", door: Door::Writer, sync: true },
+    Route { method: "GET", path: "/signoffs", door: Door::Writer, sync: true },
+    Route { method: "POST", path: "/signoffs/{id}/sign", door: Door::Person, sync: false }, // WHAT: a person, any role, never a key. WHY: only a person signs; the shop's viewers sign.
+    Route { method: "POST", path: "/signoffs/{id}/withdraw", door: Door::Writer, sync: true },
+    Route { method: "GET", path: "/signoffs/{id}/signature.png", door: Door::Signed, sync: true },
 ];
 
 /// Whether `knock` should get through `route`'s door.
@@ -395,6 +401,17 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
         }).expect("a throwaway person");
         id
     };
+    let fresh_signoff = || {
+        let admin = session(office, ADMIN); // WHAT: an administrator. WHY: asks for the line.
+        let (_, made) = send(
+            office,
+            "POST",
+            &format!("/api/v1/sets/{}/signoffs", things.set),
+            Some(&admin),
+            &Body::Json(json!([{"label": "Probe", "ref": format!("probe:{n}")}])),
+        ); // WHAT: one line on the probe's set. WHY: a real id to knock with.
+        serde_json::from_str::<Value>(&made).unwrap()[0]["id"].as_str().expect("a sign-off").to_string()
+    };
     let path = route
         .path
         .replace("{id}", &match route.path {
@@ -404,6 +421,7 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
             p if p.starts_with("/groups/") => things.group.clone(),
             p if p.starts_with("/people/") => fresh_person(),
             p if p.starts_with("/keys/") => key(office, ADMIN, "assistant", None).1,
+            p if p.starts_with("/signoffs/") => fresh_signoff(), // WHAT: a line of its own. WHY: a signature is final, so each knock signs a fresh one.
             _ => "nothing_by_that_id".to_string(),
         })
         .replace("{version}", "9.9.9")
@@ -441,6 +459,8 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
         ("POST", "/groups/{id}/people") => Body::Json(json!({"person": VIEWER, "on": false})),
         ("POST", "/projects/{id}/folders") => Body::Json(json!({"folders": ["Probe"]})),
         ("POST", "/files") => form(&[("project", &things.project)], Some((&format!("{unique}.txt"), b"x"))),
+        ("POST", "/sets/{id}/signoffs") => Body::Json(json!([{"label": "Knock", "ref": format!("knock:{unique}")}])),
+        ("POST", "/signoffs/{id}/sign") => Body::Json(json!({"name": "Knock", "strokes": [[[1.0, 1.0], [9.0, 9.0]]]})),
         ("POST", "/files/{id}/folder") | ("POST", "/sets/{id}/folder") => Body::Json(json!({"folder": null})),
         ("POST", _) | ("DELETE", _) => Body::Raw("application/json".into(), Vec::new()), // WHAT: nothing in the body. WHY: the routes that take none.
         _ => Body::None,

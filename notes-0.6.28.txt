@@ -1,0 +1,18 @@
+SIGNING TRAVELERS AND SHIPPING TICKETS ON THE SHOP'S IPADS
+
+An office program can now ask for sign-offs on a drawing set: a traveler's
+stations (B12 · WELD, B12 · FINAL INSPECTION) or a shipping ticket's
+receiver. When the drawing is open in Excalibur View, a button over it says
+how many are waiting. It opens the list beside the drawing, grouped as the
+program grouped them. Tap Sign on a line, sign with a finger, a pen or the
+mouse, check your name, and tap Sign. The program reads the signature back
+and fills in its own form.
+
+Who can sign is who can see the drawing: its job, and its folder's rule. The
+shop's viewers sign the shop's papers; the office's papers stay the office's.
+
+A signature is final. Once signed, a line can't be signed again or taken
+back, and the server keeps who signed (their account and the name they wrote),
+when, and the signature itself. Only a person signs: a program's key can ask
+for sign-offs and read them back, never sign. Every signature is on the audit
+log.

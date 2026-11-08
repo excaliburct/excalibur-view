@@ -129,6 +129,48 @@ fn folder_paths() -> Value {
                 "requestBody": body("Moving"),
                 "responses": ok("DrawingSet")
             }
+        },
+        "/sets/{id}/signoffs": {
+            "get": {
+                "summary": "A drawing set's sign-offs, in the order they were asked for.",
+                "parameters": [path_param("id", "The drawing set.")],
+                "responses": { "200": { "description": "Its sign-off lines: id, label, group, ref, page, status (open, signed or withdrawn), signer, signed_by, signed, seq." } }
+            },
+            "post": {
+                "summary": "Ask for sign-offs on a drawing set: a list of {label, group, ref, page}.",
+                "description": "A ref already asked for on the set (open or signed) changes nothing, so asking again after a restart makes no doubles. At most 5,000 at once.",
+                "parameters": [path_param("id", "The drawing set.")],
+                "responses": { "200": { "description": "The set's sign-off lines." } }
+            }
+        },
+        "/signoffs": {
+            "get": {
+                "summary": "Sign-off lines changed after `since` (0 for all), on sets the caller may reach, oldest change first.",
+                "description": "Ask again from the answer's `latest` to read only what changed since.",
+                "responses": { "200": { "description": "{signoffs, latest}." } }
+            }
+        },
+        "/signoffs/{id}/sign": {
+            "post": {
+                "summary": "Sign a line: {name, strokes}, the strokes in the 400 by 140 pad's units.",
+                "description": "Only a person signed in signs, never a key. A signature is final: a signed or withdrawn line answers 409.",
+                "parameters": [path_param("id", "The sign-off line.")],
+                "responses": { "200": { "description": "The line, signed." } }
+            }
+        },
+        "/signoffs/{id}/withdraw": {
+            "post": {
+                "summary": "Take back a line not yet signed.",
+                "parameters": [path_param("id", "The sign-off line.")],
+                "responses": { "200": { "description": "The line, withdrawn." } }
+            }
+        },
+        "/signoffs/{id}/signature.png": {
+            "get": {
+                "summary": "A signed line's signature as a picture: PNG, 400 by 140, black on white.",
+                "parameters": [path_param("id", "The sign-off line.")],
+                "responses": { "200": { "description": "The picture." } }
+            }
         }
     })
 }

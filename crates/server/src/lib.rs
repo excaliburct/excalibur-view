@@ -33,6 +33,7 @@ pub mod presence;
 pub mod projects;
 pub mod quantities;
 pub mod run;
+pub mod signoffs; // WHAT: signatures asked for on a set and signed on View. WHY: the shop signs travelers and shipping tickets on its iPads.
 pub mod store;
 pub mod tunnel;
 pub mod updates;

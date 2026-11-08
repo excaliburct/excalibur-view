@@ -280,6 +280,30 @@ CREATE TABLE IF NOT EXISTS keys (
     made        TEXT NOT NULL,
     last_used   TEXT
 );
+
+-- Sign-offs: signatures a program asks for on a drawing set (a traveler's
+-- stations, a shipping ticket's receiver), signed by a person on View. A
+-- signature is final: the row is written once more, when it is signed, and
+-- never again. `seq` orders every change, so the asker reads back only what
+-- changed since it last looked.
+CREATE TABLE IF NOT EXISTS signoffs (
+    id          TEXT PRIMARY KEY,
+    set_id      TEXT NOT NULL REFERENCES sets(id) ON DELETE CASCADE,
+    label       TEXT NOT NULL,
+    grp         TEXT NOT NULL DEFAULT '',
+    ref         TEXT NOT NULL,
+    page        INTEGER,
+    asked_by    TEXT NOT NULL,
+    asked       TEXT NOT NULL,
+    signer      TEXT,
+    signed_by   TEXT,
+    signed      TEXT,
+    strokes     TEXT,
+    withdrawn   INTEGER NOT NULL DEFAULT 0,
+    seq         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS signoffs_by_set ON signoffs(set_id);
+CREATE INDEX IF NOT EXISTS signoffs_by_seq ON signoffs(seq);
 "#;
 
 /// An invitation as it is written down.

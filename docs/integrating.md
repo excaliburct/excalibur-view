@@ -330,6 +330,41 @@ not see is left out of every list, count, stamp, markup list, takeoff and
 download for them, and answered exactly as one that does not exist. A sync key
 acts as the office on its own projects and reads every folder of them.
 
+### Signatures from the shop: sign-offs (0.6.28)
+
+A program that keeps the shop's paperwork can have it signed on View. Put the
+document up as a drawing set (a traveler, a shipping ticket), then ask for the
+lines to be signed:
+
+    POST /api/v1/sets/{set}/signoffs
+    [ { "label": "B12 · WELD", "group": "Stair 1", "ref": "trav:500:B12:weld", "page": 0 },
+      { "label": "Load 1 · Received by", "ref": "ship:1:received" } ]
+
+`ref` is yours: it comes back with the signature, so you know which box it
+fills, and it is never shown. Asking again for a `ref` already on the set
+changes nothing, so a restart makes no doubles. At most 5,000 lines at once.
+
+Whoever may see the set (its project and its folder's rule) sees the lines
+beside the drawing in View, signs with a finger, a pen or the mouse, and checks
+their name. Then read the signatures back, from where you left off:
+
+    GET /api/v1/signoffs?since=0
+    { "signoffs": [ { "id": "so_…", "set": "…", "label": "B12 · WELD", "ref": "trav:500:B12:weld",
+                      "status": "signed", "signer": "Sid Ortiz", "signed_by": "usr_…",
+                      "signed": "2026-11-09T15:04:05Z", "seq": 7 } ],
+      "latest": 7 }
+
+Keep `latest` and ask with it next time. Each line comes back as it is now,
+oldest change first, a page of up to 500 at a time. `GET
+/signoffs/{id}/signature.png` gives the signature as a picture (400 by 140,
+black on white) to print on your form. `POST /signoffs/{id}/withdraw` takes
+back a line nobody has signed.
+
+The rules: **only a person signs**, never a key (yours included); **a
+signature is final** (signing again, or withdrawing a signed line, answers
+409); and every signature is on the audit log. A sync key may ask, read and
+withdraw on its own projects, and nothing more.
+
 ### Being told instead of asking
 
 Studio → Office → Change notices, or `POST /notices` with a `url`, and the

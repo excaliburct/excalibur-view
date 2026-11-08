@@ -829,3 +829,38 @@ mod tests {
         assert_eq!(back, Role::Admin);
     }
 }
+
+/// A sign-off line on a drawing set, as `GET /sets/{id}/signoffs` lists it:
+/// a signature a program asked for (a traveler's station, a shipping ticket's
+/// receiver), signed by a person on View.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SignOff {
+    pub id: String,    // WHAT: its id. WHY: what signing names.
+    pub set: String,   // WHAT: the set it's on. WHY: matched to the open drawing.
+    pub label: String, // WHAT: what it says ("B12 · WELD"). WHY: the signer sees what they sign for.
+    #[serde(default)]
+    pub group: String, // WHAT: its heading ("Stair 1"). WHY: a long traveler reads by page.
+    #[serde(rename = "ref")]
+    pub reference: String, // WHAT: the asker's own name for the box. WHY: carried back; never shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>, // WHAT: its page, if known. WHY: View can go there.
+    pub status: String, // WHAT: "open", "signed" or "withdrawn". WHY: what to show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<String>, // WHAT: the name written when signed. WHY: shown beside a signed line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_by: Option<String>, // WHAT: the account that signed. WHY: who it really was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed: Option<String>, // WHAT: when. WHY: shown beside a signed line.
+    #[serde(default)]
+    pub seq: i64, // WHAT: its place in the order of changes. WHY: a program reads back only what changed.
+}
+
+impl SignOff {
+    /// Whether it's still waiting for a signature.
+    pub fn open(&self) -> bool {
+        self.status == "open" // WHAT: neither signed nor withdrawn. WHY: only these are offered to sign.
+    }
+}
+
+/// The signing pad's size, in the units a signature's strokes are sent in.
+pub const SIGN_PAD: (f64, f64) = (400.0, 140.0); // WHAT: 400 by 140. WHY: the server draws the picture this size and refuses points off it.
