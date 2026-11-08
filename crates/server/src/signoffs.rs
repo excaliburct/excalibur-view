@@ -205,11 +205,11 @@ fn asked_for(
             for (label, group, reference, page) in &ready {
                 let there: Option<String> = tx
                     .query_row(
-                        "SELECT id FROM signoffs WHERE set_id = ?1 AND ref = ?2 AND withdrawn = 0",
-                        params![set, reference],
+                        "SELECT id FROM signoffs WHERE set_id = ?1 AND ref = ?2 AND asked_by = ?3 AND withdrawn = 0",
+                        params![set, reference, who.id],
                         |r| r.get(0),
                     )
-                    .optional()?; // WHAT: the same reference already asked for. WHY: asking again changes nothing.
+                    .optional()?; // WHAT: the same reference already asked for by the same asker. WHY: asking again changes nothing; another's line with the same reference is never handed back as this asker's.
                 if there.is_some() {
                     continue; // WHAT: left as it is. WHY: open stays open, signed stays signed.
                 }
@@ -396,6 +396,13 @@ pub async fn withdraw(
             "That's signed already; a signature can't be withdrawn.",
         )); // WHAT: refused. WHY: final.
     }
+    record(
+        &server,
+        crate::audit::Entry::new(crate::audit::action::WITHDREW_SIGNOFF, &who.email)
+            .by(&who.id)
+            .about(line.id.clone())
+            .saying(line.label.clone()),
+    ); // WHAT: on the log. WHY: who took a line back, and which.
     Ok(Json(line))
 }
 
@@ -405,7 +412,10 @@ pub async fn changes(
     headers: HeaderMap,
     Query(since): Query<Since>,
 ) -> Answer<Json<Changes>> {
-    let who = writer(&server, &headers)?; // WHAT: the asker (a program's key, or the office). WHY: the shop reads lines through their sets.
+    let who = crate::api::caller(&server, &headers)?; // WHAT: the asker (a program's key, or the office). WHY: the shop reads lines through their sets.
+    if !who.role.may_write() {
+        return Err(Denied::forbidden("read the sign-offs")); // WHAT: only those who may ask. WHY: as asking, but never behind the license: signatures already made are always read back.
+    }
     let lines = server
         .store
         .with(|db| {

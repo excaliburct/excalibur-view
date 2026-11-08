@@ -77,6 +77,7 @@ pub mod action {
     pub const DOWNLOADED_FILE: &str = "downloaded a file"; // WHAT: a file taken off the server. WHY: reaching a file is the line an auditor wants, as for a drawing.
     pub const ASKED_SIGNOFFS: &str = "asked for sign-offs"; // WHAT: signatures asked for on a set. WHY: who asked, and on what.
     pub const SIGNED_OFF: &str = "signed a sign-off"; // WHAT: a person signed a line. WHY: every signature can be found later.
+    pub const WITHDREW_SIGNOFF: &str = "withdrew a sign-off"; // WHAT: a line taken back unsigned. WHY: who took it back can be found later.
     pub const MOVED: &str = "moved to another folder"; // WHAT: a set or a file moved. WHY: moving one can change who sees it.
 }
 

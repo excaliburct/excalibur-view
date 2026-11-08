@@ -22,7 +22,8 @@ struct Scratch(std::path::PathBuf); // WHAT: the server's data folder. WHY: each
 impl Scratch {
     fn new() -> Scratch {
         let n: u64 = rand::random(); // WHAT: a random number. WHY: a folder name no other test is using.
-        let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("hyperview-signoffs-{n:016x}")); // WHAT: the folder. WHY: under cargo's own folder for tests, not the shared system one.
+        let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("hyperview-signoffs-{n:016x}")); // WHAT: the folder. WHY: under cargo's own folder for tests, not the shared system one.
         std::fs::create_dir_all(&path).expect("a scratch directory"); // WHAT: made. WHY: the store writes into it.
         Scratch(path)
     }
@@ -588,4 +589,60 @@ fn asking_again_makes_no_doubles_and_a_sync_key_keeps_to_its_own_projects() {
     assert_eq!(status, 200, "{said}");
     let (status, _) = office.get(&sync, "/signoffs?since=0");
     assert_eq!(status, 200);
+}
+
+#[test]
+fn another_askers_line_is_never_handed_back_and_a_withdrawal_is_on_the_log() {
+    let office = an_office();
+    let job = a_job(&office);
+    let ids = asked(&office, &job); // WHAT: Eve's two lines. WHY: hers.
+    let theirs = office.post(
+        &office.admin,
+        &format!("/sets/{}/signoffs", job.shop),
+        json!([{ "label": "B12 · PAINT", "ref": "trav:500:B12:weld" }]),
+    ); // WHAT: Sam asks with Eve's reference and other words. WHY: as another program with a key might.
+    let mine: Vec<&Value> = theirs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|l| l["ref"] == "trav:500:B12:weld")
+        .collect(); // WHAT: every line with that reference. WHY: Sam's own is new, Eve's untouched.
+    assert_eq!(mine.len(), 2, "{theirs}"); // WHAT: two lines, one each. WHY: a line is never handed to another asker as theirs.
+    assert!(mine
+        .iter()
+        .any(|l| l["label"] == "B12 · PAINT" && l["id"] != ids[0].as_str())); // WHAT: Sam's is his own. WHY: the words he asked.
+    let (status, taken) = office.ask(
+        &office.eve,
+        "POST",
+        &format!("/signoffs/{}/withdraw", ids[1]),
+        None,
+    ); // WHAT: Eve takes one back. WHY: logged.
+    assert_eq!(status, 200, "{taken}");
+    let (_, log) = office.get(&office.admin, "/audit"); // WHAT: the log. WHY: checked.
+    assert!(log.to_string().contains("withdrew a sign-off"), "{log}"); // WHAT: there. WHY: who took a line back can be found.
+}
+
+#[test]
+fn signatures_already_made_are_read_back_after_an_office_trial_ends() {
+    let office = an_office();
+    let job = a_job(&office);
+    let ids = asked(&office, &job); // WHAT: two lines. WHY: one is signed before the trial ends.
+    office.post(
+        &office.sid,
+        &format!("/signoffs/{}/sign", ids[0]),
+        a_signature("Sid Ortiz"),
+    ); // WHAT: signed. WHY: must still be read back.
+    {
+        let db = rusqlite::Connection::open(office.scratch.0.join("hyperview.sqlite")).unwrap(); // WHAT: the server's database. WHY: the trial ended long ago.
+        db.execute("DELETE FROM settings WHERE key = 'founding_install'", [])
+            .unwrap(); // WHAT: no longer a founding install. WHY: an ordinary office.
+        db.execute(
+            "UPDATE settings SET value = '2026-01-01T00:00:00Z' WHERE key = 'licensing_began'",
+            [],
+        )
+        .unwrap(); // WHAT: its trial began in January. WHY: long over.
+    }
+    let (status, changes) = office.get(&office.eve, "/signoffs?since=0"); // WHAT: the signatures read back. WHY: never behind the license.
+    assert_eq!(status, 200, "{changes}");
+    assert!(changes.to_string().contains("Sid Ortiz"), "{changes}"); // WHAT: the signature made before. WHY: nothing already signed is lost to a lapsed license.
 }
