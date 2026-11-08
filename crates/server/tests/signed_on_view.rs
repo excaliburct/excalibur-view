@@ -618,8 +618,18 @@ fn another_askers_line_is_never_handed_back_and_a_withdrawal_is_on_the_log() {
         None,
     ); // WHAT: Eve takes one back. WHY: logged.
     assert_eq!(status, 200, "{taken}");
+    office.ask(
+        &office.eve,
+        "POST",
+        &format!("/signoffs/{}/withdraw", ids[1]),
+        None,
+    ); // WHAT: taken back again. WHY: nothing happens, so nothing is logged.
     let (_, log) = office.get(&office.admin, "/audit"); // WHAT: the log. WHY: checked.
-    assert!(log.to_string().contains("withdrew a sign-off"), "{log}"); // WHAT: there. WHY: who took a line back can be found.
+    assert_eq!(
+        log.to_string().matches("withdrew a sign-off").count(),
+        1,
+        "{log}"
+    ); // WHAT: there once. WHY: who took a line back can be found, and a repeat adds no noise.
 }
 
 #[test]

@@ -383,18 +383,25 @@ pub async fn withdraw(
         .store
         .with(|db| {
             let seq = next_seq(db)?; // WHAT: its change number. WHY: the change is seen.
-            db.execute(
+            let changed = db.execute(
                 "UPDATE signoffs SET withdrawn = 1, seq = ?1 WHERE id = ?2 AND signed IS NULL AND withdrawn = 0",
                 params![seq, id],
             )?; // WHAT: taken back, only if not signed. WHY: a signature stays.
-            Ok(db.query_row(&format!("SELECT {COLUMNS} FROM signoffs WHERE id = ?1"), params![id], row).optional()?)
+            Ok(db
+                .query_row(&format!("SELECT {COLUMNS} FROM signoffs WHERE id = ?1"), params![id], row)
+                .optional()?
+                .map(|line| (line, changed > 0)))
         })
         .map_err(|e| Denied::broke("withdraw that sign-off", e))?
         .ok_or_else(|| Denied::missing("sign-off"))?;
+    let (line, changed) = line; // WHAT: the line, and whether this call took it back. WHY: only a real change goes on the log.
     if line.status == "signed" {
         return Err(Denied::taken(
             "That's signed already; a signature can't be withdrawn.",
         )); // WHAT: refused. WHY: final.
+    }
+    if !changed {
+        return Ok(Json(line)); // WHAT: already taken back. WHY: nothing happened, so nothing is logged.
     }
     record(
         &server,
