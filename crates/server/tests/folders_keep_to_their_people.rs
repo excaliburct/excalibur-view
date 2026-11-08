@@ -700,11 +700,11 @@ fn a_drawing_a_program_sends_into_a_new_folder_is_the_offices_before_any_folder_
         404
     ); // WHAT: Nan can't open it. WHY: a program's new folder is the office's until it says, whatever came first.
     let (_, nan) = office.get(&office.nan, &format!("/projects/{project}/sets")); // WHAT: her set list. WHY: it mustn't be listed either.
-    assert!(!names(&nan, "name").contains(&"Contract".to_string()), "{nan}"); // WHAT: not there. WHY: hidden looks like missing.
-    assert_eq!(
-        office.bytes(admin, &format!("/sets/{sent}/file")).0,
-        200
-    ); // WHAT: Sam still opens it. WHY: the office's, not nobody's.
+    assert!(
+        !names(&nan, "name").contains(&"Contract".to_string()),
+        "{nan}"
+    ); // WHAT: not there. WHY: hidden looks like missing.
+    assert_eq!(office.bytes(admin, &format!("/sets/{sent}/file")).0, 200); // WHAT: Sam still opens it. WHY: the office's, not nobody's.
 }
 
 #[test]
@@ -1103,7 +1103,11 @@ fn a_long_request_writes_every_rule_change_and_every_group_it_made_in_the_audit_
         .map(|n| json!({ "folder": format!("{n:02} HARMLESS"), "see": "everyone" }))
         .collect(); // WHAT: twenty harmless changes. WHY: they used to fill the one audit line.
     folders.push(json!({ "folder": "21 CONTRACT", "see": ["Crew"] })); // WHAT: the twenty-first, given to a group nobody made. WHY: the one that must not be hidden.
-    office.post(&sync, &format!("/projects/{project}/folders"), json!({ "folders": folders })); // WHAT: sent at once. WHY: one request.
+    office.post(
+        &sync,
+        &format!("/projects/{project}/folders"),
+        json!({ "folders": folders }),
+    ); // WHAT: sent at once. WHY: one request.
     let (_, log) = office.get(admin, "/audit"); // WHAT: the log. WHY: checked.
     let text = log.to_string(); // WHAT: all of it as text. WHY: searched.
     assert!(text.contains("21 CONTRACT"), "{text}"); // WHAT: the twenty-first change is there. WHY: nothing past twenty is dropped.
@@ -1114,7 +1118,10 @@ fn a_long_request_writes_every_rule_change_and_every_group_it_made_in_the_audit_
         .iter()
         .filter(|e| e["action"] == "made a group of people")
         .collect(); // WHAT: the group lines. WHY: checked.
-    assert!(made.iter().any(|e| e.to_string().contains("Crew")), "{text}"); // WHAT: the group the request made. WHY: groups decide who sees folders.
+    assert!(
+        made.iter().any(|e| e.to_string().contains("Crew")),
+        "{text}"
+    ); // WHAT: the group the request made. WHY: groups decide who sees folders.
 }
 
 #[test]
@@ -1141,5 +1148,9 @@ fn a_drawing_everybody_sees_is_never_pointed_at_a_newer_issue_in_a_folder_they_c
         .unwrap_or_else(|| panic!("{nan}")); // WHAT: the old issue. WHY: still hers.
     assert!(mine["superseded_by"].is_null(), "{mine}"); // WHAT: not pointed at the hidden one. WHY: she mustn't learn a newer drawing is kept from her.
     let (_, sam) = office.get(admin, &format!("/projects/{project}/sets")); // WHAT: Sam's list. WHY: both are there for the office.
-    assert_eq!(names(&sam, "name").iter().filter(|n| *n == "S-101").count(), 2, "{sam}"); // WHAT: two S-101s. WHY: kept apart, neither lost.
+    assert_eq!(
+        names(&sam, "name").iter().filter(|n| *n == "S-101").count(),
+        2,
+        "{sam}"
+    ); // WHAT: two S-101s. WHY: kept apart, neither lost.
 }

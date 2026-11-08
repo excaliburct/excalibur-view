@@ -140,10 +140,16 @@ mod tests {
     #[test]
     fn a_name_in_the_index_that_reaches_outside_the_cache_is_never_removed() {
         let folder = a_folder(); // WHAT: a cache of its own. WHY: the test's.
-        let outside = folder.parent().unwrap().join(format!("{}-outside.pdf", folder.file_name().unwrap().to_string_lossy())); // WHAT: a file beside the cache, not in it. WHY: what a doctored index would point at.
+        let outside = folder.parent().unwrap().join(format!(
+            "{}-outside.pdf",
+            folder.file_name().unwrap().to_string_lossy()
+        )); // WHAT: a file beside the cache, not in it. WHY: what a doctored index would point at.
         std::fs::write(&outside, b"%PDF").unwrap(); // WHAT: made. WHY: must survive.
         let mut index = BTreeMap::new(); // WHAT: an index somebody changed. WHY: it is a file anybody with the account can edit.
-        index.insert("set_x".to_string(), format!("../{}", outside.file_name().unwrap().to_string_lossy())); // WHAT: a climb out of the cache. WHY: joined as it was, it named the file outside.
+        index.insert(
+            "set_x".to_string(),
+            format!("../{}", outside.file_name().unwrap().to_string_lossy()),
+        ); // WHAT: a climb out of the cache. WHY: joined as it was, it named the file outside.
         index.insert("set_y".to_string(), outside.to_string_lossy().into_owned()); // WHAT: a whole path. WHY: joining a whole path replaces the folder.
         write_index(&folder, &index); // WHAT: written. WHY: read back by the seat.
         let gone = forget_unseen(&folder, false, |_| Seen::No); // WHAT: the server says neither is theirs. WHY: what would remove them.
@@ -152,7 +158,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&folder); // WHAT: likewise. WHY: the same.
         assert!(survived, "a file outside the cache was removed: {gone:?}");
         assert!(gone.is_empty(), "{gone:?}");
-        assert!(a_plain_name("0123456789ab-S-101.pdf"), "an ordinary kept name");
+        assert!(
+            a_plain_name("0123456789ab-S-101.pdf"),
+            "an ordinary kept name"
+        );
     }
 
     fn a_folder() -> PathBuf {

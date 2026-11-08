@@ -42,14 +42,49 @@ pub fn safe_name(name: &str) -> String {
 
 /// The names Windows keeps for devices, whatever comes after a dot.
 const DEVICES: &[&str] = &[
-    "con", "prn", "aux", "nul", "conin$", "conout$", "com0", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
-    "com\u{b9}", "com\u{b2}", "com\u{b3}", "lpt\u{b9}", "lpt\u{b2}", "lpt\u{b3}", // WHAT: COM and LPT with a superscript 1, 2 or 3. WHY: Windows keeps these for devices too, and they are letters and digits to every filter here.
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    "conin$",
+    "conout$",
+    "com0",
+    "com1",
+    "com2",
+    "com3",
+    "com4",
+    "com5",
+    "com6",
+    "com7",
+    "com8",
+    "com9",
+    "lpt0",
+    "lpt1",
+    "lpt2",
+    "lpt3",
+    "lpt4",
+    "lpt5",
+    "lpt6",
+    "lpt7",
+    "lpt8",
+    "lpt9",
+    "com\u{b9}",
+    "com\u{b2}",
+    "com\u{b3}",
+    "lpt\u{b9}",
+    "lpt\u{b2}",
+    "lpt\u{b3}", // WHAT: COM and LPT with a superscript 1, 2 or 3. WHY: Windows keeps these for devices too, and they are letters and digits to every filter here.
 ]; // WHAT: the device names. WHY: writing to `CON.docx` on Windows 10 writes to the console, `NUL.xlsx` to nowhere, `COM1.txt` to a serial port.
 
 /// A name that is a Windows device's, with `_` put in front so it is a file.
 /// Anything else as it was.
 pub fn not_a_device(name: String) -> String {
-    let base = name.split('.').next().unwrap_or("").trim_end_matches([' ', '.']).to_ascii_lowercase(); // WHAT: the part before the first dot, as Windows compares it. WHY: `nul.tar.gz` is the device too.
+    let base = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches([' ', '.'])
+        .to_ascii_lowercase(); // WHAT: the part before the first dot, as Windows compares it. WHY: `nul.tar.gz` is the device too.
     if DEVICES.contains(&base.as_str()) {
         format!("_{name}") // WHAT: a different name. WHY: an ordinary file, beside the others.
     } else {
@@ -63,10 +98,85 @@ pub const RUNS_ITSELF: &str = "This is a program or a shortcut, so Excalibur Vie
 /// Kinds of file the system would run rather than open: programs, scripts,
 /// installers and shortcuts on Windows, Mac and Linux.
 const RUNS: &[&str] = &[
-    "exe", "com", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msc", "msi", "msp", "scr", "pif", "cpl", "hta", "lnk", "url", "reg", "inf", "jar", "appref-ms", "application", "gadget", "dll", "sys", "scf", "settingcontent-ms", "library-ms", "search-ms", // WHAT: Windows. WHY: Explorer runs each of these.
-    "chm", "xll", "iso", "img", "vhd", "vhdx", "appx", "appxbundle", "msix", "msixbundle", "appinstaller", "diagcab", "jnlp", "ade", "adp", "mde", "xbap", "ws", "vb", "psd1", "ps1xml", "psc1", "msh", "msh1", "msh2", "mshxml", // WHAT: Windows, the ones easy to forget. WHY: help files run script, Excel loads an .xll as a program, a disk image mounts and hides what is inside it from the downloaded mark, and an app package installs itself.
-    "app", "command", "tool", "pkg", "dmg", "workflow", "terminal", "webloc", "inetloc", "fileloc", // WHAT: Mac. WHY: `open` runs or mounts each of these.
-    "desktop", "sh", "bash", "run", "bin", "appimage", "deb", "rpm", "py", "pl", // WHAT: Linux. WHY: a desktop may run each of these.
+    "exe",
+    "com",
+    "bat",
+    "cmd",
+    "ps1",
+    "psm1",
+    "vbs",
+    "vbe",
+    "js",
+    "jse",
+    "wsf",
+    "wsh",
+    "msc",
+    "msi",
+    "msp",
+    "scr",
+    "pif",
+    "cpl",
+    "hta",
+    "lnk",
+    "url",
+    "reg",
+    "inf",
+    "jar",
+    "appref-ms",
+    "application",
+    "gadget",
+    "dll",
+    "sys",
+    "scf",
+    "settingcontent-ms",
+    "library-ms",
+    "search-ms", // WHAT: Windows. WHY: Explorer runs each of these.
+    "chm",
+    "xll",
+    "iso",
+    "img",
+    "vhd",
+    "vhdx",
+    "appx",
+    "appxbundle",
+    "msix",
+    "msixbundle",
+    "appinstaller",
+    "diagcab",
+    "jnlp",
+    "ade",
+    "adp",
+    "mde",
+    "xbap",
+    "ws",
+    "vb",
+    "psd1",
+    "ps1xml",
+    "psc1",
+    "msh",
+    "msh1",
+    "msh2",
+    "mshxml", // WHAT: Windows, the ones easy to forget. WHY: help files run script, Excel loads an .xll as a program, a disk image mounts and hides what is inside it from the downloaded mark, and an app package installs itself.
+    "app",
+    "command",
+    "tool",
+    "pkg",
+    "dmg",
+    "workflow",
+    "terminal",
+    "webloc",
+    "inetloc",
+    "fileloc", // WHAT: Mac. WHY: `open` runs or mounts each of these.
+    "desktop",
+    "sh",
+    "bash",
+    "run",
+    "bin",
+    "appimage",
+    "deb",
+    "rpm",
+    "py",
+    "pl", // WHAT: Linux. WHY: a desktop may run each of these.
 ]; // WHAT: the list. WHY: an office's files are spreadsheets, letters and pictures; nothing in them needs to run.
 
 /// Whether a file of this name is one the system would run.
@@ -75,7 +185,7 @@ pub fn runs_itself(name: &str) -> bool {
     let name = name.trim_end_matches(['.', ' ']); // WHAT: trailing dots and spaces gone. WHY: Windows drops them, so `run.exe.` is `run.exe`.
     match name.rsplit_once('.') {
         Some((_, ext)) => RUNS.contains(&ext), // WHAT: its kind on the list. WHY: refused.
-        None => false, // WHAT: no kind at all. WHY: opened as a plain file.
+        None => false,                         // WHAT: no kind at all. WHY: opened as a plain file.
     }
 }
 
@@ -103,7 +213,9 @@ fn forget_old_in(folder: &Path, age: std::time::Duration) -> Vec<PathBuf> {
     for one in each.flatten() {
         let path = one.path(); // WHAT: one file's folder. WHY: a copy lives in its own.
         let opened = one.metadata().and_then(|m| m.modified()).ok(); // WHAT: when it was written. WHY: its age.
-        let old = opened.and_then(|t| t.elapsed().ok()).is_none_or(|e| e >= age); // WHAT: older than allowed, or an age that can't be read. WHY: a copy that can't say its age isn't kept on a guess.
+        let old = opened
+            .and_then(|t| t.elapsed().ok())
+            .is_none_or(|e| e >= age); // WHAT: older than allowed, or an age that can't be read. WHY: a copy that can't say its age isn't kept on a guess.
         if old && std::fs::remove_dir_all(&path).is_ok() {
             gone.push(path); // WHAT: taken off. WHY: said.
         }
@@ -133,7 +245,8 @@ fn from_elsewhere(path: &Path) {
     if cfg!(windows) {
         let mut mark = path.as_os_str().to_owned(); // WHAT: the copy's path. WHY: the mark is a stream beside it.
         mark.push(":Zone.Identifier"); // WHAT: the stream Windows reads. WHY: where a browser writes the same mark.
-        let _ = std::fs::write(PathBuf::from(mark), "[ZoneTransfer]\r\nZoneId=3\r\n"); // WHAT: "from the internet". WHY: the most careful zone; a drive that can't hold it just goes without.
+        let _ = std::fs::write(PathBuf::from(mark), "[ZoneTransfer]\r\nZoneId=3\r\n");
+        // WHAT: "from the internet". WHY: the most careful zone; a drive that can't hold it just goes without.
     }
 }
 
@@ -180,37 +293,90 @@ mod tests {
 
     #[test]
     fn a_name_windows_keeps_for_a_device_is_saved_as_a_file_instead() {
-        for device in ["NUL.docx", "con.xlsx", "COM1.txt", "lpt9", "Aux.tar.gz", "nul .pdf", "COM\u{b9}.txt", "lpt\u{b3}"] {
+        for device in [
+            "NUL.docx",
+            "con.xlsx",
+            "COM1.txt",
+            "lpt9",
+            "Aux.tar.gz",
+            "nul .pdf",
+            "COM\u{b9}.txt",
+            "lpt\u{b3}",
+        ] {
             let saved = super::safe_name(device); // WHAT: the name the copy gets. WHY: checked.
             assert!(saved.starts_with('_'), "{device} saved as {saved}");
         }
-        assert_eq!(super::safe_name("Console Notes.docx"), "Console Notes.docx", "a name that only starts like one is left alone");
+        assert_eq!(
+            super::safe_name("Console Notes.docx"),
+            "Console Notes.docx",
+            "a name that only starts like one is left alone"
+        );
         assert_eq!(super::safe_name("com10.txt"), "com10.txt");
     }
 
     #[test]
     fn the_easily_forgotten_kinds_that_run_are_never_opened() {
-        for name in ["Spec.chm", "rates.xll", "Drawings.iso", "disk.vhdx", "Viewer.msix", "Update.appinstaller", "fix.diagcab", "a.jnlp"] {
+        for name in [
+            "Spec.chm",
+            "rates.xll",
+            "Drawings.iso",
+            "disk.vhdx",
+            "Viewer.msix",
+            "Update.appinstaller",
+            "fix.diagcab",
+            "a.jnlp",
+        ] {
             assert!(super::runs_itself(name), "{name} would run");
         }
-        assert!(!super::runs_itself("Takeoff.xlsx"), "an ordinary spreadsheet opens");
+        assert!(
+            !super::runs_itself("Takeoff.xlsx"),
+            "an ordinary spreadsheet opens"
+        );
     }
 
     #[test]
     fn a_program_or_a_shortcut_is_never_saved_or_opened() {
-        for name in ["Site photos.exe", "Pictures/Photo.LNK", "run.bat", "x.ps1", "a.scr", "b.hta", "c.command", "d.desktop", "e.AppImage", "f.exe.", "g.exe ", "h.url"] {
+        for name in [
+            "Site photos.exe",
+            "Pictures/Photo.LNK",
+            "run.bat",
+            "x.ps1",
+            "a.scr",
+            "b.hta",
+            "c.command",
+            "d.desktop",
+            "e.AppImage",
+            "f.exe.",
+            "g.exe ",
+            "h.url",
+        ] {
             assert!(runs_itself(name), "{name}"); // WHAT: each refused. WHY: the system would run it.
-            assert_eq!(save_copy("file_runs", name, b"MZ"), Err(RUNS_ITSELF.to_string()), "{name}"); // WHAT: nothing written. WHY: refused first.
+            assert_eq!(
+                save_copy("file_runs", name, b"MZ"),
+                Err(RUNS_ITSELF.to_string()),
+                "{name}"
+            ); // WHAT: nothing written. WHY: refused first.
         }
-        for name in ["Estimate.xlsx", "Letter.docx", "Photo.jpg", "Plan.dwg", "notes", "exe.pdf"] {
+        for name in [
+            "Estimate.xlsx",
+            "Letter.docx",
+            "Photo.jpg",
+            "Plan.dwg",
+            "notes",
+            "exe.pdf",
+        ] {
             assert!(!runs_itself(name), "{name}"); // WHAT: ordinary office files. WHY: opened as before.
         }
-        assert!(!copies_folder().join(crate::server::safe("file_runs")).exists()); // WHAT: no folder made for the refused ones. WHY: nothing was saved.
+        assert!(!copies_folder()
+            .join(crate::server::safe("file_runs"))
+            .exists()); // WHAT: no folder made for the refused ones. WHY: nothing was saved.
     }
 
     #[test]
     fn a_copy_is_taken_off_once_it_is_older_than_allowed() {
-        let folder = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("hv-copies-test-{}", std::process::id())); // WHAT: a folder of the test's own, inside the build folder. WHY: never the person's real copies, and never the shared temporary folder another account could plant a file in.
+        let folder = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-scratch")
+            .join(format!("hv-copies-test-{}", std::process::id())); // WHAT: a folder of the test's own, inside the build folder. WHY: never the person's real copies, and never the shared temporary folder another account could plant a file in.
         std::fs::create_dir_all(folder.join("file_a")).unwrap(); // WHAT: one copy's folder. WHY: as save_copy makes.
         std::fs::write(folder.join("file_a").join("Safety.docx"), b"PK").unwrap(); // WHAT: the copy. WHY: what must go.
         assert!(forget_old_in(&folder, COPY_KEPT_FOR).is_empty()); // WHAT: just opened. WHY: kept while it is being read.

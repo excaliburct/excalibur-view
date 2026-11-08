@@ -79,6 +79,11 @@ pub fn decode(stream: &Stream) -> std::result::Result<Vec<u8>, Trouble> {
 
 /// `decode`, refusing a stream that decodes to more than `limit` bytes at
 /// any step.
+///
+/// # Errors
+///
+/// A filter that can't be decoded, one this reader doesn't know, or more than
+/// `limit` bytes decoded at any step.
 pub fn decode_within(stream: &Stream, limit: usize) -> std::result::Result<Vec<u8>, Trouble> {
     let (data, remaining) = decode_to_within(stream, limit)?;
     match remaining.first() {
@@ -96,10 +101,16 @@ pub fn decode_to(stream: &Stream) -> std::result::Result<(Vec<u8>, Vec<String>),
 /// two or three.
 pub const LONGEST_CHAIN: usize = 8; // WHAT: eight. WHY: well past any real file; each filter is a pass over the whole stream, so the file must not choose how many.
 
-fn decode_to_within(stream: &Stream, limit: usize) -> std::result::Result<(Vec<u8>, Vec<String>), Trouble> {
+fn decode_to_within(
+    stream: &Stream,
+    limit: usize,
+) -> std::result::Result<(Vec<u8>, Vec<String>), Trouble> {
     let names = filter_names(&stream.dict);
     if names.len() > LONGEST_CHAIN {
-        return Err(Trouble::Corrupt(format!("a stream names {} filters, which no drawing does", names.len()))); // WHAT: refused as damage before any is run. WHY: forty thousand filters over a few megabytes was a hundred gigabytes of copying.
+        return Err(Trouble::Corrupt(format!(
+            "a stream names {} filters, which no drawing does",
+            names.len()
+        ))); // WHAT: refused as damage before any is run. WHY: forty thousand filters over a few megabytes was a hundred gigabytes of copying.
     }
     let parms = decode_parms(&stream.dict, names.len());
     let mut data = stream.data.clone();
@@ -115,10 +126,18 @@ fn decode_to_within(stream: &Stream, limit: usize) -> std::result::Result<(Vec<u
 
 /// The refusal for a stream that decodes to more than `limit`.
 fn too_big(limit: usize) -> Trouble {
-    Trouble::Corrupt(format!("a stream decodes to more than {} MiB, which no drawing needs", limit / (1024 * 1024))) // WHAT: said as damage. WHY: treated as a broken stream, which every caller already handles.
+    Trouble::Corrupt(format!(
+        "a stream decodes to more than {} MiB, which no drawing needs",
+        limit / (1024 * 1024)
+    )) // WHAT: said as damage. WHY: treated as a broken stream, which every caller already handles.
 }
 
-fn one(name: &str, data: &[u8], parm: Option<&Dict>, limit: usize) -> std::result::Result<Vec<u8>, Trouble> {
+fn one(
+    name: &str,
+    data: &[u8],
+    parm: Option<&Dict>,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, Trouble> {
     let out = match name {
         "FlateDecode" | "Fl" => inflate(data, limit)?,
         "LZWDecode" | "LZW" => {
@@ -146,7 +165,10 @@ fn one(name: &str, data: &[u8], parm: Option<&Dict>, limit: usize) -> std::resul
 fn inflate(data: &[u8], limit: usize) -> std::result::Result<Vec<u8>, Trouble> {
     use flate2::read::{DeflateDecoder, ZlibDecoder};
 
-    let start = data.iter().position(|b| !crate::parse::is_space(*b)).unwrap_or(0);
+    let start = data
+        .iter()
+        .position(|b| !crate::parse::is_space(*b))
+        .unwrap_or(0);
     let data = &data[start..];
     if data.is_empty() {
         return Ok(Vec::new());
@@ -169,7 +191,10 @@ fn inflate(data: &[u8], limit: usize) -> std::result::Result<Vec<u8>, Trouble> {
 /// Reads until the reader stops or breaks, keeping whatever came out first.
 /// `read_to_end` throws away partial output on error, and partial output is
 /// exactly what a half-written drawing set has to offer.
-fn read_what_we_can(mut reader: impl std::io::Read, limit: usize) -> std::result::Result<Vec<u8>, Trouble> {
+fn read_what_we_can(
+    mut reader: impl std::io::Read,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, Trouble> {
     let mut out = Vec::new();
     let mut buffer = [0u8; 32 * 1024];
     loop {
@@ -179,7 +204,7 @@ fn read_what_we_can(mut reader: impl std::io::Read, limit: usize) -> std::result
                 if out.len() + n > limit {
                     return Err(too_big(limit)); // WHAT: past the limit. WHY: stopped here, before the memory goes.
                 }
-                out.extend_from_slice(&buffer[..n])
+                out.extend_from_slice(&buffer[..n]);
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
@@ -190,9 +215,9 @@ fn read_what_we_can(mut reader: impl std::io::Read, limit: usize) -> std::result
 
 /// Where an LZW stream is written: refuses to grow past its limit.
 struct Capped {
-    out: Vec<u8>,  // WHAT: what has come out. WHY: handed back when whole.
-    limit: usize,  // WHAT: the most it may hold. WHY: as for Flate.
-    over: bool,    // WHAT: whether the limit was hit. WHY: told apart from a damaged stream.
+    out: Vec<u8>, // WHAT: what has come out. WHY: handed back when whole.
+    limit: usize, // WHAT: the most it may hold. WHY: as for Flate.
+    over: bool,   // WHAT: whether the limit was hit. WHY: told apart from a damaged stream.
 }
 
 impl std::io::Write for Capped {
@@ -218,7 +243,11 @@ fn lzw(data: &[u8], early_change: bool, limit: usize) -> std::result::Result<Vec
     } else {
         Decoder::new(BitOrder::Msb, 8)
     };
-    let mut capped = Capped { out: Vec::new(), limit, over: false }; // WHAT: somewhere to write that refuses to grow too far. WHY: LZW multiplies as Flate does.
+    let mut capped = Capped {
+        out: Vec::new(),
+        limit,
+        over: false,
+    }; // WHAT: somewhere to write that refuses to grow too far. WHY: LZW multiplies as Flate does.
     let result = decoder.into_stream(&mut capped).decode_all(data); // WHAT: decoded into it. WHY: stops at the limit.
     if capped.over {
         return Err(too_big(limit)); // WHAT: refused for its size. WHY: as Flate.
@@ -339,13 +368,21 @@ fn unpredict(data: Vec<u8>, parm: &Dict) -> Vec<u8> {
     if predictor <= 1 {
         return data;
     }
-    let colors = parm.get("Colors").and_then(|o| o.as_i64()).unwrap_or(1).max(1) as usize;
+    let colors = parm
+        .get("Colors")
+        .and_then(|o| o.as_i64())
+        .unwrap_or(1)
+        .max(1) as usize;
     let bpc = parm
         .get("BitsPerComponent")
         .and_then(|o| o.as_i64())
         .unwrap_or(8)
         .max(1) as usize;
-    let columns = parm.get("Columns").and_then(|o| o.as_i64()).unwrap_or(1).max(1) as usize;
+    let columns = parm
+        .get("Columns")
+        .and_then(|o| o.as_i64())
+        .unwrap_or(1)
+        .max(1) as usize;
     // WHAT: the row's length worked out without overflowing, and never longer than the data. WHY: the numbers are the file's; a row of a terabyte asked for a terabyte of memory and closed the program.
     let Some(bits) = columns.checked_mul(colors).and_then(|n| n.checked_mul(bpc)) else {
         return data; // WHAT: numbers too big to multiply. WHY: no real predictor has them; the bytes are passed on as they are.
@@ -438,7 +475,10 @@ mod tests {
     #[test]
     fn flate_round_trips() {
         let text = b"W12x26 at 26.00 lb per foot".repeat(40);
-        let s = stream(dict! {"Filter" => Object::name("FlateDecode")}, deflate(&text));
+        let s = stream(
+            dict! {"Filter" => Object::name("FlateDecode")},
+            deflate(&text),
+        );
         assert_eq!(decode(&s).unwrap(), text);
     }
 
@@ -473,26 +513,44 @@ mod tests {
         assert_eq!(decode(&s).unwrap(), b"Hello World!");
     }
 
-    const _: () = assert!(LARGEST_DECODED <= 256 * 1024 * 1024, "the everyday limit stays a sane size"); // WHAT: checked when the tests are built. WHY: the limit can't creep up unnoticed.
+    const _: () = assert!(
+        LARGEST_DECODED <= 256 * 1024 * 1024,
+        "the everyday limit stays a sane size"
+    ); // WHAT: checked when the tests are built. WHY: the limit can't creep up unnoticed.
 
     #[test]
     fn a_stream_that_decodes_past_its_limit_is_refused_rather_than_followed() {
         // WHAT: Flate of a mebibyte of zeros, once and twice over, with a limit below it. WHY: nested Flate turns a few hundred bytes into terabytes; it must stop at the limit.
         let big = vec![0u8; 1024 * 1024];
-        let once = stream(dict! {"Filter" => Object::name("FlateDecode")}, deflate(&big));
+        let once = stream(
+            dict! {"Filter" => Object::name("FlateDecode")},
+            deflate(&big),
+        );
         let twice = stream(
             dict! {"Filter" => Object::Array(vec![Object::name("FlateDecode"), Object::name("FlateDecode")])},
             deflate(&deflate(&big)),
         );
         for s in [&once, &twice] {
-            assert!(decode_within(s, 1024 * 1024 - 1).is_err(), "one byte over the limit is refused");
-            assert_eq!(decode_within(s, 1024 * 1024).unwrap().len(), big.len(), "exactly the limit is read whole");
+            assert!(
+                decode_within(s, 1024 * 1024 - 1).is_err(),
+                "one byte over the limit is refused"
+            );
+            assert_eq!(
+                decode_within(s, 1024 * 1024).unwrap().len(),
+                big.len(),
+                "exactly the limit is read whole"
+            );
         }
         // WHAT: run length's copies held the same. WHY: two bytes make 128.
-        let runs = stream(dict! {"Filter" => Object::name("RunLengthDecode")}, [129u8, 0].repeat(10_000));
+        let runs = stream(
+            dict! {"Filter" => Object::name("RunLengthDecode")},
+            [129u8, 0].repeat(10_000),
+        );
         assert!(decode_within(&runs, 1000).is_err());
         // WHAT: LZW too. WHY: it multiplies as well.
-        let lzw_bytes = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8).encode(&big).unwrap();
+        let lzw_bytes = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
+            .encode(&big)
+            .unwrap();
         let lzw = stream(dict! {"Filter" => Object::name("LZWDecode")}, lzw_bytes);
         assert!(decode_within(&lzw, 1000).is_err());
         assert_eq!(decode_within(&lzw, big.len()).unwrap().len(), big.len());
@@ -502,13 +560,33 @@ mod tests {
     fn a_chain_of_filters_longer_than_any_real_one_is_refused_before_it_is_run() {
         // WHAT: four megabytes put through forty thousand Crypt filters. WHY: each one copied the whole stream, so a few hundred kilobytes of names made the reader copy 160 GB.
         let names: Vec<Object> = (0..40_000).map(|_| Object::name("Crypt")).collect();
-        let s = stream(dict! {"Filter" => Object::Array(names)}, vec![7u8; 4 * 1024 * 1024]);
+        let s = stream(
+            dict! {"Filter" => Object::Array(names)},
+            vec![7u8; 4 * 1024 * 1024],
+        );
         let started = std::time::Instant::now(); // WHAT: now. WHY: the refusal must be at once.
-        assert!(decode(&s).is_err(), "a chain of forty thousand filters was run");
-        assert!(started.elapsed() < std::time::Duration::from_secs(2), "took {:?}", started.elapsed());
-        let hexed: String = deflate(b"hello").iter().map(|b| format!("{b:02x}")).collect(); // WHAT: "hello", deflated, written as hex. WHY: a real two-filter chain.
-        let ordinary = stream(dict! {"Filter" => Object::Array(vec![Object::name("ASCIIHexDecode"), Object::name("FlateDecode")])}, format!("{hexed}>").into_bytes()); // WHAT: the chain. WHY: still read.
-        assert_eq!(decode(&ordinary).unwrap(), b"hello", "an ordinary chain still reads");
+        assert!(
+            decode(&s).is_err(),
+            "a chain of forty thousand filters was run"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+        let hexed: String = deflate(b"hello")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(); // WHAT: "hello", deflated, written as hex. WHY: a real two-filter chain.
+        let ordinary = stream(
+            dict! {"Filter" => Object::Array(vec![Object::name("ASCIIHexDecode"), Object::name("FlateDecode")])},
+            format!("{hexed}>").into_bytes(),
+        ); // WHAT: the chain. WHY: still read.
+        assert_eq!(
+            decode(&ordinary).unwrap(),
+            b"hello",
+            "an ordinary chain still reads"
+        );
     }
 
     #[test]
