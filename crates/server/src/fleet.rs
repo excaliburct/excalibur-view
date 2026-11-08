@@ -112,6 +112,9 @@ struct Ops {
     /// turns this amber on purpose.
     #[serde(rename = "backupDays")]
     backup_days: Option<f64>,
+    /// Where the last off-site backup went, when, and when a restore of one was
+    /// last proven (`crate::offsite`). Each `null` when unknown.
+    offsite: crate::offsite::Report, // WHAT: the off-site detail. WHY: backupDays says how old; this says where, and whether it ever came back.
     disk: Disk,
     #[serde(rename = "updateChannel")]
     update_channel: UpdateChannel,
@@ -250,6 +253,7 @@ async fn ops(State(server): State<Shared>, headers: HeaderMap) -> Result<Json<Op
 
     Ok(Json(Ops {
         backup_days: days_since_backup(&server),
+        offsite: crate::offsite::report(&server.config.data), // WHAT: read from the job's markers. WHY: Fleet shows where and whether it was proven.
         disk: Disk {
             free_gb: free_gigabytes(&server.config.data),
         },
@@ -621,10 +625,12 @@ fn refused_owned(why: String) -> Landed {
 
 /// When the drawings were last copied off this machine, in days.
 ///
-/// `None` means never, and never is not the same as today. Whoever set the
-/// server up records a backup by touching a file; a shop with a real backup
-/// system points that at wherever it already runs.
+/// `None` means never, and never is not the same as today. The off-site job
+/// (`crate::offsite`) records a backup only once it is confirmed where it went;
+/// a shop with its own backup system can still record one by touching
+/// `last-backup`, as before.
 fn days_since_backup(server: &Server) -> Option<f64> {
+    if let Some(days) = crate::offsite::backup_days(&server.config.data) { return Some(days); } // WHAT: the off-site job's confirmed backup first. WHY: it is written only once the copy is read back from where it went.
     let marker = server.config.data.join("last-backup");
     let when = std::fs::metadata(&marker).ok()?.modified().ok()?;
     let ago = std::time::SystemTime::now().duration_since(when).ok()?;

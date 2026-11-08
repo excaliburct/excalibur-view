@@ -32,6 +32,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 sha2 = "0.10"
+# WHAT: gzip for the off-site catalog. WHY: the database copy shrinks several times; already in the build through other crates.
+flate2 = "1"
+# WHAT: the office's own clock. WHY: "01:30" for the off-site backup means the office's half past one; already in the build through the app.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rand = "0.8"
 argon2 = "0.5"
 time = { version = "0.3", features = ["formatting", "parsing"] }

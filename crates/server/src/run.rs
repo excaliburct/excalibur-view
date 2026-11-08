@@ -52,6 +52,7 @@ pub async fn serve(
 ) -> Result<()> {
     std::fs::create_dir_all(&config.data)
         .with_context(|| format!("making {}", config.data.display()))?;
+    crate::offsite::check_settings(&config.data, config.offsite_work.as_deref(), config.offsite_target.as_deref(), &config.offsite_at).context("the off-site backup's settings")?; // WHAT: refuse to start on a backup setting that doesn't read. WHY: a typo found now, not by a backup that never runs.
     #[cfg(windows)]
     if config.replace_self {
         if let Some(home) = config.data.parent() {
@@ -116,6 +117,9 @@ pub async fn serve(
     };
     if server.config.check_for_updates {
         tokio::spawn(crate::updates::keep_up_to_date(Arc::clone(&server)));
+    }
+    if server.config.offsite_target.is_some() {
+        tokio::spawn(crate::offsite::nightly(Arc::clone(&server))); // WHAT: tonight's off-site backup, once a night. WHY: off until HYPERVIEW_OFFSITE_TARGET is set.
     }
 
     let app = api::router(server).layer(tower_http::trace::TraceLayer::new_for_http());

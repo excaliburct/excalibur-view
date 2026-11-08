@@ -62,6 +62,14 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        "--offsite-backup" | "--offsite-drill" => { // WHAT: a backup now, or the restore drill (README.md, Off-site backups). WHY: the server runs the backup each night itself; these are for a person.
+            let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect(); // WHAT: the words after the program, never the program's own name. WHY: a folder name that isn't valid Unicode reaches the command (as close as it can be written) instead of stopping the program.
+            #[allow(unused_mut)] // WHAT: only Windows changes it. WHY: no warning elsewhere.
+            let mut config = Config::from_environment(); // WHAT: the server's own settings. WHY: the same target, work folder and data as the night's.
+            #[cfg(windows)]
+            if std::env::var_os("HYPERVIEW_DATA").is_none() && hyperview_server::winsvc::data_folder().exists() { config.data = hyperview_server::winsvc::data_folder(); } // WHAT: the installed service's drawings. WHY: the service keeps them in ProgramData, not beside this program.
+            std::process::exit(hyperview_server::offsite::main_from_args(&hyperview_server::offsite::VIEW, &config, VERSION, &args)); // WHAT: run it and end with its code. WHY: 0 good, 5 good with a warning, anything else says why.
+        }
         "--console" | "--serve" => console(),
         #[cfg(windows)]
         "" => front_door(),
