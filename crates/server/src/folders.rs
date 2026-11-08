@@ -153,7 +153,11 @@ impl Sight {
 /// Whether everybody on `project` sees what is in `folder`, by its rule and
 /// every rule above it.
 pub(crate) fn everybodys(db: &Connection, project: &str, folder: &str) -> rusqlite::Result<bool> {
-    let rules = Sight { everything: false, groups: Vec::new(), rules: rules_of(db, project)? }; // WHAT: the project's rules, as nobody in particular. WHY: only the rule matters, not who asks.
+    let rules = Sight {
+        everything: false,
+        groups: Vec::new(),
+        rules: rules_of(db, project)?,
+    }; // WHAT: the project's rules, as nobody in particular. WHY: only the rule matters, not who asks.
     Ok(matches!(rules.rule(Some(folder)), See::Everyone)) // WHAT: everybody's or not. WHY: a drawing outside every folder may only be replaced by one everybody sees too.
 }
 
@@ -604,10 +608,11 @@ pub async fn make_folders(
         Ok(who) => who, // WHAT: let in. WHY: the list is read next.
         Err(denied) => return crate::api::turned_away(body, denied).await, // WHAT: refused with the body unread. WHY: as above.
     };
-    let body: serde_json::Value = match crate::api::json_once_let_in(body, crate::api::MIDDLING_BODY).await {
-        Ok(body) => body, // WHAT: the folders asked for. WHY: made below.
-        Err(denied) => return denied.into_response(), // WHAT: too big or not JSON. WHY: said plainly.
-    };
+    let body: serde_json::Value =
+        match crate::api::json_once_let_in(body, crate::api::MIDDLING_BODY).await {
+            Ok(body) => body, // WHAT: the folders asked for. WHY: made below.
+            Err(denied) => return denied.into_response(), // WHAT: too big or not JSON. WHY: said plainly.
+        };
     folders_made(&server, &who, &project, &body).into_response() // WHAT: the folders made, as before. WHY: unchanged once let in.
 }
 
@@ -624,7 +629,12 @@ fn folders_gate(server: &Shared, headers: &HeaderMap, project: &str) -> Answer<W
     Ok(who) // WHAT: let in. WHY: every check above passed.
 }
 
-fn folders_made(server: &Shared, who: &Who, project: &str, body: &serde_json::Value) -> Answer<Json<serde_json::Value>> {
+fn folders_made(
+    server: &Shared,
+    who: &Who,
+    project: &str,
+    body: &serde_json::Value,
+) -> Answer<Json<serde_json::Value>> {
     let by_program = who.is_key(auth::purpose::SYNC); // WHAT: a program keeping its projects in step. WHY: its new folders are the office's until it says.
     let asked = asked(body)?; // WHAT: the folders asked for. WHY: all checked before anything is written.
     let set_in = if by_program { "program" } else { "view" }; // WHAT: where the rule was set. WHY: a rule changed in the Studio is kept until the program sets that folder again.

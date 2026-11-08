@@ -143,7 +143,11 @@ mod tests {
     #[test]
     fn a_tool_chest_nested_past_any_real_one_is_refused_and_the_reader_lives() {
         // WHAT: elements a hundred thousand deep, read, searched and let go on a thread with a small stack. WHY: the tree was searched and dropped one level per call, so a tool chest shared to the office ran the server and every seat that fetched it out of stack.
-        let deep = format!("<BluebeamRevuToolSet>{}{}</BluebeamRevuToolSet>", "<a>".repeat(100_000), "</a>".repeat(100_000));
+        let deep = format!(
+            "<BluebeamRevuToolSet>{}{}</BluebeamRevuToolSet>",
+            "<a>".repeat(100_000),
+            "</a>".repeat(100_000)
+        );
         let lived = std::thread::Builder::new()
             .stack_size(512 * 1024) // WHAT: half a megabyte. WHY: less than any real thread has, so an unlimited reader fails here first.
             .spawn(move || {
@@ -156,8 +160,15 @@ mod tests {
             })
             .unwrap()
             .join(); // WHAT: the thread finished. WHY: a stack overflow ends the whole test process instead.
-        assert_eq!(lived.ok(), Some(true), "too deep is refused, and the reader lived");
-        assert!(parse(b"<a><b><c><d/></c></b></a>").is_some(), "ordinary nesting still reads");
+        assert_eq!(
+            lived.ok(),
+            Some(true),
+            "too deep is refused, and the reader lived"
+        );
+        assert!(
+            parse(b"<a><b><c><d/></c></b></a>").is_some(),
+            "ordinary nesting still reads"
+        );
     }
 
     #[test]

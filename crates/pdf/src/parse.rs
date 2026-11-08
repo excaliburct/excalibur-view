@@ -53,15 +53,26 @@ pub const DEEPEST: usize = 256; // WHAT: 256 levels. WHY: far past any real file
 
 impl<'a> Reader<'a> {
     pub fn new(bytes: &'a [u8]) -> Reader<'a> {
-        Reader { bytes, at: 0, depth: 0, too_deep: false }
+        Reader {
+            bytes,
+            at: 0,
+            depth: 0,
+            too_deep: false,
+        }
     }
 
     pub fn at(bytes: &'a [u8], at: usize) -> Reader<'a> {
-        Reader { bytes, at, depth: 0, too_deep: false }
+        Reader {
+            bytes,
+            at,
+            depth: 0,
+            too_deep: false,
+        }
     }
 
     /// Whether anything this reader read was nested deeper than [`DEEPEST`]
     /// and left out. What came back is then not what the bytes say.
+    #[must_use] // WHAT: the answer must be looked at. WHY: asking and ignoring it would keep a damaged reading
     pub fn went_too_deep(&self) -> bool {
         self.too_deep // WHAT: the flag. WHY: read by whoever keeps the bytes.
     }
@@ -300,12 +311,12 @@ impl<'a> Reader<'a> {
             return self.fail("nested too deep"); // WHAT: refused. WHY: deeper would be the file choosing how deep the stack goes.
         }
         self.depth += 1; // WHAT: one level deeper. WHY: counted while this array is read.
-        let read = self.array_inside(); // WHAT: the array itself. WHY: read with the level counted.
+        let read = Ok(self.array_inside()); // WHAT: the array itself, which always reads. WHY: read with the level counted.
         self.depth -= 1; // WHAT: back out. WHY: the next object starts where this one did.
         read
     }
 
-    fn array_inside(&mut self) -> Result<Object> {
+    fn array_inside(&mut self) -> Object {
         self.at += 1; // '['
         let mut items = Vec::new();
         loop {
@@ -331,7 +342,7 @@ impl<'a> Reader<'a> {
                 self.at = before + 1;
             }
         }
-        Ok(Object::Array(items))
+        Object::Array(items) // WHAT: what was read, unreadable items skipped. WHY: an array never fails as a whole
     }
 
     pub fn dictionary(&mut self) -> Result<Dict> {
@@ -411,10 +422,7 @@ impl<'a> Reader<'a> {
                         let save = self.at;
                         if let Ok(generation) = self.integer() {
                             if (0..=65535).contains(&generation) && self.eat("R") {
-                                return Ok(Object::Ref(Ref::new(
-                                    number as u32,
-                                    generation as u16,
-                                )));
+                                return Ok(Object::Ref(Ref::new(number as u32, generation as u16)));
                             }
                         }
                         self.at = save;
@@ -490,7 +498,10 @@ impl<'a> Reader<'a> {
         let value = self.object()?;
         self.skip_space();
         self.eat("endobj");
-        Ok((Ref::new(number.max(0) as u32, generation.max(0) as u16), value))
+        Ok((
+            Ref::new(number.max(0) as u32, generation.max(0) as u16),
+            value,
+        ))
     }
 }
 
@@ -598,20 +609,26 @@ mod tests {
             })
             .unwrap()
             .join(); // WHAT: the reader's thread finished. WHY: a stack overflow would end the test process instead.
-        assert!(read.is_ok(), "reading a deeply nested object did not come back");
+        assert!(
+            read.is_ok(),
+            "reading a deeply nested object did not come back"
+        );
         let shallow = Reader::new(b"[[[1 2] <</K [3]>>]]").object().unwrap(); // WHAT: ordinary nesting. WHY: still read whole.
         assert_eq!(shallow.as_array().map(|a| a.len()), Some(1));
     }
 
     #[test]
     fn string_escapes_and_nesting_survive() {
+        assert_eq!(read(r"(a\(b\)c)").as_string().unwrap(), b"a(b)c");
         assert_eq!(
-            read(r"(a\(b\)c)").as_string().unwrap(),
-            b"a(b)c"
+            read("(outer (inner) done)").as_string().unwrap(),
+            b"outer (inner) done"
         );
-        assert_eq!(read("(outer (inner) done)").as_string().unwrap(), b"outer (inner) done");
         assert_eq!(read(r"(\101\102)").as_string().unwrap(), b"AB");
-        assert_eq!(read("(line\\\ncontinued)").as_string().unwrap(), b"linecontinued");
+        assert_eq!(
+            read("(line\\\ncontinued)").as_string().unwrap(),
+            b"linecontinued"
+        );
     }
 
     #[test]
@@ -652,7 +669,9 @@ mod tests {
 
     #[test]
     fn an_indirect_object_gives_back_its_reference() {
-        let (r, o) = Reader::new(b"7 0 obj\n<</A 1>>\nendobj").indirect().unwrap();
+        let (r, o) = Reader::new(b"7 0 obj\n<</A 1>>\nendobj")
+            .indirect()
+            .unwrap();
         assert_eq!(r, Ref::new(7, 0));
         assert!(o.as_dict().unwrap().has("A"));
     }

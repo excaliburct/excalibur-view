@@ -47,11 +47,16 @@ pub fn service_only_steps(folder: &Path) -> Vec<Vec<OsString>> {
     let below = folder.join("*").into_os_string(); // WHAT: everything inside the folder. WHY: icacls reads the `*` itself, so the folder's own entry is not touched by step 3.
     let quiet = ["/C", "/Q"]; // WHAT: carry on past a file it can't change, and quietly. WHY: one locked file must not leave the rest open, and a service has nobody to show it to.
     let step = |head: Vec<OsString>, rest: &[&str]| -> Vec<OsString> {
-        head.into_iter().chain(rest.iter().chain(quiet.iter()).map(|a| OsString::from(*a))).collect() // WHAT: one run's arguments. WHY: the path first, then the switches.
+        head.into_iter()
+            .chain(rest.iter().chain(quiet.iter()).map(|a| OsString::from(*a)))
+            .collect() // WHAT: one run's arguments. WHY: the path first, then the switches.
     };
     vec![
         step(vec![whole()], &["/reset"]), // WHAT: the folder's own entries cleared. WHY: an entry an account wrote on the folder would otherwise stay, and be inherited by everything below it.
-        step(vec![whole()], &["/inheritance:r", "/grant:r", SYSTEM, ADMINISTRATORS]), // WHAT: nothing from ProgramData; the system and administrators only. WHY: ProgramData lets every account read and add files.
+        step(
+            vec![whole()],
+            &["/inheritance:r", "/grant:r", SYSTEM, ADMINISTRATORS],
+        ), // WHAT: nothing from ProgramData; the system and administrators only. WHY: ProgramData lets every account read and add files.
         step(vec![below], &["/reset", "/T"]), // WHAT: everything below inherits from the folder alone. WHY: an entry an account wrote on its own file is not inherited, so it outlived step 2.
         step(vec![whole()], &["/setowner", ADMINISTRATORS_OWN, "/T"]), // WHAT: administrators own all of it. WHY: an owner can always give itself access again.
     ]
@@ -62,7 +67,8 @@ pub fn service_only_steps(folder: &Path) -> Vec<Vec<OsString>> {
 /// `.local` redirection folder Windows looks in beside a program.
 pub fn planted(name: &str, program: &str) -> bool {
     let lower = name.to_ascii_lowercase(); // WHAT: the name as Windows compares it. WHY: `VERSION.DLL` is `version.dll`.
-    lower.ends_with(".dll") || lower == format!("{}.local", program.to_ascii_lowercase()) // WHAT: a library, or the redirection folder. WHY: the service is one program and ships neither, so either is somebody else's.
+    lower.ends_with(".dll") || lower == format!("{}.local", program.to_ascii_lowercase())
+    // WHAT: a library, or the redirection folder. WHY: the service is one program and ships neither, so either is somebody else's.
 }
 
 /// Makes `folder` the service's own (see [`service_only_steps`]) and takes
@@ -73,7 +79,9 @@ pub fn planted(name: &str, program: &str) -> bool {
 pub fn lock_down(folder: &Path) {
     use std::os::windows::process::CommandExt; // WHAT: Windows-only process options. WHY: no console window.
     const NO_WINDOW: u32 = 0x0800_0000; // WHAT: CREATE_NO_WINDOW. WHY: a service has no desktop to show one on.
-    let system = std::env::var_os("SystemRoot").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows")); // WHAT: Windows' own folder. WHY: icacls is run by its full path, never found on a PATH somebody could change.
+    let system = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows")); // WHAT: Windows' own folder. WHY: icacls is run by its full path, never found on a PATH somebody could change.
     let icacls = system.join("System32").join("icacls.exe"); // WHAT: the program. WHY: as above.
     let mut held = true; // WHAT: whether every step went through. WHY: said once at the end.
     for args in service_only_steps(folder) {
@@ -87,16 +95,24 @@ pub fn lock_down(folder: &Path) {
             Ok(status) if status.success() => {} // WHAT: done. WHY: on to the next.
             Ok(status) => {
                 held = false; // WHAT: noted. WHY: said below.
-                tracing::warn!("could not limit who may use {} ({:?}: icacls said {status})", folder.display(), args.get(1)); // WHAT: which step. WHY: whoever looks after the server can run it by hand.
+                tracing::warn!(
+                    "could not limit who may use {} ({:?}: icacls said {status})",
+                    folder.display(),
+                    args.get(1)
+                ); // WHAT: which step. WHY: whoever looks after the server can run it by hand.
             }
             Err(e) => {
                 held = false; // WHAT: noted. WHY: said below.
-                tracing::warn!("could not limit who may use {}: {e}", folder.display()); // WHAT: icacls would not start. WHY: the folder keeps whatever permissions it had.
+                tracing::warn!("could not limit who may use {}: {e}", folder.display());
+                // WHAT: icacls would not start. WHY: the folder keeps whatever permissions it had.
             }
         }
     }
     if held {
-        tracing::info!("{} is the system's and administrators' only", folder.display()); // WHAT: said. WHY: the log shows it was done.
+        tracing::info!(
+            "{} is the system's and administrators' only",
+            folder.display()
+        ); // WHAT: said. WHY: the log shows it was done.
     }
     let program = crate::winsvc::PROGRAM; // WHAT: the service's own file name. WHY: its `.local` folder is looked for.
     for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
@@ -105,10 +121,20 @@ pub fn lock_down(folder: &Path) {
             continue; // WHAT: the program, its data, its report. WHY: the service's own.
         }
         let path = entry.path(); // WHAT: where it is. WHY: taken away.
-        let gone = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) }; // WHAT: taken away. WHY: the service would load it, as the system.
+        let gone = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        }; // WHAT: taken away. WHY: the service would load it, as the system.
         match gone {
-            Ok(()) => tracing::warn!("took away {}, which this service does not ship and would have loaded", path.display()), // WHAT: said. WHY: somebody put it there, and an administrator should know.
-            Err(e) => tracing::error!("{} is beside the service and could not be taken away ({e}); remove it by hand", path.display()), // WHAT: said loudly. WHY: the service may load it on its next start.
+            Ok(()) => tracing::warn!(
+                "took away {}, which this service does not ship and would have loaded",
+                path.display()
+            ), // WHAT: said. WHY: somebody put it there, and an administrator should know.
+            Err(e) => tracing::error!(
+                "{} is beside the service and could not be taken away ({e}); remove it by hand",
+                path.display()
+            ), // WHAT: said loudly. WHY: the service may load it on its next start.
         }
     }
 }
@@ -118,41 +144,101 @@ mod tests {
     use super::*;
 
     fn as_text(step: &[OsString]) -> Vec<String> {
-        step.iter().map(|a| a.to_string_lossy().into_owned()).collect() // WHAT: one run's arguments as text. WHY: compared below.
+        step.iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect() // WHAT: one run's arguments as text. WHY: compared below.
     }
 
     #[test]
     fn the_service_folder_is_locked_to_the_system_and_administrators_only() {
         let folder = Path::new("C:/ProgramData/Excalibur Hyperview/Server"); // WHAT: the service's folder. WHY: the one locked down.
-        let steps: Vec<Vec<String>> = service_only_steps(folder).iter().map(|s| as_text(s)).collect(); // WHAT: every run. WHY: checked below.
-        let grants: Vec<&String> = steps.iter().flatten().filter(|a| a.starts_with("*S-1-5") && a.contains(':')).collect(); // WHAT: who is granted anything, anywhere. WHY: exactly two.
-        assert_eq!(grants, ["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"], "only the system and administrators");
-        let closing = steps.iter().position(|s| s.contains(&"/inheritance:r".to_string())).expect("inheritance from ProgramData stopped"); // WHAT: the step that closes the folder. WHY: ordered below.
-        assert_eq!(steps[closing][0], folder.as_os_str().to_string_lossy(), "on the folder itself, as one argument");
-        assert!(steps[closing].contains(&"/grant:r".to_string()), "the grants replace any before");
+        let steps: Vec<Vec<String>> = service_only_steps(folder)
+            .iter()
+            .map(|s| as_text(s))
+            .collect(); // WHAT: every run. WHY: checked below.
+        let grants: Vec<&String> = steps
+            .iter()
+            .flatten()
+            .filter(|a| a.starts_with("*S-1-5") && a.contains(':'))
+            .collect(); // WHAT: who is granted anything, anywhere. WHY: exactly two.
+        assert_eq!(
+            grants,
+            ["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"],
+            "only the system and administrators"
+        );
+        let closing = steps
+            .iter()
+            .position(|s| s.contains(&"/inheritance:r".to_string()))
+            .expect("inheritance from ProgramData stopped"); // WHAT: the step that closes the folder. WHY: ordered below.
+        assert_eq!(
+            steps[closing][0],
+            folder.as_os_str().to_string_lossy(),
+            "on the folder itself, as one argument"
+        );
+        assert!(
+            steps[closing].contains(&"/grant:r".to_string()),
+            "the grants replace any before"
+        );
     }
 
     #[test]
     fn what_an_account_left_in_the_folder_is_taken_from_it() {
         let folder = Path::new("C:/ProgramData/Excalibur Hyperview/Server"); // WHAT: the service's folder. WHY: as above.
-        let steps: Vec<Vec<String>> = service_only_steps(folder).iter().map(|s| as_text(s)).collect(); // WHAT: every run. WHY: checked below.
+        let steps: Vec<Vec<String>> = service_only_steps(folder)
+            .iter()
+            .map(|s| as_text(s))
+            .collect(); // WHAT: every run. WHY: checked below.
         let at = |wanted: &dyn Fn(&Vec<String>) -> bool| steps.iter().position(wanted); // WHAT: where a step is. WHY: the order matters.
-        let own_entries = at(&|s| s[0] == folder.as_os_str().to_string_lossy() && s.contains(&"/reset".to_string())).expect("the folder's own entries cleared"); // WHAT: an entry an account wrote on the folder. WHY: not inherited, so stopping inheritance left it, and it was inherited by everything below.
+        let own_entries = at(&|s| {
+            s[0] == folder.as_os_str().to_string_lossy() && s.contains(&"/reset".to_string())
+        })
+        .expect("the folder's own entries cleared"); // WHAT: an entry an account wrote on the folder. WHY: not inherited, so stopping inheritance left it, and it was inherited by everything below.
         let closing = at(&|s| s.contains(&"/inheritance:r".to_string())).unwrap(); // WHAT: the closing step. WHY: must come after the clearing.
         assert!(own_entries < closing, "cleared, then closed: {steps:?}");
-        let below = at(&|s| s[0].ends_with('*') && s.contains(&"/reset".to_string()) && s.contains(&"/T".to_string())).expect("everything below reset to inherit"); // WHAT: entries an account wrote on its own files. WHY: they outlived the grants.
-        let owner = at(&|s| s.contains(&"/setowner".to_string()) && s.contains(&"*S-1-5-32-544".to_string()) && s.contains(&"/T".to_string())).expect("administrators made the owner of everything"); // WHAT: ownership taken. WHY: an owner can always give itself access again.
-        assert!(closing < below && below < owner, "the owner is changed last, after anything made in between: {steps:?}");
-        assert!(steps.iter().all(|s| s.contains(&"/C".to_string())), "no step stops at one locked file");
+        let below = at(&|s| {
+            s[0].ends_with('*')
+                && s.contains(&"/reset".to_string())
+                && s.contains(&"/T".to_string())
+        })
+        .expect("everything below reset to inherit"); // WHAT: entries an account wrote on its own files. WHY: they outlived the grants.
+        let owner = at(&|s| {
+            s.contains(&"/setowner".to_string())
+                && s.contains(&"*S-1-5-32-544".to_string())
+                && s.contains(&"/T".to_string())
+        })
+        .expect("administrators made the owner of everything"); // WHAT: ownership taken. WHY: an owner can always give itself access again.
+        assert!(
+            closing < below && below < owner,
+            "the owner is changed last, after anything made in between: {steps:?}"
+        );
+        assert!(
+            steps.iter().all(|s| s.contains(&"/C".to_string())),
+            "no step stops at one locked file"
+        );
     }
 
     #[test]
     fn a_dll_beside_the_service_is_somebody_elses() {
         let program = "Hyperview-Server.exe"; // WHAT: the service's file. WHY: as installed.
-        for name in ["version.dll", "USERENV.DLL", "bcrypt.Dll", "Hyperview-Server.exe.local", "HYPERVIEW-SERVER.EXE.LOCAL"] {
-            assert!(planted(name, program), "{name} would be left beside the service"); // WHAT: a library or the redirection folder. WHY: the service ships neither, and loads both before anything runs.
+        for name in [
+            "version.dll",
+            "USERENV.DLL",
+            "bcrypt.Dll",
+            "Hyperview-Server.exe.local",
+            "HYPERVIEW-SERVER.EXE.LOCAL",
+        ] {
+            assert!(
+                planted(name, program),
+                "{name} would be left beside the service"
+            ); // WHAT: a library or the redirection folder. WHY: the service ships neither, and loads both before anything runs.
         }
-        for name in ["Hyperview-Server.exe", "hyperview-data", "last-install.txt", "Hyperview-Server.exe.old", "notes.dll.txt"] {
+        for name in [
+            "Hyperview-Server.exe",
+            "hyperview-data",
+            "last-install.txt",
+            "Hyperview-Server.exe.old",
+            "notes.dll.txt",
+        ] {
             assert!(!planted(name, program), "{name} is the service's own"); // WHAT: what the service keeps there. WHY: never taken away.
         }
     }
