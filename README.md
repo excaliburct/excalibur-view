@@ -302,8 +302,10 @@ Setting it up, once (Excalibur's people do this with the office):
    opened as administrator. Each time it starts, the server locks that folder
    so only the system, administrators and the server itself can change it,
    and it won't back up while anyone else could change the folder, its `bin`
-   or `rclone.conf`. On Linux, `chmod 700` the folder and its `bin`, and
-   `chmod 600 rclone.conf`. In it:
+   or `rclone.conf`. Keep it under the service's own folder, as above, where
+   you can: that folder is already the service's alone. On Linux, `chmod 700`
+   the folder and its `bin`, `chmod 600 rclone.conf`, and let every file in it
+   belong to root or the server's own account. In it:
    - `bin\age.exe` and `bin\rclone.exe` (the server only ever uses these two,
      never copies found elsewhere on the computer);
    - `age-recipients.txt`, holding the `age1...` public line. A private key

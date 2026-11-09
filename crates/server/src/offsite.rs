@@ -136,17 +136,35 @@ pub fn plan(product: &str, listing: &BTreeMap<String, Vec<String>>, tonight: &st
 
 // ---------------------------------------------------------------- the public half only
 
-/// Why someone other than the system, administrators or this account could change the work folder, its `bin` or
-/// `rclone.conf`, or `None`. Unix: group or other write. Windows: the owner and every permission that grants a change.
+/// Why someone other than the system, administrators or this account could change anything in the work folder, or
+/// `None`. Every entry is checked, no link followed. Unix: owned by root or this account, no group or other write, and
+/// rclone.conf readable by its owner only. Windows: owned by the system, administrators or this account, and no change
+/// right for anyone else.
 pub fn others_can_change(work: &Path) -> Option<String> {
-    for p in [work.to_path_buf(), work.join("bin"), work.join("rclone.conf")] { // WHAT: what decides where backups go and what runs. WHY: the programs and the bucket's key.
-        let Ok(m) = std::fs::metadata(&p) else { continue }; // WHAT: only what is there. WHY: a missing bin is said later, as age missing.
-        #[cfg(unix)]
-        { use std::os::unix::fs::PermissionsExt; if m.permissions().mode() & 0o022 != 0 { return Some(format!("{} can be changed by other accounts (mode {:o})", p.display(), m.permissions().mode() & 0o777)); } } // WHAT: group or other write. WHY: another account could swap age or the bucket's settings.
+    let mut stack = vec![work.to_path_buf()]; // WHAT: entries still to look at. WHY: the whole tree, not only the folder, bin and rclone.conf.
+    while let Some(p) = stack.pop() {
+        let m = match std::fs::symlink_metadata(&p) { Ok(m) => m, Err(e) if p == work && e.kind() == std::io::ErrorKind::NotFound => return None, Err(e) => return Some(format!("{} can't be looked at ({e})", p.display())) }; // WHAT: the entry itself, never what a link points at. WHY: a missing work folder is said later, as age missing; anything else unreadable is refused.
+        if m.file_type().is_symlink() { return Some(format!("{} is a link; nothing in the work folder may point elsewhere: replace it with the file itself", p.display())); } // WHAT: refuse links. WHY: a link can be pointed at a file another account owns.
         #[cfg(windows)]
-        { let _ = &m; if let Some(why) = winacl::others_can_change(&p) { return Some(why); } } // WHAT: the owner and the permissions list. WHY: the same, on Windows.
+        if std::os::windows::fs::MetadataExt::file_attributes(&m) & 0x400 != 0 { return Some(format!("{} is a reparse point; nothing in the work folder may point elsewhere", p.display())); } // WHAT: refuse junctions. WHY: the same.
+        #[cfg(unix)]
+        { use std::os::unix::fs::{MetadataExt, PermissionsExt}; let (uid, mode) = (m.uid(), m.permissions().mode() & 0o777); // WHAT: its owner and mode. WHY: judged below.
+          if uid != 0 && uid != my_uid() { return Some(format!("{} is owned by account {uid}, not root or this server's account ({}): chown it to one of them", p.display(), my_uid())); } // WHAT: a stranger's file. WHY: its owner can change it back at any time.
+          if mode & 0o022 != 0 { return Some(format!("{} can be changed by other accounts (mode {mode:o}): chmod go-w it", p.display())); } // WHAT: group or other write. WHY: another account could swap age or the bucket's settings.
+          if p == work.join("rclone.conf") && mode & 0o077 != 0 { return Some(format!("{} can be read by other accounts (mode {mode:o}) and holds the bucket's key: chmod 600 it", p.display())); } } // WHAT: the bucket's key readable by others. WHY: anyone with it can delete the backups.
+        #[cfg(windows)]
+        if let Some(why) = winacl::others_can_change(&p) { return Some(why); } // WHAT: the owner and the permissions list. WHY: the same, on Windows.
+        if m.is_dir() { match std::fs::read_dir(&p) { Ok(rd) => for e in rd { match e { Ok(e) => stack.push(e.path()), Err(e) => return Some(format!("{} can't be read ({e})", p.display())) } }, Err(e) => return Some(format!("{} can't be read ({e})", p.display())) } } // WHAT: look inside. WHY: a file planted anywhere is found; what can't be read isn't trusted.
     }
     None
+}
+
+/// The account this server runs as (Unix).
+#[cfg(unix)]
+fn my_uid() -> u32 {
+    #[cfg(test)]
+    if let Some(u) = PRETEND_UID.with(|c| c.get()) { return u; } // WHAT: the tests' other account. WHY: proves a stranger's file is refused, without being root.
+    nix::unistd::getuid().as_raw() // WHAT: this process's account. WHY: its own files are trusted.
 }
 
 /// Locks the work folder to the system, administrators and this account, nothing inherited (Windows), as the server starts.
@@ -154,7 +172,7 @@ pub fn lock_work(work: &Path) {
     match std::fs::create_dir_all(work) { // WHAT: make it if missing. WHY: locked before anything is put in it.
         Err(e) => tracing::warn!("could not make the off-site work folder {}: {e}", work.display()), // WHAT: say so. WHY: the backup then says what is missing.
         #[cfg(windows)]
-        Ok(()) => match winacl::me().and_then(|me| winacl::lock(work, &[winacl::SYSTEM, winacl::ADMINISTRATORS, &me])) { Ok(()) => tracing::info!("{} is the system's, administrators' and this server's only", work.display()), Err(e) => tracing::warn!("could not lock the off-site work folder {}: {e:#}; the backup refuses to run until only the system and administrators can change it", work.display()) }, // WHAT: a protected permissions list. WHY: ProgramData lets every account add files.
+        Ok(()) => match winacl::me().and_then(|me| winacl::lock(work, &[winacl::SYSTEM, winacl::ADMINISTRATORS, &me])) { Ok(()) => tracing::info!("{} is the system's, administrators' and this server's only", work.display()), Err(e) => tracing::warn!("could not lock the off-site work folder {w}: {e:#}. The backup refuses to run until it is fixed. From a command prompt opened as administrator: icacls \"{w}\" /setowner *S-1-5-32-544 /T /C, then icacls \"{w}\" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F, then icacls \"{w}\\*\" /reset /T /C; then run the backup by hand to check", w = work.display()) }, // WHAT: a protected permissions list. WHY: ProgramData lets every account add files.
         #[cfg(not(windows))]
         Ok(()) => {} // WHAT: nothing more off Windows. WHY: the backup checks the folder's mode itself.
     }
@@ -167,14 +185,14 @@ mod winacl {
     use std::path::Path; // WHAT: paths. WHY: the folders.
     use std::ptr::{null, null_mut}; // WHAT: empty pointers. WHY: the calls' optional parts.
     use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE}; // WHAT: handles and freeing. WHY: everything the calls hand back is freed.
-    use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT}; // WHAT: permissions by name and in text. WHY: read and set.
-    use windows_sys::Win32::Security::{AclSizeInformation, GetAce, GetAclInformation, GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER}; // WHAT: the security calls and shapes. WHY: as above.
+    use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, ProgressInvokeNever, TreeSetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, TREE_SEC_INFO_RESET}; // WHAT: permissions by name and in text. WHY: read and set.
+    use windows_sys::Win32::Security::{AclSizeInformation, GetAce, GetAclInformation, GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER}; // WHAT: the security calls and shapes. WHY: as above.
     use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW; // WHAT: make a folder. WHY: with its permissions already in place.
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}; // WHAT: this process. WHY: whose account it runs as.
 
     pub const SYSTEM: &str = "S-1-5-18"; // WHAT: the system account. WHY: a well-known SID, any language.
     pub const ADMINISTRATORS: &str = "S-1-5-32-544"; // WHAT: the administrators group. WHY: the same.
-    const CHANGE: u32 = 0x2 | 0x4 | 0x10 | 0x40 | 0x1_0000 | 0x4_0000 | 0x8_0000 | 0x1000_0000 | 0x4000_0000; // WHAT: write, append, write attributes, delete child, delete, change permissions, take ownership, all, generic write. WHY: any of them lets an account swap what is there.
+    const CHANGE: u32 = 0x2 | 0x4 | 0x10 | 0x40 | 0x100 | 0x1_0000 | 0x4_0000 | 0x8_0000 | 0x1000_0000 | 0x4000_0000; // WHAT: write data (add file), append (add folder), write extended attributes, delete child, write attributes, delete, change permissions, take ownership, generic all, generic write. WHY: any of them lets an account swap or alter what is there.
 
     fn wide(s: &std::ffi::OsStr) -> Vec<u16> { use std::os::windows::ffi::OsStrExt; s.encode_wide().chain(Some(0)).collect() } // WHAT: a NUL-ended wide string. WHY: what the calls take.
 
@@ -232,14 +250,16 @@ mod winacl {
         })
     }
 
-    /// Replaces an existing folder's permissions with `sids` only, protected, and passes them to everything inside.
+    /// Resets the whole tree under `path`: owner Administrators, `sids` only on the folder, protected, and everything inside
+    /// inheriting from it alone.
     pub fn lock(path: &Path, sids: &[&str]) -> Result<()> {
         let name = wide(path.as_os_str()); // WHAT: the folder's name. WHY: NUL-ended for the call.
-        with_descriptor(&format!("D:P{}", aces(sids)), |sd| { // WHAT: the new list. WHY: as text, parsed by the system.
-            let (mut present, mut defaulted, mut dacl): (i32, i32, *mut ACL) = (0, 0, null_mut()); // WHAT: the list inside it. WHY: what SetNamedSecurityInfoW takes.
-            // SAFETY: `sd` is live for this closure, the DACL pointer taken from it is used only within it, and `name` is NUL-ended.
-            let r = unsafe { if GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) == 0 || present == 0 { 1 } else { SetNamedSecurityInfoW(name.as_ptr(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, null_mut(), null_mut(), dacl, null()) } }; // WHAT: set it, inheritance off. WHY: ProgramData's own entries go.
-            if r != 0 { bail!("could not set the permissions of {} (error {r})", path.display()); } Ok(()) // WHAT: say so. WHY: the backup then refuses.
+        with_descriptor(&format!("O:BAD:P{}", aces(sids)), |sd| { // WHAT: the new owner and list. WHY: as text, parsed by the system.
+            let (mut present, mut defaulted, mut dacl, mut owner, mut owner_defaulted): (i32, i32, *mut ACL, PSID, i32) = (0, 0, null_mut(), null_mut(), 0); // WHAT: the owner and list inside it. WHY: what TreeSetNamedSecurityInfoW takes.
+            // SAFETY: `sd` is live for this closure, the owner and DACL pointers taken from it are used only within it, `name`
+            // is NUL-ended, and no progress callback is given.
+            let r = unsafe { if GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) == 0 || present == 0 || GetSecurityDescriptorOwner(sd, &mut owner, &mut owner_defaulted) == 0 || owner.is_null() { 1 } else { TreeSetNamedSecurityInfoW(name.as_ptr(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, owner, null_mut(), dacl, null(), TREE_SEC_INFO_RESET, None, ProgressInvokeNever, null()) } }; // WHAT: the whole tree: owner, list, inheritance off at the top. WHY: a file planted before setup keeps no owner or entry of its own.
+            if r != 0 { bail!("could not set the owner and permissions of {} and everything in it (error {r})", path.display()); } Ok(()) // WHAT: say so. WHY: the backup then refuses.
         })
     }
 
@@ -479,7 +499,8 @@ impl Cipher {
     pub fn encrypt_stream(&self, recipients: &Path, out: &Path, fill: impl FnOnce(&mut dyn Write) -> Result<()>) -> Result<()> {
         match self {
             Cipher::Age(exe) => {
-                let mut child = Command::new(exe).arg("-R").arg(recipients).arg("-o").arg(out).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().with_context(|| format!("starting {}", exe.display()))?; // WHAT: age reads the stream and writes the encrypted file. WHY: the server locks with the public key only.
+                let _ = std::fs::remove_file(out); let file = create_private(out).with_context(|| format!("making {}", out.display()))?; // WHAT: the encrypted file, owner-only before a byte is in it. WHY: everything in the work folder is this account's alone.
+                let mut child = Command::new(exe).arg("-R").arg(recipients).stdin(Stdio::piped()).stdout(file).stderr(Stdio::piped()).spawn().with_context(|| format!("starting {}", exe.display()))?; // WHAT: age reads the stream and writes the encrypted file into it. WHY: the server locks with the public key only.
                 let mut sin = child.stdin.take().ok_or_else(|| anyhow!("age has no input"))?; // WHAT: age's input. WHY: the archive is written into it.
                 let filled = fill(&mut sin); // WHAT: write everything. WHY: one stream from the files to age.
                 drop(sin); // WHAT: close age's input. WHY: age writes the end of the file when its input ends.
@@ -489,7 +510,7 @@ impl Cipher {
                 Ok(())
             }
             #[cfg(test)]
-            Cipher::Fake => { let keys = std::fs::read_to_string(recipients)?; let mut buf = Vec::new(); fill(&mut buf)?; std::fs::write(out, fake::seal(&keys, &buf)) .map_err(Into::into) } // WHAT: the stand-in. WHY: the same shape as age's output.
+            Cipher::Fake => { let keys = std::fs::read_to_string(recipients)?; let mut buf = Vec::new(); fill(&mut buf)?; let _ = std::fs::remove_file(out); create_private(out)?.write_all(&fake::seal(&keys, &buf)).map_err(Into::into) } // WHAT: the stand-in. WHY: the same shape as age's output.
         }
     }
 
@@ -740,7 +761,10 @@ impl Job<'_> {
         println!("{line}"); // WHAT: to the console. WHY: a person running it sees it.
         let path = self.own().join("offsite.log"); // WHAT: the log file. WHY: beside the job.
         if std::fs::metadata(&path).map(|m| m.len() > 4 * 1024 * 1024).unwrap_or(false) { let _ = std::fs::rename(&path, self.own().join("offsite.log.1")); } // WHAT: one old log kept past 4 MB. WHY: a log must never fill the disk.
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) { let _ = writeln!(f, "{line}"); } // WHAT: append. WHY: best effort; the console still has it.
+        let mut o = std::fs::OpenOptions::new(); o.create(true).append(true); // WHAT: append, making it if new. WHY: one log.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600); // WHAT: owner-only when made. WHY: everything in the work folder is this account's alone.
+        if let Ok(mut f) = o.open(&path) { let _ = writeln!(f, "{line}"); } // WHAT: append. WHY: best effort; the console still has it.
     }
 
     /// The nightly backup. Returns the exit code to end with.
@@ -847,7 +871,7 @@ impl Job<'_> {
         std::fs::rename(&part, &out).map_err(|e| refuse(2, e))?; // WHAT: its real name. WHY: only now whole.
         let age_sha = sha256_file(&out).map_err(|e| refuse(2, e))?; let age_bytes = std::fs::metadata(&out).map_err(|e| refuse(2, e))?.len(); // WHAT: fingerprint and size. WHY: the sidecar and the read-back.
         let side = Sidecar { format: manifest.format.clone(), name: name.clone(), created_at: manifest.created_at.clone(), app_version: self.version.clone(), age_sha256: age_sha.clone(), age_bytes, blob_count: on_disk.len(), blob_bytes: on_disk.values().map(|(_, s)| s).sum() }; // WHAT: the unencrypted facts. WHY: no names, no records.
-        let side_path = spool.join(format!("{name}.json")); std::fs::write(&side_path, serde_json::to_vec_pretty(&side).map_err(|e| refuse(2, e))?).map_err(|e| refuse(2, e))?; // WHAT: write it. WHY: sent beside the catalog.
+        let side_path = spool.join(format!("{name}.json")); write_atomic(&side_path, &serde_json::to_vec_pretty(&side).map_err(|e| refuse(2, e))?).map_err(|e| refuse(2, e))?; // WHAT: write it, owner-only. WHY: sent beside the catalog.
 
         // 4. send the catalog and read it back
         self.target.put(&out, &format!("daily/{name}")).map_err(|e| refuse(3, format!("the upload failed: {e:#}")))?; // WHAT: send it. WHY: off the box.
@@ -884,6 +908,8 @@ impl Job<'_> {
 /// run ends or the process dies. `Err` is the exit to end with.
 fn hold_lock(path: &Path) -> std::result::Result<std::fs::File, Exit> {
     let mut o = std::fs::OpenOptions::new(); o.read(true).write(true).create(true).truncate(false); // WHAT: open or make it, never emptied. WHY: its contents don't matter, only the hold.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600); // WHAT: owner-only when made. WHY: everything in the work folder is this account's alone.
     #[cfg(windows)]
     std::os::windows::fs::OpenOptionsExt::share_mode(&mut o, 0); // WHAT: no sharing. WHY: a second run can't even open it.
     let f = match o.open(path) { Ok(f) => f, Err(e) if e.raw_os_error() == Some(32) => return Err(refuse(2, format!("{BUSY} ({})", path.display()))), Err(e) => return Err(refuse(2, format!("could not open the lock {}: {e}", path.display()))) }; // WHAT: open it; Windows' sharing violation is a run going. WHY: say which.
@@ -899,6 +925,7 @@ fn panic_words(p: &(dyn std::any::Any + Send)) -> String {
 thread_local! {
     /// The tests' fault inside a run, and the tests' file changed while it is sent.
     pub(crate) static FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; // WHAT: panic inside the run. WHY: proves it becomes exit 3.
+    pub(crate) static PRETEND_UID: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) }; // WHAT: a different account for this server. WHY: makes every file look like a stranger's.
     pub(crate) static LOOSEN_SCRATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; // WHAT: open the scratch folder up just after it is made. WHY: proves the check after making it.
     pub(crate) static FAIL_PUT_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; // WHAT: uploads that succeed before one fails. WHY: proves a batch cut short doesn't block later nights.
     pub(crate) static CHANGE_WHILE_SENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; // WHAT: rewrite a file between its check and its encryption. WHY: proves the fingerprint taken while sending decides.
@@ -1051,7 +1078,7 @@ fn valid_manifest(product: &Product, man: &Manifest) -> Result<()> {
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp"); // WHAT: beside it. WHY: one rename puts it in place.
-    std::fs::write(&tmp, bytes)?; std::fs::rename(&tmp, path)?; Ok(()) // WHAT: write, then rename. WHY: a reader never sees half a file.
+    let _ = std::fs::remove_file(&tmp); create_private(&tmp)?.write_all(bytes)?; std::fs::rename(&tmp, path)?; Ok(()) // WHAT: write owner-only, then rename. WHY: a reader never sees half a file, and no other account can read or change it.
 }
 
 fn real(p: &Path) -> PathBuf {

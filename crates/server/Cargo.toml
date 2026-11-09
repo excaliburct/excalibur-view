@@ -59,6 +59,11 @@ windows-service = "0.7"
 # off-site work folder is locked and checked; already in the build through tokio and others.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
+# WHAT: this process's own account, through a safe call. WHY: the off-site work folder trusts only files that root or
+# this account owns; already in the build through ctrlc.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["user"] }
+
 [dev-dependencies]
 wat = "1"
 ureq = { version = "2", features = ["json", "tls"] }

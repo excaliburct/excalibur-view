@@ -18,6 +18,9 @@ impl Tmp {
 }
 impl Drop for Tmp { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } } // WHAT: remove it. WHY: tidy.
 
+/// Writes a file owner-only (Unix 0600), as a person setting up the work folder would. The tests' umask may be 0002.
+fn put(p: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<()> { std::fs::write(p.as_ref(), bytes)?; #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(p.as_ref(), std::fs::Permissions::from_mode(0o600))?; } Ok(()) } // WHAT: write, then owner-only. WHY: the work folder trusts nothing others can change.
+
 const CH: &str = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"; // WHAT: the letters of an age key. WHY: well-formed fake keys.
 fn fake_pub() -> String { let r: [u8; 58] = std::array::from_fn(|_| rand::random::<u8>()); format!("age1{}", r.iter().map(|b| CH.as_bytes()[(*b % 32) as usize] as char).collect::<String>()) } // WHAT: a fake public key line. WHY: right shape, so the real check accepts it.
 fn secret_line() -> String { ["AGE", "SECRET", "KEY", "1QQQQ"].join("-") } // WHAT: a private-key-shaped line, built in pieces. WHY: the secret scanners must not flag a test value.
@@ -32,7 +35,7 @@ fn world() -> World {
     let d2 = store.put_blob(b"a chest file").unwrap(); // WHAT: a second file. WHY: more than one.
     store.with(|db| { db.execute_batch(&format!("INSERT INTO projects(id,number,name,created) VALUES('p1','2630','Real Job Name','2026-11-01'); INSERT INTO sets(id,project,name,filename,digest,bytes,sheets,uploaded,uploaded_by) VALUES('s1','p1','Structural','s.pdf','{d1}',{},1,'2026-11-01T10:00:00Z','x'); INSERT INTO files(id,project,name,digest,bytes,uploaded,uploaded_by) VALUES('f1','p1','note.txt','{d2}',12,'2026-11-01','x');", pdf.len()))?; Ok(()) }).unwrap(); // WHAT: a project, a set and a file. WHY: real records pointing at real files.
     drop(store); // WHAT: close it. WHY: as a running server would leave it, open or not.
-    create_private_dir(&work).unwrap(); let pubk = fake_pub(); std::fs::write(work.join("age-recipients.txt"), format!("# public key: {pubk}\n{pubk}\n")).unwrap(); // WHAT: the public key file. WHY: what Creede places.
+    create_private_dir(&work).unwrap(); let pubk = fake_pub(); put(work.join("age-recipients.txt"), format!("# public key: {pubk}\n{pubk}\n")).unwrap(); // WHAT: the public key file. WHY: what Creede places.
     let id = root.join("id.txt"); std::fs::write(&id, format!("# public key: {pubk}\n{}\n", secret_line())).unwrap(); // WHAT: the right private key (kept off the server). WHY: the drill's key.
     let wrong = root.join("wrong.txt"); std::fs::write(&wrong, format!("# public key: {}\n{}\n", fake_pub(), secret_line())).unwrap(); // WHAT: someone else's key. WHY: must open nothing.
     World { _t: t, data, work, bucket, id, wrong, root }
@@ -148,7 +151,7 @@ fn the_drill_restores_into_scratch_checks_everything_and_fails_when_it_should() 
 #[test]
 fn nothing_is_marked_unless_it_is_confirmed_where_it_went() {
     let w = world(); let rf = w.work.join("age-recipients.txt"); let good = std::fs::read_to_string(&rf).unwrap(); // WHAT: the public key file. WHY: one case breaks it.
-    std::fs::write(&rf, format!("{good}{}\n", secret_line())).unwrap(); let e = job(&w).backup(); std::fs::write(&rf, &good).unwrap(); // WHAT: a private key on the server. WHY: must refuse.
+    put(&rf, format!("{good}{}\n", secret_line())).unwrap(); let e = job(&w).backup(); put(&rf, &good).unwrap(); // WHAT: a private key on the server. WHY: must refuse.
     assert_eq!(e.code, 2); assert!(e.why.contains("PRIVATE key")); assert!(!w.bucket.exists(), "nothing left the box"); // WHAT: refused before anything. WHY: the claim.
     std::fs::write(&w.bucket, "a file where the target folder should be").unwrap(); let e = job(&w).backup(); std::fs::remove_file(&w.bucket).unwrap(); assert_eq!(e.code, 3, "{e:?}"); // WHAT: a target that can't be written. WHY: a failed upload.
     assert!(report(&w.data).last_good.is_none() && backup_days(&w.data).is_none(), "a failed upload is never marked"); // WHAT: no marker. WHY: Fleet keeps it amber.
@@ -156,7 +159,7 @@ fn nothing_is_marked_unless_it_is_confirmed_where_it_went() {
     std::fs::write(w.data.join("hyperview.sqlite"), b"not a database at all, just bytes").unwrap(); let e = job(&w).backup(); assert_eq!(e.code, 2, "{e:?}"); assert!(e.why.contains("database"), "{}", e.why); assert!(report(&w.data).last_good.is_none()); // WHAT: a database that won't copy or open. WHY: never sent, never marked.
     let inside = Job { work: w.data.join("work"), ..job(&w) }.backup(); assert_eq!(inside.code, 4, "a work folder inside the data is refused"); // WHAT: overlap. WHY: the spool would back itself up.
     let held = hold_lock(&w.work.join("view/offsite.lock")).unwrap(); let busy = job(&w).backup(); assert_eq!(busy.code, 2, "{busy:?}"); assert!(busy.why.contains("still running")); drop(held); // WHAT: a run already going, holding the system's lock. WHY: never two at once.
-    std::fs::write(w.work.join("view/offsite.lock"), "left by a run that crashed").unwrap(); let after = job(&w).backup(); assert!(!after.why.contains("still running"), "a lock file nobody holds is no lock (the run goes on to the damaged database above): {after:?}"); // WHAT: a crashed run's leftover file. WHY: the system let go of its lock when it died, whatever its age.
+    put(w.work.join("view/offsite.lock"), "left by a run that crashed").unwrap(); let after = job(&w).backup(); assert!(!after.why.contains("still running"), "a lock file nobody holds is no lock (the run goes on to the damaged database above): {after:?}"); // WHAT: a crashed run's leftover file. WHY: the system let go of its lock when it died, whatever its age.
 }
 
 #[test]
@@ -319,8 +322,8 @@ fn a_file_changed_while_it_is_sent_is_not_sent_and_the_run_says_so() {
 
 #[test]
 fn a_private_key_anywhere_in_the_work_folder_is_refused() {
-    let w = world(); create_private_dir(&w.work.join("bin")).unwrap(); std::fs::write(w.work.join("bin/age"), format!("a program naming its own format: {}", secret_line())).unwrap(); // WHAT: age's program, which holds the words. WHY: bin is skipped.
-    assert_eq!(job(&w).backup().code, 0, "bin is age's own"); std::fs::create_dir_all(w.work.join("old")).unwrap(); std::fs::write(w.work.join("old/key.txt"), format!("# created\n{}\n", secret_line().to_lowercase())).unwrap(); // WHAT: a key left in a folder of the work folder. WHY: any case, any depth.
+    let w = world(); create_private_dir(&w.work.join("bin")).unwrap(); put(w.work.join("bin/age"), format!("a program naming its own format: {}", secret_line())).unwrap(); // WHAT: age's program, which holds the words. WHY: bin is skipped.
+    assert_eq!(job(&w).backup().code, 0, "bin is age's own"); create_private_dir(&w.work.join("old")).unwrap(); put(w.work.join("old/key.txt"), format!("# created\n{}\n", secret_line().to_lowercase())).unwrap(); // WHAT: a key left in a folder of the work folder. WHY: any case, any depth.
     std::thread::sleep(WAIT); let e = job(&w).backup(); assert_eq!(e.code, 2, "{e:?}"); assert!(e.why.contains("PRIVATE key") && e.why.contains("key.txt"), "{}", e.why); // WHAT: refused, naming the file. WHY: it opens every backup.
 }
 
@@ -346,10 +349,15 @@ fn a_folder_the_link_check_cannot_read_is_a_refusal() {
 #[test]
 fn a_work_folder_others_could_change_is_refused() {
     #[cfg(unix)]
-    { use std::os::unix::fs::PermissionsExt; let w = world(); create_private_dir(&w.work.join("bin")).unwrap(); std::fs::write(w.work.join("rclone.conf"), "[r2]\n").unwrap(); std::fs::set_permissions(w.work.join("rclone.conf"), std::fs::Permissions::from_mode(0o600)).unwrap(); assert_eq!(job(&w).backup().code, 0, "owner-only is fine"); // WHAT: a good work folder. WHY: the baseline.
+    { use std::os::unix::fs::PermissionsExt; let w = world(); create_private_dir(&w.work.join("bin")).unwrap(); put(w.work.join("rclone.conf"), "[r2]\n").unwrap(); std::fs::set_permissions(w.work.join("rclone.conf"), std::fs::Permissions::from_mode(0o600)).unwrap(); assert_eq!(job(&w).backup().code, 0, "owner-only is fine"); // WHAT: a good work folder. WHY: the baseline.
       for (what, path, mode) in [("the work folder", w.work.clone(), 0o770), ("bin", w.work.join("bin"), 0o777), ("rclone.conf", w.work.join("rclone.conf"), 0o666)] { let was = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777; std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap(); std::thread::sleep(WAIT); // WHAT: open one to other accounts. WHY: each is checked.
         let e = job(&w).backup(); let d = drill(&w, &w.id, &format!("s-open-{}", mode)).run(); std::fs::set_permissions(&path, std::fs::Permissions::from_mode(was)).unwrap(); // WHAT: a backup and a drill, then put back. WHY: both refuse.
-        assert_eq!(e.code, 2, "{what}: {e:?}"); assert!(e.why.contains("changed by other accounts"), "{what}: {}", e.why); assert_eq!(d.code, 2, "{what}: the drill too: {d:?}"); } } // WHAT: refused. WHY: whoever can swap age or rclone.conf can read or redirect every backup.
+        assert_eq!(e.code, 2, "{what}: {e:?}"); assert!(e.why.contains("changed by other accounts"), "{what}: {}", e.why); assert_eq!(d.code, 2, "{what}: the drill too: {d:?}"); } // WHAT: refused. WHY: whoever can swap age or rclone.conf can read or redirect every backup.
+      for (what, path, mode, says) in [("a program in bin", w.work.join("bin/age"), 0o664, "chmod go-w"), ("the public key file", w.work.join("age-recipients.txt"), 0o666, "chmod go-w"), ("rclone.conf readable by others", w.work.join("rclone.conf"), 0o644, "chmod 600")] { put(&path, std::fs::read(&path).unwrap_or_default()).unwrap(); std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap(); std::thread::sleep(WAIT); // WHAT: one file anywhere in the tree opened up. WHY: the whole tree is checked, not only the folder, bin and rclone.conf.
+        let e = job(&w).backup(); std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap(); assert_eq!(e.code, 2, "{what}: {e:?}"); assert!(e.why.contains(says), "{what}: {}", e.why); } // WHAT: refused, saying how to fix it. WHY: as above.
+      std::os::unix::fs::symlink("/etc/hostname", w.work.join("bin/rclone")).unwrap(); std::thread::sleep(WAIT); let e = job(&w).backup(); std::fs::remove_file(w.work.join("bin/rclone")).unwrap(); assert_eq!(e.code, 2, "{e:?}"); assert!(e.why.contains("is a link"), "{}", e.why); // WHAT: a link in the work folder. WHY: never followed, always refused.
+      PRETEND_UID.with(|c| c.set(Some(4242))); std::thread::sleep(WAIT); let e = job(&w).backup(); PRETEND_UID.with(|c| c.set(None)); assert_eq!(e.code, 2, "{e:?}"); assert!(e.why.contains("is owned by account"), "{}", e.why); // WHAT: every file a stranger's. WHY: an owner can always change its file back.
+      std::thread::sleep(WAIT); assert_eq!(job(&w).backup().code, 0, "and the job's own files pass, night after night"); } // WHAT: the normal case after all that. WHY: the log, salt, sizes and spool are made owner-only.
 }
 
 #[test]
@@ -394,7 +402,7 @@ fn with_real_age_the_backup_cannot_be_read_without_the_private_key() {
     let Some((age, keygen)) = real_age() else { eprintln!("NOTE: age is not installed here; the real-age proof did not run on this machine (it runs on the build server)."); return; }; // WHAT: skip only where age is absent. WHY: CI machines without it still run every other test.
     let w = world(); let key = w.root.join("real-key.txt"); let other = w.root.join("other-key.txt"); // WHAT: two real key pairs. WHY: the right one and a wrong one.
     for k in [&key, &other] { assert!(Command::new(&keygen).arg("-o").arg(k).output().unwrap().status.success()); } // WHAT: make them. WHY: as Creede does on his own machine.
-    let pubk = std::fs::read_to_string(&key).unwrap().lines().find_map(|l| l.strip_prefix("# public key: ").map(str::to_string)).unwrap(); std::fs::write(w.work.join("age-recipients.txt"), format!("{pubk}\n")).unwrap(); // WHAT: only the public line on the "server". WHY: the design.
+    let pubk = std::fs::read_to_string(&key).unwrap().lines().find_map(|l| l.strip_prefix("# public key: ").map(str::to_string)).unwrap(); put(w.work.join("age-recipients.txt"), format!("{pubk}\n")).unwrap(); // WHAT: only the public line on the "server". WHY: the design.
     let real = |w: &World| Job { cipher: Cipher::Age(age.clone()), ..job(w) }; // WHAT: the job with real age. WHY: the real lock.
     let e = real(&w).backup(); assert_eq!(e.code, 0, "{e:?}"); // WHAT: a real backup. WHY: the baseline.
     let objects: Vec<_> = files_in(&w.bucket).into_iter().filter(|p| p.extension().map(|x| x == "age").unwrap_or(false)).collect(); assert!(objects.len() >= 3); // WHAT: the encrypted objects. WHY: catalog copies and files.
