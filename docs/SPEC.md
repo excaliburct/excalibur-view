@@ -765,7 +765,11 @@ them the hub's — so a Fleet with a compromised shelf can offer only builds tha
 were already signed by a key the publisher holds on his own machine.
 
 `backupDays` is `null` when the drawings have never been copied off the box, and
-null is not zero. The Fleet turns that amber on purpose: a shop holding its own
+null is not zero. From 0.6.29 it counts from the server's own off-site backup
+(`crate::offsite`, README "Off-site backups"), and only from a copy read back
+from where it went; `offsite` beside it says when (`lastGood`), where
+(`where`) and when a restore drill last passed (`restoreTested`), each `null`
+when unknown. The Fleet turns that amber on purpose: a shop holding its own
 drawings with no copy anywhere else is one dead disk from losing every takeoff
 it has done.
 

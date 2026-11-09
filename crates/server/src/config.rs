@@ -49,6 +49,14 @@ pub struct Config {
     /// file, the command line or the environment — and set only by a test,
     /// which cannot hold the publisher's private key.
     pub plugin_keys_for_tests: Vec<(String, [u8; 32])>,
+    /// Where the nightly off-site backup goes: a folder, or
+    /// `rclone:REMOTE:bucket/folder`. None means the backup is off.
+    pub offsite_target: Option<String>, // WHAT: HYPERVIEW_OFFSITE_TARGET. WHY: a copy on the same machine is not a backup (crate::offsite).
+    /// The backup's own folder, apart from the data: age and rclone in its
+    /// `bin`, the public key, rclone's settings, the spool and the log.
+    pub offsite_work: Option<String>, // WHAT: HYPERVIEW_OFFSITE_WORK. WHY: the programs and the bucket's settings live outside what is backed up.
+    /// The time of night the server runs it, on its own clock, 24-hour.
+    pub offsite_at: String, // WHAT: HYPERVIEW_OFFSITE_AT, "01:30" unless set. WHY: after the office has gone home, before anyone is back.
 }
 
 impl Default for Config {
@@ -68,6 +76,9 @@ impl Default for Config {
             check_for_updates: false,
             replace_self: false,
             plugin_keys_for_tests: Vec::new(),
+            offsite_target: None, // WHAT: off. WHY: nothing leaves the box until someone sets it up.
+            offsite_work: None, // WHAT: none. WHY: the same.
+            offsite_at: "01:30".into(), // WHAT: half past one at night. WHY: the office is shut and the night's sync is done.
         }
     }
 }
@@ -135,6 +146,11 @@ impl Config {
                 .map(|o| o.trim().to_string())
                 .filter(|o| !o.is_empty())
                 .collect();
+        }
+        config.offsite_target = non_empty("HYPERVIEW_OFFSITE_TARGET"); // WHAT: where the nightly backup goes. WHY: off when empty.
+        config.offsite_work = non_empty("HYPERVIEW_OFFSITE_WORK"); // WHAT: the backup's own folder. WHY: its programs, key and log.
+        if let Some(at) = non_empty("HYPERVIEW_OFFSITE_AT") {
+            config.offsite_at = at; // WHAT: the time of night. WHY: checked as the server starts, so a typo is found then.
         }
         config
     }

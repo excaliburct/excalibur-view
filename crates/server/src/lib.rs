@@ -27,6 +27,7 @@ pub mod license;
 pub mod lockdown; // WHAT: the service folder made the service's own. WHY: ProgramData lets every account read it and add files.
 pub mod mcp;
 pub mod notices;
+pub mod offsite; // WHAT: the nightly off-site backup and its restore drill. WHY: a copy on the same machine is not a backup.
 pub mod openapi;
 pub mod patience;
 pub mod presence;

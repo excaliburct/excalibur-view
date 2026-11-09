@@ -38,6 +38,27 @@ a test release without waiting on CI.
 
 Setting the Mac half up for the first time: `docs/SETUP-THE-MAC-BUILD.md`.
 
+## Before releasing 0.6.29: the off-site backup on Windows
+
+The off-site backup's Windows permissions have been compiled and linted for
+Windows but not yet run there. On a Windows server, before the release:
+
+1. As administrator, set `HYPERVIEW_OFFSITE_TARGET`, `HYPERVIEW_OFFSITE_WORK`
+   (say `C:\ProgramData\Excalibur Hyperview\Server\offsite`) and restart the
+   service. Then `icacls "C:\ProgramData\Excalibur Hyperview\Server\offsite"`
+   must list only `NT AUTHORITY\SYSTEM:(OI)(CI)(F)` and
+   `BUILTIN\Administrators:(OI)(CI)(F)`, with no inherited `(I)` entries.
+2. Add a `Users:(OI)(CI)(M)` entry with icacls; `Hyperview-Server.exe
+   --offsite-backup` must refuse ("can be changed by"). Restart the service: the
+   entry is gone and the backup runs.
+3. Run a drill with `--scratch D:\drill-test` (a drive root, where every user
+   may make folders). While it runs, `icacls D:\drill-test` must list only the
+   person running it and `NT AUTHORITY\SYSTEM`, both `(OI)(CI)(F)`, nothing
+   inherited, owner that person (`dir /q D:\` shows the owner). With `--keep`, the files under `restored`
+   show the same, inherited.
+4. Make `D:\drill-test2` first, then run a drill into it: refused, "must not
+   exist yet".
+
 ## What each half produces
 
 | Workflow | Runner | Artifact | Holds |

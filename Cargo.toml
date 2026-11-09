@@ -8,13 +8,15 @@ members = ["crates/annot", "crates/chest", "crates/pdf", "crates/hub", "crates/h
 exclude = ["plugins", "private"]
 
 [workspace.package]
-# WHAT: the version every crate in the program carries. WHY: 0.6.28 is a new
-# build (sign-offs: travelers and shipping tickets signed on the shop's
-# iPads), and two builds never share a version, because an install refuses
-# to put a version over itself.
-version = "0.6.28"
+# WHAT: the version every crate in the program carries. WHY: 0.6.29 is a new
+# build (the server's own nightly off-site backup, locked with a key it never
+# holds, and its restore drill), and two builds never share a version, because
+# an install refuses to put a version over itself.
+version = "0.6.29"
 edition = "2021"
-rust-version = "1.88"
+# WHAT: the oldest Rust that builds it. WHY: 1.89 gives File::try_lock, the system-held lock the off-site
+# backup takes so a crashed run never blocks the next one; every build uses the newest stable.
+rust-version = "1.89"
 
 [profile.release]
 opt-level = 3

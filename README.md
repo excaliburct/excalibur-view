@@ -276,6 +276,77 @@ Everything the desktop does is on that API, so anything else — an ERP, a
 spreadsheet, a fleet tool — can ask the same questions and get the same answers.
 The one worth knowing about is `GET /api/v1/sets/{id}/takeoff`.
 
+### Off-site backups
+
+A copy of the drawings on the same computer is not a backup: a dead disk, a
+fire or ransomware takes both. From 0.6.29 the server can send a copy
+somewhere else every night by itself, locked so that only the person holding
+the private key can open it. That key never sits on the server.
+
+What it sends: one small, locked "catalog" each night (the database and a
+list of what it holds) and every drawing file, each locked on its own. A file
+is sent once; after the first night only new files go. It keeps the last 7
+nights, 4 weeks and 12 months of catalogs, counted rather than dated, so a
+backup that stops for a month never empties the bucket. Nothing counts as
+backed up until the server has read it back from where it went; the
+maintenance report (`GET /api/admin/ops`) then says how many days old it is
+(`backupDays`), where it went, and when a restore was last proven.
+
+Setting it up, once (Excalibur's people do this with the office):
+
+1. On your own computer, not the server, make the key pair:
+   `age-keygen -o offsite-key.txt`. Put that file on a USB stick and lock it
+   away. Its `# public key: age1...` line is the only part the server gets.
+2. Make a work folder for the backup, apart from the drawings, for example
+   `C:\ProgramData\Excalibur Hyperview\Server\offsite`, from a command prompt
+   opened as administrator. Each time it starts, the server locks that folder
+   so only the system, administrators and the server itself can change it,
+   and it won't back up while anyone else could change the folder, its `bin`
+   or `rclone.conf`. Keep it under the service's own folder, as above, where
+   you can: that folder is already the service's alone. On Linux, `chmod 700`
+   the folder and its `bin`, `chmod 600 rclone.conf`, and let every file in it
+   belong to root or the server's own account. In it:
+   - `bin\age.exe` and `bin\rclone.exe` (the server only ever uses these two,
+     never copies found elsewhere on the computer);
+   - `age-recipients.txt`, holding the `age1...` public line. A private key
+     put there by mistake, or anywhere in the work folder, is refused and
+     nothing is sent;
+   - `rclone.conf`, for a cloud bucket: made by hand, because it holds the
+     bucket's key. Not needed when the target is a folder.
+3. Set three settings as System environment variables (Windows: Settings,
+   System, About, Advanced system settings, Environment Variables, System
+   variables), then restart the Excalibur View service:
+   - `HYPERVIEW_OFFSITE_TARGET`: where it goes. A folder (a second disk or a
+     NAS share), or `rclone:REMOTE:bucket/folder` for a cloud bucket.
+   - `HYPERVIEW_OFFSITE_WORK`: the work folder above.
+   - `HYPERVIEW_OFFSITE_AT`: the time of night, 24-hour, on the server's
+     clock. `01:30` if not set.
+
+   The server will not start with a setting it can't read (a time like
+   `1:30am`, a work folder inside the drawings folder), so a mistake shows the
+   moment the service is restarted, not weeks later.
+4. Run one now, from a command prompt opened as administrator:
+   `Hyperview-Server.exe --offsite-backup`. The last line says DONE, or why
+   not. The log is `offsite.log` in the work folder's `view` folder.
+5. Prove it comes back (the restore drill), with the USB stick in:
+   `Hyperview-Server.exe --offsite-drill --identity E:\offsite-key.txt --scratch C:\drill-1`.
+   The scratch folder must not exist yet: the drill makes it, open only to
+   the person running it. Pressing Ctrl+C during a drill deletes the opened
+   key and what was restored. It fetches the newest catalog into it, opens it,
+   checks the counts, every file's fingerprint and one real drawing, and says
+   RESTORE DRILL PASSED or what failed. Add `--full` to fetch every file,
+   `--keep` to keep the restored copy. Do this once a month.
+
+A target written after `--offsite-backup` (a USB disk, say) is backed up to
+as well, but it doesn't count: only a backup to the server's own
+`HYPERVIEW_OFFSITE_TARGET` moves the days since the last backup.
+
+Each night the server tries once, after the time; a failed night is tried
+again an hour later, and nothing is marked until one passes. A failed night
+is shown in the maintenance report too (`lastFailed`, and why), until the
+next good one. A night it was
+switched off is caught up the next time it is on.
+
 ## The markups list
 
 A bar along the bottom of the window says how many markups there are, what they

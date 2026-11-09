@@ -1,0 +1,21 @@
+OFF-SITE BACKUPS, EVERY NIGHT, LOCKED
+
+The server can now send a copy of the drawings somewhere else every night by
+itself: a second disk, a NAS, or a cloud bucket. A copy on the same computer
+is not a backup; a dead disk, a fire or ransomware takes both.
+
+Everything it sends is locked with a key whose private half never sits on the
+server. Only the person holding that key, on a USB stick, can open it. A
+private key put on the server by mistake is refused and nothing is sent.
+
+After the first night only new drawings go. It keeps the last 7 nights, 4
+weeks and 12 months. Nothing counts as backed up until the server has read it
+back from where it went. Whoever looks after the server can then see how old
+the last good copy is, where it went, and when a restore was last proven.
+
+The restore drill brings the newest copy back into an empty folder, opens it
+and checks everything, so the office knows it would really come back.
+
+It is off until it is set up: three settings, a work folder with two small
+programs and the public key, and one test run. The steps are in README.md,
+under "Off-site backups".
