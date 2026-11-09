@@ -36,6 +36,8 @@ sha2 = "0.10"
 flate2 = "1"
 # WHAT: the office's own clock. WHY: "01:30" for the off-site backup means the office's half past one; already in the build through the app.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# WHAT: Ctrl+C and stop signals. WHY: a drill stopped part way deletes the opened private key and the plaintext restore.
+ctrlc = { version = "3.5", features = ["termination"] }
 rand = "0.8"
 argon2 = "0.5"
 time = { version = "0.3", features = ["formatting", "parsing"] }
@@ -53,6 +55,9 @@ url = "2"
 # by Windows after thirty seconds for not answering.
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
+# WHAT: Windows' own security calls. WHY: the drill's folder is made with its permissions already in place, and the
+# off-site work folder is locked and checked; already in the build through tokio and others.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [dev-dependencies]
 wat = "1"

@@ -136,6 +136,157 @@ pub fn plan(product: &str, listing: &BTreeMap<String, Vec<String>>, tonight: &st
 
 // ---------------------------------------------------------------- the public half only
 
+/// Why someone other than the system, administrators or this account could change the work folder, its `bin` or
+/// `rclone.conf`, or `None`. Unix: group or other write. Windows: the owner and every permission that grants a change.
+pub fn others_can_change(work: &Path) -> Option<String> {
+    for p in [work.to_path_buf(), work.join("bin"), work.join("rclone.conf")] { // WHAT: what decides where backups go and what runs. WHY: the programs and the bucket's key.
+        let Ok(m) = std::fs::metadata(&p) else { continue }; // WHAT: only what is there. WHY: a missing bin is said later, as age missing.
+        #[cfg(unix)]
+        { use std::os::unix::fs::PermissionsExt; if m.permissions().mode() & 0o022 != 0 { return Some(format!("{} can be changed by other accounts (mode {:o})", p.display(), m.permissions().mode() & 0o777)); } } // WHAT: group or other write. WHY: another account could swap age or the bucket's settings.
+        #[cfg(windows)]
+        { let _ = &m; if let Some(why) = winacl::others_can_change(&p) { return Some(why); } } // WHAT: the owner and the permissions list. WHY: the same, on Windows.
+    }
+    None
+}
+
+/// Locks the work folder to the system, administrators and this account, nothing inherited (Windows), as the server starts.
+pub fn lock_work(work: &Path) {
+    match std::fs::create_dir_all(work) { // WHAT: make it if missing. WHY: locked before anything is put in it.
+        Err(e) => tracing::warn!("could not make the off-site work folder {}: {e}", work.display()), // WHAT: say so. WHY: the backup then says what is missing.
+        #[cfg(windows)]
+        Ok(()) => match winacl::me().and_then(|me| winacl::lock(work, &[winacl::SYSTEM, winacl::ADMINISTRATORS, &me])) { Ok(()) => tracing::info!("{} is the system's, administrators' and this server's only", work.display()), Err(e) => tracing::warn!("could not lock the off-site work folder {}: {e:#}; the backup refuses to run until only the system and administrators can change it", work.display()) }, // WHAT: a protected permissions list. WHY: ProgramData lets every account add files.
+        #[cfg(not(windows))]
+        Ok(()) => {} // WHAT: nothing more off Windows. WHY: the backup checks the folder's mode itself.
+    }
+}
+
+/// Windows folder permissions through the system's own calls.
+#[cfg(windows)]
+mod winacl {
+    use anyhow::{anyhow, bail, Result}; // WHAT: errors. WHY: said in the log.
+    use std::path::Path; // WHAT: paths. WHY: the folders.
+    use std::ptr::{null, null_mut}; // WHAT: empty pointers. WHY: the calls' optional parts.
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE}; // WHAT: handles and freeing. WHY: everything the calls hand back is freed.
+    use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT}; // WHAT: permissions by name and in text. WHY: read and set.
+    use windows_sys::Win32::Security::{AclSizeInformation, GetAce, GetAclInformation, GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER}; // WHAT: the security calls and shapes. WHY: as above.
+    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW; // WHAT: make a folder. WHY: with its permissions already in place.
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}; // WHAT: this process. WHY: whose account it runs as.
+
+    pub const SYSTEM: &str = "S-1-5-18"; // WHAT: the system account. WHY: a well-known SID, any language.
+    pub const ADMINISTRATORS: &str = "S-1-5-32-544"; // WHAT: the administrators group. WHY: the same.
+    const CHANGE: u32 = 0x2 | 0x4 | 0x10 | 0x40 | 0x1_0000 | 0x4_0000 | 0x8_0000 | 0x1000_0000 | 0x4000_0000; // WHAT: write, append, write attributes, delete child, delete, change permissions, take ownership, all, generic write. WHY: any of them lets an account swap what is there.
+
+    fn wide(s: &std::ffi::OsStr) -> Vec<u16> { use std::os::windows::ffi::OsStrExt; s.encode_wide().chain(Some(0)).collect() } // WHAT: a NUL-ended wide string. WHY: what the calls take.
+
+    /// A SID as text (S-1-…), freed after. `sid` is one the system handed back, or null.
+    fn sid_text(sid: PSID) -> Option<String> {
+        if sid.is_null() { return None; } // WHAT: no SID. WHY: nothing to convert.
+        // SAFETY: `sid` points at a SID the system wrote (a token's or a security descriptor's, still held by the caller);
+        // ConvertSidToStringSidW allocates a NUL-ended string that is read up to its NUL and then freed once with LocalFree.
+        unsafe {
+            let mut w: windows_sys::core::PWSTR = null_mut(); // WHAT: the text the system makes. WHY: freed below.
+            if ConvertSidToStringSidW(sid, &mut w) == 0 || w.is_null() { return None; } // WHAT: convert. WHY: compared as text.
+            let mut n = 0; while *w.add(n) != 0 { n += 1; } // WHAT: its length. WHY: NUL-ended.
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(w, n)); if !LocalFree(w as _).is_null() { return None; } Some(s) // WHAT: copy, then free; a failed free is a refusal. WHY: no leak, nothing ignored.
+        }
+    }
+
+    /// The SID of the account this program runs as.
+    pub fn me() -> Result<String> {
+        // SAFETY: the token handle is this process's own, opened for query and closed once; the buffer is u64-aligned and
+        // as large as GetTokenInformation said, so the TOKEN_USER it writes there is read in bounds.
+        let sid = unsafe {
+            let mut tok: HANDLE = null_mut(); // WHAT: this process's token. WHY: it names the account.
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 { bail!("could not read this program's own account"); } // WHAT: open it. WHY: read only.
+            let mut need = 0u32; let _sizing = GetTokenInformation(tok, TokenUser, null_mut(), 0, &mut need); // WHAT: the size needed; this call fails by design, its answer is `need`. WHY: asked first.
+            if need == 0 { CloseHandle(tok); bail!("could not read this program's own account"); } // WHAT: no size is a refusal. WHY: nothing ignored.
+            let mut buf = vec![0u64; (need as usize).div_ceil(8).max(1)]; // WHAT: room for it, aligned. WHY: TOKEN_USER holds a pointer.
+            let ok = GetTokenInformation(tok, TokenUser, buf.as_mut_ptr().cast(), (buf.len() * 8) as u32, &mut need); let closed = CloseHandle(tok); // WHAT: read it, close the token. WHY: no leak.
+            if ok == 0 || closed == 0 { bail!("could not read this program's own account"); } // WHAT: refuse either failure. WHY: never guess whose folder it is.
+            sid_text((*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid) // WHAT: the SID, while the buffer still holds it. WHY: compared and granted.
+        };
+        sid.ok_or_else(|| anyhow!("this program's account has no SID")) // WHAT: refuse none. WHY: the same.
+    }
+
+    /// Builds a security descriptor from SDDL text and hands it to `with`, freeing it after.
+    fn with_descriptor<T>(sddl: &str, with: impl FnOnce(PSECURITY_DESCRIPTOR) -> Result<T>) -> Result<T> {
+        let text: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect(); let mut sd: PSECURITY_DESCRIPTOR = null_mut(); // WHAT: the permissions in SDDL. WHY: one well-checked parser.
+        // SAFETY: `text` is NUL-ended and outlives the call; the descriptor the system allocates is used only inside `with`
+        // and freed once with LocalFree afterwards, whatever `with` returned.
+        unsafe {
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(text.as_ptr(), SDDL_REVISION_1, &mut sd, null_mut()) == 0 { bail!("could not build the permissions {sddl}"); } // WHAT: parse. WHY: refused if malformed.
+            let r = with(sd); if !LocalFree(sd as _).is_null() { bail!("could not free the permissions {sddl}"); } r // WHAT: use it, then free; a failed free is a refusal. WHY: no leak, nothing ignored.
+        }
+    }
+
+    fn aces(sids: &[&str]) -> String { sids.iter().map(|s| format!("(A;OICI;FA;;;{s})")).collect() } // WHAT: full control, inherited by everything inside, for each. WHY: files made inside get the same.
+
+    /// Makes a new folder that is born protected: owned by `owner`, only `sids` allowed, nothing inherited.
+    pub fn create_dir(path: &Path, owner: &str, sids: &[&str]) -> Result<()> {
+        let name = wide(path.as_os_str()); // WHAT: the folder's name. WHY: NUL-ended for the call.
+        with_descriptor(&format!("O:{owner}D:P{}", aces(sids)), |sd| { // WHAT: the folder's permissions. WHY: in place at the moment it exists.
+            let sa = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd, bInheritHandle: 0 }; // WHAT: handed to CreateDirectoryW. WHY: no gap where it is open.
+            // SAFETY: `name` is NUL-ended and `sa` points at a live descriptor for the length of the call.
+            let ok = unsafe { CreateDirectoryW(name.as_ptr(), &sa) }; // WHAT: make it. WHY: born protected.
+            if ok == 0 { bail!("making {}: {}", path.display(), std::io::Error::last_os_error()); } Ok(()) // WHAT: refuse. WHY: an existing folder is never reused.
+        })
+    }
+
+    /// Replaces an existing folder's permissions with `sids` only, protected, and passes them to everything inside.
+    pub fn lock(path: &Path, sids: &[&str]) -> Result<()> {
+        let name = wide(path.as_os_str()); // WHAT: the folder's name. WHY: NUL-ended for the call.
+        with_descriptor(&format!("D:P{}", aces(sids)), |sd| { // WHAT: the new list. WHY: as text, parsed by the system.
+            let (mut present, mut defaulted, mut dacl): (i32, i32, *mut ACL) = (0, 0, null_mut()); // WHAT: the list inside it. WHY: what SetNamedSecurityInfoW takes.
+            // SAFETY: `sd` is live for this closure, the DACL pointer taken from it is used only within it, and `name` is NUL-ended.
+            let r = unsafe { if GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) == 0 || present == 0 { 1 } else { SetNamedSecurityInfoW(name.as_ptr(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, null_mut(), null_mut(), dacl, null()) } }; // WHAT: set it, inheritance off. WHY: ProgramData's own entries go.
+            if r != 0 { bail!("could not set the permissions of {} (error {r})", path.display()); } Ok(()) // WHAT: say so. WHY: the backup then refuses.
+        })
+    }
+
+    /// A permissions list read back: the owner, whether it is protected, and each entry (type, flags, rights, SID).
+    pub type Perms = (Option<String>, bool, Vec<(u8, u8, u32, String)>); // WHAT: what read returns. WHY: named, so its users read plainly.
+
+    pub fn read(path: &Path) -> Result<Perms> {
+        let name = wide(path.as_os_str()); // WHAT: the name. WHY: NUL-ended for the call.
+        // SAFETY: `name` is NUL-ended; every pointer read (owner, DACL, each ACE and its SID) lies inside the security
+        // descriptor the system allocated for this call, which is freed once with LocalFree after the last read.
+        unsafe {
+            let (mut owner, mut dacl, mut sd): (PSID, *mut ACL, PSECURITY_DESCRIPTOR) = (null_mut(), null_mut(), null_mut()); // WHAT: what the system hands back. WHY: read below.
+            let r = GetNamedSecurityInfoW(name.as_ptr(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &mut owner, null_mut(), &mut dacl, null_mut(), &mut sd); // WHAT: owner and list. WHY: what decides who can change it.
+            if r != 0 { bail!("could not read the permissions of {} (error {r})", path.display()); } // WHAT: refuse. WHY: unknown is not safe.
+            let mut control = 0u16; let mut rev = 0u32; let read_flags = GetSecurityDescriptorControl(sd, &mut control, &mut rev) != 0; // WHAT: its flags. WHY: whether inheritance is off.
+            let mut out = Vec::new(); let mut ok = read_flags && !dacl.is_null(); // WHAT: the entries; unreadable flags or no list at all is a refusal. WHY: refused below.
+            if ok { let mut info = ACL_SIZE_INFORMATION { AceCount: 0, AclBytesInUse: 0, AclBytesFree: 0 }; ok = GetAclInformation(dacl, (&mut info as *mut ACL_SIZE_INFORMATION).cast(), std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32, AclSizeInformation) != 0; // WHAT: how many entries. WHY: each is read.
+                for i in 0..info.AceCount { let mut ace = null_mut(); if GetAce(dacl, i, &mut ace) == 0 { ok = false; break; } let h = *(ace as *const ACE_HEADER); // WHAT: one entry's header. WHY: its kind and flags.
+                    let (mask, sid) = if h.AceType == 0 { let a = ace as *const ACCESS_ALLOWED_ACE; ((*a).Mask, sid_text(std::ptr::addr_of!((*a).SidStart) as PSID).unwrap_or_default()) } else { (0, String::new()) }; // WHAT: an allow entry's rights and SID. WHY: others are judged by kind alone.
+                    out.push((h.AceType, h.AceFlags, mask, sid)); } } // WHAT: keep it. WHY: returned.
+            let who = sid_text(owner); if !LocalFree(sd as _).is_null() { ok = false; } // WHAT: the owner, then free; a failed free is a refusal. WHY: no leak, nothing ignored.
+            if !ok { bail!("{} has no readable permissions list", path.display()); } // WHAT: refuse. WHY: an empty or unreadable list lets everyone in.
+            Ok((who, control & SE_DACL_PROTECTED != 0, out))
+        }
+    }
+
+    /// Why someone other than the system, administrators or this account could change `path`, or `None`.
+    pub fn others_can_change(path: &Path) -> Option<String> {
+        let me = match me() { Ok(m) => m, Err(e) => return Some(format!("{e:#}")) }; let trusted = [SYSTEM, ADMINISTRATORS, me.as_str()]; // WHAT: who may. WHY: the server's own account and those who run the machine.
+        let (owner, _, list) = match read(path) { Ok(r) => r, Err(e) => return Some(format!("{e:#}")) }; // WHAT: its owner and list. WHY: judged below.
+        if !owner.as_deref().is_some_and(|o| trusted.contains(&o)) { return Some(format!("{} is owned by {}, who can change its permissions back", path.display(), owner.unwrap_or_else(|| "nobody known".into()))); } // WHAT: the owner. WHY: an owner can always give itself access.
+        for (kind, flags, mask, sid) in list { if u32::from(flags) & INHERIT_ONLY_ACE != 0 || kind == 1 { continue; } // WHAT: skip entries for what is inside, and denials. WHY: neither lets anyone change this one.
+            if kind != 0 { return Some(format!("{} has a kind of permission this program doesn't read ({kind}); refusing it", path.display())); } // WHAT: anything unusual. WHY: unknown is not safe.
+            if mask & CHANGE != 0 && !trusted.contains(&sid.as_str()) { return Some(format!("{} can be changed by {sid}", path.display())); } } // WHAT: a change right for anyone else. WHY: they could swap age or rclone.conf.
+        None
+    }
+
+    /// Whether `path` is a protected folder owned by `owner` with only `sids` allowed.
+    pub fn is_only(path: &Path, owner: &str, sids: &[&str]) -> Result<()> {
+        let (o, protected, list) = read(path)?; // WHAT: its permissions. WHY: checked once it is made.
+        if !protected { bail!("{} inherits permissions from its parent", path.display()); } // WHAT: inheritance off. WHY: the parent's entries would let others in.
+        if o.as_deref() != Some(owner) { bail!("{} is owned by {}, not this account", path.display(), o.unwrap_or_default()); } // WHAT: the owner. WHY: the same.
+        if let Some((k, _, _, sid)) = list.iter().find(|(k, _, _, sid)| *k != 0 || !sids.contains(&sid.as_str())) { bail!("{} lets in {sid} (kind {k})", path.display()); } // WHAT: only the allowed. WHY: the restore inherits this list.
+        Ok(())
+    }
+}
+
 /// The first file in the work folder holding an age private key, if any. `bin` (age's own program names the format) and
 /// the job's logs are skipped, and so is anything over 64 KB: a key file is a few lines.
 pub fn private_key_in(work: &Path) -> Option<PathBuf> {
@@ -192,7 +343,7 @@ impl Target {
             return Ok(Target::Rclone { exe, config: work.join("rclone.conf"), remote: remote.trim_end_matches('/').to_string() }); // WHAT: the remote and its settings file. WHY: Creede makes rclone.conf on the box; this program never reads it, rclone does.
         }
         if spec.trim().is_empty() { bail!("no target given"); } // WHAT: refuse nothing. WHY: a backup must go somewhere.
-        Ok(Target::Folder(PathBuf::from(spec))) // WHAT: a folder. WHY: the tests, a USB disk or a NAS.
+        Ok(Target::Folder(std::path::absolute(spec.trim())?)) // WHAT: a folder, by its full path. WHY: the tests, a USB disk or a NAS; compared and shown as one place, wherever this was started.
     }
 
     /// Where it went, in words, for the ops report. No keys, no account numbers.
@@ -223,6 +374,8 @@ impl Target {
             Target::Folder(_) => {
                 let dst = self.folder_path(key)?; // WHAT: where it lands. WHY: checked above.
                 if dst.exists() { bail!("{key} is already there; a backup is never written over"); } // WHAT: refuse an overwrite. WHY: what was sent stays as it was sent.
+                #[cfg(test)]
+                if let Some(n) = FAIL_PUT_AFTER.with(|f| f.get()) { if n == 0 { bail!("a planted upload failure"); } FAIL_PUT_AFTER.with(|f| f.set(Some(n - 1))); } // WHAT: the tests' connection that drops part way. WHY: the next night must still run.
                 #[cfg(test)]
                 if LOSE_UPLOADS.with(|l| l.get()).is_some_and(|f| key.starts_with(f)) { return Ok(()); } // WHAT: the tests' lossy bucket says yes and keeps nothing. WHY: the read-back must catch it.
                 if let Some(p) = dst.parent() { std::fs::create_dir_all(p)?; } // WHAT: its folder. WHY: the first one makes it.
@@ -420,7 +573,7 @@ impl TarOut<'_> {
 
 /// Reads an archive into a folder. Refuses anything that isn't a short plain file name: a damaged or planted
 /// archive can never write outside `into`.
-fn untar(r: &mut dyn Read, into: &Path, limit: u64) -> Result<Vec<String>> {
+fn untar(r: &mut dyn Read, into: &Path, limit: u64, expect: &[(&str, u64)]) -> Result<Vec<String>> {
     let mut names = Vec::new(); // WHAT: what came out. WHY: the caller checks it.
     let mut total = 0u64; // WHAT: bytes so far. WHY: a planted archive can't fill the disk.
     loop {
@@ -436,6 +589,8 @@ fn untar(r: &mut dyn Read, into: &Path, limit: u64) -> Result<Vec<String>> {
         let name = std::str::from_utf8(&h[..end])?.to_string(); // WHAT: the name. WHY: checked next.
         if !key_ok(&name) || h[345] != 0 { bail!("the archive holds a name this program never writes: {name:?}; refusing it"); } // WHAT: only our plain names, no prefix field. WHY: no ../, no absolute path, no drive letter.
         let size = field(124, 136).and_then(|t| u64::from_str_radix(&t, 8).ok()).ok_or_else(|| anyhow!("a damaged size in the archive"))?; // WHAT: its size. WHY: how much to read.
+        let Some(&(_, cap)) = expect.iter().find(|(n, _)| *n == name) else { bail!("the archive holds {name:?}, which this program never restores; refusing it"); }; // WHAT: only the names expected. WHY: nothing else is ever written.
+        if size > cap { bail!("{name} in the archive is {size} bytes, over the {cap} allowed; refusing it"); } // WHAT: each name's own cap, before writing. WHY: a planted giant never reaches the disk.
         total += size; if total > limit { bail!("the archive is bigger than it said it would be; refusing it"); } // WHAT: the cap. WHY: never fill the disk on a planted archive.
         let path = name.split('/').fold(into.to_path_buf(), |p, s| p.join(s)); // WHAT: where it goes. WHY: inside `into`, by construction.
         if !path.starts_with(into) || path.components().count() != into.components().count() + name.split('/').count() { bail!("an archive name would land outside its folder: {name:?}; refusing it"); } // WHAT: checked again, by path. WHY: never written outside, whatever the name check missed.
@@ -500,10 +655,14 @@ pub struct Marker {
     #[serde(default)]
     pub ok: Option<bool>,                   // WHAT: a drill's result. WHY: only a pass counts.
     #[serde(default)]
-    pub at: Option<String>,                 // WHAT: when the drill ran. WHY: restoreTested.
+    pub at: Option<String>,                 // WHAT: when the drill ran, or the night failed. WHY: restoreTested, lastFailed.
+    #[serde(default)]
+    pub why: Option<String>,                // WHAT: why the night failed. WHY: lastFailedWhy.
 }
 
 pub const BACKUP_MARKER: &str = "offsite-backup.json"; // WHAT: written after a confirmed backup. WHY: the ops report's backupDays.
+pub const FAILED_MARKER: &str = "offsite-failed.json"; // WHAT: written after a failed night, removed after a good one. WHY: the ops report's lastFailed.
+const BUSY: &str = "another off-site backup is still running"; // WHAT: the lock's refusal. WHY: a run already going is not a failed night.
 pub const DRILL_MARKER: &str = "offsite-drill.json";   // WHAT: written after a passed drill. WHY: the ops report's restoreTested.
 
 /// What the ops report says about off-site backups: each field `None` when unknown, never a guess.
@@ -514,6 +673,10 @@ pub struct Report {
     pub r#where: Option<String>,        // WHAT: where it went. WHY: "backed up" means nothing without where.
     #[serde(rename = "restoreTested")]
     pub restore_tested: Option<String>, // WHAT: when a drill last passed. WHY: a backup never restored is unproven.
+    #[serde(rename = "lastFailed")]
+    pub last_failed: Option<String>,    // WHAT: when the last night failed, until a good one. WHY: a failure reaches Fleet, not only the log.
+    #[serde(rename = "lastFailedWhy")]
+    pub last_failed_why: Option<String>, // WHAT: why it failed. WHY: what to look at first.
 }
 
 fn past_time(s: &Option<String>) -> Option<time::OffsetDateTime> {
@@ -531,11 +694,14 @@ fn read_marker(path: &Path) -> Option<Marker> {
 pub fn report(data: &Path) -> Report {
     let b = read_marker(&data.join(BACKUP_MARKER)).unwrap_or_default(); // WHAT: the backup marker. WHY: unknown when absent.
     let d = read_marker(&data.join(DRILL_MARKER)).unwrap_or_default(); // WHAT: the drill marker. WHY: the same.
+    let f = read_marker(&data.join(FAILED_MARKER)).unwrap_or_default(); // WHAT: the failure marker. WHY: the same.
     let iso = |t: time::OffsetDateTime| t.format(&time::format_description::well_known::Rfc3339).ok(); // WHAT: back to text. WHY: one form in the report.
     Report {
         last_good: past_time(&b.last_good).and_then(iso),                                             // WHAT: a real past time, or None. WHY: never a guess.
         r#where: b.r#where.filter(|_| past_time(&b.last_good).is_some()).map(|w| w.chars().take(200).collect()), // WHAT: where, with a good time only. WHY: half a marker is no marker.
         restore_tested: if d.ok == Some(true) { past_time(&d.at).and_then(iso) } else { None },       // WHAT: a passed drill's time only. WHY: a failed drill proves nothing.
+        last_failed: past_time(&f.at).and_then(iso),                                                  // WHAT: a real past time, or None. WHY: never a guess.
+        last_failed_why: f.why.filter(|_| past_time(&f.at).is_some()).map(|w| w.chars().take(300).collect()), // WHAT: why, with a good time only. WHY: half a marker is no marker.
     }
 }
 
@@ -579,6 +745,16 @@ impl Job<'_> {
 
     /// The nightly backup. Returns the exit code to end with.
     pub fn backup(&self) -> Exit {
+        let e = self.backup_run(); // WHAT: the run. WHY: its end is recorded below.
+        if self.mark { // WHAT: only for the server's own target. WHY: a hand run elsewhere says nothing about the nightly copy.
+            let failed = self.data.join(FAILED_MARKER); // WHAT: the failure marker. WHY: the ops report's lastFailed.
+            if e.code == 0 || e.code == 5 { let _ = std::fs::remove_file(&failed); } // WHAT: a good night clears it. WHY: the failure is over.
+            else if !e.why.starts_with(BUSY) { let m = Marker { at: time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).ok(), why: Some(e.why.chars().take(300).collect()), ..Marker::default() }; if let Err(w) = serde_json::to_vec_pretty(&m).map_err(anyhow::Error::from).and_then(|b| write_atomic(&failed, &b)) { self.log(&format!("WARNING: could not write {FAILED_MARKER}: {w:#}")); } } // WHAT: when and why it failed. WHY: Fleet sees a failed night, not only an old one; a run already going is not a failure.
+        }
+        e
+    }
+
+    fn backup_run(&self) -> Exit {
         let own = self.own(); // WHAT: the job's folder. WHY: lock, stage and spool live there.
         if inside(&own, &self.data) || inside(&self.data, &own) { return refuse(4, "the work folder and the data folder must be apart: a backup inside what it backs up grows forever"); } // WHAT: refuse overlap. WHY: the spool would be backed up into itself.
         if let Err(e) = create_private_dir(&own).and_then(|_| create_private_dir(&own.join("spool"))) { return refuse(2, format!("could not make {}: {e}", own.display())); } // WHAT: make it, owner-only. WHY: the first run; the stage inside holds the database unencrypted.
@@ -599,6 +775,7 @@ impl Job<'_> {
         let own = self.own(); // WHAT: the job's folder. WHY: spool and salt.
         let recipients = self.work.join("age-recipients.txt"); // WHAT: the public key file. WHY: Creede puts it there.
         let keys = check_recipients(&std::fs::read_to_string(&recipients).unwrap_or_default()).map_err(|e| refuse(2, format!("{e} ({})", recipients.display())))?; // WHAT: check it first. WHY: refuse before anything is copied.
+        if let Some(why) = others_can_change(&self.work) { return Err(refuse(2, format!("{why}; only the system, administrators and this server's own account may change the work folder, its bin and rclone.conf (README.md, Off-site backups)"))); } // WHAT: refuse a work folder others could change. WHY: whoever can swap bin/age or rclone.conf can read or redirect every backup.
         if let Some(found) = private_key_in(&self.work) { return Err(refuse(2, format!("{} holds a PRIVATE key. Only the public line (age1...) belongs on this server: move that file off this machine, to Creede", found.display()))); } // WHAT: a private key anywhere in the work folder. WHY: the key that opens every backup must never sit beside them.
         if let Target::Rclone { config, exe, .. } = &self.target { if !config.exists() || !exe.exists() { return Err(refuse(2, format!("rclone or its settings are missing ({} / {}). Creede sets these up once (README.md, Off-site backups).", exe.display(), config.display()))); } } // WHAT: the bucket's settings. WHY: say what's missing, not an rclone error at night.
         if let Some(exe) = self.cipher.program() { if !exe.exists() { return Err(refuse(2, format!("age is missing ({})", exe.display()))); } } // WHAT: the lock program. WHY: the same.
@@ -628,10 +805,10 @@ impl Job<'_> {
         let mut damaged = Vec::new(); // WHAT: files whose bytes don't match their name. WHY: never sent, and reported.
         let mut warned = 0usize; // WHAT: warnings that leave tonight's backup good but not clean. WHY: exit 5, for someone to look at.
         let send = |sizes: &mut BTreeMap<String, u64>| -> std::result::Result<(), Exit> { // WHAT: send one batch and note each file's encrypted size. WHY: the sizes the read-back expects.
-            let mut batch = BTreeMap::new(); // WHAT: this batch's sizes. WHY: noted only once sent.
+            let mut batch = BTreeMap::new(); // WHAT: this batch's sizes. WHY: kept before sending, so a batch cut short is checked, not unknown.
             for e in std::fs::read_dir(&outgoing).map_err(|e| refuse(2, e))?.flatten() { batch.insert(e.file_name().to_string_lossy().into_owned(), e.metadata().map_err(|e| refuse(2, e))?.len()); } // WHAT: each encrypted file's size. WHY: as sent.
+            sizes.extend(batch); write_atomic(&index_path, &serde_json::to_vec(&*sizes).map_err(|e| refuse(2, e))?).map_err(|e| refuse(2, format!("could not keep the sizes of the files being sent: {e:#}")))?; // WHAT: keep the sizes first. WHY: whatever the send does, tomorrow knows what each object should be.
             self.target.put_all(&outgoing, "blobs").map_err(|e| refuse(3, format!("sending files failed: {e:#}")))?; // WHAT: send them. WHY: off the box.
-            sizes.extend(batch); write_atomic(&index_path, &serde_json::to_vec(&*sizes).map_err(|e| refuse(2, e))?).map_err(|e| refuse(2, format!("could not keep the sizes of the files sent: {e:#}")))?; // WHAT: keep the sizes. WHY: tomorrow's read-back checks them too.
             let _ = std::fs::remove_dir_all(&outgoing); Ok(()) // WHAT: empty the spool. WHY: never holds the whole data.
         };
         for (digest, (path, size)) in &on_disk { // WHAT: each file. WHY: the new ones are sent.
@@ -653,8 +830,10 @@ impl Job<'_> {
         let after: BTreeMap<String, u64> = self.target.list("blobs").map_err(|e| refuse(3, format!("could not read the bucket back: {e:#}")))?.into_iter().collect(); // WHAT: read the bucket back. WHY: only what is really there counts.
         let unknown = on_disk.keys().filter(|d| !sizes.contains_key(&object_for(&salt, d))).count(); // WHAT: files in the bucket whose sent size this job never noted. WHY: their size can't be checked.
         if unknown > 0 { return Err(refuse(3, format!("{unknown} file(s) in the target have no record of the size they were sent at ({}); not marking. If that file was lost, move it and name-salt.txt aside: the next run sends every file again under new names", index_path.display()))); } // WHAT: refuse. WHY: only an exact size proves the object whole.
-        let absent = on_disk.keys().filter(|d| { let o = object_for(&salt, d); after.get(&o) != sizes.get(&o) }).count(); // WHAT: files not there at exactly the size sent. WHY: a short or padded object is not the one sent.
-        if absent > 0 { return Err(refuse(3, format!("{absent} file(s) are not in the target at the size they were sent; not marking"))); } // WHAT: refuse. WHY: a catalog must never name a file the target doesn't hold.
+        let absent = on_disk.keys().filter(|d| !after.contains_key(&object_for(&salt, d))).count(); // WHAT: files not in the target at all. WHY: a catalog must never name one.
+        if absent > 0 { return Err(refuse(3, format!("{absent} file(s) are not in the target after sending; not marking"))); } // WHAT: refuse. WHY: the next night sends them.
+        let wrong: Vec<String> = on_disk.keys().filter_map(|d| { let o = object_for(&salt, d); match (after.get(&o), sizes.get(&o)) { (Some(a), Some(w)) if a != w => Some(format!("blobs/{o} is {a} bytes, sent as {w}")), _ => None } }).collect(); // WHAT: objects of another size than sent, by name. WHY: someone can find and delete each one.
+        if !wrong.is_empty() { return Err(refuse(3, format!("{} file(s) are not in the target at the size they were sent; not marking. Delete each from the target and the next night sends it again: {}", wrong.len(), wrong.iter().take(5).cloned().collect::<Vec<_>>().join("; ")))); } // WHAT: refuse, naming up to five. WHY: a short or padded object is not the one sent, and is never written over.
         self.log(&format!("files: {} in all, {sent} new sent ({:.1} MB), every one read back", on_disk.len(), sent_bytes as f64 / 1048576.0)); // WHAT: the tally. WHY: upload time and cost follow from it.
 
         // 3. the catalog: database and manifest, packed, gzipped and locked
@@ -707,8 +886,8 @@ fn hold_lock(path: &Path) -> std::result::Result<std::fs::File, Exit> {
     let mut o = std::fs::OpenOptions::new(); o.read(true).write(true).create(true).truncate(false); // WHAT: open or make it, never emptied. WHY: its contents don't matter, only the hold.
     #[cfg(windows)]
     std::os::windows::fs::OpenOptionsExt::share_mode(&mut o, 0); // WHAT: no sharing. WHY: a second run can't even open it.
-    let f = match o.open(path) { Ok(f) => f, Err(e) if e.raw_os_error() == Some(32) => return Err(refuse(2, format!("another off-site backup is still running ({})", path.display()))), Err(e) => return Err(refuse(2, format!("could not open the lock {}: {e}", path.display()))) }; // WHAT: open it; Windows' sharing violation is a run going. WHY: say which.
-    match f.try_lock() { Ok(()) => Ok(f), Err(std::fs::TryLockError::WouldBlock) => Err(refuse(2, format!("another off-site backup is still running ({})", path.display()))), Err(std::fs::TryLockError::Error(e)) => Err(refuse(2, format!("could not lock {}: {e}", path.display()))) } // WHAT: the system's lock. WHY: never two at once.
+    let f = match o.open(path) { Ok(f) => f, Err(e) if e.raw_os_error() == Some(32) => return Err(refuse(2, format!("{BUSY} ({})", path.display()))), Err(e) => return Err(refuse(2, format!("could not open the lock {}: {e}", path.display()))) }; // WHAT: open it; Windows' sharing violation is a run going. WHY: say which.
+    match f.try_lock() { Ok(()) => Ok(f), Err(std::fs::TryLockError::WouldBlock) => Err(refuse(2, format!("{BUSY} ({})", path.display()))), Err(std::fs::TryLockError::Error(e)) => Err(refuse(2, format!("could not lock {}: {e}", path.display()))) } // WHAT: the system's lock. WHY: never two at once.
 }
 
 /// A fault's message, for the log.
@@ -720,6 +899,8 @@ fn panic_words(p: &(dyn std::any::Any + Send)) -> String {
 thread_local! {
     /// The tests' fault inside a run, and the tests' file changed while it is sent.
     pub(crate) static FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; // WHAT: panic inside the run. WHY: proves it becomes exit 3.
+    pub(crate) static LOOSEN_SCRATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; // WHAT: open the scratch folder up just after it is made. WHY: proves the check after making it.
+    pub(crate) static FAIL_PUT_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; // WHAT: uploads that succeed before one fails. WHY: proves a batch cut short doesn't block later nights.
     pub(crate) static CHANGE_WHILE_SENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; // WHAT: rewrite a file between its check and its encryption. WHY: proves the fingerprint taken while sending decides.
 }
 
@@ -803,24 +984,30 @@ fn create_private_dir(path: &Path) -> std::io::Result<()> {
 /// removed, full control for the person running it and the system only.
 fn new_private_dir(path: &Path) -> Result<()> {
     if let Some(up) = path.parent().filter(|p| !p.as_os_str().is_empty()) { std::fs::create_dir_all(up)?; } // WHAT: its parent. WHY: an ordinary folder above it.
-    let mut b = std::fs::DirBuilder::new(); // WHAT: not recursive. WHY: an existing folder is an error, not reused.
+    #[cfg(not(windows))]
+    { let mut b = std::fs::DirBuilder::new(); // WHAT: not recursive. WHY: an existing folder is an error, not reused.
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700); // WHAT: owner only, set as it is made. WHY: never open to others, even for a moment.
-    b.create(path).with_context(|| format!("making {}", path.display()))?; // WHAT: make it. WHY: fails if anything is already there.
+    b.create(path).with_context(|| format!("making {}", path.display()))?; } // WHAT: make it. WHY: fails if anything is already there.
     #[cfg(windows)]
-    windows_owner_only(path)?; // WHAT: the person and the system only. WHY: ProgramData and the drive's root let every account read.
-    Ok(())
+    { let me = winacl::me()?; winacl::create_dir(path, &me, &[&me, winacl::SYSTEM])?; } // WHAT: born with only this account and the system, nothing inherited. WHY: no moment when another account could plant a junction in it.
+    #[cfg(all(test, unix))]
+    if LOOSEN_SCRATCH.with(|l| l.get()) { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?; } // WHAT: the tests' folder opened up after it is made. WHY: proves the check below catches it.
+    check_private_dir(path) // WHAT: look at what was made. WHY: trust it only once checked.
 }
 
-/// Windows: replaces a new folder's permissions with full control for the person running this and the system, nothing
-/// inherited. icacls and whoami are run by their full paths.
-#[cfg(windows)]
-fn windows_owner_only(path: &Path) -> Result<()> {
-    let system = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows")).join("System32"); // WHAT: Windows' own programs. WHY: never found on a PATH somebody could change.
-    let who = Command::new(system.join("whoami.exe")).args(["/user", "/fo", "csv", "/nh"]).stdin(Stdio::null()).output().context("asking whoami who is running this")?; // WHAT: this account's SID. WHY: a SID works in any language and can't be a look-alike name.
-    let sid = String::from_utf8_lossy(&who.stdout).split(',').next_back().map(|s| s.trim().trim_matches('"').to_string()).filter(|s| s.starts_with("S-1-") && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).ok_or_else(|| anyhow!("whoami gave no SID"))?; // WHAT: the SID, checked. WHY: only a well-formed SID reaches icacls.
-    let done = Command::new(system.join("icacls.exe")).arg(path).args(["/inheritance:r", "/grant:r"]).arg(format!("*{sid}:(OI)(CI)F")).arg("*S-1-5-18:(OI)(CI)F").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().context("running icacls")?; // WHAT: nothing inherited; this account and the system, for everything inside. WHY: the restored files inherit it.
-    if !done.success() { bail!("icacls could not make it owner-only ({done})"); } // WHAT: refuse the drill. WHY: never restore into a folder others can read.
+/// A just-made folder is ours alone: a real folder (no link or reparse point), empty, and owner-only (Unix 0700; Windows:
+/// protected, owned by this account, only it and the system allowed).
+fn check_private_dir(path: &Path) -> Result<()> {
+    let m = std::fs::symlink_metadata(path).with_context(|| format!("looking at {}", path.display()))?; // WHAT: the folder itself. WHY: never what a link points at.
+    if !m.is_dir() || m.file_type().is_symlink() { bail!("{} is not a plain folder", path.display()); } // WHAT: a real folder. WHY: a link sends the restore elsewhere.
+    #[cfg(windows)]
+    if std::os::windows::fs::MetadataExt::file_attributes(&m) & 0x400 != 0 { bail!("{} is a reparse point", path.display()); } // WHAT: no junction. WHY: the same.
+    if std::fs::read_dir(path).with_context(|| format!("reading {}", path.display()))?.next().is_some() { bail!("{} is not empty", path.display()); } // WHAT: nothing in it yet. WHY: anything there was planted.
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; let mode = m.permissions().mode() & 0o777; if mode != 0o700 { bail!("{} is mode {mode:o}, not 0700", path.display()); } } // WHAT: owner only. WHY: never open to others.
+    #[cfg(windows)]
+    { let me = winacl::me()?; winacl::is_only(path, &me, &[&me, winacl::SYSTEM])?; } // WHAT: protected, ours, only us and the system. WHY: the restore inherits it.
     Ok(())
 }
 
@@ -828,7 +1015,9 @@ fn windows_owner_only(path: &Path) -> Result<()> {
 fn link_inside(dir: &Path) -> Option<PathBuf> {
     let mut stack = vec![dir.to_path_buf()]; // WHAT: folders to look in. WHY: the whole restore.
     while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).ok()?.flatten() {
+        let Ok(rd) = std::fs::read_dir(&d) else { return Some(d) }; // WHAT: a folder that can't be read is a refusal. WHY: what it hides can't be checked.
+        for e in rd {
+            let Ok(e) = e else { return Some(d) }; // WHAT: an entry that can't be read. WHY: the same.
             let Ok(m) = std::fs::symlink_metadata(e.path()) else { return Some(e.path()) }; // WHAT: the entry itself. WHY: one that can't be looked at isn't trusted.
             #[cfg(windows)]
             if std::os::windows::fs::MetadataExt::file_attributes(&m) & 0x400 != 0 { return Some(e.path()); } // WHAT: FILE_ATTRIBUTE_REPARSE_POINT. WHY: a junction points elsewhere like a link.
@@ -890,13 +1079,19 @@ pub struct Drill<'a> {
 impl Drill<'_> {
     /// Runs the drill. RESTORE DRILL PASSED, or the reason it didn't.
     pub fn run(&self) -> Exit {
+        let identity = match std::path::absolute(&self.identity) { Ok(p) => p, Err(e) => return refuse(4, format!("the key file {}: {e}", self.identity.display())) }; // WHAT: the key's full path. WHY: the opened key goes beside it, never in whatever folder this was started from.
+        if let Some(why) = others_can_change(&self.job.work) { return refuse(2, format!("{why}; the drill runs bin/age with the private key, so only the system, administrators and this account may change the work folder")); } // WHAT: refuse a work folder others could change. WHY: a swapped age would be handed the key.
+        clear_leftover_keys(&identity, &self.job); // WHAT: opened keys an interrupted drill left. WHY: they open every backup.
+        guard_on_interrupt(); // WHAT: Ctrl+C or a stop signal deletes the opened key and the restore. WHY: they must not outlive the drill.
         if std::fs::symlink_metadata(&self.scratch).is_ok() { return refuse(4, format!("the scratch folder {} must not exist yet: the drill makes it, owner-only", self.scratch.display())); } // WHAT: refuse any folder, file or link already there. WHY: a folder made earlier may be open to others, or hold anything.
         if inside(&self.scratch, &self.job.data) || inside(&self.job.data, &self.scratch) { return refuse(4, "the scratch folder must be apart from the live data folder"); } // WHAT: refuse overlap. WHY: a restore must never land on the real data.
-        if let Err(e) = new_private_dir(&self.scratch) { let _ = std::fs::remove_dir_all(&self.scratch); return refuse(4, format!("could not make {} owner-only: {e:#}", self.scratch.display())); } // WHAT: make it, owner-only from the start. WHY: the restore goes there in plaintext, and inherits it.
-        let key = match OpenedKey::open(&self.job.cipher, &self.identity) { Ok(k) => k, Err(e) => { let _ = std::fs::remove_dir_all(&self.scratch); return refuse(2, format!("{e:#}")); } }; // WHAT: a locked key opened once. WHY: a drill decrypts many files; one passphrase, not one per file.
+        if let Err(e) = new_private_dir(&self.scratch) { let _ = std::fs::remove_dir_all(&self.scratch); return refuse(4, format!("could not make {} owner-only: {e:#}", self.scratch.display())); }
+        hold_secret(&self.scratch); // WHAT: the restore is deleted on Ctrl+C. WHY: it is plaintext. // WHAT: make it, owner-only from the start. WHY: the restore goes there in plaintext, and inherits it.
+        let key = match OpenedKey::open(&self.job.cipher, &identity) { Ok(k) => k, Err(e) => { let _ = std::fs::remove_dir_all(&self.scratch); let_go(&self.scratch); return refuse(2, format!("{e:#}")); } }; // WHAT: a locked key opened once. WHY: a drill decrypts many files; one passphrase, not one per file.
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_in(&key.path))).unwrap_or_else(|p| Err(refuse(3, format!("the drill stopped part way: {}", panic_words(p.as_ref()))))); // WHAT: the drill; a fault inside is a failed drill. WHY: the clean-up below runs whatever happened.
         drop(key); // WHAT: delete the opened key now. WHY: it opens every backup.
         if !self.keep || r.is_err() { let _ = std::fs::remove_dir_all(&self.scratch); } // WHAT: delete the restored copy. WHY: it is plaintext.
+        let_go(&self.scratch); // WHAT: the drill is over. WHY: a kept restore is the person's now.
         match r {
             Ok(summary) if !self.job.mark => { self.job.log(&format!("RESTORE DRILL PASSED (from {}, not this server's own target: not marked): {summary}", self.job.target.words())); Exit { code: 0, why: String::new() } } // WHAT: a drill of another target. WHY: restoreTested speaks for the server's own off-site copy only.
             Ok(summary) => {
@@ -913,14 +1108,21 @@ impl Drill<'_> {
         let name = match &self.object { Some(o) => o.clone(), None => { let mut all = Vec::new(); for f in ["daily", "weekly", "monthly"] { for (n, _) in j.target.list(f).map_err(|e| refuse(3, format!("could not list the bucket: {e:#}")))? { if believable(j.product.id, &n, time::OffsetDateTime::now_utc()) { all.push(format!("{f}/{n}")); } } } all.sort_by_key(|k| k.rsplit('/').next().unwrap_or("").to_string()); all.pop().ok_or_else(|| refuse(3, "there is no backup in the target to drill"))? } }; // WHAT: the catalog, or the newest anywhere. WHY: --latest by default.
         let base = name.rsplit('/').next().unwrap_or(&name).to_string(); // WHAT: its own name. WHY: checked against the manifest.
         if parse_name(j.product.id, &base).is_none() || !key_ok(&name) { return Err(refuse(4, format!("{name} isn't one of this product's catalogs"))); } // WHAT: refuse a stranger. WHY: only our names are fetched.
-        let enc = dl.join(&base); j.target.get(&name, &enc).map_err(|e| refuse(3, format!("download failed: {e:#}")))?; j.target.get(&format!("{name}.json"), &dl.join("sidecar.json")).map_err(|e| refuse(3, format!("its sidecar is missing: {e:#}")))?; // WHAT: fetch both. WHY: the sidecar has the fingerprint.
-        let side: Sidecar = serde_json::from_slice(&read_capped(&dl.join("sidecar.json"), SIDECAR_CAP).map_err(|e| refuse(2, format!("the sidecar: {e:#}")))?).map_err(|e| refuse(2, format!("the sidecar doesn't read: {e}")))?; // WHAT: read it, if small. WHY: the fingerprint to compare; a planted huge one is refused unread.
+        let (folder, _) = name.rsplit_once('/').filter(|(f, _)| ["daily", "weekly", "monthly"].contains(f)).ok_or_else(|| refuse(4, format!("{name} isn't in daily/, weekly/ or monthly/")))?; // WHAT: its folder. WHY: listed first.
+        let listed: BTreeMap<String, u64> = j.target.list(folder).map_err(|e| refuse(3, format!("could not list {folder}: {e:#}")))?.into_iter().collect(); // WHAT: what is there and how big, before fetching anything. WHY: sizes are checked before a byte comes down.
+        let side_size = *listed.get(&format!("{base}.json")).ok_or_else(|| refuse(3, format!("{name}'s sidecar is missing")))?; // WHAT: the sidecar's listed size. WHY: checked next.
+        if side_size > SIDECAR_CAP { return Err(refuse(2, format!("the sidecar is listed at {side_size} bytes, over the {SIDECAR_CAP} a sidecar can be; not fetched"))); } // WHAT: refuse a giant sidecar unfetched. WHY: it would fill the scratch drive.
+        j.target.get(&format!("{name}.json"), &dl.join("sidecar.json")).map_err(|e| refuse(3, format!("its sidecar is missing: {e:#}")))?; // WHAT: the sidecar first. WHY: it says how big the catalog must be.
+        let side: Sidecar = serde_json::from_slice(&read_capped(&dl.join("sidecar.json"), SIDECAR_CAP).map_err(|e| refuse(2, format!("the sidecar: {e:#}")))?).map_err(|e| refuse(2, format!("the sidecar doesn't read: {e}")))?; // WHAT: read it, if small. WHY: the fingerprint and size to compare.
+        let cat_size = listed.get(&base).copied(); // WHAT: the catalog's listed size. WHY: compared with the sidecar before fetching.
+        if cat_size != Some(side.age_bytes) { return Err(refuse(2, format!("the catalog is listed at {} bytes and its sidecar says {}; not fetched", cat_size.map(|n| n.to_string()).unwrap_or_else(|| "no".into()), side.age_bytes))); } // WHAT: refuse a catalog of another size. WHY: a hostile one can't fill the scratch drive.
+        let enc = dl.join(&base); j.target.get(&name, &enc).map_err(|e| refuse(3, format!("download failed: {e:#}")))?; // WHAT: now the catalog. WHY: its size is known good.
         if side.name != base || sha256_file(&enc).map_err(|e| refuse(2, e))? != side.age_sha256 { return Err(refuse(2, "the downloaded catalog is not the one that was uploaded (its fingerprint differs)")); } // WHAT: compare. WHY: a damaged or swapped download is caught before decrypting.
         j.log(&format!("downloaded {name}; its fingerprint matches")); // WHAT: note it. WHY: step one passed.
         let tgz = dl.join("catalog.tar.gz"); j.cipher.decrypt_file(identity, &enc, &tgz).map_err(|e| refuse(2, format!("{e:#}")))?; // WHAT: decrypt with Creede's key. WHY: only that key opens it.
         let restored = self.scratch.join("restored"); // WHAT: the restored data folder. WHY: what a real restore copies into place.
         let mut gz = flate2::read::GzDecoder::new(std::fs::File::open(&tgz).map_err(|e| refuse(2, e))?); // WHAT: gunzip. WHY: the catalog is gzipped.
-        let names = untar(&mut gz, &restored, 64 << 30).map_err(|e| refuse(2, format!("unpacking failed: {e:#}")))?; let _ = std::fs::remove_file(&tgz); // WHAT: unpack safely, then drop the plaintext tarball. WHY: only our names, never outside.
+        let names = untar(&mut gz, &restored, 64 << 30, &[("manifest.json", MANIFEST_CAP), (j.product.database, 64 << 30)]).map_err(|e| refuse(2, format!("unpacking failed: {e:#}")))?; let _ = std::fs::remove_file(&tgz); // WHAT: unpack safely, then drop the plaintext tarball. WHY: only our names, never outside.
         if names.len() != 2 || !names.iter().any(|n| n == "manifest.json") || !names.iter().any(|n| n == j.product.database) { return Err(refuse(2, format!("the catalog holds {names:?}, not a manifest and a database"))); } // WHAT: exactly the two files. WHY: anything else is not ours.
         let man: Manifest = serde_json::from_slice(&read_capped(&restored.join("manifest.json"), MANIFEST_CAP).map_err(|e| refuse(2, format!("the manifest: {e:#}")))?).map_err(|e| refuse(2, format!("the manifest doesn't read: {e}")))?; let _ = std::fs::remove_file(restored.join("manifest.json")); // WHAT: read it if within the cap, then leave a clean data folder. WHY: what the drill checks against.
         valid_manifest(j.product, &man).map_err(|e| refuse(2, format!("the manifest is not one this program writes: {e:#}")))?; // WHAT: every field as written. WHY: a planted manifest can't steer what is fetched or where it goes.
@@ -963,12 +1165,13 @@ impl OpenedKey {
     fn open(cipher: &Cipher, identity: &Path) -> Result<OpenedKey> {
         let mut head = [0u8; 21]; let n = std::fs::File::open(identity).with_context(|| format!("reading the key file {}", identity.display()))?.read(&mut head)?; // WHAT: the file's first bytes. WHY: a locked key starts with age's header.
         if !(head[..n].starts_with(b"age-encryption.org/v1") || head[..n].starts_with(b"FAKEPASS1")) { return Ok(OpenedKey { path: identity.to_path_buf(), delete: false }); } // WHAT: not locked. WHY: used as it is.
-        let out = identity.parent().unwrap_or(Path::new(".")).join(format!(".drill-key-{}.txt", hex(&rand::random::<[u8; 6]>()))); // WHAT: beside the key, on the stick. WHY: the opened key never touches the server's disk.
-        cipher.unlock(identity, &out)?; Ok(OpenedKey { path: out, delete: true }) // WHAT: age asks for the passphrase once. WHY: one prompt for the whole drill.
+        let out = key_beside(identity)?; // WHAT: beside the key, on the stick. WHY: the opened key never touches the server's disk.
+        hold_secret(&out); // WHAT: deleted on Ctrl+C, even mid-prompt. WHY: it opens every backup.
+        if let Err(e) = cipher.unlock(identity, &out) { let _ = std::fs::remove_file(&out); let_go(&out); return Err(e); } Ok(OpenedKey { path: out, delete: true }) // WHAT: age asks for the passphrase once. WHY: one prompt for the whole drill.
     }
 }
 
-impl Drop for OpenedKey { fn drop(&mut self) { if self.delete { let _ = std::fs::remove_file(&self.path); } } } // WHAT: delete the opened key. WHY: it opens every backup; even a panic removes it.
+impl Drop for OpenedKey { fn drop(&mut self) { if self.delete { let _ = std::fs::remove_file(&self.path); let_go(&self.path); } } } // WHAT: delete the opened key. WHY: it opens every backup; even a panic removes it.
 
 // ---------------------------------------------------------------- the settings, the command line and the night
 
@@ -1031,9 +1234,52 @@ pub async fn nightly(server: crate::api::Shared) {
     }
 }
 
-/// Whether a run to `given` stands for the server's own off-site copy: only when it is the configured target.
-pub fn marks(configured: Option<&str>, given: Option<&str>) -> bool {
-    matches!((configured.map(str::trim), given.map(str::trim)), (Some(c), Some(g)) if !c.is_empty() && c == g) // WHAT: the same target as the setting. WHY: anything else is a hand run elsewhere.
+/// Whether a run stands for the server's own off-site copy: the target and the work folder given (`None`: as set) are
+/// the configured ones, compared as real places.
+pub fn marks(set_target: Option<&str>, set_work: Option<&str>, target: Option<&str>, work: Option<&str>) -> bool {
+    let set_target = set_target.map(str::trim).filter(|t| !t.is_empty()); // WHAT: the setting. WHY: none set means nothing marks.
+    let same_target = match (set_target, target.map(str::trim)) { (Some(_), None) => true, (Some(a), Some(b)) => same_place(a, b), _ => false }; // WHAT: the same target. WHY: a USB disk tried once is not the off-site copy.
+    let same_work = match (set_work, work) { (_, None) => true, (Some(a), Some(b)) => real_of(a) == real_of(b), (None, Some(_)) => false }; // WHAT: the same work folder. WHY: another one has its own salt and sizes.
+    same_target && same_work
+}
+
+fn real_of(p: &str) -> Option<PathBuf> { std::path::absolute(p.trim()).ok().map(|a| real(&a)) } // WHAT: a folder's real place. WHY: two spellings of one folder are the same.
+
+fn same_place(a: &str, b: &str) -> bool {
+    match (a.strip_prefix("rclone:"), b.strip_prefix("rclone:")) { (Some(x), Some(y)) => x.trim_end_matches('/') == y.trim_end_matches('/'), (None, None) => real_of(a).is_some() && real_of(a) == real_of(b), _ => false } // WHAT: the same remote, or the same real folder. WHY: compared as places, not text.
+}
+
+/// Where an opened key goes: a new name beside the key file, by its full path.
+fn key_beside(identity: &Path) -> Result<PathBuf> {
+    let full = std::path::absolute(identity)?; // WHAT: the key's full path. WHY: a relative one has no folder of its own.
+    Ok(full.parent().unwrap_or(Path::new("/")).join(format!(".drill-key-{}.txt", hex(&rand::random::<[u8; 6]>())))) // WHAT: beside it. WHY: on the stick, never the server's disk.
+}
+
+/// Deletes opened keys an interrupted drill left beside the key file, and says so.
+fn clear_leftover_keys(identity: &Path, job: &Job) {
+    let Some(dir) = identity.parent() else { return }; // WHAT: the key's folder. WHY: where opened keys go.
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let n = e.file_name().to_string_lossy().into_owned(); // WHAT: its name. WHY: only ours are touched.
+        if n.starts_with(".drill-key-") && n.ends_with(".txt") && std::fs::remove_file(e.path()).is_ok() { job.log(&format!("removed {n}, an opened key an earlier drill left behind beside {}", identity.display())); } // WHAT: delete it and say so. WHY: it opens every backup.
+    }
+}
+
+/// The files and folders a drill must not leave behind if it is stopped: the opened key and the restore.
+static SECRETS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new()); // WHAT: what to delete on Ctrl+C. WHY: a stopped drill leaves no plaintext or key.
+
+fn hold_secret(p: &Path) { if let Ok(mut v) = SECRETS.lock() { v.push(p.to_path_buf()); } } // WHAT: note it. WHY: deleted if stopped.
+fn let_go(p: &Path) { if let Ok(mut v) = SECRETS.lock() { v.retain(|x| x != p); } } // WHAT: forget it. WHY: deleted already, or kept on purpose.
+
+/// Deletes every noted secret (or, for a test, those under one folder): what Ctrl+C or a stop signal runs before the drill ends.
+pub(crate) fn delete_secrets(under: Option<&Path>) {
+    let held: Vec<PathBuf> = SECRETS.lock().map(|mut v| { let (go, stay): (Vec<PathBuf>, Vec<PathBuf>) = v.drain(..).partition(|p| under.is_none_or(|u| p.starts_with(u))); *v = stay; go }).unwrap_or_default(); // WHAT: take the ones to delete. WHY: each is deleted once.
+    for p in held { let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) }; } // WHAT: delete each. WHY: the key and the restore must not outlive the drill.
+}
+
+/// Sets, once, what Ctrl+C or a stop signal does during a drill: delete the secrets, then end.
+fn guard_on_interrupt() {
+    static ONCE: std::sync::Once = std::sync::Once::new(); // WHAT: once per process. WHY: the handler can be set only once.
+    ONCE.call_once(|| { let _ = ctrlc::set_handler(|| { delete_secrets(None); std::process::exit(130); }); }); // WHAT: delete, then end as interrupted. WHY: age's passphrase prompt can be stopped with Ctrl+C.
 }
 
 /// `--offsite-backup [TARGET]` and `--offsite-drill [TARGET] --identity KEY --scratch DIR [...]`, with the server's settings.
@@ -1044,13 +1290,14 @@ pub fn main_from_args(product: &'static Product, config: &crate::Config, version
     while i < args.len() { let a = &args[i]; if ["--full", "--keep"].contains(&a.as_str()) { flags.insert(a.clone()); i += 1; } else if ["--data", "--work", "--identity", "--scratch", "--object", "--sample"].contains(&a.as_str()) && i + 1 < args.len() { opt.insert(a.clone(), args[i + 1].clone()); i += 2; } else if i == 1 && !a.starts_with("--") { spec = Some(a.clone()); i += 1; } else { eprintln!("unknown or incomplete option {a}\n{usage}"); return 4; } } // WHAT: a target first, then --name value pairs and two flags. WHY: a mistyped option must not be ignored.
     let data = opt.get("--data").map(PathBuf::from).unwrap_or_else(|| config.data.clone()); // WHAT: the data folder the server uses, or the one given. WHY: the installed program finds its own drawings.
     let work = opt.get("--work").cloned().or_else(|| config.offsite_work.clone()); // WHAT: the work folder given, or the setting. WHY: the same as the night's.
+    let given = spec.clone(); // WHAT: the target typed, if any. WHY: decides whether this run marks.
     let target = spec.or_else(|| config.offsite_target.clone()); // WHAT: the target given, or the setting. WHY: a person can try another, such as a USB disk.
     let job = match job_from(product, data, work.as_deref(), target.as_deref(), version) { Ok(Some(j)) => j, Ok(None) => { eprintln!("The off-site backup isn't set up: HYPERVIEW_OFFSITE_TARGET and HYPERVIEW_OFFSITE_WORK are empty (README.md, Off-site backups)."); return 4; } Err(e) => { eprintln!("{e:#}"); return 4; } }; // WHAT: the job, or why not. WHY: say what is missing.
-    let mut job = job; job.mark = marks(config.offsite_target.as_deref(), target.as_deref()) && opt.get("--data").is_none_or(|d| Path::new(d) == config.data); // WHAT: mark only the server's own target and data. WHY: a backup by hand to a USB disk must not move backupDays.
+    let mut job = job; job.mark = marks(config.offsite_target.as_deref(), config.offsite_work.as_deref(), given.as_deref(), opt.get("--work").map(String::as_str)) && opt.get("--data").is_none_or(|d| real_of(d) == Some(real(&config.data))); // WHAT: mark only the server's own target, work folder and data, as real places. WHY: a backup by hand to a USB disk must not move backupDays.
     let exit = if mode == "--offsite-backup" { job.backup() } else { // WHAT: the backup now, or the drill. WHY: the two commands.
         let (Some(id), Some(scratch)) = (opt.get("--identity"), opt.get("--scratch")) else { eprintln!("{usage}"); return 4; }; // WHAT: the key and the scratch folder. WHY: both required.
         let sample = match opt.get("--sample").map(|s| s.parse::<usize>()) { None => 20, Some(Ok(n)) => n, Some(Err(_)) => { eprintln!("--sample takes a number\n{usage}"); return 4; } }; // WHAT: how many files a sample drill checks. WHY: 20 by default; a typo is refused.
-        Drill { job, identity: PathBuf::from(id), scratch: PathBuf::from(scratch), object: opt.get("--object").cloned(), full: flags.contains("--full"), sample, keep: flags.contains("--keep") }.run() // WHAT: run it. WHY: Creede, with the key on a USB stick.
+        Drill { job, identity: std::path::absolute(id).unwrap_or_else(|_| PathBuf::from(id)), scratch: PathBuf::from(scratch), object: opt.get("--object").cloned(), full: flags.contains("--full"), sample, keep: flags.contains("--keep") }.run() // WHAT: run it. WHY: Creede, with the key on a USB stick.
     };
     if exit.code != 0 && exit.code != 5 && !exit.why.is_empty() { eprintln!("{}", exit.why); } // WHAT: the reason on failure. WHY: a person running it sees why.
     exit.code

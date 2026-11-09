@@ -32,7 +32,7 @@ fn world() -> World {
     let d2 = store.put_blob(b"a chest file").unwrap(); // WHAT: a second file. WHY: more than one.
     store.with(|db| { db.execute_batch(&format!("INSERT INTO projects(id,number,name,created) VALUES('p1','2630','Real Job Name','2026-11-01'); INSERT INTO sets(id,project,name,filename,digest,bytes,sheets,uploaded,uploaded_by) VALUES('s1','p1','Structural','s.pdf','{d1}',{},1,'2026-11-01T10:00:00Z','x'); INSERT INTO files(id,project,name,digest,bytes,uploaded,uploaded_by) VALUES('f1','p1','note.txt','{d2}',12,'2026-11-01','x');", pdf.len()))?; Ok(()) }).unwrap(); // WHAT: a project, a set and a file. WHY: real records pointing at real files.
     drop(store); // WHAT: close it. WHY: as a running server would leave it, open or not.
-    std::fs::create_dir_all(&work).unwrap(); let pubk = fake_pub(); std::fs::write(work.join("age-recipients.txt"), format!("# public key: {pubk}\n{pubk}\n")).unwrap(); // WHAT: the public key file. WHY: what Creede places.
+    create_private_dir(&work).unwrap(); let pubk = fake_pub(); std::fs::write(work.join("age-recipients.txt"), format!("# public key: {pubk}\n{pubk}\n")).unwrap(); // WHAT: the public key file. WHY: what Creede places.
     let id = root.join("id.txt"); std::fs::write(&id, format!("# public key: {pubk}\n{}\n", secret_line())).unwrap(); // WHAT: the right private key (kept off the server). WHY: the drill's key.
     let wrong = root.join("wrong.txt"); std::fs::write(&wrong, format!("# public key: {}\n{}\n", fake_pub(), secret_line())).unwrap(); // WHAT: someone else's key. WHY: must open nothing.
     World { _t: t, data, work, bucket, id, wrong, root }
@@ -81,19 +81,23 @@ fn tar_of(entries: &[(&[u8; 100], u8, &[u8])]) -> Vec<u8> {
     for (name, kind, body) in entries { let mut h = [0u8; 512]; h[..100].copy_from_slice(&name[..]); h[100..108].copy_from_slice(b"0000600\0"); h[124..136].copy_from_slice(format!("{:011o}\0", body.len()).as_bytes()); h[156] = *kind; h[257..263].copy_from_slice(b"ustar\0"); h[148..156].copy_from_slice(b"        "); let s: u32 = h.iter().map(|&b| b as u32).sum(); h[148..156].copy_from_slice(format!("{s:06o}\0 ").as_bytes()); out.extend_from_slice(&h); out.extend_from_slice(body); out.extend(std::iter::repeat_n(0, (512 - body.len() % 512) % 512)); } // WHAT: each header and body. WHY: valid checksums, so only the name or kind is wrong.
     out.extend_from_slice(&[0u8; 1024]); out // WHAT: the end marker. WHY: a complete archive.
 }
+const EXPECT: &[(&str, u64)] = &[("manifest.json", 1 << 30), ("hyperview.sqlite", 1 << 30)]; // WHAT: what a catalog may hold. WHY: as the drill passes it.
+const ANY: &[(&str, u64)] = &[("manifest.json", 1 << 30), ("hyperview.sqlite", 1 << 30), ("a", 1 << 30), ("link", 1 << 30), ("../evil", 1 << 30), ("/etc/evil", 1 << 30), ("C:evil", 1 << 30), ("..\\evil", 1 << 30)]; // WHAT: every hostile name let through this check. WHY: the name and kind checks are what is tested there.
 fn name100(s: &str) -> [u8; 100] { let mut n = [0u8; 100]; n[..s.len()].copy_from_slice(s.as_bytes()); n } // WHAT: a padded name field. WHY: the header's form.
 
 #[test]
 fn the_archive_round_trips_and_a_hostile_one_never_writes_outside_its_folder() {
     let t = Tmp::new("tar"); // WHAT: a folder. WHY: unpacked into.
     let mut buf = Vec::new(); { let mut w = TarOut { w: &mut buf }; let big = vec![7u8; 70_000]; w.file("manifest.json", 2, &mut &b"{}"[..]).unwrap(); w.file("hyperview.sqlite", big.len() as u64, &mut &big[..]).unwrap(); w.end().unwrap(); } // WHAT: a real archive. WHY: what the job writes.
-    assert_eq!(untar(&mut &buf[..], &t.0.join("ok"), 1 << 20).unwrap(), vec!["manifest.json", "hyperview.sqlite"]); assert_eq!(std::fs::read(t.0.join("ok/hyperview.sqlite")).unwrap(), vec![7u8; 70_000]); // WHAT: comes back byte for byte. WHY: a restore is exact.
+    assert_eq!(untar(&mut &buf[..], &t.0.join("ok"), 1 << 20, EXPECT).unwrap(), vec!["manifest.json", "hyperview.sqlite"]); assert_eq!(std::fs::read(t.0.join("ok/hyperview.sqlite")).unwrap(), vec![7u8; 70_000]); // WHAT: comes back byte for byte. WHY: a restore is exact.
     for (why, arch) in [("climbs out", tar_of(&[(&name100("../evil"), b'0', b"x")])), ("absolute", tar_of(&[(&name100("/etc/evil"), b'0', b"x")])), ("drive letter", tar_of(&[(&name100("C:evil"), b'0', b"x")])), ("a link", tar_of(&[(&name100("link"), b'2', b"")])), ("twice", tar_of(&[(&name100("a"), b'0', b"1"), (&name100("a"), b'0', b"2")])), ("backslash", tar_of(&[(&name100("..\\evil"), b'0', b"x")]))] { // WHAT: each hostile archive. WHY: a planted backup must not escape.
-        let into = t.0.join(why.replace(' ', "-")); assert!(untar(&mut &arch[..], &into, 1 << 20).is_err(), "{why} must be refused"); assert!(!t.0.join("evil").exists() && !Path::new("/etc/evil").exists(), "{why}: nothing outside"); // WHAT: refused, nothing outside. WHY: the claim.
+        let into = t.0.join(why.replace(' ', "-")); assert!(untar(&mut &arch[..], &into, 1 << 20, ANY).is_err(), "{why} must be refused"); assert!(!t.0.join("evil").exists() && !Path::new("/etc/evil").exists(), "{why}: nothing outside"); // WHAT: refused, nothing outside. WHY: the claim.
     }
-    assert!(untar(&mut &buf[..buf.len() - 1100], &t.0.join("short"), 1 << 20).is_err(), "cut short"); // WHAT: a truncated archive. WHY: refused, not half-read as whole.
-    assert!(untar(&mut &buf[..], &t.0.join("cap"), 1000).is_err(), "bigger than allowed"); // WHAT: the size cap. WHY: a planted archive can't fill the disk.
-    let mut bad = buf.clone(); bad[10] ^= 1; assert!(untar(&mut &bad[..], &t.0.join("sum"), 1 << 20).is_err(), "a damaged header"); // WHAT: a flipped header byte. WHY: the checksum catches it.
+    assert!(untar(&mut &buf[..buf.len() - 1100], &t.0.join("short"), 1 << 20, EXPECT).is_err(), "cut short"); // WHAT: a truncated archive. WHY: refused, not half-read as whole.
+    assert!(untar(&mut &buf[..], &t.0.join("cap"), 1000, EXPECT).is_err(), "bigger than allowed"); // WHAT: the size cap. WHY: a planted archive can't fill the disk.
+    let stranger = tar_of(&[(&name100("evil.txt"), b'0', b"planted")]); assert!(untar(&mut &stranger[..], &t.0.join("stranger"), 1 << 20, EXPECT).is_err(), "a name this program never restores"); assert!(!t.0.join("stranger/evil.txt").exists(), "and nothing written"); // WHAT: an unexpected plain name. WHY: only the manifest and the database come out of a catalog.
+    let fat = tar_of(&[(&name100("manifest.json"), b'0', &vec![b' '; 2048])]); assert!(untar(&mut &fat[..], &t.0.join("fat"), 1 << 20, &[("manifest.json", 1024)]).is_err(), "over its own cap"); assert!(!t.0.join("fat/manifest.json").exists(), "refused before writing"); // WHAT: a manifest over its cap. WHY: a giant never reaches the disk.
+    let mut bad = buf.clone(); bad[10] ^= 1; assert!(untar(&mut &bad[..], &t.0.join("sum"), 1 << 20, EXPECT).is_err(), "a damaged header"); // WHAT: a flipped header byte. WHY: the checksum catches it.
 }
 
 #[test]
@@ -247,7 +251,7 @@ const WAIT: std::time::Duration = std::time::Duration::from_millis(1100); // WHA
 /// match, as someone who could write to the bucket (but not read it without the key) might plant it.
 fn plant(w: &World, name: &str, edit: impl FnOnce(&mut serde_json::Value), pad: usize) {
     let cat = files_in(&w.bucket.join("daily")).into_iter().find(|p| p.file_name().unwrap().to_string_lossy().ends_with(".tar.gz.age")).unwrap(); // WHAT: a real catalog. WHY: its database is reused.
-    let plain = fake::open(&std::fs::read_to_string(&w.id).unwrap(), &std::fs::read(&cat).unwrap()).unwrap(); let t = Tmp::new("plant"); untar(&mut flate2::read::GzDecoder::new(&plain[..]), &t.0.join("x"), 1 << 30).unwrap(); // WHAT: opened. WHY: to change its manifest.
+    let plain = fake::open(&std::fs::read_to_string(&w.id).unwrap(), &std::fs::read(&cat).unwrap()).unwrap(); let t = Tmp::new("plant"); untar(&mut flate2::read::GzDecoder::new(&plain[..]), &t.0.join("x"), 1 << 30, EXPECT).unwrap(); // WHAT: opened. WHY: to change its manifest.
     let mut m: serde_json::Value = serde_json::from_slice(&std::fs::read(t.0.join("x/manifest.json")).unwrap()).unwrap(); m["name"] = name.into(); edit(&mut m); let mut mj = serde_json::to_vec(&m).unwrap(); mj.extend(std::iter::repeat_n(b' ', pad)); // WHAT: the changed manifest. WHY: each case below.
     let db = std::fs::read(t.0.join("x/hyperview.sqlite")).unwrap(); let mut buf = Vec::new(); { let mut gz = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast()); { let mut tw = TarOut { w: &mut gz }; tw.file("manifest.json", mj.len() as u64, &mut &mj[..]).unwrap(); tw.file("hyperview.sqlite", db.len() as u64, &mut &db[..]).unwrap(); tw.end().unwrap(); } gz.finish().unwrap(); } // WHAT: packed as the job packs. WHY: only the manifest differs.
     let sealed = fake::seal(&std::fs::read_to_string(w.work.join("age-recipients.txt")).unwrap(), &buf); let out = w.bucket.join("daily").join(name); std::fs::write(&out, &sealed).unwrap(); // WHAT: locked to the same key. WHY: it opens like a real one.
@@ -264,7 +268,10 @@ fn a_planted_manifest_or_an_oversized_sidecar_is_refused_before_it_steers_anythi
         ("a short salt", Box::new(|m| m["salt"] = "abc".into()), 0), ("a database fingerprint in capitals", Box::new(|m| m["databaseSha256"] = "A".repeat(64).into()), 0), ("a manifest over 64 MB", Box::new(|_| {}), 64 * 1024 * 1024 + 1)];
     for (i, (why, edit, pad)) in cases.into_iter().enumerate() { let n = soon(10 + i as i64); plant(&w, &n, edit, pad); let e = drill(&w, &w.id, &format!("s-plant{i}")).run(); assert_eq!(e.code, 2, "{why}: {e:?}"); assert!(e.why.contains("manifest"), "{why}: {}", e.why); assert!(!w.root.join(format!("s-plant{i}")).exists(), "{why}: nothing left"); std::fs::remove_file(w.bucket.join("daily").join(&n)).unwrap(); std::fs::remove_file(w.bucket.join("daily").join(format!("{n}.json"))).unwrap(); } // WHAT: refused, nothing left, then taken away. WHY: one plant at a time.
     let n = soon(30); plant(&w, &n, |_| {}, 0); let side = w.bucket.join("daily").join(format!("{n}.json")); let mut big = std::fs::read(&side).unwrap(); big.extend(std::iter::repeat_n(b' ', 64 * 1024)); std::fs::write(&side, big).unwrap(); // WHAT: a sidecar over 64 KB. WHY: refused unread.
-    let e = drill(&w, &w.id, "s-bigside").run(); assert_eq!(e.code, 2, "{e:?}"); assert!(e.why.contains("sidecar"), "{}", e.why); // WHAT: refused. WHY: the cap.
+    let e = drill(&w, &w.id, "s-bigside").run(); assert_eq!(e.code, 2, "{e:?}"); assert!(e.why.contains("sidecar") && e.why.contains("not fetched"), "{}", e.why); // WHAT: refused from the listing, before fetching. WHY: a giant sidecar never comes down.
+    std::fs::remove_file(&side).unwrap(); std::fs::remove_file(w.bucket.join("daily").join(&n)).unwrap(); // WHAT: that plant gone. WHY: the next one.
+    let n = soon(40); plant(&w, &n, |_| {}, 0); let side = w.bucket.join("daily").join(format!("{n}.json")); let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&side).unwrap()).unwrap(); v["ageBytes"] = (v["ageBytes"].as_u64().unwrap() + 1).into(); std::fs::write(&side, serde_json::to_vec(&v).unwrap()).unwrap(); // WHAT: a catalog listed at another size than its sidecar says. WHY: a hostile catalog could be any size.
+    let e = drill(&w, &w.id, "s-bigcat").run(); assert_eq!(e.code, 2, "{e:?}"); assert!(e.why.contains("catalog is listed") && e.why.contains("not fetched"), "{}", e.why); // WHAT: refused before fetching. WHY: the scratch drive is never filled.
     std::fs::remove_file(&side).unwrap(); std::fs::remove_file(w.bucket.join("daily").join(&n)).unwrap(); assert_eq!(drill(&w, &w.id, "s-after").run().code, 0, "the real one still drills"); // WHAT: the plants gone. WHY: the checks refuse only what is wrong.
 }
 
@@ -278,8 +285,11 @@ fn a_catalog_dated_in_the_future_is_never_the_one_the_drill_picks() {
 
 #[test]
 fn a_run_by_hand_to_another_target_marks_nothing() {
-    assert!(marks(Some("rclone:r2:b/v"), Some("rclone:r2:b/v")) && marks(Some(" x "), Some("x")), "the server's own target marks"); // WHAT: the same target. WHY: the nightly copy.
-    assert!(!marks(Some("rclone:r2:b/v"), Some("E:/usb")) && !marks(None, Some("E:/usb")) && !marks(Some(""), Some("")) && !marks(None, None), "anything else doesn't"); // WHAT: another target, or none set. WHY: a USB disk tried once is not the off-site copy.
+    let t = Tmp::new("marks"); let (wk, other) = (t.0.join("work"), t.0.join("other")); create_private_dir(&wk).unwrap(); create_private_dir(&other).unwrap(); let (wk, other) = (wk.to_string_lossy().into_owned(), other.to_string_lossy().into_owned()); // WHAT: the set work folder and another. WHY: compared as places.
+    assert!(marks(Some("rclone:r2:b/v"), Some(&wk), Some("rclone:r2:b/v"), None) && marks(Some(" rclone:r2:b/v/ "), Some(&wk), None, Some(&format!("{wk}/./"))), "the server's own target and work folder mark"); // WHAT: the same, however written. WHY: the nightly copy.
+    assert!(!marks(Some("rclone:r2:b/v"), Some(&wk), Some("E:/usb"), None) && !marks(None, None, Some("E:/usb"), None) && !marks(Some(""), None, Some(""), None) && !marks(None, None, None, None), "another target, or none set"); // WHAT: refused. WHY: a USB disk tried once is not the off-site copy.
+    assert!(!marks(Some("rclone:r2:b/v"), Some(&wk), None, Some(&other)) && !marks(Some("rclone:r2:b/v"), None, None, Some(&wk)), "another work folder doesn't"); // WHAT: --work elsewhere. WHY: its own salt and sizes say nothing of the nightly copy.
+    let folder = t.0.join("bucket"); assert!(marks(Some(&folder.to_string_lossy()), None, Some(&format!("{}/../bucket", wk)), None), "a folder target is the same place by any path"); // WHAT: two spellings of one folder. WHY: compared as real places.
     let w = world(); let e = Job { mark: false, ..job(&w) }.backup(); assert_eq!(e.code, 0, "{e:?}"); assert!(report(&w.data).last_good.is_none() && backup_days(&w.data).is_none(), "backupDays doesn't move"); // WHAT: a good run elsewhere. WHY: sent, not marked.
     let d = Drill { job: Job { mark: false, ..job(&w) }, ..drill(&w, &w.id, "s-other") }.run(); assert_eq!(d.code, 0, "{d:?}"); assert!(report(&w.data).restore_tested.is_none(), "restoreTested doesn't move"); // WHAT: a drill of it. WHY: the same.
     std::thread::sleep(WAIT); assert_eq!(job(&w).backup().code, 0); assert!(report(&w.data).last_good.is_some(), "its own target marks"); // WHAT: the normal case. WHY: the rule isn't refusing everything.
@@ -289,7 +299,7 @@ fn a_run_by_hand_to_another_target_marks_nothing() {
 fn an_object_of_another_size_is_not_the_one_sent() {
     let w = world(); assert_eq!(job(&w).backup().code, 0); let first = report(&w.data).last_good; // WHAT: a good backup. WHY: its mark must not move below.
     let blob = files_in(&w.bucket.join("blobs")).remove(0); let good = std::fs::read(&blob).unwrap(); let mut longer = good.clone(); longer.push(0); std::fs::write(&blob, &longer).unwrap(); // WHAT: an object a byte longer than sent. WHY: "bigger than the plain file" is not proof.
-    std::thread::sleep(WAIT); let e = job(&w).backup(); assert_eq!(e.code, 3, "{e:?}"); assert!(e.why.contains("size they were sent"), "{}", e.why); assert_eq!(report(&w.data).last_good, first, "not marked"); // WHAT: refused. WHY: only the exact size sent counts.
+    std::thread::sleep(WAIT); let e = job(&w).backup(); assert_eq!(e.code, 3, "{e:?}"); assert!(e.why.contains("size they were sent") && e.why.contains("blobs/") && e.why.contains("Delete each"), "{}", e.why); assert_eq!(report(&w.data).last_good, first, "not marked"); // WHAT: refused. WHY: only the exact size sent counts.
     std::fs::write(&blob, &good).unwrap(); std::fs::remove_file(w.work.join("view/blob-sizes.json")).unwrap(); std::thread::sleep(WAIT); let e = job(&w).backup(); assert_eq!(e.code, 3, "{e:?}"); assert!(e.why.contains("no record"), "{}", e.why); // WHAT: the sizes lost. WHY: an unknown size is never taken as right.
 }
 
@@ -309,7 +319,7 @@ fn a_file_changed_while_it_is_sent_is_not_sent_and_the_run_says_so() {
 
 #[test]
 fn a_private_key_anywhere_in_the_work_folder_is_refused() {
-    let w = world(); std::fs::create_dir_all(w.work.join("bin")).unwrap(); std::fs::write(w.work.join("bin/age"), format!("a program naming its own format: {}", secret_line())).unwrap(); // WHAT: age's program, which holds the words. WHY: bin is skipped.
+    let w = world(); create_private_dir(&w.work.join("bin")).unwrap(); std::fs::write(w.work.join("bin/age"), format!("a program naming its own format: {}", secret_line())).unwrap(); // WHAT: age's program, which holds the words. WHY: bin is skipped.
     assert_eq!(job(&w).backup().code, 0, "bin is age's own"); std::fs::create_dir_all(w.work.join("old")).unwrap(); std::fs::write(w.work.join("old/key.txt"), format!("# created\n{}\n", secret_line().to_lowercase())).unwrap(); // WHAT: a key left in a folder of the work folder. WHY: any case, any depth.
     std::thread::sleep(WAIT); let e = job(&w).backup(); assert_eq!(e.code, 2, "{e:?}"); assert!(e.why.contains("PRIVATE key") && e.why.contains("key.txt"), "{}", e.why); // WHAT: refused, naming the file. WHY: it opens every backup.
 }
@@ -319,6 +329,56 @@ fn a_link_inside_the_scratch_folder_is_found() {
     let t = Tmp::new("links"); std::fs::create_dir_all(t.0.join("a/b")).unwrap(); std::fs::write(t.0.join("a/b/f"), "x").unwrap(); assert_eq!(link_inside(&t.0), None, "plain files and folders"); // WHAT: a clean restore. WHY: nothing found.
     #[cfg(unix)]
     { std::os::unix::fs::symlink("/etc", t.0.join("a/b/l")).unwrap(); assert_eq!(link_inside(&t.0), Some(t.0.join("a/b/l")), "a link deep inside"); } // WHAT: a link. WHY: nothing the drill opens may point elsewhere.
+}
+
+#[test]
+fn a_scratch_folder_opened_up_after_it_is_made_is_refused() {
+    let w = world(); assert_eq!(job(&w).backup().code, 0); LOOSEN_SCRATCH.with(|l| l.set(true)); let e = drill(&w, &w.id, "s-loose").run(); LOOSEN_SCRATCH.with(|l| l.set(false)); // WHAT: a scratch folder open to others once made. WHY: what another account could do in the gap.
+    assert_eq!(e.code, 4, "{e:?}"); assert!(e.why.contains("not 0700"), "{}", e.why); assert!(!w.root.join("s-loose").exists(), "and taken away"); // WHAT: refused before anything is restored. WHY: plaintext only in a folder that is ours alone.
+}
+
+#[test]
+fn a_folder_the_link_check_cannot_read_is_a_refusal() {
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; let t = Tmp::new("closed"); let shut = t.0.join("shut"); std::fs::create_dir_all(&shut).unwrap(); std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap(); let found = link_inside(&t.0); std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap(); assert_eq!(found, Some(shut), "fails closed"); } // WHAT: a folder it can't look into. WHY: what can't be checked isn't trusted.
+}
+
+#[test]
+fn a_work_folder_others_could_change_is_refused() {
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; let w = world(); create_private_dir(&w.work.join("bin")).unwrap(); std::fs::write(w.work.join("rclone.conf"), "[r2]\n").unwrap(); std::fs::set_permissions(w.work.join("rclone.conf"), std::fs::Permissions::from_mode(0o600)).unwrap(); assert_eq!(job(&w).backup().code, 0, "owner-only is fine"); // WHAT: a good work folder. WHY: the baseline.
+      for (what, path, mode) in [("the work folder", w.work.clone(), 0o770), ("bin", w.work.join("bin"), 0o777), ("rclone.conf", w.work.join("rclone.conf"), 0o666)] { let was = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777; std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap(); std::thread::sleep(WAIT); // WHAT: open one to other accounts. WHY: each is checked.
+        let e = job(&w).backup(); let d = drill(&w, &w.id, &format!("s-open-{}", mode)).run(); std::fs::set_permissions(&path, std::fs::Permissions::from_mode(was)).unwrap(); // WHAT: a backup and a drill, then put back. WHY: both refuse.
+        assert_eq!(e.code, 2, "{what}: {e:?}"); assert!(e.why.contains("changed by other accounts"), "{what}: {}", e.why); assert_eq!(d.code, 2, "{what}: the drill too: {d:?}"); } } // WHAT: refused. WHY: whoever can swap age or rclone.conf can read or redirect every backup.
+}
+
+#[test]
+fn a_batch_cut_short_doesnt_block_the_nights_after() {
+    let w = world(); FAIL_PUT_AFTER.with(|f| f.set(Some(1))); let e = job(&w).backup(); FAIL_PUT_AFTER.with(|f| f.set(None)); assert_eq!(e.code, 3, "{e:?}"); // WHAT: the connection drops after one file. WHY: a failed batch.
+    std::thread::sleep(WAIT); let e = job(&w).backup(); assert_eq!(e.code, 0, "the next night finishes: {e:?}"); assert!(report(&w.data).last_good.is_some()); // WHAT: the next night. WHY: the sizes were kept before sending, so nothing is unknown.
+}
+
+#[test]
+fn a_failed_night_reaches_the_ops_report_until_a_good_one() {
+    let w = world(); std::fs::write(&w.bucket, "a file where the target folder should be").unwrap(); let e = job(&w).backup(); assert_eq!(e.code, 3, "{e:?}"); // WHAT: a failed night. WHY: the marker.
+    let r = report(&w.data); assert!(r.last_failed.is_some() && r.last_failed_why.as_deref().is_some_and(|y| y.contains("failed")), "{r:?}"); assert!(r.last_good.is_none()); // WHAT: when and why. WHY: Fleet sees it.
+    std::fs::remove_file(&w.bucket).unwrap(); let held = hold_lock(&w.work.join("view/offsite.lock")).unwrap(); let before = report(&w.data).last_failed; assert_eq!(job(&w).backup().code, 2); drop(held); assert_eq!(report(&w.data).last_failed, before, "a run already going is not a failure"); // WHAT: refused by the lock. WHY: not a failed night.
+    assert_eq!(job(&w).backup().code, 0); let r = report(&w.data); assert!(r.last_failed.is_none() && r.last_failed_why.is_none(), "a good night clears it"); // WHAT: cleared. WHY: the failure is over.
+    std::fs::remove_dir_all(&w.bucket).unwrap(); std::fs::write(&w.bucket, "x").unwrap(); assert_eq!(Job { mark: false, ..job(&w) }.backup().code, 3); assert!(report(&w.data).last_failed.is_none(), "a hand run elsewhere marks no failure either"); // WHAT: another target. WHY: says nothing of the nightly copy.
+}
+
+#[test]
+fn a_stopped_drill_leaves_no_key_and_a_leftover_one_is_cleared() {
+    let t = Tmp::new("secrets"); let key = t.0.join(".drill-key-abc.txt"); let dir = t.0.join("restore"); std::fs::write(&key, "opened").unwrap(); create_private_dir(&dir.join("restored")).unwrap(); hold_secret(&key); hold_secret(&dir); // WHAT: an opened key and a restore, noted. WHY: what Ctrl+C deletes.
+    delete_secrets(Some(&t.0)); assert!(!key.exists() && !dir.exists(), "both deleted"); // WHAT: the stop handler's work. WHY: neither outlives the drill.
+    assert!(key_beside(Path::new("key.age")).unwrap().is_absolute(), "an opened key's place is a full path"); // WHAT: a relative key file. WHY: never whatever folder this was started from.
+    let w = world(); assert_eq!(job(&w).backup().code, 0); let stick = w.root.join("stick"); std::fs::create_dir_all(&stick).unwrap(); let id = stick.join("id.txt"); std::fs::copy(&w.id, &id).unwrap(); std::fs::write(stick.join(".drill-key-0a0b0c0d0e0f.txt"), "left by a drill stopped earlier").unwrap(); // WHAT: a leftover opened key beside the key. WHY: an earlier drill was killed.
+    assert_eq!(drill(&w, &id, "s-left").run().code, 0); assert!(!stick.join(".drill-key-0a0b0c0d0e0f.txt").exists(), "deleted"); assert!(std::fs::read_to_string(w.work.join("view/offsite.log")).unwrap().contains("left behind"), "and said"); // WHAT: cleared at the start. WHY: it opens every backup.
+}
+
+#[test]
+fn a_folder_target_is_a_full_path() {
+    let t = Target::parse("some/relative/folder", Path::new("/w")).unwrap(); assert!(matches!(t, Target::Folder(ref p) if p.is_absolute()), "made absolute"); // WHAT: a relative folder. WHY: one place wherever this was started.
 }
 
 // ---------------------------------------------------------------- real age, where it is installed

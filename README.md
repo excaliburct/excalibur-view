@@ -298,7 +298,12 @@ Setting it up, once (Excalibur's people do this with the office):
    `age-keygen -o offsite-key.txt`. Put that file on a USB stick and lock it
    away. Its `# public key: age1...` line is the only part the server gets.
 2. Make a work folder for the backup, apart from the drawings, for example
-   `C:\ProgramData\Excalibur Hyperview\Server\offsite`. In it:
+   `C:\ProgramData\Excalibur Hyperview\Server\offsite`, from a command prompt
+   opened as administrator. Each time it starts, the server locks that folder
+   so only the system, administrators and the server itself can change it,
+   and it won't back up while anyone else could change the folder, its `bin`
+   or `rclone.conf`. On Linux, `chmod 700` the folder and its `bin`, and
+   `chmod 600 rclone.conf`. In it:
    - `bin\age.exe` and `bin\rclone.exe` (the server only ever uses these two,
      never copies found elsewhere on the computer);
    - `age-recipients.txt`, holding the `age1...` public line. A private key
@@ -324,7 +329,8 @@ Setting it up, once (Excalibur's people do this with the office):
 5. Prove it comes back (the restore drill), with the USB stick in:
    `Hyperview-Server.exe --offsite-drill --identity E:\offsite-key.txt --scratch C:\drill-1`.
    The scratch folder must not exist yet: the drill makes it, open only to
-   the person running it. It fetches the newest catalog into it, opens it,
+   the person running it. Pressing Ctrl+C during a drill deletes the opened
+   key and what was restored. It fetches the newest catalog into it, opens it,
    checks the counts, every file's fingerprint and one real drawing, and says
    RESTORE DRILL PASSED or what failed. Add `--full` to fetch every file,
    `--keep` to keep the restored copy. Do this once a month.
@@ -334,7 +340,9 @@ as well, but it doesn't count: only a backup to the server's own
 `HYPERVIEW_OFFSITE_TARGET` moves the days since the last backup.
 
 Each night the server tries once, after the time; a failed night is tried
-again an hour later, and nothing is marked until one passes. A night it was
+again an hour later, and nothing is marked until one passes. A failed night
+is shown in the maintenance report too (`lastFailed`, and why), until the
+next good one. A night it was
 switched off is caught up the next time it is on.
 
 ## The markups list

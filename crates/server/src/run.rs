@@ -119,6 +119,7 @@ pub async fn serve(
         tokio::spawn(crate::updates::keep_up_to_date(Arc::clone(&server)));
     }
     if server.config.offsite_target.is_some() {
+        if let Some(work) = server.config.offsite_work.as_deref() { crate::offsite::lock_work(std::path::Path::new(work)); } // WHAT: the work folder made the system's, administrators' and this server's only (Windows). WHY: it holds the programs run on the data and the bucket's key.
         tokio::spawn(crate::offsite::nightly(Arc::clone(&server))); // WHAT: tonight's off-site backup, once a night. WHY: off until HYPERVIEW_OFFSITE_TARGET is set.
     }
 
