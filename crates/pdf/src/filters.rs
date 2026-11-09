@@ -364,25 +364,24 @@ fn run_length(data: &[u8], limit: usize) -> std::result::Result<Vec<u8>, Trouble
 
 /// Reverses the PNG and TIFF predictors that compressors apply before deflate.
 fn unpredict(data: Vec<u8>, parm: &Dict) -> Vec<u8> {
-    let predictor = parm.get("Predictor").and_then(|o| o.as_i64()).unwrap_or(1);
+    let predictor = parm.get("Predictor").and_then(Object::as_i64).unwrap_or(1);
     if predictor <= 1 {
         return data;
     }
-    let colors = parm
-        .get("Colors")
-        .and_then(|o| o.as_i64())
-        .unwrap_or(1)
-        .max(1) as usize;
-    let bpc = parm
-        .get("BitsPerComponent")
-        .and_then(|o| o.as_i64())
-        .unwrap_or(8)
-        .max(1) as usize;
-    let columns = parm
-        .get("Columns")
-        .and_then(|o| o.as_i64())
-        .unwrap_or(1)
-        .max(1) as usize;
+    // WHAT: a predictor number from the file, at least 1, as a size; one too big for this machine's sizes becomes the largest. WHY: the largest then fails the checked multiply below and the bytes pass on as they are, where a cast would have cut it to some other number.
+    let size = |key: &str, default: i64| {
+        usize::try_from(
+            parm.get(key)
+                .and_then(Object::as_i64)
+                .unwrap_or(default)
+                .max(1),
+        )
+        .unwrap_or(usize::MAX)
+    };
+    let colors = size("Colors", 1); // WHAT: colour components per sample. WHY: part of the row's length.
+    let bpc = size("BitsPerComponent", 8); // WHAT: bits per component. WHY: the same.
+    let columns = size("Columns", 1); // WHAT: samples per row. WHY: the same.
+
     // WHAT: the row's length worked out without overflowing, and never longer than the data. WHY: the numbers are the file's; a row of a terabyte asked for a terabyte of memory and closed the program.
     let Some(bits) = columns.checked_mul(colors).and_then(|n| n.checked_mul(bpc)) else {
         return data; // WHAT: numbers too big to multiply. WHY: no real predictor has them; the bytes are passed on as they are.

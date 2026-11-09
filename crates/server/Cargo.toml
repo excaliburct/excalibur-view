@@ -27,7 +27,7 @@ axum = { version = "0.7", features = ["multipart", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors", "limit"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"

@@ -422,7 +422,15 @@ impl<'a> Reader<'a> {
                         let save = self.at;
                         if let Ok(generation) = self.integer() {
                             if (0..=65535).contains(&generation) && self.eat("R") {
-                                return Ok(Object::Ref(Ref::new(number as u32, generation as u16)));
+                                // WHAT: the reference, when its number fits an object number; null when it doesn't. WHY: a number past u32 used to be cut to some other object's number, and a reference to an object that can't exist reads as null in PDF.
+                                return Ok(
+                                    match (u32::try_from(number), u16::try_from(generation)) {
+                                        (Ok(number), Ok(generation)) => {
+                                            Object::Ref(Ref::new(number, generation))
+                                        }
+                                        _ => Object::Null,
+                                    },
+                                );
                             }
                         }
                         self.at = save;
@@ -498,8 +506,12 @@ impl<'a> Reader<'a> {
         let value = self.object()?;
         self.skip_space();
         self.eat("endobj");
+        // WHAT: the header's numbers as an object number and generation; one below zero or too big is 0. WHY: below zero was already 0; too big used to be cut to some other object's number.
         Ok((
-            Ref::new(number.max(0) as u32, generation.max(0) as u16),
+            Ref::new(
+                u32::try_from(number).unwrap_or(0),
+                u16::try_from(generation).unwrap_or(0),
+            ),
             value,
         ))
     }
@@ -578,6 +590,13 @@ mod tests {
         assert_eq!(read("12 0 R"), Object::Ref(Ref::new(12, 0)));
         assert_eq!(read("[1 2]").as_array().unwrap().len(), 2);
         assert!(read("<</A 1>>").as_dict().unwrap().has("A"));
+    }
+
+    #[test]
+    fn a_reference_past_the_largest_object_number_is_null_not_another_object() {
+        // WHAT: 2^32 + 12 used to be cut to object 12. WHY: a file must never point at an object it didn't name.
+        assert_eq!(read("4294967308 0 R"), Object::Null);
+        assert_eq!(read("4294967295 7 R"), Object::Ref(Ref::new(u32::MAX, 7))); // WHAT: the largest number still a reference. WHY: the edge stays in.
     }
 
     #[test]
