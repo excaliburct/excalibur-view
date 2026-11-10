@@ -414,7 +414,7 @@ impl App {
             self.editing_text = None;
             return;
         };
-        let mut text = mark.markup.contents();
+        let mut text = crate::typing::editable(&mark.markup.contents()); // WHAT: the words with every line break a \n. WHY: a box Revu wrote, with \r between its lines, opened as one line full of characters nobody could see.
         let before = text.clone();
 
         // The box to its words before it is drawn: they may have been given
@@ -442,37 +442,11 @@ impl App {
             (setting.colour[1] * 255.0) as u8,
             (setting.colour[2] * 255.0) as u8,
         );
-        let family = match (setting.family, setting.bold) {
-            (annot::text::Family::Courier, _) => egui::FontFamily::Monospace,
-            (_, true) => egui::FontFamily::Name(ui::chrome::SHEET_TEXT_BOLD.into()),
-            (_, false) => egui::FontFamily::Name(ui::chrome::SHEET_TEXT.into()),
-        };
-        let halign = match setting.across {
-            annot::text::Across::Left => egui::Align::LEFT,
-            annot::text::Across::Middle => egui::Align::Center,
-            annot::text::Across::Right => egui::Align::RIGHT,
-        };
-        let line = egui::Stroke::new((size * 0.06).max(0.6), ink);
-        let (underline, strike, italic) = (setting.underline, setting.strike, setting.italic);
         let inner = egui::vec2((rect.width() - pad * 2.0).max(size), (rect.height() - pad * 2.0).max(leading));
-        // A box that grows does not wrap: its lines end where they are ended.
-        let wrap = if fit { f32::INFINITY } else { inner.x };
+        // WHAT: the look of the words, wrapped by the same wrap the saved drawing uses; a box that grows does not wrap. WHY: egui's own wrap broke lines in other places, and the words jumped when the box was finished.
+        let look = crate::typing::Look::of(setting, zoom, inner.x, fit);
         let mut layouter = move |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _width: f32| {
-            let mut job = egui::text::LayoutJob::single_section(
-                buffer.as_str().to_owned(),
-                egui::TextFormat {
-                    font_id: egui::FontId::new(size, family.clone()),
-                    color: ink,
-                    line_height: Some(leading),
-                    italics: italic,
-                    underline: if underline { line } else { egui::Stroke::NONE },
-                    strikethrough: if strike { line } else { egui::Stroke::NONE },
-                    ..Default::default()
-                },
-            );
-            job.wrap.max_width = wrap;
-            job.halign = halign;
-            ui.fonts(|f| f.layout_job(job))
+            ui.fonts(|f| f.layout_job(crate::typing::job(buffer.as_str(), &look))) // WHAT: the words laid out, the wrap's spaces shown as line breaks. WHY: as above, character for character, so the cursor stays where it is.
         };
         let edit_id = egui::Id::new(("typing-in-place", doc.id, index));
         let shown = egui::Area::new(egui::Id::new(("typing-area", doc.id, index)))
@@ -565,7 +539,7 @@ impl App {
             }
         }
         if let Some(doc) = self.doc_mut() {
-            let typed = doc.marks.get(index).is_some_and(|m| m.markup.contents() != text);
+            let typed = doc.marks.get(index).is_some_and(|m| crate::typing::editable(&m.markup.contents()) != text); // WHAT: changed only if the words differ as the box holds them. WHY: a box Revu wrote would otherwise be rewritten, \r for \n, just by opening it.
             if typed {
                 if let Some(mark) = doc.marks.get_mut(index) {
                     mark.markup.set_contents(&text);
@@ -2335,8 +2309,8 @@ impl App {
                     self.copy_selection();
                 }
                 "Edit.Cut" => self.cut_selection(),
-                "Edit.Paste" => self.paste(false),
-                "Edit.PasteInPlace" => self.paste(true),
+                "Edit.Paste" => self.paste_anything(false, None), // WHAT: the last thing copied, here or in another program. WHY: Paste put down only markups copied here, never words or a picture from anywhere else.
+                "Edit.PasteInPlace" => self.paste_anything(true, None), // WHAT: the same, markups at the place they came from. WHY: as above.
                 "Delete" => self.delete_selected(),
                 "View.InvertColors" => {
                     let on = self.chrome.is_on("View.InvertColors");

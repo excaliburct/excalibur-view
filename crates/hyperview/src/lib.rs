@@ -39,6 +39,7 @@ pub mod morepanels;
 pub mod ocr;
 pub mod overlay; // WHAT: fitting one issue of a sheet on another and colouring the result. WHY: Overlay Pages and Compare Documents both line sheets up with it.
 pub mod panelbody;
+pub mod pasted; // WHAT: words and pictures from other programs put on a sheet. WHY: Paste, Ctrl+V and a picture let go over a sheet.
 pub mod picture;
 pub mod panels;
 pub mod pen;
@@ -69,6 +70,7 @@ pub mod stamps;
 pub mod spell;
 pub mod sync;
 pub mod textedit;
+pub mod typing; // WHAT: the words of a text box as they are typed on the sheet. WHY: the box being typed in and the saved drawing break their lines alike.
 pub mod trust;
 pub mod updatebox;
 pub mod serverui;
