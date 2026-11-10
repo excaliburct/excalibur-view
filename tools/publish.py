@@ -782,11 +782,16 @@ PRODUCTS = {
 
 def license_payload(lic, product="view"):
     lines = [PRODUCTS[product]["domain"]] + [f"{k}={lic[k]}" for k in LICENSE_FIELDS]
+    if lic.get("modules"):  # WHAT: the Office Server's parts, last, only when there are any. WHY: hub::license::License::signing_payload writes the same; an older license's text is unchanged
+        lines.append("modules=" + ",".join(lic["modules"]))
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+MODULE_NAME = re.compile(r"[a-z][a-z0-9-]{0,31}")  # WHAT: a part's name: plain lowercase. WHY: the names are joined by commas in the signed text, so none may hold a comma, "=" or a line break
+
+
 def make_license(key_path, company, product="view", edition=None, users=0, updates_through=None,
-                 years=1, founding=False, note=None, id=None, issued=None):
+                 years=1, founding=False, note=None, id=None, issued=None, modules=None):
     """Signs a license and hands it back. The one place a license is made:
     `sign-license` and the Square side both come through here."""
     import secrets
@@ -811,6 +816,9 @@ def make_license(key_path, company, product="view", edition=None, users=0, updat
             raise SystemExit("a license cannot have a line break in it")
     if users < 0:
         raise SystemExit("--users is a number; 0 means no limit")
+    modules = [m.strip() for m in (modules or []) if m.strip()]  # WHAT: the parts asked for. WHY: --modules cad,citadel
+    if len(modules) > 16 or len(set(modules)) != len(modules) or not all(MODULE_NAME.fullmatch(m) for m in modules):
+        raise SystemExit("--modules is up to 16 plain lowercase names, each once: view's office server parts, e.g. cad,citadel")
     lic = {
         "id": id or kind["id"] + secrets.token_hex(6),
         "company": company.strip(),
@@ -821,6 +829,8 @@ def make_license(key_path, company, product="view", edition=None, users=0, updat
         "note": note,
         "key": name,
     }
+    if modules:  # WHAT: written only when there are parts. WHY: a license without parts reads exactly as before
+        lic["modules"] = modules
     signed = license_payload(lic, product)
     signature = key.sign(signed)
     key.public_key().verify(signature, signed)
@@ -901,6 +911,7 @@ def cmd_sign_license(a):
         a.key, a.company, product=a.product, edition=a.edition, users=a.users,
         updates_through=a.updates_through, years=a.years, founding=a.founding,
         note=a.note, id=a.id, issued=a.issued,
+        modules=(a.modules or "").split(","),  # WHAT: the parts, comma separated. WHY: --modules cad,citadel
     )
     out = a.out or license_file_name(lic, a.product)
     write_license(lic, out)
@@ -1460,6 +1471,7 @@ def main():
     l.add_argument("--updates-through", help="YYYY-MM-DD, or forever")
     l.add_argument("--founding", action="store_true", help="every user, updates forever")
     l.add_argument("--note")
+    l.add_argument("--modules", help="the Office Server's parts besides View, comma separated: cad, archetype, citadel")
     l.add_argument("--id")
     l.add_argument("--issued")
     l.add_argument("--out")

@@ -62,6 +62,50 @@ impl Edition {
     }
 }
 
+/// A part of the Excalibur Office Server an office can have (docs/OFFICE-SERVER.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Module {
+    /// Drawings, takeoff, markups, sign-offs: always on.
+    View,
+    /// Excalibur CAD's office drawings.
+    Cad,
+    /// Archetype's shared jobs.
+    Archetype,
+    /// Citadel / LatCon Estimating's jobs, kept blind.
+    Citadel,
+}
+
+impl Module {
+    /// Every part this build knows, in the order the Manager lists them.
+    pub const ALL: [Module; 4] = [Module::View, Module::Cad, Module::Archetype, Module::Citadel];
+
+    /// Its name in a license and the API.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Module::View => "view",
+            Module::Cad => "cad",
+            Module::Archetype => "archetype",
+            Module::Citadel => "citadel",
+        }
+    }
+
+    /// The part a license's name stands for, if this build knows it.
+    pub fn named(name: &str) -> Option<Module> {
+        Module::ALL.into_iter().find(|m| m.name() == name)
+    }
+
+    /// As people read it.
+    pub const fn title(self) -> &'static str {
+        match self {
+            Module::View => "Excalibur View",
+            Module::Cad => "Excalibur CAD drawings",
+            Module::Archetype => "Archetype jobs",
+            Module::Citadel => "Citadel (estimating)",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct License {
     /// `evl_…`, quoted when somebody rings about it.
@@ -79,6 +123,10 @@ pub struct License {
     /// "Founding customer", or whatever else was agreed. Signed with the rest.
     #[serde(default)]
     pub note: String,
+    /// The Office Server's parts this office has, besides View: `cad`, `archetype`, `citadel`. Signed with the rest;
+    /// written only when there are any, so every license made before parts existed reads, and checks, exactly as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modules: Vec<String>,
     /// Which of the program's keys signed it.
     pub key: String,
     /// Ed25519, hex.
@@ -107,6 +155,23 @@ impl License {
             self.note,
         )
         .into_bytes()
+        .into_iter()
+        .chain(if self.modules.is_empty() { Vec::new() } else { format!("modules={}\n", self.modules.join(",")).into_bytes() }) // WHAT: the parts line, last, only when there are parts. WHY: an older license's signed text is unchanged, so it still checks out
+        .collect()
+    }
+
+    /// The Office Server's parts this license switches on: View always, then each part it names that this build knows.
+    /// A part this build doesn't know yet is skipped, never an error: a license issued for a newer server still works here.
+    pub fn parts(&self) -> Vec<Module> {
+        let mut on = vec![Module::View]; // WHAT: View is always there. WHY: every Office Server is View's server grown
+        for name in &self.modules {
+            if let Some(part) = Module::named(name) {
+                if !on.contains(&part) {
+                    on.push(part); // WHAT: a known part, once. WHY: the list the server serves
+                }
+            }
+        }
+        on
     }
 
     /// Reads a license file and checks it is signed by a key in `trusted`.
@@ -140,6 +205,12 @@ impl License {
             &self.key,
         ];
         if fields.iter().any(|f| f.contains(['\n', '\r'])) {
+            return Err("That license file has been changed since it was issued.".into());
+        }
+        // WHAT: each part's name is short plain lowercase, at most 16 parts, none twice. WHY: the names go into the signed text
+        // joined by commas, so a comma, a newline or "=" in one could make two different lists sign the same
+        let plain = |m: &String| (1..=32).contains(&m.len()) && m.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') && m.as_bytes()[0].is_ascii_lowercase();
+        if self.modules.len() > 16 || !self.modules.iter().all(plain) || (1..self.modules.len()).any(|i| self.modules[..i].contains(&self.modules[i])) {
             return Err("That license file has been changed since it was issued.".into());
         }
         if self.id.trim().is_empty() || self.company.trim().is_empty() {
@@ -322,6 +393,7 @@ mod tests {
             updates_through: "2027-10-01".into(),
             issued: "2026-10-01".into(),
             note: String::new(),
+            modules: Vec::new(),
             key: "mesafab-2026".into(),
             signature: String::new(),
         };
@@ -380,6 +452,49 @@ mod tests {
         let text = String::from_utf8(license.signing_payload()).unwrap();
         assert!(text.starts_with("excalibur-license-v1\n"));
         assert!(!text.starts_with("hyperview-release-v1"));
+    }
+
+    #[test]
+    fn a_license_without_parts_signs_the_same_text_as_before_parts_existed() {
+        // WHAT: the signed text of a license with no parts, written out. WHY: every license issued before parts existed must still check out
+        let license = a_license(&issuer().0);
+        assert_eq!(
+            String::from_utf8(license.signing_payload()).unwrap(),
+            "excalibur-license-v1\nid=evl_0001\ncompany=Example Steel, Inc.\nedition=office\nusers=10\nupdates_through=2027-10-01\nissued=2026-10-01\nnote=\n"
+        );
+        assert_eq!(license.parts(), vec![Module::View]); // WHAT: View only. WHY: what every office had before
+        assert!(!serde_json::to_string(&license).unwrap().contains("modules")); // WHAT: no empty parts line written. WHY: the file stays as it was
+    }
+
+    #[test]
+    fn parts_are_signed_and_switch_on_only_what_this_build_knows() {
+        let (signing, trusted) = issuer();
+        let mut license = a_license(&signing);
+        license.modules = vec!["citadel".into(), "cad".into(), "someday".into()]; // WHAT: two known parts and one from a newer build. WHY: all three cases
+        license.signature = hex(&signing.sign(&license.signing_payload()).to_bytes());
+        assert!(String::from_utf8(license.signing_payload()).unwrap().ends_with("note=\nmodules=citadel,cad,someday\n")); // WHAT: the parts line, last. WHY: the publishing script writes the same
+        let text = serde_json::to_string(&license).unwrap();
+        let read = License::read(&text, &trusted).unwrap(); // WHAT: it checks out. WHY: signed with the rest
+        assert_eq!(read.parts(), vec![Module::View, Module::Citadel, Module::Cad]); // WHAT: View, then the known parts; "someday" skipped. WHY: a newer license still works here
+        let mut more = read.clone();
+        more.modules.push("archetype".into()); // WHAT: a part added after signing. WHY: must not check out
+        assert!(more.check(&trusted).is_err());
+        let mut fewer = read;
+        fewer.modules.clear(); // WHAT: the parts taken off after signing. WHY: must not check out either
+        assert!(fewer.check(&trusted).is_err());
+    }
+
+    #[test]
+    fn a_part_name_that_could_change_the_signed_text_is_refused() {
+        let (signing, _) = issuer();
+        for bad in ["cad,citadel", "cad\nusers=0", "Cad", "", "c=d", "-cad"] {
+            let mut license = a_license(&signing);
+            license.modules = vec![bad.into()]; // WHAT: a comma, a newline, capitals, nothing, "=" or a leading dash. WHY: each could make two lists sign alike
+            assert!(License::parse(&serde_json::to_string(&license).unwrap()).is_err(), "{bad:?}");
+        }
+        let mut twice = a_license(&signing);
+        twice.modules = vec!["cad".into(), "cad".into()]; // WHAT: a part named twice. WHY: refused, so one list has one signed text
+        assert!(License::parse(&serde_json::to_string(&twice).unwrap()).is_err());
     }
 
     #[test]
@@ -467,5 +582,24 @@ mod tests {
         let founding = License::read(FOUNDING_FROM_THE_SCRIPT, &trusted).expect("the founding one");
         assert!(founding.unlimited() && founding.forever());
         assert_eq!(founding.note, "Founding customer");
+        let parts = License::read(PARTS_FROM_THE_SCRIPT, &trusted).expect("the script's license with parts"); // WHAT: a license with parts, as the script signs it. WHY: the two must agree on the parts line too
+        assert_eq!(parts.parts(), vec![Module::View, Module::Citadel, Module::Cad]);
     }
+
+    /// `sign-license --modules citadel,cad`, with the same made-up key, pasted in as it came out (2026-11-10).
+    const PARTS_FROM_THE_SCRIPT: &str = r#"{
+  "id": "evl_fixture03",
+  "company": "Latcon Excavation",
+  "edition": "office",
+  "users": 0,
+  "updates_through": "2027-11-10",
+  "issued": "2026-11-10",
+  "note": "",
+  "key": "mesafab-2026",
+  "modules": [
+    "citadel",
+    "cad"
+  ],
+  "signature": "a6993a7c62594a205d7f7abbe581cdb3928ba7a5164e70832747ef0330f020fbce43aeefc9a891b405239bca24b8137e06703e5513c166bd80cb4c53945c0609"
+}"#;
 }

@@ -525,6 +525,7 @@ mod tests {
             updates_through: through.into(),
             issued: "2026-10-02".into(),
             note: String::new(),
+            modules: Vec::new(),
             key: "mesafab-2026".into(),
             signature: String::new(),
         };
@@ -732,6 +733,7 @@ mod renewal_tests {
             updates_through: through.into(),
             issued: "2026-09-01".into(),
             note: String::new(),
+            modules: Vec::new(),
             key: "mesafab-2026".into(),
             signature: "00".repeat(64),
         }
