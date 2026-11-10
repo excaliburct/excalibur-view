@@ -527,7 +527,7 @@ fn draw_words(
         if baseline + setting.size < area[1] {
             break;
         }
-        let run = crate::content::width_of(line, setting.size, setting.bold);
+        let run = crate::content::width_of_in(line, setting.size, setting.family, setting.bold); // WHAT: the line's width in its own family. WHY: centred and right-aligned Courier lines were placed by Helvetica's widths.
         let x = match setting.across {
             crate::text::Across::Left => area[0] + pad,
             crate::text::Across::Middle => area[0] + pad + (width - run) * 0.5,

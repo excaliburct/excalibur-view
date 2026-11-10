@@ -21,6 +21,9 @@ pub struct Clipboard {
     /// Where the copy came from, so Paste in Place knows there is a place to
     /// put it back.
     pub from: Option<Where>,
+    /// The words put on the operating system's clipboard with the copy, so a
+    /// paste that brings them back is known to be this copy coming back.
+    pub said: Option<String>,
 }
 
 #[derive(Clone)]
@@ -35,6 +38,20 @@ pub struct Carried {
 pub struct Where {
     pub doc: u64,
     pub page: u32,
+}
+
+/// What goes on the operating system's clipboard when a snapshot is taken.
+const SNAPSHOT_SAID: &str = "A snapshot copied in Excalibur View";
+
+/// The words to put on the operating system's clipboard for markups copied:
+/// their own words, one markup a line, or a count when they have none.
+pub fn said_for(marks: &[Carried]) -> String {
+    let words: Vec<String> = marks.iter().map(|c| c.markup.contents()).filter(|w| !w.trim().is_empty()).collect(); // WHAT: what the markups say. WHY: pasted into an email, a copied note brings its words.
+    if words.is_empty() {
+        format!("{} markup{} copied in Excalibur View", marks.len(), if marks.len() == 1 { "" } else { "s" }) // WHAT: a count. WHY: shapes have no words, and the clipboard still needs something only this copy put there.
+    } else {
+        words.join("\n")
+    }
 }
 
 impl Clipboard {
@@ -97,13 +114,16 @@ impl App {
             });
         }
         let count = carried.len();
+        let said = said_for(&carried); // WHAT: the words that go on the operating system's clipboard with the copy. WHY: Ctrl+V reads that clipboard, and seeing them come back is how it knows to put these markups down.
         self.clipboard = Clipboard {
             marks: carried,
             from: Some(Where {
                 doc: doc.id,
                 page: doc.page,
             }),
+            said: Some(said.clone()),
         };
+        self.system_copy = Some(said); // WHAT: put there at the end of the frame. WHY: as above; the markups' own words are also what another program gets if they are pasted there.
         self.status = format!(
             "{count} markup{} copied.",
             if count == 1 { "" } else { "s" }
@@ -348,6 +368,7 @@ mod tests {
                 },
             ],
             from: None,
+            said: None,
         };
         assert_eq!(board.bounds(), Some([5.0, 8.0, 100.0, 60.0]));
     }
@@ -714,7 +735,9 @@ impl App {
                 strokes: Vec::new(),
             }],
             from: Some(Where { doc: doc_id(self), page }),
+            said: Some(SNAPSHOT_SAID.into()),
         };
+        self.system_copy = Some(SNAPSHOT_SAID.into()); // WHAT: the snapshot's words on the operating system's clipboard. WHY: so Ctrl+V knows the snapshot is the last thing copied.
 
         // And beside the drawing, so it can go into an email.
         let beside = crate::docops::beside(&path, "snapshot");

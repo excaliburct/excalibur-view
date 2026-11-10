@@ -1400,6 +1400,38 @@ fn a_picture_put_on_a_sheet_is_really_there_when_it_is_rendered() {
 }
 
 #[test]
+fn words_and_a_picture_pasted_onto_a_blank_sheet_added_to_a_set_are_drawn() {
+    // WHAT: a blank sheet added to a set, a picture and words pasted on it, saved, and the sheet drawn by pdfium. WHY: Creede could not paste photos or words onto a blank sheet; this proves both reach the file and show on the sheet.
+    let scratch = Scratch::new("pasted");
+    let sheet = scratch.at("set.pdf");
+    a_set(&sheet, 2, &["S-101", "S-102"]);
+    let mut doc = hyperview::sheet::Doc::open(sheet.clone()).expect("the set should open");
+    doc.change_sheets(&hyperview::reorder::Plan::Blank { before: 1 }, "Test").expect("a blank sheet goes in");
+    assert_eq!(doc.page, 1, "the blank sheet is showing");
+    let (w, h) = doc.frame().size();
+    let red = image::RgbaImage::from_pixel(400, 400, image::Rgba([220, 30, 30, 255]));
+    let pen = hyperview::pen::Pen::default();
+    hyperview::pasted::picture_onto(&mut doc, [w * 0.3, h * 0.5], hyperview::picture::from_image(&red), &pen).expect("the picture goes down");
+    let mut big = pen.clone();
+    big.text.size = 60.0;
+    hyperview::pasted::words_onto(&mut doc, [w * 0.75, h * 0.5], "PASTED WORDS", &big).expect("the words go down");
+    doc.save("Test").expect("saved");
+
+    let png = scratch.at("look.png");
+    hyperview::render::picture_of(library(), &sheet, 1, 600, 600, &png).expect("the blank sheet should render");
+    let drawn = image::open(&png).expect("the picture should open").to_rgb8();
+    let red_pixels = drawn.pixels().filter(|p| p[0] > 150 && p[1] < 100 && p[2] < 100).count();
+    assert!(red_pixels > 100, "the picture should be visible: {red_pixels} red pixels");
+    let right = drawn.width() / 2; // WHAT: the right half, where the words went. WHY: the picture is on the left.
+    let dark_right = drawn
+        .enumerate_pixels()
+        .filter(|(x, _, p)| *x > right && p[0] < 120 && p[1] < 120 && p[2] < 120)
+        .count();
+    let reds_right = drawn.enumerate_pixels().filter(|(x, _, p)| *x > right && p[0] > 150 && p[1] < 100).count();
+    assert!(dark_right + reds_right > 30, "the words should be drawn: {dark_right} dark, {reds_right} red pixels");
+}
+
+#[test]
 fn a_picture_with_transparency_does_not_arrive_on_a_black_square() {
     // A PDF has no room for a fourth channel in the picture itself. Without a
     // soft mask, everything see-through comes out black — which is exactly how

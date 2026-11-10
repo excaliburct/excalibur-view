@@ -708,6 +708,9 @@ pub struct App {
     pub hosting: Option<crate::host::Hosting>,
     /// Markups cut or copied, waiting to go somewhere.
     pub clipboard: crate::clip::Clipboard,
+    pub pointer_now: Option<egui::Pos2>, // WHAT: where the pointer is this frame. WHY: Ctrl+V puts what is pasted under it.
+    pub paste_seen: bool, // WHAT: whether this Ctrl+V's paste has been dealt with. WHY: the key's release, which is all that arrives when only a picture is copied, must not paste a second time.
+    pub system_copy: Option<String>, // WHAT: words to put on the operating system's clipboard this frame. WHY: copying markups puts their words there, so Ctrl+V knows the copy is the program's own.
     /// The Undo History window, when it is up.
     pub history_open: bool,
     /// The loop being dragged round some markups, while it is being dragged.
@@ -961,6 +964,9 @@ impl App {
             last_print: Default::default(),
             hosting: None,
             clipboard: crate::clip::Clipboard::default(),
+            pointer_now: None, // WHAT: no pointer yet. WHY: read each frame.
+            paste_seen: false, // WHAT: no paste yet. WHY: as above.
+            system_copy: None, // WHAT: nothing to copy out yet. WHY: as above.
             history_open: false,
             lasso: None,
             moving: None,
@@ -1803,6 +1809,23 @@ mod the_keys_belong_to_the_drawing {
     }
 
     #[test]
+    fn ctrl_v_arrives_as_a_paste_and_never_as_the_key() {
+        // WHAT: what the desktop's window layer sends for Ctrl+V: a paste with the words, then only the V being let go. WHY: the shortcut was listening for V being pressed, which never comes, so Ctrl+V pasted nothing at all.
+        let ctx = egui::Context::default();
+        let let_go = egui::Event::Key { key: egui::Key::V, physical_key: None, pressed: false, repeat: false, modifiers: egui::Modifiers::COMMAND };
+        let raw = egui::RawInput { events: vec![egui::Event::Paste("RFI 014".into()), let_go], modifiers: egui::Modifiers::COMMAND, ..Default::default() };
+        let mut seen = None;
+        let _ = ctx.run(raw, |ctx| {
+            assert!(!ctx.input(|i| i.key_pressed(egui::Key::V)), "the key itself never arrives");
+            seen = Some(super::clipboard_keys(ctx));
+        });
+        assert_eq!(seen, Some((false, false, Some("RFI 014".to_string()), true)));
+        let raw = egui::RawInput { events: vec![egui::Event::Copy, egui::Event::Cut], ..Default::default() };
+        let _ = ctx.run(raw, |ctx| seen = Some(super::clipboard_keys(ctx)));
+        assert_eq!(seen, Some((true, true, None, false)), "Ctrl+C and Ctrl+X arrive as copy and cut");
+    }
+
+    #[test]
     fn with_nothing_focused_the_drawing_has_the_keys() {
         let ctx = egui::Context::default();
         a_pass(&ctx, |ui| {
@@ -1810,6 +1833,24 @@ mod the_keys_belong_to_the_drawing {
         });
         assert!(!somebody_is_typing(&ctx));
     }
+}
+
+/// The copy, cut and paste that arrived this frame, and whether a V was let
+/// go with Ctrl held.
+fn clipboard_keys(ctx: &egui::Context) -> (bool, bool, Option<String>, bool) {
+    ctx.input(|i| {
+        let (mut copied, mut cut, mut pasted, mut v_let_go) = (false, false, None, false); // WHAT: nothing seen yet. WHY: filled from the frame's events.
+        for event in &i.events {
+            match event {
+                egui::Event::Copy => copied = true,
+                egui::Event::Cut => cut = true,
+                egui::Event::Paste(words) => pasted = Some(words.clone()),
+                egui::Event::Key { key: egui::Key::V, pressed: false, modifiers, .. } if modifiers.command => v_let_go = true,
+                _ => {}
+            }
+        }
+        (copied, cut, pasted, v_let_go)
+    })
 }
 
 fn key_named(name: &str) -> Option<egui::Key> {
@@ -2046,6 +2087,9 @@ impl eframe::App for App {
         self.canvas(ctx);
         crate::bench::mark(&mut marks, "sheet");
         self.run_commands(ctx);
+        if let Some(words) = self.system_copy.take() {
+            ctx.copy_text(words); // WHAT: the copied markups' words onto the operating system's clipboard. WHY: so the next Ctrl+V knows they are the last thing copied.
+        }
         self.calibrate_dialog(ctx);
         self.quick_tools_window(ctx); // WHAT: setting the quick tools up, when open. WHY: with the other windows.
         self.signoffs_button(ctx); // WHAT: "Sign-offs: 2 to sign", over the drawing. WHY: found without a menu.
@@ -2260,6 +2304,16 @@ impl App {
                 .filter_map(|f| f.path.clone())
                 .collect()
         });
+        // WHAT: pictures let go over a drawing go on the sheet showing, where they were let go. WHY: dragging a photo onto a sheet did nothing, or tried to open it as a drawing.
+        let (pictures, dropped): (Vec<PathBuf>, Vec<PathBuf>) =
+            dropped.into_iter().partition(|p| crate::pasted::is_picture(p) && self.doc().is_some());
+        let at = crate::platform::pointer_now(ctx); // WHAT: where they were let go. WHY: the picture goes there.
+        for path in pictures {
+            match crate::picture::read(&path) {
+                Ok(picture) => self.paste_picture(picture, at),
+                Err(why) => self.error = Some(why), // WHAT: says why it could not be read. WHY: rather than nothing happening.
+            }
+        }
         if dropped.is_empty() {
             return;
         }
@@ -2411,8 +2465,25 @@ impl App {
     }
 
     fn keyboard(&mut self, ctx: &egui::Context) {
+        self.pointer_now = ctx.input(|i| i.pointer.hover_pos()); // WHAT: where the pointer is. WHY: what is pasted goes under it.
         if somebody_is_typing(ctx) {
             return;
+        }
+        // WHAT: Ctrl+C, Ctrl+X and Ctrl+V as the window layer delivers them. WHY: on a desktop they arrive as copy, cut and paste events and never as the keys, so the shortcuts listening for the keys never ran; with only a picture copied, nothing arrives but the V being let go.
+        let (copied, cut, pasted, v_let_go) = clipboard_keys(ctx);
+        let shifted = ctx.input(|i| i.modifiers.shift); // WHAT: Shift held. WHY: Ctrl+Shift+V is Paste in Place.
+        if copied {
+            self.copy_selection();
+        }
+        if cut {
+            self.cut_selection();
+        }
+        if let Some(words) = pasted.clone() {
+            self.paste_seen = true; // WHAT: this Ctrl+V is dealt with. WHY: its release must not paste again.
+            self.paste_anything(shifted, Some(words));
+        }
+        if v_let_go && !std::mem::take(&mut self.paste_seen) {
+            self.paste_anything(shifted, None); // WHAT: a Ctrl+V that brought no words: a picture, or the markups copied here. WHY: the window layer reads only words for its paste.
         }
         let (keys, ctrl, shift, alt) = ctx.input(|i| {
             (
@@ -2550,7 +2621,16 @@ impl App {
                 continue;
             }
             let Some(key) = key_named(keys.key) else { continue };
-            if pressed(key) {
+            let done_already = match id {
+                "Edit.Copy" => copied,
+                "Edit.Cut" => cut,
+                "Edit.Paste" | "Edit.PasteInPlace" => pasted.is_some(),
+                _ => false,
+            }; // WHAT: whether the copy, cut or paste event already did this. WHY: where the key also arrives, once is enough.
+            if pressed(key) && !done_already {
+                if matches!(id, "Edit.Paste" | "Edit.PasteInPlace") {
+                    self.paste_seen = true; // WHAT: this Ctrl+V is dealt with. WHY: as above, its release must not paste again.
+                }
                 self.chrome.fire(id);
                 if let Some(tool) = crate::panelbody::tool_for(id) {
                     self.chrome.tool = id.to_string();
