@@ -15,8 +15,10 @@
 #   It does NOT have the Excalibur signing key, and the iPad app has no use
 #   for it: the App Store installs the updates, not the program.
 #
-# Started by hand only. See mobile/ios/build.sh, which is what it runs and what
-# builds the same thing on a Mac of your own.
+# Started by hand, by "Build everything" on every push (check only: the
+# Simulator build, no key, nothing kept), and by "Release" (archived, sent to
+# App Store Connect, then submitted for review). See mobile/ios/build.sh,
+# which is what it runs and what builds the same thing on a Mac of your own.
 
 name: iPad build
 
@@ -31,6 +33,33 @@ on:
         description: "Send the archive to App Store Connect (TestFlight)"
         type: boolean
         default: false
+  # WHAT: lets "Build everything" (every push) and "Release" run this same build. WHY: one copy of each platform's build, never two drifting apart.
+  workflow_call:
+    inputs:
+      ref:  # WHAT: the commit to build; empty means the one the run started on. WHY: a release builds exactly the commit it names.
+        type: string
+        default: ""
+      check_only:  # WHAT: build and test, keep nothing, sign nothing. WHY: the build on every push proves it builds; it must not leave files a release could pick up.
+        type: boolean
+        default: false
+      archive:  # WHAT: as the input above. WHY: the Release workflow asks for an archive.
+        type: boolean
+        default: false
+      upload:  # WHAT: as the input above. WHY: the Release workflow sends it to App Store Connect.
+        type: boolean
+        default: false
+      build_number:  # WHAT: the build number to stamp; empty means the run number, as before. WHY: the Release workflow picks one and then looks the build up by it.
+        type: string
+        default: ""
+    secrets:  # WHAT: the App Store Connect key, passed only by a caller that archives. WHY: the build on every push passes none.
+      APPLE_API_KEY_P8:
+        required: false
+      APPLE_API_KEY_ID:
+        required: false
+      APPLE_API_ISSUER:
+        required: false
+      MACOS_SIGN_IDENTITY:
+        required: false
 
 # Never on a pull request. A pull request can come from anybody's fork and
 # would run their code with the API key in reach.
@@ -39,7 +68,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ipad-build-${{ github.ref }}
+  group: ipad-build-${{ github.workflow }}-${{ github.ref }}  # WHAT: one queue per calling workflow and branch. WHY: a push build must never cancel a release build of the same branch, or the other way round.
   cancel-in-progress: true
 
 jobs:
@@ -51,20 +80,22 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Rust, for an iPad and for the Simulator
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # WHAT: v4.4.0, 2026-07-20. WHY: pinned by commit, so a moved tag can never change what runs here.
         with:
+          ref: ${{ inputs.ref }}  # WHAT: the commit asked for, or empty for the run's own. WHY: as the input says.
+          persist-credentials: false  # WHAT: the job's token is not left in .git/config. WHY: nothing after checkout needs it, so no later step can borrow it.
+      - name: Rust, for an iPad and for the Simulator
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # WHAT: the stable branch, 2026-10-16. WHY: pinned by commit, as above.
+        with:
+          toolchain: stable  # WHAT: stable Rust. WHY: pinned by commit, the action no longer reads it from the ref.
           targets: aarch64-apple-ios,aarch64-apple-ios-sim
 
-      - uses: Swatinem/rust-cache@v2
-
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # WHAT: v2.9.3, 2026-10-20. WHY: pinned by commit, so a moved tag can never change what runs here.
       - name: XcodeGen
         run: brew install xcodegen
 
       - name: The App Store Connect key
-        if: ${{ inputs.archive || inputs.upload }}
+        if: ${{ !inputs.check_only && (inputs.archive || inputs.upload) }}  # WHAT: as before, and never for a check build. WHY: a check build needs no key.
         env:
           API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
           SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
@@ -81,23 +112,24 @@ jobs:
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           # Rises with every run, as App Store Connect needs it to.
-          BUILD_NUMBER: ${{ github.run_number }}
+          BUILD_NUMBER: ${{ inputs.build_number || github.run_number }}  # WHAT: the number the caller chose, else the run number. WHY: see the build_number input.
           STEPS: >-
             native project simulator
-            ${{ (inputs.archive || inputs.upload) && 'archive' || '' }}
-            ${{ inputs.upload && 'upload' || '' }}
+            ${{ !inputs.check_only && (inputs.archive || inputs.upload) && 'archive' || '' }}
+            ${{ !inputs.check_only && inputs.upload && 'upload' || '' }}
         run: mobile/ios/build.sh
 
       - name: Keep the Simulator build
-        uses: actions/upload-artifact@v4
+        if: ${{ !inputs.check_only }}  # WHAT: only when keeping the files. WHY: a check build must leave nothing a release could pick up.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # WHAT: v4.6.2, 2025-03-19. WHY: pinned by commit, so a moved tag can never change what runs here.
         with:
           name: excalibur-view-ipad-simulator
           path: mobile/ios/build/simulator/Build/Products/Release-iphonesimulator/ExcaliburView.app
           if-no-files-found: warn
 
       - name: Keep the .ipa
-        if: ${{ inputs.archive && !inputs.upload }}
-        uses: actions/upload-artifact@v4
+        if: ${{ !inputs.check_only && inputs.archive && !inputs.upload }}  # WHAT: as before, never for a check build. WHY: as above.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # WHAT: v4.6.2, 2025-03-19. WHY: pinned by commit, so a moved tag can never change what runs here.
         with:
           name: excalibur-view-ipad
           path: mobile/ios/build/export/*.ipa
@@ -109,7 +141,7 @@ jobs:
       # those logs out so the reason can be read. They hold no key: the App
       # Store Connect key is a separate file in RUNNER_TEMP, removed below.
       - name: Gather Xcode's distribution logs
-        if: failure()
+        if: ${{ failure() && !inputs.check_only }}  # WHAT: as before, never for a check build. WHY: a check build makes no archive, so there are no such logs.
         run: |
           set -u
           mkdir -p "$RUNNER_TEMP/distlogs"
@@ -117,8 +149,8 @@ jobs:
           ls -R "$RUNNER_TEMP/distlogs" | head -50
 
       - name: Keep Xcode's distribution logs
-        if: failure()
-        uses: actions/upload-artifact@v4
+        if: ${{ failure() && !inputs.check_only }}  # WHAT: as before, never for a check build. WHY: a check build makes no archive, so there are no such logs.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # WHAT: v4.6.2, 2025-03-19. WHY: pinned by commit, so a moved tag can never change what runs here.
         with:
           name: xcode-distribution-logs
           path: ${{ runner.temp }}/distlogs

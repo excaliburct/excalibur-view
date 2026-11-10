@@ -1,0 +1,276 @@
+# Builds all five platforms from one commit on main and puts the tablet apps
+# in their stores.
+#
+#   Windows, Linux, Mac: built, tested and kept as the release artifacts
+#     (windows-<version>, linux-<version>, mac-<version>), exactly as their own
+#     workflows make them. The PC's "Release Excalibur View" picks those up,
+#     signs and publishes them; nothing here signs an update.
+#   Android: the Play bundle, signed with the upload key, sent to Google Play
+#     on the chosen track (production by default) by tools/play_release.py.
+#   iPad: archived, sent to App Store Connect, and once Apple has processed it,
+#     submitted for review with the notes as "What's New" by
+#     tools/appstore_release.py. Release after approval stays a person's
+#     button unless "app_store_release" says after-approval.
+#
+# Started by hand only (Actions -> Release -> Run workflow), from main, in this
+# repository. Never on a pull request or a tag, never from a fork: every job
+# that holds a store key checks all three. The commit must already be on main,
+# so code nobody merged can never be built with the store keys in reach.
+#
+# "dry_run" builds everything (the iPad is archived but not uploaded) and runs
+# both store scripts in their dry-run mode: every check, no call to a store.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:  # WHAT: the commit to release. WHY: a release is one commit, named; empty takes main as it is now.
+        description: "Commit to release (full 40-character id; empty = newest on main)"
+        type: string
+        default: ""
+      play_track:  # WHAT: the Play track. WHY: production by default; the others for a test round.
+        description: "Google Play track"
+        type: choice
+        options: [production, beta, alpha, internal]
+        default: production
+      play_status:  # WHAT: out to everybody, or a draft. WHY: "draft" leaves the release button in Play Console.
+        description: "Google Play release status (draft = press release in Play Console yourself)"
+        type: choice
+        options: [completed, draft]
+        default: completed
+      app_store_release:  # WHAT: who releases the iPad version once Apple approves it. WHY: a person, unless asked otherwise.
+        description: "App Store release after approval"
+        type: choice
+        options: [manual, after-approval]
+        default: manual
+      dry_run:  # WHAT: build everything, check the uploads, send nothing. WHY: proves a release without touching either store.
+        description: "Dry run: build and check everything, send nothing to either store"
+        type: boolean
+        default: false
+
+permissions: {}  # WHAT: nothing by default. WHY: each job asks for exactly what it needs below.
+
+concurrency:  # WHAT: one release at a time, never cancelled by another. WHY: two releases racing could send two builds to a store at once.
+  group: release-excalibur-view
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: What is being released
+    # WHAT: only this repository, never a pull request, only from main. WHY: the gate every later job sits behind.
+    if: github.repository == 'excaliburct/excalibur-view' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read  # WHAT: read the code. WHY: to find the commit, its version and its notes.
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}  # WHAT: the commit. WHY: every build checks it out.
+      version: ${{ steps.plan.outputs.version }}  # WHAT: its version. WHY: names the artifacts and the store releases.
+      build_number: ${{ steps.plan.outputs.build_number }}  # WHAT: the iPad build number. WHY: stamped by the iPad build, then looked up by the submission.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # WHAT: v4.4.0, 2026-07-20. WHY: pinned by commit, so a moved tag can never change what runs here.
+        with:
+          fetch-depth: 0  # WHAT: all of main's history. WHY: to prove the commit is on main.
+          persist-credentials: false  # WHAT: no token left in .git/config. WHY: nothing here pushes.
+
+      - name: The commit, its version and its notes
+        id: plan
+        env:
+          WANT: ${{ inputs.commit }}  # WHAT: the input, through the environment. WHY: never pasted into the script, so it cannot become shell.
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }  # WHAT: one red line and stop. WHY: says plainly what to fix.
+          if [ -z "$WANT" ]; then  # WHAT: no commit given. WHY: take main as it is.
+            sha="$(git rev-parse HEAD)"  # WHAT: main's newest commit. WHY: the checkout is main.
+          elif [[ "$WANT" =~ ^[0-9a-f]{40}$ ]]; then  # WHAT: a full commit id. WHY: a short one or a branch name could mean something else tomorrow.
+            sha="$WANT"  # WHAT: that commit. WHY: as asked.
+          else
+            fail "The commit must be the full 40-character id (git rev-parse HEAD), or empty for the newest on main."  # WHAT: refused. WHY: as above.
+          fi
+          git cat-file -e "$sha^{commit}" 2>/dev/null || fail "There is no commit $sha in this repository."  # WHAT: it exists. WHY: a typo is said plainly.
+          git merge-base --is-ancestor "$sha" HEAD || fail "Commit $sha is not on main. Merge it first."  # WHAT: it is on main. WHY: never build unmerged code (a fork's pull request, say) with the store keys in reach.
+          version="$(git show "$sha:Cargo.toml" | sed -n '/^\[workspace.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p')"  # WHAT: that commit's version. WHY: the same place the builds read it.
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "No MAJOR.MINOR.PATCH version in that commit's Cargo.toml."  # WHAT: a version. WHY: it names everything.
+          mkdir -p "$RUNNER_TEMP/notes"  # WHAT: a folder for the notes. WHY: handed to the store jobs.
+          git show "$sha:notes-$version.txt" > "$RUNNER_TEMP/notes/notes-$version.txt" 2>/dev/null \
+            || fail "That commit has no notes-$version.txt. Write the release notes first; they become What's New in both stores."  # WHAT: the notes exist. WHY: both stores show them.
+          build_number="$(date -u +%Y%m%d.%H%M)"  # WHAT: the date, a dot, the time (20261110.1530). WHY: rises with every release and sits above every run number used before; two small parts, never one number too big for Apple.
+          {
+            echo "sha=$sha"
+            echo "version=$version"
+            echo "build_number=$build_number"
+          } >> "$GITHUB_OUTPUT"  # WHAT: the three answers. WHY: every later job reads them.
+          {
+            echo "### Excalibur View $version"
+            echo "Commit \`$sha\`, iPad build $build_number."
+          } >> "$GITHUB_STEP_SUMMARY"  # WHAT: shown on the run's page. WHY: says at a glance what this run released.
+
+      - name: Keep the notes
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # WHAT: v4.6.2, 2025-03-19. WHY: pinned by commit, as above.
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes
+          if-no-files-found: error
+          retention-days: 30
+
+  tests:  # WHAT: the whole test suite on that commit. WHY: a release that does not pass its own tests is not a release.
+    needs: plan
+    uses: ./.github/workflows/check.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+    permissions:
+      contents: read
+
+  windows:  # WHAT: the Windows build, kept as windows-<version>. WHY: what the PC's release picks up.
+    needs: plan
+    uses: ./.github/workflows/windows.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+    permissions:
+      contents: read
+
+  linux:  # WHAT: the Linux build, kept as linux-<version>. WHY: as above.
+    needs: plan
+    uses: ./.github/workflows/linux.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+    permissions:
+      contents: read
+
+  mac:  # WHAT: the Mac build, signed and notarized, kept as mac-<version>. WHY: as above.
+    needs: plan
+    if: github.repository == 'excaliburct/excalibur-view' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'  # WHAT: the gate again. WHY: this job holds Apple's credentials.
+    uses: ./.github/workflows/mac.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+      notarize: true
+    secrets:  # WHAT: exactly the Mac build's secrets, by name. WHY: never all of them.
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+    permissions:
+      contents: read
+
+  ipad:  # WHAT: the iPad archive, sent to App Store Connect (not in a dry run). WHY: the submission below needs it there.
+    needs: plan
+    if: github.repository == 'excaliburct/excalibur-view' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'  # WHAT: the gate again. WHY: this job holds the App Store Connect key.
+    uses: ./.github/workflows/ios.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+      archive: true
+      upload: ${{ !inputs.dry_run }}
+      build_number: ${{ needs.plan.outputs.build_number }}
+    secrets:  # WHAT: exactly the iPad build's secrets, by name. WHY: never all of them.
+      APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+    permissions:
+      contents: read
+
+  android:  # WHAT: the Android bundle, signed with the upload key, kept as android-<version>. WHY: the Play job sends it.
+    needs: plan
+    if: github.repository == 'excaliburct/excalibur-view' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'  # WHAT: the gate again. WHY: this job holds the upload key.
+    uses: ./.github/workflows/android.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+    secrets:  # WHAT: exactly the Android build's secrets, by name. WHY: never all of them.
+      ANDROID_UPLOAD_KEYSTORE: ${{ secrets.ANDROID_UPLOAD_KEYSTORE }}
+      ANDROID_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+      ANDROID_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+      ANDROID_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+    permissions:
+      contents: read
+
+  google-play:
+    name: Google Play
+    needs: [plan, tests, windows, linux, mac, ipad, android]  # WHAT: only after every platform built and every test passed. WHY: a release is all five or none.
+    if: github.repository == 'excaliburct/excalibur-view' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'  # WHAT: the gate again. WHY: this job holds the Play key.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: google-play  # WHAT: a GitHub Environment. WHY: Creede can add a reviewer or a main-only rule to it in Settings without touching this file.
+    permissions:
+      contents: read  # WHAT: read the scripts. WHY: nothing else is needed.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # WHAT: v4.4.0. WHY: pinned by commit, as above.
+        with:
+          sparse-checkout: tools  # WHAT: only the scripts, from main as it is now. WHY: the uploading code is main's, whatever commit is being released.
+          persist-credentials: false  # WHAT: no token left behind. WHY: nothing here pushes.
+
+      - name: The bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # WHAT: v4.3.0, 2025-04-24. WHY: pinned by commit, as above.
+        with:
+          name: android-${{ needs.plan.outputs.version }}
+          path: android
+
+      - name: The notes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # WHAT: v4.3.0. WHY: pinned by commit, as above.
+        with:
+          name: release-notes
+          path: notes
+
+      - name: Send it to Google Play
+        env:
+          PLAY_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}  # WHAT: the service account key. WHY: only in this step's environment, never on a command line.
+          VERSION: ${{ needs.plan.outputs.version }}  # WHAT: checked by plan. WHY: names the files.
+          TRACK: ${{ inputs.play_track }}  # WHAT: through the environment. WHY: never pasted into the script; the script checks it too.
+          STATUS: ${{ inputs.play_status }}  # WHAT: as above. WHY: as above.
+          DRY_RUN: ${{ inputs.dry_run }}  # WHAT: as above. WHY: as above.
+        run: |
+          set -euo pipefail
+          [ -n "$PLAY_JSON" ] || { echo "::error::The PLAY_SERVICE_ACCOUNT_JSON secret is not set."; exit 1; }  # WHAT: the secret exists. WHY: said plainly.
+          umask 077  # WHAT: files made from here are ours alone. WHY: the key file is 0600 from its first byte.
+          key="$(mktemp "$RUNNER_TEMP/play.XXXXXX")"  # WHAT: a fresh file name. WHY: never a guessable one.
+          trap 'rm -f "$key"' EXIT  # WHAT: removed however the step ends. WHY: the key never outlives it.
+          printf '%s' "$PLAY_JSON" > "$key"  # WHAT: the key into the file. WHY: printf, not echo, so nothing is interpreted; nothing goes to the log.
+          extra=()  # WHAT: optional arguments. WHY: dry run.
+          [ "$DRY_RUN" = "true" ] && extra+=(--dry-run)  # WHAT: a dry run. WHY: as the input says.
+          python3 tools/play_release.py --account-file "$key" --version "$VERSION" \
+            --aab "android/excalibur-view-$VERSION.aab" --symbols "android/native-debug-symbols-$VERSION.zip" \
+            --notes-file "notes/notes-$VERSION.txt" --track "$TRACK" --status "$STATUS" ${extra[@]+"${extra[@]}"}  # WHAT: the upload. WHY: see tools/play_release.py.
+
+  app-store:
+    name: App Store review
+    needs: [plan, tests, windows, linux, mac, ipad, android]  # WHAT: as Google Play. WHY: as above.
+    if: github.repository == 'excaliburct/excalibur-view' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'  # WHAT: the gate again. WHY: this job holds the App Store Connect key.
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: app-store  # WHAT: a GitHub Environment. WHY: as Google Play.
+    permissions:
+      contents: read  # WHAT: read the scripts. WHY: nothing else is needed.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # WHAT: v4.4.0. WHY: pinned by commit, as above.
+        with:
+          sparse-checkout: tools  # WHAT: only the scripts, from main. WHY: as Google Play.
+          persist-credentials: false  # WHAT: no token left behind. WHY: as above.
+
+      - name: The notes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # WHAT: v4.3.0. WHY: pinned by commit, as above.
+        with:
+          name: release-notes
+          path: notes
+
+      - name: Submit it for review
+        env:
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}  # WHAT: the App Store Connect key, base64, as ios.yml reads it. WHY: only in this step's environment.
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}  # WHAT: its id. WHY: the script reads it from the environment.
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}  # WHAT: the issuer. WHY: as above.
+          VERSION: ${{ needs.plan.outputs.version }}  # WHAT: checked by plan. WHY: the App Store version.
+          BUILD_NUMBER: ${{ needs.plan.outputs.build_number }}  # WHAT: the number the iPad build stamped. WHY: finds that build.
+          RELEASE: ${{ inputs.app_store_release }}  # WHAT: through the environment. WHY: never pasted into the script; the script checks it too.
+          DRY_RUN: ${{ inputs.dry_run }}  # WHAT: as above. WHY: as above.
+        run: |
+          set -euo pipefail
+          [ -n "$API_KEY_P8" ] || { echo "::error::The APPLE_API_KEY_P8 secret is not set."; exit 1; }  # WHAT: the secret exists. WHY: said plainly.
+          umask 077  # WHAT: files made from here are ours alone. WHY: as Google Play.
+          key="$(mktemp "$RUNNER_TEMP/asc.XXXXXX")"  # WHAT: a fresh file name. WHY: as above.
+          trap 'rm -f "$key"' EXIT  # WHAT: removed however the step ends. WHY: as above.
+          printf '%s' "$API_KEY_P8" | base64 --decode > "$key"  # WHAT: the .p8 into the file. WHY: as ios.yml decodes it; nothing goes to the log.
+          extra=()  # WHAT: optional arguments. WHY: dry run.
+          [ "$DRY_RUN" = "true" ] && extra+=(--dry-run)  # WHAT: a dry run. WHY: as the input says.
+          python3 tools/appstore_release.py --key-file "$key" --version "$VERSION" --build-number "$BUILD_NUMBER" \
+            --notes-file "notes/notes-$VERSION.txt" --release "$RELEASE" ${extra[@]+"${extra[@]}"}  # WHAT: the submission. WHY: see tools/appstore_release.py.

@@ -9,10 +9,15 @@
 name: Check
 
 on:
-  push:
-    branches: [main, master]
+  # WHAT: no push trigger of its own any more. WHY: "Build everything" runs this on every push, beside the five builds, so it is not run twice.
   pull_request:
   workflow_dispatch:
+  # WHAT: lets "Build everything" and "Release" run these tests. WHY: one copy of the tests.
+  workflow_call:
+    inputs:
+      ref:  # WHAT: the commit to build; empty means the one the run started on. WHY: a release builds exactly the commit it names.
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -37,9 +42,14 @@ jobs:
           - os: ubuntu-22.04
             name: Linux
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # WHAT: v4.4.0, 2026-07-20. WHY: pinned by commit, so a moved tag can never change what runs here.
+        with:
+          ref: ${{ inputs.ref }}  # WHAT: the commit asked for, or empty for the run's own. WHY: as the input says.
+          persist-credentials: false  # WHAT: the job's token is not left in .git/config. WHY: nothing after checkout needs it, so no later step can borrow it.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # WHAT: the stable branch, 2026-10-16. WHY: pinned by commit, as above.
+        with:
+          toolchain: stable  # WHAT: stable Rust. WHY: pinned by commit, the action no longer reads it from the ref.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # WHAT: v2.9.3, 2026-10-20. WHY: pinned by commit, so a moved tag can never change what runs here.
 
       # The PDF engine is a third-party binary kept out of this repository, and
       # the tests that open a drawing genuinely need it. Leaving it out made
@@ -80,3 +90,8 @@ jobs:
 
       - name: The whole test suite
         run: cargo test --workspace
+
+      # WHAT: the store upload scripts' own tests, offline. WHY: what Play and App Store Connect are told is proven on every push, not first found out at a release.
+      - name: The store upload scripts
+        if: runner.os == 'Linux'  # WHAT: once, on Linux. WHY: plain Python and openssl; one platform is enough.
+        run: python3 tools/test_stores.py  # WHAT: run them. WHY: as above.

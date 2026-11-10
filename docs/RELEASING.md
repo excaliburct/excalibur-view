@@ -12,6 +12,13 @@
 That is the whole job. The rest of this file is what those four steps are
 doing and why, for whoever has to change one of them later.
 
+Instead of step 1, **Actions → Release** builds all five platforms on the
+commit at once and also sends the iPad and Android apps to their stores
+(docs/MOBILE.md, "Store releases"). Its Windows, Mac and Linux artifacts are
+the same ones step 2 picks up. Every push to main is already built on all
+five platforms by **Build everything**, which keeps nothing and signs
+nothing, so a build that broke is known before a release.
+
 If the release key is on a hardware key (a YubiKey) rather than in a file,
 steps 2 and 4 are each done in two halves, either side of the computer the key
 is plugged into. See [Signing on a hardware key](#signing-on-a-hardware-key-a-yubikey).
