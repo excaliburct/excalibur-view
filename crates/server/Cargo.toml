@@ -68,5 +68,5 @@ nix = { version = "0.31", default-features = false, features = ["user"] }
 wat = "1"
 ureq = { version = "2", features = ["json", "tls"] }
 ed25519-dalek = "2"
-hub = { path = "../hub" }
+hub = { path = "../hub", features = ["testing"] } # WHAT: with the HTTPS test servers. WHY: Citadel's pinned look is tested end to end
 plugin-api = { path = "../plugin-api" }

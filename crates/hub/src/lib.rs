@@ -32,6 +32,9 @@ pub mod feed;
 #[cfg(feature = "client")]
 pub mod web;
 
+#[cfg(feature = "client")]
+pub mod pinned; // WHAT: HTTPS by a pinned certificate. WHY: Excalibur's own servers make their own certificates
+
 pub use model::*;
 
 #[cfg(feature = "client")]

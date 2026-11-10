@@ -24,7 +24,7 @@ pub struct Part {
     pub name: &'static str, // WHAT: the part's licence name (view, cad, archetype, citadel). WHY: the same word the licence and Fleet use
     pub title: &'static str, // WHAT: its name for people. WHY: the Manager shows it as is
     pub licensed: bool, // WHAT: whether the licence switches it on. WHY: an office sees what it has, and what it could add
-    pub state: &'static str, // WHAT: running, not-in-this-build or off. WHY: Fleet turns a licensed part that isn't running amber
+    pub state: &'static str, // WHAT: running, not-in-this-build, off; for Citadel also looking, not-found, not-answering, certificate-changed. WHY: Fleet turns a licensed part that isn't running amber
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>, // WHAT: the part's running version, when it runs. WHY: Fleet compares it with the shelf
 }
@@ -54,16 +54,25 @@ pub fn serves_of(licensed: &[Module], built: &[Module], part: Module) -> bool {
 
 /// Every part Excalibur makes, with this office's standing for each.
 pub fn parts(server: &Server) -> Vec<Part> {
-    parts_of(&licensed(server), IN_THIS_BUILD)
+    parts_of(&licensed(server), IN_THIS_BUILD, crate::citadel::last().as_ref())
 }
 
-/// [`parts`], from a licensed list and a built list. Kept apart so a test can
-/// ask about a build that carries more parts than this one.
-pub fn parts_of(licensed: &[Module], built: &[Module]) -> Vec<Part> {
+/// [`parts`], from a licensed list, a built list and the last look at
+/// Citadel. Kept apart so a test can ask about any of them.
+pub fn parts_of(licensed: &[Module], built: &[Module], citadel: Option<&crate::citadel::Seen>) -> Vec<Part> {
     Module::ALL
         .iter()
         .map(|&part| {
             let on = licensed.contains(&part); // WHAT: switched on by the licence. WHY: decides whether it should be running
+            if part == Module::Citadel && on {
+                return Part {
+                    name: part.name(),
+                    title: part.title(),
+                    licensed: true,
+                    state: citadel.map_or("looking", |s| s.state()), // WHAT: what the last look saw, or "looking" before the first. WHY: Citadel runs alongside, so its state is what it answers
+                    version: citadel.and_then(|s| s.version()), // WHAT: Citadel's own version. WHY: Fleet compares it with Citadel's shelf
+                };
+            }
             let state = match (on, built.contains(&part)) {
                 (true, true) => "running", // WHAT: licensed and carried. WHY: it is served
                 (true, false) => "not-in-this-build", // WHAT: licensed, but this build lacks it. WHY: Fleet shows it needs an update, never a false green
@@ -105,7 +114,7 @@ mod tests {
 
     #[test]
     fn an_office_without_parts_runs_view_and_nothing_else() {
-        let parts = parts_of(&[Module::View], IN_THIS_BUILD); // WHAT: a licence with no parts line, or none at all. WHY: every office today
+        let parts = parts_of(&[Module::View], IN_THIS_BUILD, None); // WHAT: a licence with no parts line, or none at all. WHY: every office today
         assert_eq!(parts.len(), Module::ALL.len(), "every part is listed, switched on or not");
         assert_eq!(state_of(&parts, "view").state, "running");
         assert_eq!(state_of(&parts, "view").version.as_deref(), Some(crate::VERSION));
@@ -118,13 +127,30 @@ mod tests {
 
     #[test]
     fn a_licensed_part_this_build_lacks_says_so_and_never_claims_to_run() {
-        let parts = parts_of(&[Module::View, Module::Citadel], IN_THIS_BUILD); // WHAT: Citadel licensed on a build without it. WHY: the gap Fleet must see
-        assert_eq!(state_of(&parts, "citadel").state, "not-in-this-build");
-        assert!(state_of(&parts, "citadel").licensed);
-        assert!(state_of(&parts, "citadel").version.is_none());
-        let later = parts_of(&[Module::View, Module::Citadel], &[Module::View, Module::Citadel, Module::Cad]); // WHAT: a build that carries it, and CAD unlicensed. WHY: then it runs, and CAD still doesn't
-        assert_eq!(state_of(&later, "citadel").state, "running");
+        let parts = parts_of(&[Module::View, Module::Archetype], IN_THIS_BUILD, None); // WHAT: Archetype licensed on a build without it. WHY: the gap Fleet must see
+        assert_eq!(state_of(&parts, "archetype").state, "not-in-this-build");
+        assert!(state_of(&parts, "archetype").licensed);
+        assert!(state_of(&parts, "archetype").version.is_none());
+        let later = parts_of(&[Module::View, Module::Archetype], &[Module::View, Module::Archetype, Module::Cad], None); // WHAT: a build that carries it, and CAD unlicensed. WHY: then it runs, and CAD still doesn't
+        assert_eq!(state_of(&later, "archetype").state, "running");
         assert_eq!(state_of(&later, "cad").state, "off", "carried but not licensed stays off");
+    }
+
+    #[test]
+    fn citadel_is_what_its_last_look_saw_and_off_unless_licensed() {
+        use crate::citadel::Seen;
+        let on = [Module::View, Module::Citadel]; // WHAT: a licence with Citadel. WHY: the Latcon office
+        assert_eq!(state_of(&parts_of(&on, IN_THIS_BUILD, None), "citadel").state, "looking", "before the first look");
+        let running = Seen::Running { version: "1.0.2".into() };
+        let part = parts_of(&on, IN_THIS_BUILD, Some(&running));
+        assert_eq!(state_of(&part, "citadel").state, "running");
+        assert_eq!(state_of(&part, "citadel").version.as_deref(), Some("1.0.2"), "Citadel's own version, not this server's");
+        let changed = Seen::CertificateChanged { seen: "b".repeat(64) };
+        assert_eq!(state_of(&parts_of(&on, IN_THIS_BUILD, Some(&changed)), "citadel").state, "certificate-changed");
+        assert_eq!(state_of(&parts_of(&on, IN_THIS_BUILD, Some(&Seen::NotFound)), "citadel").state, "not-found");
+        let unlicensed = parts_of(&[Module::View], IN_THIS_BUILD, Some(&running)); // WHAT: Citadel running, but not licensed. WHY: the licence still decides
+        assert_eq!(state_of(&unlicensed, "citadel").state, "off");
+        assert!(state_of(&unlicensed, "citadel").version.is_none());
     }
 
     #[test]

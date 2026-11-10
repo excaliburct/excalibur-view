@@ -1093,7 +1093,7 @@ fn schemas() -> Value {
             ("name", "string", "view, cad, archetype or citadel."),
             ("title", "string", "Its name for people."),
             ("licensed", "boolean", "Whether the licence switches it on."),
-            ("state", "string", "running, not-in-this-build or off."),
+            ("state", "string", "running, not-in-this-build or off; Citadel, which runs alongside, may also be looking, not-found, not-answering or certificate-changed."),
             ("version", "string", "The version it runs. Absent unless running."),
         ]),
         "CopyAsked": object(&[

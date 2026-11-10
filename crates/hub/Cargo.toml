@@ -27,6 +27,8 @@ default = ["client"]
 # The HTTP client. A server depends on this crate for the types alone and can
 # leave the client out.
 client = ["dep:ureq", "dep:rustls", "dep:webpki-roots", "dep:rustls-native-certs"]
+# WHAT: HTTPS test servers with made-up certificates. WHY: the server crate's tests check pinning end to end; never turned on in a build that ships.
+testing = ["client"]
 
 # Machine policy: the one registry value an administrator sets through Group
 # Policy to seal a computer. Read-only, HKLM\Software\Policies.
