@@ -31,14 +31,6 @@ pub const CERT: &str = "tls-cert.pem"; // WHAT: the public certificate. WHY: kep
 /// The private key's file, in the data folder.
 pub const KEY: &str = "tls-key.pem"; // WHAT: the private key. WHY: readable by the server alone
 
-/// The port HTTPS is listening on, once it is.
-static SERVING_ON: std::sync::OnceLock<u16> = std::sync::OnceLock::new(); // WHAT: set once the listener is bound. WHY: /health never offers a port that isn't answering
-
-/// The port HTTPS is listening on, or `None`.
-pub fn serving_on() -> Option<u16> {
-    SERVING_ON.get().copied()
-}
-
 /// The encryption settings for the certificate and key (PEM).
 pub fn server_config(cert_pem: &str, key_pem: &str) -> Result<Arc<rustls::ServerConfig>, String> {
     use rustls::pki_types::pem::PemObject;
@@ -75,9 +67,6 @@ pub async fn serve(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) {
     use tower::ServiceExt;
-    if let Ok(address) = listener.local_addr() {
-        let _ = SERVING_ON.set(address.port()); // WHAT: noted. WHY: /health offers it from now on
-    }
     let acceptor = tokio_rustls::TlsAcceptor::from(config); // WHAT: the TLS side of each connection. WHY: rustls, as everywhere else
     let slots = Arc::new(tokio::sync::Semaphore::new(MOST_CONNECTIONS)); // WHAT: the open-connection slots. WHY: the cap above
     let per_address: Shares = Default::default(); // WHAT: connections per address. WHY: the per-machine cap

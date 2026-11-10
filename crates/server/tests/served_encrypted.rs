@@ -76,3 +76,30 @@ fn the_api_answers_over_https_by_the_pin_of_the_certificate_it_made_and_keeps() 
         assert_eq!(mode & 0o777, 0o600, "the key is the server's alone");
     }
 }
+
+#[test]
+fn a_seat_moves_to_https_keeps_the_pin_and_never_falls_back() {
+    let (data, base, runtime) = start();
+    let n: u64 = rand::random();
+    let book_file = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("pins-{n:016x}.json")); // WHAT: this seat's pin book. WHY: kept between runs
+    let book = hub::secure::PinBook::at(book_file.clone());
+    let server = base.trim_start_matches("http://").to_string(); // WHAT: host:port. WHY: how the book names a server
+
+    let first = hub::secure::open(&base, &book).expect("the first connection"); // WHAT: a seat's first time. WHY: it moves to HTTPS and keeps the pin
+    assert!(first.base().starts_with("https://127.0.0.1:"), "moved to HTTPS: {}", first.base());
+    let cert = std::fs::read_to_string(data.join(hyperview_server::tls::CERT)).unwrap();
+    assert_eq!(book.pin(&server), Some(hyperview_server::tls::pin(&cert).unwrap()), "the pin kept is the server's own");
+    assert_eq!(first.health().unwrap().name, "Example Steel");
+
+    let again = hub::secure::open(&base, &book).expect("the next connection"); // WHAT: later. WHY: by the kept pin
+    assert!(again.base().starts_with("https://"));
+
+    std::fs::write(&book_file, serde_json::to_string(&serde_json::json!({ server.clone(): "0".repeat(64) })).unwrap()).unwrap(); // WHAT: the seat knows another certificate. WHY: as if the server were swapped, or someone were in between
+    match hub::secure::open(&base, &book) {
+        Err(hub::client::Trouble::Refused(p)) => assert_eq!(p.error, "certificate_changed", "{}", p.message),
+        other => panic!("a changed certificate must be refused, got {:?}", other.map(|c| c.base().to_string())),
+    }
+
+    drop(runtime); // WHAT: the server gone, HTTPS with it. WHY: a seat holding a pin must not drop to plain HTTP
+    assert!(hub::secure::open(&base, &book).is_err(), "never back to plain HTTP once pinned");
+}

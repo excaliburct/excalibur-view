@@ -391,6 +391,19 @@ pub fn profiles_folder() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("profiles"))
 }
 
+/// The pins of the office servers this computer has connected to over HTTPS
+/// (`hub::secure`), kept in the program's own settings folder.
+fn pin_book() -> hub::secure::PinBook {
+    let folder = directories::ProjectDirs::from("com", "Excalibur", "Hyperview").map(|d| d.config_dir().to_path_buf()).unwrap_or_else(|| PathBuf::from(".")); // WHAT: the settings folder. WHY: the pins outlive the program, like its other settings
+    hub::secure::PinBook::at(folder.join("server-pins.json"))
+}
+
+/// A client for `base`: the server's HTTPS by its pin when it offers HTTPS,
+/// as before when it is an older server this computer never pinned.
+fn open(base: &str) -> Result<Client, hub::client::Trouble> {
+    hub::secure::open(base, &pin_book()) // WHAT: moved to HTTPS and kept there. WHY: sign-ins and drawings encrypted on the office network
+}
+
 /// Starts the worker.
 pub fn start(repaint: egui::Context) -> Link {
     let (to_worker, asks) = unbounded::<Ask>();
@@ -438,7 +451,13 @@ pub fn start(repaint: egui::Context) -> Link {
                     }
 
                     Ask::Claim { base, setup } => {
-                        let mut fresh = Client::new(&base);
+                        let mut fresh = match open(&base) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                say(&told, Told::Trouble(e.to_string())); // WHAT: why it can't connect safely. WHY: a changed certificate is never connected to
+                                continue;
+                            }
+                        };
                         match fresh.claim(&setup) {
                             Ok(claimed) => {
                                 let session = claimed.session.clone();
@@ -458,7 +477,13 @@ pub fn start(repaint: egui::Context) -> Link {
                     }
 
                     Ask::Join { base, join } => {
-                        let mut fresh = Client::new(&base);
+                        let mut fresh = match open(&base) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                say(&told, Told::Trouble(e.to_string())); // WHAT: why it can't connect safely. WHY: a changed certificate is never connected to
+                                continue;
+                            }
+                        };
                         match fresh.join(&join) {
                             Ok(session) => {
                                 client = Some(fresh);
@@ -473,7 +498,13 @@ pub fn start(repaint: egui::Context) -> Link {
                         email,
                         password,
                     } => {
-                        let mut fresh = Client::new(&base);
+                        let mut fresh = match open(&base) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                say(&told, Told::Trouble(e.to_string())); // WHAT: why it can't connect safely. WHY: a changed certificate is never connected to
+                                continue;
+                            }
+                        };
                         match fresh.sign_in(&email, &password) {
                             Ok(session) => {
                                 client = Some(fresh);
@@ -500,8 +531,16 @@ pub fn start(repaint: egui::Context) -> Link {
                             }
                         }
                         let mut resumed = None;
+                        let mut refused = None; // WHAT: a server that answered but couldn't be trusted. WHY: said, rather than signing the person out quietly
                         for address in &tried {
-                            let fresh = Client::new(address).with_token(&token);
+                            let fresh = match open(address) {
+                                Ok(c) => c.with_token(&token),
+                                Err(e @ hub::client::Trouble::Refused(_)) => {
+                                    refused = Some(e.to_string()); // WHAT: a changed certificate. WHY: never connected to
+                                    continue;
+                                }
+                                Err(_) => continue, // WHAT: not reachable this way. WHY: the next address is tried
+                            };
                             // A kept token is checked before it is trusted,
                             // so a week-old one fails here rather than in the
                             // middle of saving somebody's takeoff.
@@ -530,7 +569,10 @@ pub fn start(repaint: egui::Context) -> Link {
                                 client = Some(fresh);
                                 say(&told, Told::SignedIn(Box::new(session)));
                             }
-                            None => say(&told, Told::SignedOut),
+                            None => match refused {
+                                Some(why) => say(&told, Told::Trouble(why)), // WHAT: the reason. WHY: a person can act on it
+                                None => say(&told, Told::SignedOut),
+                            },
                         }
                     }
 

@@ -47,6 +47,8 @@ pub struct Server {
     /// key's id. In memory, like `patience`: a refused key writes at most one
     /// line a minute, so a misused key cannot fill the log.
     pub key_refusals_logged: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    /// The port this server's HTTPS listens on, once it does (`crate::tls`).
+    pub secure_port: std::sync::OnceLock<u16>, // WHAT: set once HTTPS is bound. WHY: /health never offers a port that isn't answering, and each server says its own
 }
 
 impl Server {
@@ -60,6 +62,7 @@ impl Server {
             manifests: Default::default(),
             notices: Default::default(),
             key_refusals_logged: Default::default(), // WHAT: no refusals written yet. WHY: empty on every start, as patience is.
+            secure_port: Default::default(), // WHAT: no HTTPS yet. WHY: set by run::serve once it listens
         };
         crate::license::begin(&server);
         server
@@ -655,7 +658,7 @@ async fn health(State(server): State<Shared>) -> Json<Health> {
             crate::tunnel::State::On { address } => Some(address),
             _ => None,
         },
-        secure_port: crate::tls::serving_on(), // WHAT: the HTTPS port, once it is listening. WHY: a seat moves there; never claimed before it listens
+        secure_port: server.secure_port.get().copied(), // WHAT: this server's HTTPS port, once it is listening. WHY: a seat moves there; never claimed before it listens
     })
 }
 

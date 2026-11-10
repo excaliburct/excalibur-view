@@ -202,6 +202,17 @@ impl Client {
         }
     }
 
+    /// A client for `base` that accepts only the certificate with `pin`
+    /// (`crate::pinned`): an Office Server's own HTTPS.
+    pub fn pinned(base: &str, pin: &str) -> Answer<Client> {
+        let (agent, _) = crate::pinned::agent(Some(pin)).map_err(Trouble::Unreadable)?; // WHAT: the pinned check. WHY: a malformed pin is refused, never treated as none
+        Ok(Client {
+            base: base.trim_end_matches('/').to_string(),
+            token: None,
+            agent: agent.timeout_connect(Duration::from_secs(8)).timeout_read(Duration::from_secs(120)).build(), // WHAT: the same timeouts as any client. WHY: only the certificate check differs
+        })
+    }
+
     pub fn with_token(mut self, token: &str) -> Client {
         self.token = Some(token.to_string());
         self

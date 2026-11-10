@@ -35,6 +35,9 @@ pub mod web;
 #[cfg(feature = "client")]
 pub mod pinned; // WHAT: HTTPS by a pinned certificate. WHY: Excalibur's own servers make their own certificates
 
+#[cfg(feature = "client")]
+pub mod secure; // WHAT: seats moved onto an Office Server's HTTPS and kept there. WHY: sign-ins and drawings encrypted, the certificate pinned
+
 pub use model::*;
 
 #[cfg(feature = "client")]

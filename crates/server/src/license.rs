@@ -512,6 +512,7 @@ mod tests {
                 manifests: Default::default(),
                 notices: Default::default(),
                 key_refusals_logged: Default::default(), // WHAT: none written. WHY: the new field, empty as on every start.
+                secure_port: Default::default(), // WHAT: no HTTPS. WHY: a test server
             },
             dir,
         )

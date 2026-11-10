@@ -71,6 +71,9 @@ pub async fn serve(
         None => None,
     };
     let server = Arc::new(Server::new(store, config));
+    if let Some(port) = secure.as_ref().and_then(|s| s.0.local_addr().ok()).map(|a| a.port()) {
+        let _ = server.secure_port.set(port); // WHAT: where HTTPS listens. WHY: /health offers it from now on
+    }
     let claimed = !server.store.is_empty().unwrap_or(false);
     let name = api::installation_name(&server);
 
