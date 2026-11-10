@@ -465,6 +465,7 @@ pub fn router(server: Shared) -> Router {
         .route("/notices/:id/remove", post(remove_notice))
         .route("/license", get(read_license).post(add_license))
         .route("/office", get(crate::office::read)) // WHAT: the parts this Office Server runs. WHY: the Manager and the program show what an office has
+        .route("/admin/citadel/forget-pin", post(crate::citadel::forget_pin)) // WHAT: Citadel Server's pin forgotten. WHY: after a reinstall, an administrator lets the next look keep the new one
         .route("/cad/drawings", get(crate::cad::list).post(crate::cad::create)) // WHAT: the office's CAD drawings, and a new one. WHY: the cad part; 404 unless licensed; the body is read by the handler, after its checks, capped at CAD's 256 MB
         .route("/cad/drawings/:id", get(crate::cad::one)) // WHAT: one CAD drawing. WHY: who has it out, its version
         .route("/cad/drawings/:id/file", get(crate::cad::file).put(crate::cad::save)) // WHAT: its bytes, and a new version. WHY: opened and saved by Excalibur CAD; the body is read after the checks
@@ -594,6 +595,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/license"),
     ("POST", "/license"),
     ("GET", "/office"), // WHAT: the Office Server's parts. WHY: described, so the test holds the two together
+    ("POST", "/admin/citadel/forget-pin"), // WHAT: Citadel's pin forgotten. WHY: likewise
     ("GET", "/cad/drawings"), // WHAT: CAD drawings. WHY: likewise
     ("POST", "/cad/drawings"), // WHAT: a new CAD drawing. WHY: likewise
     ("GET", "/cad/drawings/{id}"), // WHAT: one. WHY: likewise

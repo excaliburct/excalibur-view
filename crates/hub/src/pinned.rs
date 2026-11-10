@@ -128,7 +128,7 @@ pub fn agent(pin: Option<&str>) -> Result<(ureq::AgentBuilder, Arc<Pinned>), Str
         .dangerous() // WHAT: rustls' name for "my own certificate check". WHY: the check is the pin, which is stricter than an authority, not looser
         .with_custom_certificate_verifier(check.clone())
         .with_no_client_auth(); // WHAT: no client certificate. WHY: these reads are open on the server's side
-    Ok((ureq::AgentBuilder::new().tls_config(Arc::new(config)), check))
+    Ok((ureq::AgentBuilder::new().tls_config(Arc::new(config)).redirects(0), check)) // WHAT: no redirects. WHY: a pinned connection answers from the pinned server or not at all; a redirect would put another host's certificate in `seen`
 }
 
 /// HTTPS servers on this machine with made-up certificates, for tests here

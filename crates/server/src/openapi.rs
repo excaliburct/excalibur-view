@@ -841,6 +841,13 @@ another drawing.",
                 "responses": { "200": { "description": "Archived." } }
             }
         },
+        "/admin/citadel/forget-pin": {
+            "post": {
+                "summary": "Forget Citadel Server's certificate pin. Administrators signed in only.",
+                "description": "The Office Server keeps the pin of Citadel Server's certificate from its first answer and believes no other after. After Citadel Server is reinstalled (a new certificate), an administrator forgets the old pin here; the server looks again at once and keeps the certificate that answers. The log says who.",
+                "responses": { "200": { "description": "Forgotten; the state after looking again." } }
+            }
+        },
         "/office": {
             "get": {
                 "summary": "The parts this Excalibur Office Server runs.",

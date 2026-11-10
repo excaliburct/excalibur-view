@@ -90,10 +90,14 @@ pub async fn serve(
         let Ok((tcp, peer)) = accepted else {
             continue; // WHAT: a failed accept is skipped. WHY: one bad connection never stops the server
         };
-        let Some(share) = Share::take(&per_address, peer.ip()) else {
+        let Some(share) = Share::take(&per_address, machine(peer.ip())) else {
             continue; // WHAT: past its address's share, closed straight away. WHY: one machine can't take every slot
         };
-        let Ok(slot) = slots.clone().acquire_owned().await else {
+        let slot = tokio::select! {
+            _ = &mut shutdown => return, // WHAT: stop, even with every slot taken. WHY: a full server still stops when asked
+            s = slots.clone().acquire_owned() => s,
+        };
+        let Ok(slot) = slot else {
             return; // WHAT: the slots are gone. WHY: only when stopping
         };
         let (acceptor, router) = (acceptor.clone(), router.clone());
@@ -112,6 +116,20 @@ pub async fn serve(
                 .serve_connection(hyper_util::rt::TokioIo::new(tls), service);
             let _ = tokio::time::timeout(CONNECTION, connection).await; // WHAT: the connection, up to its limit. WHY: none is kept forever
         });
+    }
+}
+
+/// The machine an address belongs to, for the per-machine cap: an IPv4
+/// address itself, an IPv6 address's /64 network (one machine can hold many
+/// addresses in it).
+fn machine(ip: std::net::IpAddr) -> std::net::IpAddr {
+    match ip {
+        std::net::IpAddr::V6(v6) if v6.to_ipv4_mapped().is_none() => {
+            let s = v6.segments();
+            std::net::IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0)) // WHAT: the first 64 bits. WHY: a LAN machine picks addresses freely within its /64
+        }
+        std::net::IpAddr::V6(v6) => std::net::IpAddr::V4(v6.to_ipv4_mapped().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED)), // WHAT: an IPv4 address written as IPv6. WHY: the same machine as its IPv4 form
+        v4 => v4,
     }
 }
 
@@ -183,9 +201,7 @@ fn write_private(path: &Path, text: &str) -> Result<(), String> {
         use std::os::unix::fs::OpenOptionsExt;
         open.mode(0o600); // WHAT: the owner only. WHY: private from creation
     }
-    open.open(path)
-        .and_then(|mut f| f.write_all(text.as_bytes()))
-        .map_err(|e| format!("saving the server's key: {e}"))?;
+    let mut file = open.open(path).map_err(|e| format!("saving the server's key: {e}"))?; // WHAT: the key's file, still empty. WHY: on Windows it is made private before anything is written to it
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -200,10 +216,12 @@ fn write_private(path: &Path, text: &str) -> Result<(), String> {
             c.arg("/Q").creation_flags(NO_WINDOW).status().map(|s| s.success()).unwrap_or(false)
         };
         if !(icacls(true) || icacls(false)) {
-            let _ = std::fs::remove_file(path); // WHAT: a key that couldn't be made private is taken away. WHY: never left readable
+            drop(file);
+            let _ = std::fs::remove_file(path); // WHAT: a key file that couldn't be made private is taken away. WHY: nothing was written to it, and it never will be
             return Err("Windows wouldn't make the server's key private.".into());
         }
     }
+    file.write_all(text.as_bytes()).and_then(|_| file.sync_all()).map_err(|e| format!("saving the server's key: {e}"))?; // WHAT: the key, once only its owners can read the file. WHY: never readable by anyone else, even for a moment
     Ok(())
 }
 
@@ -214,6 +232,16 @@ const SERVICE: &str = "ExcaliburHyperviewServer"; // WHAT: the same as winsvc::N
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_machine_is_one_share_however_many_addresses_it_uses() {
+        let a: std::net::IpAddr = "fe80::1:2:3:4".parse().unwrap();
+        let b: std::net::IpAddr = "fe80::9:9:9:9".parse().unwrap();
+        assert_eq!(machine(a), machine(b), "one /64, one machine");
+        assert_ne!(machine(a), machine("fe80:0:0:1::1".parse().unwrap()), "another /64, another machine");
+        assert_eq!(machine("::ffff:10.0.0.9".parse().unwrap()), "10.0.0.9".parse::<std::net::IpAddr>().unwrap(), "IPv4 written as IPv6 is IPv4");
+        assert_eq!(machine("10.0.0.9".parse().unwrap()), "10.0.0.9".parse::<std::net::IpAddr>().unwrap());
+    }
 
     #[test]
     fn one_address_gets_its_share_of_connections_and_no_more() {

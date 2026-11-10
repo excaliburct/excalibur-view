@@ -2004,6 +2004,7 @@ dependencies = [
  "sha2",
  "takeoff",
  "ureq",
+ "url",
  "webpki-roots 0.26.11",
  "windows",
 ]

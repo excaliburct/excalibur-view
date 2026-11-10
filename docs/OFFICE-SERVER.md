@@ -70,17 +70,25 @@ Each step merges on its own, with tests, the guards proven, and a review; each s
 |---|---|
 | 1. Licence modules | done: signed `modules` line; old licences unchanged; the publishing script signs it (`--modules`) |
 | 2. Module registry | done: `GET /api/v1/office`, and every part's state in the maintenance report |
-| 3. Citadel part | watching done: Citadel Server's version read every 5 minutes on this machine, by its certificate pin, never its data. Next: installing and updating it from the same signed channel |
+| 3. Citadel part | watching done: Citadel Server's version read every 5 minutes on this machine, by its certificate pin, never its data; an administrator can forget the pin after a reinstall (`POST /api/v1/admin/citadel/forget-pin`). Updates: Fleet keeps sending Citadel Server its own signed updates directly, as today; the Office Server reports the version that results |
 | 4. HTTPS | server side done: its own certificate, HTTPS on TCP 8716 beside HTTP on 8714 (UDP 8715 stays the finding port), `secure_port` in /health. Next: the seats move to it and pin it (the View app), then plain HTTP can be turned off |
-| 5. CAD part | server side done: CAD's check-out/check-in store under `/api/v1/cad/...` with the office's own accounts; `hyperview-server --move-cad "<old CAD data folder>"` moves a CAD server's drawings in (every file checked, the old folder only read). Next: Excalibur CAD signs in to the Office Server |
+| 5. CAD part | done on both sides: CAD's check-out/check-in store under `/api/v1/cad/...` with the office's own accounts, kept in the server's own database and file store (so the nightly off-site backup and its drill carry CAD's drawings); `hyperview-server --move-cad "<old CAD data folder>"` moves a CAD server's drawings in. Excalibur CAD signs in to an Office Server (branch excad-office-server-20261110) |
 | 6. Archetype part, one installer and Manager, the USB kit | not started |
+
+Ports: TCP 8714 (the API, plain HTTP until every seat has moved), TCP 8716 (the same API over HTTPS), UDP 8715
+(seats find the server). The program's own "host the drawings on this computer" server stays plain HTTP for now.
+
+Independent security review (2026-11-10): one high (CAD read drawings before its checks), one medium (a seat's
+fallback address could take its sign-in after HTTPS was blocked) and nine lows, all fixed on this branch with tests;
+see the commit "Review fixes".
 
 Existing servers get the HTTPS port opened to the office network by the Manager's next install/repair (the
 service account can't change the firewall); until then HTTPS answers on the server itself and through the
 tunnel.
 
-### Moving a CAD server in (once CAD signs in to the Office Server)
-1. Stop the old Excalibur CAD server's service.
+### Moving a CAD server in
+1. Stop the old Excalibur CAD server's service. (On Linux, run step 2 as the account the Office Server runs as,
+   so the copied files are the server's.)
 2. On the server, in an administrator's Command Prompt:
    `"C:\Program Files\Excalibur View Server\hyperview-server.exe" --move-cad "C:\ProgramData\Excalibur CAD Server\data"`
    (the paths as installed there).

@@ -329,6 +329,7 @@
     "GET /signoffs/{id}/signature.png",
     "GET /update/latest",
     "GET /update/{version}/download",
+    "POST /admin/citadel/forget-pin",
     "POST /admin/fleet",
     "POST /admin/joining",
     "POST /admin/pin",

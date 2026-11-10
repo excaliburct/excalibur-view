@@ -520,14 +520,15 @@ pub fn start(repaint: egui::Context) -> Link {
                         // leave the building. The public one is what a truck
                         // falls back to, not what an office uses.
                         let mut tried = vec![base.clone()];
+                        let pinned = hub::secure::is_pinned(&base, &pin_book()); // WHAT: whether the shop's server is held to a certificate. WHY: then the sign-in goes nowhere else if it fails
                         if let Some(outside) = reachable_at {
                             let outside = if outside.contains("://") {
                                 outside
                             } else {
                                 format!("https://{outside}")
                             };
-                            if outside != base {
-                                tried.push(outside);
+                            if outside != base && outside.to_ascii_lowercase().starts_with("https://") && !pinned {
+                                tried.push(outside); // WHAT: the tunnel's address, https only. WHY: a token never goes anywhere unencrypted, and never in place of a pinned server
                             }
                         }
                         let mut resumed = None;
@@ -538,6 +539,10 @@ pub fn start(repaint: egui::Context) -> Link {
                                 Err(e @ hub::client::Trouble::Refused(_)) => {
                                     refused = Some(e.to_string()); // WHAT: a changed certificate. WHY: never connected to
                                     continue;
+                                }
+                                Err(e) if pinned && address == &base => {
+                                    refused = Some(e.to_string()); // WHAT: the pinned server didn't answer safely. WHY: said, and nothing else is tried with the sign-in
+                                    break;
                                 }
                                 Err(_) => continue, // WHAT: not reachable this way. WHY: the next address is tried
                             };
@@ -980,6 +985,7 @@ pub fn start(repaint: egui::Context) -> Link {
                                     base: client.base().to_string(),
                                     key,
                                     name: server_name.clone(),
+                                    pin: client.pin().map(str::to_string), // WHAT: the server's pin, when on its HTTPS. WHY: the assistant checks the same certificate
                                 })?;
                                 crate::assistant::add_to_assistant_app()
                             });

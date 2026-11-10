@@ -21,6 +21,9 @@ pub struct Client {
     base: String,
     token: Option<String>,
     agent: ureq::Agent,
+    /// The certificate pin this client holds its server to, when it is an
+    /// Office Server's HTTPS (`crate::secure`).
+    pin: Option<String>, // WHAT: the pin, when pinned. WHY: whoever reaches the same server later (the assistant) holds it to the same certificate
 }
 
 /// A request on its way out, and whether it may be sent a second time.
@@ -199,6 +202,7 @@ impl Client {
                 .timeout_connect(Duration::from_secs(8))
                 .timeout_read(Duration::from_secs(120))
                 .build(),
+            pin: None, // WHAT: no pin. WHY: plain HTTP, or an address its certificate authority vouches for
         }
     }
 
@@ -210,12 +214,18 @@ impl Client {
             base: base.trim_end_matches('/').to_string(),
             token: None,
             agent: agent.timeout_connect(Duration::from_secs(8)).timeout_read(Duration::from_secs(120)).build(), // WHAT: the same timeouts as any client. WHY: only the certificate check differs
+            pin: Some(pin.to_string()), // WHAT: the pin it holds. WHY: handed on to whatever reaches this server next
         })
     }
 
     pub fn with_token(mut self, token: &str) -> Client {
         self.token = Some(token.to_string());
         self
+    }
+
+    /// The certificate pin this client holds its server to, if any.
+    pub fn pin(&self) -> Option<&str> {
+        self.pin.as_deref()
     }
 
     pub fn base(&self) -> &str {

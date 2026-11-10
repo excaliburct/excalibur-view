@@ -501,6 +501,12 @@ const TABLE: &[Route] = &[
         sync: false,
     }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
     Route {
+        method: "POST",
+        path: "/admin/citadel/forget-pin",
+        door: Door::Admin,
+        sync: false,
+    }, // WHAT: Citadel's pin forgotten. WHY: an administrator signed in decides which certificate is believed
+    Route {
         method: "GET",
         path: "/office",
         door: Door::Signed,
@@ -758,7 +764,7 @@ fn an_office() -> Office {
         .expect("three people"); // WHAT: all in. WHY: every knock is one of them.
     let server = Arc::new(Server::new(store, config.clone())); // WHAT: the server's state. WHY: kept, to write sessions and keys into.
     hyperview_server::license::install(&server, &a_license_with_cad()).expect("the licence with CAD"); // WHAT: CAD switched on. WHY: its doors are probed like every other
-    let mut cad = hyperview_server::cad::Store::open(&hyperview_server::cad::folder(&config.data)).expect("CAD's drawings"); // WHAT: CAD's store. WHY: a real drawing to knock on
+    let mut cad = hyperview_server::cad::Store::open(&config.database(), &config.blobs()).expect("CAD's drawings"); // WHAT: CAD's store. WHY: a real drawing to knock on
     assert_eq!(cad.create("Probe", "Plate.excad", b"v1", "sam@example.com"), Ok(1)); // WHAT: drawing 1. WHY: the id the CAD routes are asked with
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

@@ -18,6 +18,10 @@ pub struct Store {
 
 /// The schema. Written out rather than migrated from nothing each time, so
 /// what the server expects can be read in one place.
+/// The schema, for another module's tests that build a database like the server's.
+#[cfg(test)]
+pub(crate) const SCHEMA_FOR_TESTS: &str = SCHEMA; // WHAT: the same text. WHY: offsite's tests read a real server's tables
+
 const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -328,6 +332,7 @@ impl Store {
         let db = Connection::open(database)
             .with_context(|| format!("opening {}", database.display()))?;
         db.execute_batch(SCHEMA).context("setting up the database")?;
+        db.execute_batch(crate::cad::SCHEMA).context("setting up CAD's drawings")?; // WHAT: the cad part's tables, in the same database. WHY: one backup and one restore carry them
         upgrade(&db).context("bringing the database up to date")?;
         Ok(Store {
             db: std::sync::Mutex::new(db),
@@ -340,6 +345,7 @@ impl Store {
         std::fs::create_dir_all(blobs)?;
         let db = Connection::open_in_memory()?;
         db.execute_batch(SCHEMA)?;
+        db.execute_batch(crate::cad::SCHEMA)?; // WHAT: CAD's tables too. WHY: the same database as a real server
         upgrade(&db)?;
         Ok(Store {
             db: std::sync::Mutex::new(db),

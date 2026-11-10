@@ -7,8 +7,10 @@
 //! CAD, the same roles), and every route answers 404 unless the office's
 //! signed licence switches the `cad` part on (`crate::office`).
 //!
-//! One SQLite file and a folder of drawing files, under `cad/` in the data
-//! folder. A drawing's bytes are kept once, named by their SHA-256, written
+//! Kept in the server's own database (`cad_drawings`, `cad_versions`,
+//! `cad_log`) and its own file store, so the nightly off-site backup and its
+//! restore drill carry CAD's drawings with View's. A drawing's bytes are kept
+//! once, named by their SHA-256, written
 //! beside and then moved into place, so a crash never leaves half a file and
 //! the same drawing saved twice takes the room once. Names and folders are
 //! only labels in the database: they never become file paths, so no name can
@@ -32,10 +34,21 @@ use crate::api::{Answer, Denied, Shared};
 /// The longest a drawing may be (a real drawing is far under this).
 pub const MOST_BYTES: usize = 256 * 1024 * 1024; // WHAT: 256 MB, CAD's own limit. WHY: the same drawings fit as before the move
 
-/// The CAD part's folder, inside the server's data folder.
-pub fn folder(data: &Path) -> PathBuf {
-    data.join("cad") // WHAT: data/cad. WHY: apart from View's own files, backed up with them
-}
+/// CAD's tables, made in the server's database as it opens (`crate::store`).
+pub const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS cad_drawings (
+    id INTEGER PRIMARY KEY, folder TEXT NOT NULL, name TEXT NOT NULL,
+    locked_by TEXT, locked_at INTEGER, archived INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS cad_drawing_place ON cad_drawings(folder, name) WHERE archived = 0;
+CREATE TABLE IF NOT EXISTS cad_versions (
+    drawing INTEGER NOT NULL REFERENCES cad_drawings(id), version INTEGER NOT NULL,
+    sha256 TEXT NOT NULL, size INTEGER NOT NULL, saved_by TEXT NOT NULL,
+    saved_at INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (drawing, version));
+CREATE TABLE IF NOT EXISTS cad_log (
+    at INTEGER NOT NULL, who TEXT NOT NULL, what TEXT NOT NULL, detail TEXT NOT NULL);
+"; // WHAT: CAD's own tables, without its people and sign-ins, named cad_. WHY: the Office Server's accounts are used instead, and the names never meet View's
 
 pub struct Store {
     db: Connection,
@@ -95,38 +108,18 @@ pub fn good_folder(s: &str) -> bool {
 }
 
 impl Store {
-    /// The store in `root` (made if new).
-    pub fn open(root: &Path) -> rusqlite::Result<Store> {
-        let new = !root.exists(); // WHAT: whether this start makes the folder. WHY: only a folder it makes is locked here
-        std::fs::create_dir_all(root.join("drawings")).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        #[cfg(unix)]
-        if new {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?; // WHAT: the server's alone. WHY: on Windows the service folder's own permissions do this
-        }
-        let db = Connection::open(root.join("cad.sqlite"))?;
+    /// CAD's drawings in the server's database and file store.
+    pub fn open(database: &Path, blobs: &Path) -> rusqlite::Result<Store> {
+        std::fs::create_dir_all(blobs).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?; // WHAT: the server's file store. WHY: made by the server already; here for a test's own folder
+        let db = Connection::open(database)?;
         db.busy_timeout(std::time::Duration::from_secs(10))?; // WHAT: waits for another request's write. WHY: each request opens its own connection
-        db.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA foreign_keys = ON;
-             CREATE TABLE IF NOT EXISTS drawings (
-                 id INTEGER PRIMARY KEY, folder TEXT NOT NULL, name TEXT NOT NULL,
-                 locked_by TEXT, locked_at INTEGER, archived INTEGER NOT NULL DEFAULT 0,
-                 created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
-             CREATE UNIQUE INDEX IF NOT EXISTS drawing_place ON drawings(folder, name) WHERE archived = 0;
-             CREATE TABLE IF NOT EXISTS versions (
-                 drawing INTEGER NOT NULL REFERENCES drawings(id), version INTEGER NOT NULL,
-                 sha256 TEXT NOT NULL, size INTEGER NOT NULL, saved_by TEXT NOT NULL,
-                 saved_at INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '',
-                 PRIMARY KEY (drawing, version));
-             CREATE TABLE IF NOT EXISTS log (
-                 at INTEGER NOT NULL, who TEXT NOT NULL, what TEXT NOT NULL, detail TEXT NOT NULL);",
-        )?; // WHAT: CAD's own tables, without its people and sign-ins. WHY: the Office Server's accounts are used instead
-        Ok(Store { db, blobs: root.join("drawings") })
+        db.execute_batch("PRAGMA foreign_keys = ON;")?; // WHAT: versions belong to drawings. WHY: a version for no drawing is refused
+        db.execute_batch(SCHEMA)?; // WHAT: CAD's tables, if not made yet. WHY: the server makes them as it opens; a test's own database too
+        Ok(Store { db, blobs: blobs.to_path_buf() })
     }
 
     pub fn log(&self, who: &str, what: &str, detail: &str) {
-        let _ = self.db.execute("INSERT INTO log (at, who, what, detail) VALUES (?1, ?2, ?3, ?4)", params![now(), who, what, detail]); // WHAT: one line of what was done. WHY: who checked out, saved, forced or archived what
+        let _ = self.db.execute("INSERT INTO cad_log (at, who, what, detail) VALUES (?1, ?2, ?3, ?4)", params![now(), who, what, detail]); // WHAT: one line of what was done. WHY: who checked out, saved, forced or archived what
     }
 
     /// A drawing's bytes, kept once by their hash.
@@ -155,7 +148,7 @@ impl Store {
     }
 
     fn blob_path(&self, sha: &str) -> PathBuf {
-        self.blobs.join(&sha[..2]).join(sha) // WHAT: drawings/ab/abcd…. WHY: no folder holds too many files
+        self.blobs.join(&sha[0..2]).join(&sha[2..4]).join(sha) // WHAT: ab/cd/abcd…, as the server keeps every file. WHY: one store, one layout, one backup
     }
 
     fn read_blob(&self, sha: &str) -> Option<Vec<u8>> {
@@ -170,8 +163,8 @@ impl Store {
     pub fn drawings(&self) -> Vec<Drawing> {
         let Ok(mut st) = self.db.prepare(
             "SELECT d.id, d.folder, d.name, v.version, v.size, v.saved_by, v.saved_at, d.locked_by, d.locked_at
-             FROM drawings d JOIN versions v ON v.drawing = d.id
-             WHERE d.archived = 0 AND v.version = (SELECT MAX(version) FROM versions WHERE drawing = d.id)
+             FROM cad_drawings d JOIN cad_versions v ON v.drawing = d.id
+             WHERE d.archived = 0 AND v.version = (SELECT MAX(version) FROM cad_versions WHERE drawing = d.id)
              ORDER BY d.folder, d.name",
         ) else {
             return Vec::new();
@@ -183,8 +176,8 @@ impl Store {
         self.db
             .query_row(
                 "SELECT d.id, d.folder, d.name, v.version, v.size, v.saved_by, v.saved_at, d.locked_by, d.locked_at
-                 FROM drawings d JOIN versions v ON v.drawing = d.id
-                 WHERE d.id = ?1 AND d.archived = 0 AND v.version = (SELECT MAX(version) FROM versions WHERE drawing = d.id)",
+                 FROM cad_drawings d JOIN cad_versions v ON v.drawing = d.id
+                 WHERE d.id = ?1 AND d.archived = 0 AND v.version = (SELECT MAX(version) FROM cad_versions WHERE drawing = d.id)",
                 [id],
                 row_drawing,
             )
@@ -203,11 +196,11 @@ impl Store {
         }
         let sha = self.put_blob(bytes).map_err(|e| Refused::Bad(format!("Couldn't store it: {e}")))?;
         let tx = self.db.transaction().map_err(|e| Refused::Bad(e.to_string()))?;
-        if tx.execute("INSERT INTO drawings (folder, name, created_by, created_at) VALUES (?1, ?2, ?3, ?4)", params![folder, name, who, now()]).is_err() {
+        if tx.execute("INSERT INTO cad_drawings (folder, name, created_by, created_at) VALUES (?1, ?2, ?3, ?4)", params![folder, name, who, now()]).is_err() {
             return Err(Refused::Exists); // WHAT: that folder already has that name. WHY: the unique index says so
         }
         let id = tx.last_insert_rowid();
-        tx.execute("INSERT INTO versions (drawing, version, sha256, size, saved_by, saved_at) VALUES (?1, 1, ?2, ?3, ?4, ?5)", params![id, sha, bytes.len() as i64, who, now()]).map_err(|e| Refused::Bad(e.to_string()))?;
+        tx.execute("INSERT INTO cad_versions (drawing, version, sha256, size, saved_by, saved_at) VALUES (?1, 1, ?2, ?3, ?4, ?5)", params![id, sha, bytes.len() as i64, who, now()]).map_err(|e| Refused::Bad(e.to_string()))?;
         tx.commit().map_err(|e| Refused::Bad(e.to_string()))?;
         self.log(who, "create", &format!("{id} {folder}/{name}"));
         Ok(id)
@@ -219,7 +212,7 @@ impl Store {
         let v = version.unwrap_or(d.version);
         let sha: String = self
             .db
-            .query_row("SELECT sha256 FROM versions WHERE drawing = ?1 AND version = ?2", params![id, v], |r| r.get(0))
+            .query_row("SELECT sha256 FROM cad_versions WHERE drawing = ?1 AND version = ?2", params![id, v], |r| r.get(0))
             .optional()
             .ok()
             .flatten()
@@ -234,7 +227,7 @@ impl Store {
             (Some(by), Some(at)) if by != who => Err(Refused::Locked(by.clone(), at)),
             (Some(_), _) => Ok(()),
             _ => {
-                let n = self.db.execute("UPDATE drawings SET locked_by = ?2, locked_at = ?3 WHERE id = ?1 AND locked_by IS NULL", params![id, who, now()]).unwrap_or(0); // WHAT: only if still free. WHY: two people asking at once can't both get it
+                let n = self.db.execute("UPDATE cad_drawings SET locked_by = ?2, locked_at = ?3 WHERE id = ?1 AND locked_by IS NULL", params![id, who, now()]).unwrap_or(0); // WHAT: only if still free. WHY: two people asking at once can't both get it
                 if n == 0 {
                     let d = self.drawing(id).ok_or(Refused::NotFound)?;
                     return Err(Refused::Locked(d.locked_by.unwrap_or_default(), d.locked_at.unwrap_or(0)));
@@ -251,7 +244,7 @@ impl Store {
         match &d.locked_by {
             None => Ok(()),
             Some(by) if by == who || force => {
-                self.db.execute("UPDATE drawings SET locked_by = NULL, locked_at = NULL WHERE id = ?1", [id]).map_err(|e| Refused::Bad(e.to_string()))?;
+                self.db.execute("UPDATE cad_drawings SET locked_by = NULL, locked_at = NULL WHERE id = ?1", [id]).map_err(|e| Refused::Bad(e.to_string()))?;
                 self.log(who, if by == who { "check-in" } else { "force-release" }, &format!("{id} (had: {by})")); // WHAT: a forced release is named as one. WHY: whoever had it can see who took it back
                 Ok(())
             }
@@ -287,7 +280,7 @@ impl Store {
         let next = d.version + 1;
         let note: String = note.chars().filter(|c| !c.is_control()).take(500).collect(); // WHAT: the note, cleaned and capped. WHY: it is shown in a list
         self.db
-            .execute("INSERT INTO versions (drawing, version, sha256, size, saved_by, saved_at, note) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![id, next, sha, size, who, now(), note])
+            .execute("INSERT INTO cad_versions (drawing, version, sha256, size, saved_by, saved_at, note) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![id, next, sha, size, who, now(), note])
             .map_err(|_| Refused::Stale(d.version))?; // WHAT: the version number taken by a save at the same moment. WHY: one of the two is refused, never both written
         self.log(who, "save", &format!("{id} v{next}"));
         Ok(next)
@@ -295,7 +288,7 @@ impl Store {
 
     pub fn versions(&self, id: i64) -> Result<Vec<Version>, Refused> {
         self.drawing(id).ok_or(Refused::NotFound)?;
-        let mut st = self.db.prepare("SELECT version, size, sha256, saved_by, saved_at, note FROM versions WHERE drawing = ?1 ORDER BY version DESC").map_err(|e| Refused::Bad(e.to_string()))?;
+        let mut st = self.db.prepare("SELECT version, size, sha256, saved_by, saved_at, note FROM cad_versions WHERE drawing = ?1 ORDER BY version DESC").map_err(|e| Refused::Bad(e.to_string()))?;
         let rows = st
             .query_map([id], |r| Ok(Version { version: r.get(0)?, size: r.get(1)?, sha256: r.get(2)?, saved_by: r.get(3)?, saved_at: r.get(4)?, note: r.get(5)? }))
             .map_err(|e| Refused::Bad(e.to_string()))?;
@@ -311,7 +304,7 @@ impl Store {
 
     /// Hidden from the list, every version kept (administrators only).
     pub fn archive(&self, id: i64, who: &str) -> Result<(), Refused> {
-        let n = self.db.execute("UPDATE drawings SET archived = 1, locked_by = NULL, locked_at = NULL WHERE id = ?1 AND archived = 0", [id]).unwrap_or(0);
+        let n = self.db.execute("UPDATE cad_drawings SET archived = 1, locked_by = NULL, locked_at = NULL WHERE id = ?1 AND archived = 0", [id]).unwrap_or(0);
         if n == 0 {
             return Err(Refused::NotFound);
         }
@@ -323,14 +316,35 @@ impl Store {
     pub fn counts(&self) -> (i64, i64, i64) {
         let q = |sql: &str| self.db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0);
         (
-            q("SELECT COUNT(*) FROM drawings WHERE archived = 0"),
-            q("SELECT COUNT(*) FROM versions"),
-            q("SELECT COUNT(*) FROM drawings WHERE archived = 0 AND locked_by IS NOT NULL"),
+            q("SELECT COUNT(*) FROM cad_drawings WHERE archived = 0"),
+            q("SELECT COUNT(*) FROM cad_versions"),
+            q("SELECT COUNT(*) FROM cad_drawings WHERE archived = 0 AND locked_by IS NOT NULL"),
         )
     }
 }
 
 // ---- moving in from CAD's own server ----------------------------------------
+
+/// A database file's `file:` address, read-only and immutable.
+fn url_of(path: &Path) -> Option<String> {
+    let full = std::path::absolute(path).ok()?; // WHAT: the full path. WHY: a URI needs one
+    let text = full.to_str()?.replace('\\', "/"); // WHAT: forward slashes. WHY: what a file: URI uses on Windows too
+    let escaped: String = text.chars().map(|c| match c { '%' => "%25".to_string(), '?' => "%3f".to_string(), '#' => "%23".to_string(), c => c.to_string() }).collect(); // WHAT: the characters a URI reads specially. WHY: a folder named with them still opens
+    Some(format!("file:{}{escaped}?mode=ro&immutable=1", if escaped.starts_with('/') { "" } else { "/" })) // WHAT: read-only, immutable. WHY: SQLite then writes nothing beside the old database
+}
+
+/// One old drawing file: a plain file, never a link, read no further than
+/// the size its version says.
+fn read_old_file(path: &Path, size: i64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let kind = std::fs::symlink_metadata(path)?; // WHAT: the entry itself, not what it points at. WHY: a link could point anywhere
+    if !kind.file_type().is_file() {
+        return Err(std::io::Error::other("it isn't a plain file")); // WHAT: a link, a folder or a device. WHY: never followed
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?.take(size.max(0) as u64 + 1).read_to_end(&mut bytes)?; // WHAT: one byte past its size at most. WHY: a longer file is caught by the size check, never read whole
+    Ok(bytes)
+}
 
 /// What a move brought in.
 #[derive(Debug, PartialEq)]
@@ -342,18 +356,23 @@ pub struct Moved {
 }
 
 /// Moves Excalibur CAD's server's drawings (its data folder, `from`) into
-/// this server's cad part (`to`). Only into an empty one, so nothing here is
-/// ever overwritten; the old folder is only read, never changed, so the old
-/// server can be started again if anything is wrong. Every file is checked
-/// against its SHA-256 as it is copied.
-pub fn move_from(from: &Path, to: &Path) -> Result<Moved, String> {
+/// this server's cad part. Only into an empty one, so nothing here is ever
+/// overwritten; the old folder is only read (opened immutable, no links
+/// followed), so the old server can be started again if anything is wrong.
+/// Every file is checked against its SHA-256 and size before any drawing is
+/// written; the drawings and versions go in as one transaction. Stop the old
+/// server first, and run it as the account the Office Server runs as (on
+/// Windows, an administrator), so the files it copies are the server's.
+pub fn move_from(from: &Path, database: &Path, blobs: &Path) -> Result<Moved, String> {
     let old_db = from.join("cad.sqlite");
     if !old_db.is_file() {
         return Err(format!("{} isn't Excalibur CAD's server's data folder (no cad.sqlite in it).", from.display())); // WHAT: the wrong folder. WHY: said plainly, nothing touched
     }
-    let old = Connection::open_with_flags(&old_db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| format!("reading {}: {e}", old_db.display()))?; // WHAT: read only. WHY: the old server's drawings are never changed by the move
-    let mut new = Store::open(to).map_err(|e| format!("opening this server's CAD drawings: {e}"))?;
-    let here: i64 = new.db.query_row("SELECT COUNT(*) FROM drawings", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    let old_uri = url_of(&old_db).ok_or_else(|| format!("{} can't be opened as a database.", old_db.display()))?; // WHAT: its address with immutable=1. WHY: opened without writing even SQLite's side files, so the old folder stays exactly as it was
+    let old = Connection::open_with_flags(&old_uri, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI).map_err(|e| format!("reading {}: {e}", old_db.display()))?; // WHAT: read only. WHY: the old server's drawings are never changed by the move
+    old.execute_batch("BEGIN").map_err(|e| format!("reading {}: {e}", old_db.display()))?; // WHAT: one snapshot for both reads. WHY: drawings and versions from the same moment
+    let mut new = Store::open(database, blobs).map_err(|e| format!("opening this server's CAD drawings: {e}"))?;
+    let here: i64 = new.db.query_row("SELECT COUNT(*) FROM cad_drawings", [], |r| r.get(0)).map_err(|e| e.to_string())?;
     if here > 0 {
         return Err("This server already has CAD drawings; a move only goes into an empty one, so nothing here is overwritten.".into()); // WHAT: refused. WHY: two offices' drawings never mix, and nothing is overwritten
     }
@@ -364,35 +383,38 @@ pub fn move_from(from: &Path, to: &Path) -> Result<Moved, String> {
     let drawings: Vec<(i64, String, String, Option<String>, i64, String, i64)> = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))).map_err(read_err)?.collect::<Result<_, _>>().map_err(read_err)?;
     let mut st = old.prepare("SELECT drawing, version, sha256, size, saved_by, saved_at, note FROM versions ORDER BY drawing, version").map_err(read_err)?;
     let versions: Vec<(i64, i64, String, i64, String, i64, String)> = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))).map_err(read_err)?.collect::<Result<_, _>>().map_err(read_err)?;
+    if let Some((_, folder, name, ..)) = drawings.iter().find(|(_, folder, name, ..)| !good_folder(folder) || !good_name(name)) {
+        return Err(format!("the old server has a drawing whose name or folder isn't allowed here ({folder:.40}/{name:.40}); nothing was moved")); // WHAT: refused. WHY: CAD turns names into file names on a computer, so only names this server would take come in
+    }
     for (_, _, sha, size, _, _, _) in &versions {
         if sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(format!("a version names a file that isn't a SHA-256 ({sha:.20}…); nothing was moved")); // WHAT: a damaged row. WHY: never becomes a path
         }
-        let bytes = std::fs::read(old_blobs.join(&sha[..2]).join(sha)).map_err(|e| format!("drawing file {sha:.12}… is missing from the old folder ({e}); nothing was moved"))?; // WHAT: the old file. WHY: every version must come
+        let bytes = read_old_file(&old_blobs.join(&sha[..2]).join(sha), *size).map_err(|e| format!("drawing file {sha:.12}… can't be read from the old folder ({e}); no drawing was moved"))?; // WHAT: the old file, no more than its size. WHY: every version must come, and nothing else
         if crate::store::hex(&Sha256::digest(&bytes)) != sha.to_ascii_lowercase() || bytes.len() as i64 != *size {
-            return Err(format!("drawing file {sha:.12}… doesn't match its fingerprint; nothing was moved")); // WHAT: a damaged file. WHY: never brought in as if it were good
+            return Err(format!("drawing file {sha:.12}… doesn't match its fingerprint; no drawing was moved")); // WHAT: a damaged file. WHY: never brought in as if it were good
         }
         new.put_blob(&bytes).map_err(|e| format!("copying a drawing file: {e}"))?; // WHAT: copied, written beside then moved into place. WHY: the same way a save writes it
         moved.files += 1;
     }
     let tx = new.db.transaction().map_err(|e| e.to_string())?; // WHAT: all rows or none. WHY: a move cut short leaves this server's CAD drawings empty, not half there
     for (id, folder, name, locked_by, archived, created_by, created_at) in &drawings {
-        tx.execute("INSERT INTO drawings (id, folder, name, locked_by, locked_at, archived, created_by, created_at) VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5, ?6)", params![id, folder, name, archived, created_by, created_at]).map_err(|e| format!("moving drawing {id}: {e}"))?; // WHAT: the same id, folder and name, checked in. WHY: CAD's links keep working; the old sign-in names aren't accounts here
+        tx.execute("INSERT INTO cad_drawings (id, folder, name, locked_by, locked_at, archived, created_by, created_at) VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5, ?6)", params![id, folder, name, archived, created_by, created_at]).map_err(|e| format!("moving drawing {id}: {e}"))?; // WHAT: the same id, folder and name, checked in. WHY: CAD's links keep working; the old sign-in names aren't accounts here
         moved.drawings += 1;
         if locked_by.is_some() {
             moved.released += 1; // WHAT: counted. WHY: the person is told which were out
         }
     }
     for (drawing, version, sha, size, saved_by, saved_at, note) in &versions {
-        tx.execute("INSERT INTO versions (drawing, version, sha256, size, saved_by, saved_at, note) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![drawing, version, sha.to_ascii_lowercase(), size, saved_by, saved_at, note]).map_err(|e| format!("moving a version of drawing {drawing}: {e}"))?; // WHAT: every version, who saved it and when. WHY: the history comes along
+        tx.execute("INSERT INTO cad_versions (drawing, version, sha256, size, saved_by, saved_at, note) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![drawing, version, sha.to_ascii_lowercase(), size, saved_by, saved_at, note]).map_err(|e| format!("moving a version of drawing {drawing}: {e}"))?; // WHAT: every version, who saved it and when. WHY: the history comes along
         moved.versions += 1;
     }
-    tx.execute("INSERT INTO log (at, who, what, detail) VALUES (?1, 'move', 'moved-in', ?2)", params![now(), format!("{} drawings, {} versions from {}", moved.drawings, moved.versions, from.display())]).map_err(|e| e.to_string())?; // WHAT: the move itself, in the log. WHY: where these drawings came from, and when
+    tx.execute("INSERT INTO cad_log (at, who, what, detail) VALUES (?1, 'move', 'moved-in', ?2)", params![now(), format!("{} drawings, {} versions from {}", moved.drawings, moved.versions, from.display())]).map_err(|e| e.to_string())?; // WHAT: the move itself, in the log. WHY: where these drawings came from, and when
     tx.commit().map_err(|e| format!("finishing the move: {e}"))?;
     if let Ok(mut st) = old.prepare("SELECT at, who, what, detail FROM log ORDER BY rowid") {
         let rows: Vec<(i64, String, String, String)> = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map(|it| it.flatten().collect()).unwrap_or_default(); // WHAT: the old server's log. WHY: who did what before the move
         for (at, who, what, detail) in rows {
-            let _ = new.db.execute("INSERT INTO log (at, who, what, detail) VALUES (?1, ?2, ?3, ?4)", params![at, who, what, detail]); // WHAT: kept beside this server's. WHY: the history isn't lost
+            let _ = new.db.execute("INSERT INTO cad_log (at, who, what, detail) VALUES (?1, ?2, ?3, ?4)", params![at, who, what, detail]); // WHAT: kept beside this server's. WHY: the history isn't lost
         }
     }
     Ok(moved)
@@ -415,7 +437,7 @@ fn on(server: &crate::api::Server) -> Answer<()> {
 
 /// The store, opened for one request.
 fn store(server: &crate::api::Server) -> Answer<Store> {
-    Store::open(&folder(&server.config.data)).map_err(|e| Denied::broke("open the CAD drawings", e)) // WHAT: one connection per request. WHY: SQLite with WAL; the locks are in the rows, not the connection
+    Store::open(&server.config.database(), &server.config.blobs()).map_err(|e| Denied::broke("open the CAD drawings", e)) // WHAT: one connection per request. WHY: SQLite with WAL; the locks are in the rows, not the connection
 }
 
 fn refused(r: Refused) -> Denied {
@@ -601,10 +623,22 @@ pub async fn archive(State(server): State<Shared>, headers: HeaderMap, UrlPath(i
 mod tests {
     use super::*;
 
-    fn a_store() -> Store {
+    /// A fresh folder under the build's target. Never the shared temp folder.
+    fn a_folder(what: &str) -> PathBuf {
         let n: u64 = rand::random();
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("cad-{n:016x}")); // WHAT: under target. WHY: never the shared temp folder
-        Store::open(&dir).unwrap()
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("{what}-{n:016x}"))
+    }
+
+    /// A server's database and file store, in a fresh folder.
+    fn a_server_folder() -> (PathBuf, PathBuf) {
+        let dir = a_folder("cad");
+        std::fs::create_dir_all(&dir).unwrap();
+        (dir.join("hyperview.sqlite"), dir.join("files")) // WHAT: as Config::database and Config::blobs name them. WHY: where the cad part keeps its drawings
+    }
+
+    fn a_store() -> Store {
+        let (db, blobs) = a_server_folder();
+        Store::open(&db, &blobs).unwrap()
     }
 
     #[test]
@@ -621,57 +655,102 @@ mod tests {
         assert_eq!(s.file(id, Some(1)).unwrap(), (1, b"v1".to_vec()), "every version kept");
         assert_eq!(s.unlock(id, "pat@example.com", false).map_err(|e| matches!(e, Refused::Locked(..))), Err(true), "not theirs to check in");
         s.unlock(id, "pat@example.com", true).unwrap(); // WHAT: forced. WHY: the route allows it to administrators only
+        assert_eq!(s.save(id, 2, b"v3", "sam@example.com", ""), Err(Refused::NotYours), "a save after the drawing was taken back never lands");
         assert_eq!(s.restore(id, 1, "pat@example.com"), Err(Refused::NotYours), "restoring is a save, so it needs the drawing out");
         s.archive(id, "admin@example.com").unwrap();
         assert!(s.drawing(id).is_none() && s.drawings().is_empty(), "archived is hidden");
         assert_eq!(s.counts(), (0, 2, 0), "and its versions kept");
     }
 
-    /// An old CAD server's data folder, made the way CAD's server makes it.
+    #[test]
+    fn a_file_whose_bytes_changed_on_disk_is_never_handed_out() {
+        let mut s = a_store();
+        let id = s.create("", "Plate.excad", b"the real drawing", "sam@example.com").unwrap();
+        let sha = s.versions(id).unwrap()[0].sha256.clone();
+        std::fs::write(s.blob_path(&sha), b"something else").unwrap(); // WHAT: the file changed under it. WHY: a damaged disk, or someone in the folder
+        assert_eq!(s.file(id, None), Err(Refused::NotFound), "refused, not handed out as the drawing");
+    }
+
+    /// An old CAD server's data folder, laid out the way CAD's own server
+    /// lays it out: cad.sqlite with its own tables, files in drawings/ab/.
     fn an_old_cad_server() -> PathBuf {
-        let n: u64 = rand::random();
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("old-cad-{n:016x}"));
-        let mut old = Store::open(&dir).unwrap(); // WHAT: the same tables CAD's server has for drawings. WHY: a move reads only those
-        old.db.execute_batch("CREATE TABLE users (name TEXT PRIMARY KEY, pass TEXT NOT NULL, admin INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL);").unwrap(); // WHAT: CAD's own accounts table. WHY: present in the old folder, never moved
-        let a = old.create("Jobs/2640", "Base plate.excad", b"v1", "sam").unwrap();
-        old.lock(a, "sam").unwrap();
-        old.save(a, 1, b"v2", "sam", "holes").unwrap(); // WHAT: two versions, still checked out. WHY: the history and the lock both matter
-        let b = old.create("", "Old.excad", b"old", "pat").unwrap();
-        old.archive(b, "pat").unwrap(); // WHAT: an archived drawing. WHY: moved too, still hidden
+        let dir = a_folder("old-cad");
+        std::fs::create_dir_all(dir.join("drawings")).unwrap();
+        let db = Connection::open(dir.join("cad.sqlite")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE users (name TEXT PRIMARY KEY, pass TEXT NOT NULL, admin INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL);
+             CREATE TABLE drawings (id INTEGER PRIMARY KEY, folder TEXT NOT NULL, name TEXT NOT NULL, locked_by TEXT, locked_at INTEGER, archived INTEGER NOT NULL DEFAULT 0, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
+             CREATE TABLE versions (drawing INTEGER NOT NULL REFERENCES drawings(id), version INTEGER NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL, saved_by TEXT NOT NULL, saved_at INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '', PRIMARY KEY (drawing, version));
+             CREATE TABLE log (at INTEGER NOT NULL, who TEXT NOT NULL, what TEXT NOT NULL, detail TEXT NOT NULL);",
+        )
+        .unwrap(); // WHAT: CAD's server's tables. WHY: what a move reads
+        let file = |bytes: &[u8]| {
+            let sha = crate::store::hex(&Sha256::digest(bytes));
+            std::fs::create_dir_all(dir.join("drawings").join(&sha[..2])).unwrap();
+            std::fs::write(dir.join("drawings").join(&sha[..2]).join(&sha), bytes).unwrap(); // WHAT: drawings/ab/abcd…. WHY: CAD's server's layout
+            (sha, bytes.len() as i64)
+        };
+        let ((s1, n1), (s2, n2), (s3, n3)) = (file(b"v1"), file(b"v2"), file(b"old"));
+        db.execute("INSERT INTO drawings VALUES (1, 'Jobs/2640', 'Base plate.excad', 'sam', 100, 0, 'sam', 1)", []).unwrap(); // WHAT: checked out to sam. WHY: a lock that must be released by the move
+        db.execute("INSERT INTO drawings VALUES (2, '', 'Old.excad', NULL, NULL, 1, 'pat', 1)", []).unwrap(); // WHAT: archived. WHY: moved too, still hidden
+        for (d, v, sha, n, note) in [(1, 1, &s1, n1, ""), (1, 2, &s2, n2, "holes"), (2, 1, &s3, n3, "")] {
+            db.execute("INSERT INTO versions VALUES (?1, ?2, ?3, ?4, 'sam', 1, ?5)", params![d, v, sha, n, note]).unwrap();
+        }
+        db.execute("INSERT INTO log VALUES (1, 'sam', 'create', '1')", []).unwrap(); // WHAT: a line of history. WHY: kept beside this server's
         dir
     }
 
     #[test]
     fn a_cad_server_moves_in_whole_and_its_folder_is_left_as_it_was() {
         let from = an_old_cad_server();
-        let before = std::fs::read(from.join("cad.sqlite")).unwrap();
-        let to = a_store_folder();
-        let moved = move_from(&from, &to).unwrap();
+        let before: Vec<(PathBuf, Vec<u8>)> = walk(&from); // WHAT: every file there, with its bytes. WHY: none may change
+        let (db, blobs) = a_server_folder();
+        let moved = move_from(&from, &db, &blobs).unwrap();
         assert_eq!(moved, Moved { drawings: 2, versions: 3, files: 3, released: 1 });
-        let here = Store::open(&to).unwrap();
+        let here = Store::open(&db, &blobs).unwrap();
         let listed = here.drawings();
         assert_eq!(listed.len(), 1, "the archived one stays hidden");
         assert_eq!((listed[0].folder.as_str(), listed[0].name.as_str(), listed[0].version, listed[0].locked_by.clone()), ("Jobs/2640", "Base plate.excad", 2, None));
         assert_eq!(here.file(1, Some(1)).unwrap().1, b"v1", "every version came");
         assert_eq!(here.versions(1).unwrap()[0].note, "holes");
-        assert_eq!(std::fs::read(from.join("cad.sqlite")).unwrap(), before, "the old server's data is only read");
-        assert!(move_from(&from, &to).unwrap_err().contains("already has CAD drawings"), "never twice, never over drawings here");
+        assert_eq!(walk(&from), before, "the old folder is exactly as it was, side files and all");
+        assert!(move_from(&from, &db, &blobs).unwrap_err().contains("already has CAD drawings"), "never twice, never over drawings here");
+    }
+
+    fn walk(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walk(&path));
+            } else {
+                out.push((path.clone(), std::fs::read(&path).unwrap()));
+            }
+        }
+        out.sort();
+        out
     }
 
     #[test]
-    fn a_damaged_or_missing_file_stops_the_move_before_anything_is_moved() {
+    fn a_damaged_file_a_link_or_a_bad_name_stops_the_move_before_any_drawing_is_moved() {
         let from = an_old_cad_server();
-        let sha = Store::open(&from).unwrap().versions(1).unwrap()[0].sha256.clone();
-        std::fs::write(from.join("drawings").join(&sha[..2]).join(&sha), b"tampered").unwrap(); // WHAT: a file changed on disk. WHY: it must not come in as if it were good
-        let to = a_store_folder();
-        assert!(move_from(&from, &to).unwrap_err().contains("doesn't match its fingerprint"));
-        assert!(Store::open(&to).unwrap().drawings().is_empty(), "nothing moved");
-        assert!(move_from(&to.join("nowhere"), &a_store_folder()).unwrap_err().contains("isn't Excalibur CAD's server's data folder"));
-    }
-
-    fn a_store_folder() -> PathBuf {
-        let n: u64 = rand::random();
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("cad-to-{n:016x}"))
+        let sha: String = Connection::open(from.join("cad.sqlite")).unwrap().query_row("SELECT sha256 FROM versions WHERE drawing = 1 AND version = 1", [], |r| r.get(0)).unwrap();
+        let path = from.join("drawings").join(&sha[..2]).join(&sha);
+        std::fs::write(&path, b"tampered").unwrap(); // WHAT: a file changed on disk. WHY: it must not come in as if it were good
+        let (db, blobs) = a_server_folder();
+        assert!(move_from(&from, &db, &blobs).unwrap_err().contains("doesn't match its fingerprint"));
+        assert!(Store::open(&db, &blobs).unwrap().drawings().is_empty(), "no drawing moved");
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink("/dev/zero", &path).unwrap(); // WHAT: a link to something endless. WHY: never followed
+            assert!(move_from(&from, &db, &blobs).unwrap_err().contains("isn't a plain file"));
+        }
+        let bad = an_old_cad_server();
+        Connection::open(bad.join("cad.sqlite")).unwrap().execute("UPDATE drawings SET name = '../../evil' WHERE id = 1", []).unwrap(); // WHAT: a name this server wouldn't take. WHY: CAD makes file names from them
+        let (db, blobs) = a_server_folder();
+        assert!(move_from(&bad, &db, &blobs).unwrap_err().contains("isn't allowed here"));
+        assert!(move_from(&a_folder("nowhere"), &db, &blobs).unwrap_err().contains("isn't Excalibur CAD's server's data folder"));
     }
 
     #[test]

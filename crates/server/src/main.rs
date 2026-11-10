@@ -79,7 +79,7 @@ fn main() {
             let mut config = Config::from_environment(); // WHAT: this server's settings. WHY: its data folder
             #[cfg(windows)]
             if std::env::var_os("HYPERVIEW_DATA").is_none() && hyperview_server::winsvc::data_folder().exists() { config.data = hyperview_server::winsvc::data_folder(); } // WHAT: the installed service's data. WHY: the same folder the service serves
-            match hyperview_server::cad::move_from(std::path::Path::new(&from), &hyperview_server::cad::folder(&config.data)) {
+            match hyperview_server::cad::move_from(std::path::Path::new(&from), &config.database(), &config.blobs()) {
                 Ok(m) => println!("  Moved {} drawings ({} versions, {} files). {} were checked out there and are checked in here. The old CAD server's folder was not changed.", m.drawings, m.versions, m.files, m.released), // WHAT: what came. WHY: a person checks it against the old server
                 Err(why) => {
                     eprintln!("  {why}");

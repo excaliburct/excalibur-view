@@ -144,6 +144,22 @@ pub fn look(server: &Server) -> Seen {
     seen
 }
 
+/// `POST /api/v1/admin/citadel/forget-pin`: forgets Citadel Server's kept
+/// pin, so the next look keeps the certificate that answers then. For after
+/// Citadel Server was reinstalled, or when something else answered on its
+/// port first. Administrators signed in only; the log says who.
+pub async fn forget_pin(axum::extract::State(server): axum::extract::State<Shared>, headers: axum::http::HeaderMap) -> crate::api::Answer<axum::Json<serde_json::Value>> {
+    let who = crate::api::administrator(&server, &headers)?; // WHAT: an administrator signed in, never a key. WHY: re-pinning decides which server is believed
+    server.store.set_setting(PIN, "").map_err(|e| crate::api::Denied::broke("forget Citadel's pin", e))?; // WHAT: no pin kept. WHY: the next look keeps the one that answers
+    if let Ok(mut last) = LAST.lock() {
+        *last = None; // WHAT: nothing seen yet. WHY: the parts list says "looking" until the next look
+    }
+    tracing::warn!("Citadel Server's certificate pin was forgotten by {}; the next look keeps the one that answers", who.email); // WHAT: in the log, by name. WHY: who chose to trust a new certificate
+    let server = server.clone();
+    let _ = tokio::task::spawn_blocking(move || look(&server)).await; // WHAT: looks now. WHY: the administrator sees the result at once
+    Ok(axum::Json(serde_json::json!({ "state": last().map(|s| s.state()).unwrap_or("looking") })))
+}
+
 /// Looks at Citadel every [`LOOK_EVERY`] while the licence switches it on.
 pub async fn watch(server: Shared) {
     loop {
