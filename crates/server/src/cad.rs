@@ -17,8 +17,9 @@
 
 use std::path::{Path, PathBuf};
 
-use axum::body::Bytes;
+use axum::body::Body;
 use axum::extract::{Path as UrlPath, Query, State};
+use axum::http::Uri;
 use axum::http::{header, HeaderMap};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -136,9 +137,19 @@ impl Store {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
             }
-            let part = path.with_extension("part");
-            std::fs::write(&part, bytes)?; // WHAT: written beside. WHY: a crash never leaves half a drawing under its real name
-            std::fs::rename(&part, &path)?; // WHAT: moved into place. WHY: all at once
+            let part = path.with_extension(format!("part{:016x}", rand::random::<u64>())); // WHAT: a name of its own. WHY: two saves of the same bytes at once never write into one file
+            let written = (|| {
+                use std::io::Write;
+                let mut f = std::fs::File::create(&part)?;
+                f.write_all(bytes)?;
+                f.sync_all() // WHAT: on the disk before it is named. WHY: a power cut never leaves a short file under a whole drawing's name
+            })();
+            if let Err(e) = written.and_then(|_| std::fs::rename(&part, &path)) {
+                let _ = std::fs::remove_file(&part); // WHAT: the leftover. WHY: never a stray part file
+                if !path.exists() {
+                    return Err(e); // WHAT: nothing kept. WHY: said
+                }
+            }
         }
         Ok(sha)
     }
@@ -151,7 +162,8 @@ impl Store {
         if sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
             return None; // WHAT: never a path from anything but a hash. WHY: a damaged row can't reach outside the folder
         }
-        std::fs::read(self.blob_path(sha)).ok()
+        let bytes = std::fs::read(self.blob_path(sha)).ok()?;
+        (crate::store::hex(&Sha256::digest(&bytes)) == sha.to_ascii_lowercase()).then_some(bytes) // WHAT: only bytes that are what their name says. WHY: a damaged file is never handed out as the drawing
     }
 
     /// The drawings not archived, by folder then name.
@@ -250,6 +262,18 @@ impl Store {
     /// A new version, saved by the person who has it out, on top of the
     /// version they opened (`base`); refused if someone saved since.
     pub fn save(&mut self, id: i64, base: i64, bytes: &[u8], who: &str, note: &str) -> Result<i64, Refused> {
+        if bytes.len() > MOST_BYTES {
+            return Err(Refused::Bad("That drawing is too big.".into()));
+        }
+        let sha = self.put_blob(bytes).map_err(|e| Refused::Bad(format!("Couldn't store it: {e}")))?; // WHAT: the bytes kept first. WHY: the slow part, outside the write lock
+        self.db.execute_batch("BEGIN IMMEDIATE").map_err(|e| Refused::Bad(e.to_string()))?; // WHAT: the check and the write as one. WHY: a check-out forced back and taken by someone else in between can't let this save land
+        let saved = self.save_checked(id, base, &sha, bytes.len() as i64, who, note);
+        let _ = self.db.execute_batch(if saved.is_ok() { "COMMIT" } else { "ROLLBACK" }); // WHAT: kept or undone. WHY: all of it or none
+        saved
+    }
+
+    /// [`save`]'s checks and write, inside its transaction.
+    fn save_checked(&self, id: i64, base: i64, sha: &str, size: i64, who: &str, note: &str) -> Result<i64, Refused> {
         let d = self.drawing(id).ok_or(Refused::NotFound)?;
         if d.locked_by.as_deref() != Some(who) {
             return match d.locked_by {
@@ -260,14 +284,10 @@ impl Store {
         if base != d.version {
             return Err(Refused::Stale(d.version)); // WHAT: saved by someone else since it was opened. WHY: never overwrites their work
         }
-        if bytes.len() > MOST_BYTES {
-            return Err(Refused::Bad("That drawing is too big.".into()));
-        }
-        let sha = self.put_blob(bytes).map_err(|e| Refused::Bad(format!("Couldn't store it: {e}")))?;
         let next = d.version + 1;
         let note: String = note.chars().filter(|c| !c.is_control()).take(500).collect(); // WHAT: the note, cleaned and capped. WHY: it is shown in a list
         self.db
-            .execute("INSERT INTO versions (drawing, version, sha256, size, saved_by, saved_at, note) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![id, next, sha, bytes.len() as i64, who, now(), note])
+            .execute("INSERT INTO versions (drawing, version, sha256, size, saved_by, saved_at, note) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![id, next, sha, size, who, now(), note])
             .map_err(|_| Refused::Stale(d.version))?; // WHAT: the version number taken by a save at the same moment. WHY: one of the two is refused, never both written
         self.log(who, "save", &format!("{id} v{next}"));
         Ok(next)
@@ -409,6 +429,19 @@ fn refused(r: Refused) -> Denied {
     }
 }
 
+/// The address's query values, read only once the caller is known: a
+/// stranger is answered 401 or 404 whatever they put there.
+fn values<T: serde::de::DeserializeOwned>(uri: &Uri) -> Answer<T> {
+    Query::<T>::try_from_uri(uri).map(|q| q.0).map_err(|e| Denied::wrong(format!("Those values don't read: {e}"))) // WHAT: parsed here, not by an extractor. WHY: an extractor would answer before the licence and sign-in checks
+}
+
+/// The drawing's bytes, read only once the caller is known and no further
+/// than [`MOST_BYTES`]: nothing is buffered for a stranger, or on a server
+/// without the cad part.
+async fn drawing_bytes(body: Body) -> Answer<axum::body::Bytes> {
+    axum::body::to_bytes(body, MOST_BYTES).await.map_err(|_| Denied::wrong("That drawing is too big, or it didn't arrive whole.")) // WHAT: the body, capped. WHY: read after `on()` and the door, never before
+}
+
 /// Runs a store job off the async threads (drawings can be large).
 async fn blocking<T: Send + 'static>(server: &Shared, job: impl FnOnce(&mut Store) -> Result<T, Refused> + Send + 'static) -> Answer<T> {
     let server = server.clone();
@@ -440,9 +473,11 @@ fn drawing_id(id: &str) -> Answer<i64> {
     id.parse().map_err(|_| Denied::missing("drawing")) // WHAT: 404 for anything not a number. WHY: the same answer as an id that doesn't exist
 }
 
-pub async fn create(State(server): State<Shared>, headers: HeaderMap, Query(at): Query<Place>, body: Bytes) -> Answer<Json<Drawing>> {
+pub async fn create(State(server): State<Shared>, headers: HeaderMap, uri: Uri, body: Body) -> Answer<Json<Drawing>> {
     on(&server)?;
     let who = crate::api::writer(&server, &headers)?; // WHAT: someone who may change drawings. WHY: a viewer opens, never adds
+    let at: Place = values(&uri)?;
+    let body = drawing_bytes(body).await?;
     blocking(&server, move |s| {
         let id = s.create(&at.folder, &at.name, &body, &who.email)?;
         s.drawing(id).ok_or(Refused::NotFound)
@@ -463,9 +498,10 @@ pub struct Which {
     version: Option<i64>,
 }
 
-pub async fn file(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, Query(which): Query<Which>) -> Answer<Response> {
+pub async fn file(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, uri: Uri) -> Answer<Response> {
     on(&server)?;
     crate::api::caller(&server, &headers)?;
+    let which: Which = values(&uri)?;
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known
     let (version, bytes) = blocking(&server, move |s| s.file(id, which.version)).await?;
     Ok(([(header::CONTENT_TYPE, "application/octet-stream".to_string()), (header::HeaderName::from_static("x-version"), version.to_string())], bytes).into_response()) // WHAT: the bytes, and which version they are (X-Version, as CAD's own server sends it). WHY: the next save names it as its base
@@ -478,9 +514,11 @@ pub struct Saving {
     note: String,
 }
 
-pub async fn save(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, Query(saving): Query<Saving>, body: Bytes) -> Answer<Json<Drawing>> {
+pub async fn save(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, uri: Uri, body: Body) -> Answer<Json<Drawing>> {
     on(&server)?;
     let who = crate::api::writer(&server, &headers)?;
+    let saving: Saving = values(&uri)?;
+    let body = drawing_bytes(body).await?;
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known
     blocking(&server, move |s| {
         s.save(id, saving.base.ok_or_else(|| Refused::Bad("Say which version this was opened from (base).".into()))?, &body, &who.email, &saving.note)?;
@@ -508,13 +546,15 @@ pub struct Release {
     force: bool,
 }
 
-pub async fn unlock(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, Query(release): Query<Release>) -> Answer<Json<Drawing>> {
+pub async fn unlock(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, uri: Uri) -> Answer<Json<Drawing>> {
     on(&server)?;
-    let who = if release.force {
+    let asked = values::<Release>(&uri); // WHAT: whether this is a forced check-in. WHY: it decides the door; a value that doesn't read is refused after the door
+    let who = if asked.as_ref().is_ok_and(|r| r.force) {
         crate::api::administrator(&server, &headers)? // WHAT: forcing someone else's drawing back in. WHY: an administrator's call only
     } else {
         crate::api::writer(&server, &headers)?
     };
+    let release = asked?;
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known
     blocking(&server, move |s| {
         s.unlock(id, &who.email, release.force)?;
@@ -536,9 +576,10 @@ pub struct Restoring {
     version: Option<i64>, // WHAT: the version to bring back. WHY: required, and refused after the caller is known
 }
 
-pub async fn restore(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, Query(restoring): Query<Restoring>) -> Answer<Json<Drawing>> {
+pub async fn restore(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, uri: Uri) -> Answer<Json<Drawing>> {
     on(&server)?;
     let who = crate::api::writer(&server, &headers)?;
+    let restoring: Restoring = values(&uri)?;
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known
     blocking(&server, move |s| {
         s.restore(id, restoring.version.ok_or_else(|| Refused::Bad("Say which version to bring back.".into()))?, &who.email)?;

@@ -163,3 +163,38 @@ fn a_licence_signed_by_anyone_else_switches_nothing_on() {
     assert_eq!(code, 400, "a part added to a signed licence breaks its signature");
     assert_eq!(ask(&office, "GET", "/cad/drawings", &office.sam, None).0, 404, "and CAD stays off");
 }
+
+/// A request that says a huge drawing is coming and sends none of it: the
+/// answer, or None when the server sat waiting for the body.
+fn answered_before_the_body(office: &Office, path: &str, token: Option<&str>) -> Option<String> {
+    answered_before("POST", office, path, token)
+}
+
+fn answered_before_the_body_put(office: &Office, path: &str, token: Option<&str>) -> Option<String> {
+    answered_before("PUT", office, path, token)
+}
+
+fn answered_before(method: &str, office: &Office, path: &str, token: Option<&str>) -> Option<String> {
+    use std::io::{Read, Write};
+    let address = office.base.trim_start_matches("http://").split('/').next().unwrap().to_string(); // WHAT: host:port. WHY: a raw socket
+    let mut tcp = std::net::TcpStream::connect(&address).unwrap();
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap(); // WHAT: five seconds. WHY: a server reading the body first would still be waiting
+    let auth = token.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
+    write!(tcp, "{method} /api/v1{path} HTTP/1.1\r\nHost: {address}\r\n{auth}Content-Type: application/octet-stream\r\nContent-Length: 200000000\r\n\r\n").unwrap(); // WHAT: 200 MB promised. WHY: none of it sent
+    let mut first = [0u8; 64];
+    let n = tcp.read(&mut first).ok()?;
+    Some(String::from_utf8_lossy(&first[..n]).to_string())
+}
+
+#[test]
+fn a_drawing_is_never_read_before_the_server_knows_who_sent_it() {
+    let off = an_office(None);
+    let said = answered_before_the_body(&off, "/cad/drawings?name=x.excad", Some(&off.sam)).expect("answered without waiting for the body");
+    assert!(said.starts_with("HTTP/1.1 404"), "no cad part: {said}");
+    let on = an_office(Some(license(&["cad"])));
+    let said = answered_before_the_body(&on, "/cad/drawings?name=x.excad", None).expect("answered without waiting for the body");
+    assert!(said.starts_with("HTTP/1.1 401"), "a stranger: {said}");
+    let said = answered_before_the_body_put(&on, "/cad/drawings/1/file?base=1", Some(&on.val)).expect("answered without waiting for the body");
+    assert!(said.starts_with("HTTP/1.1 403"), "a viewer: {said}");
+    assert!(answered_before_the_body(&on, "/cad/drawings?name=x.excad&folder=", None).is_some_and(|s| s.starts_with("HTTP/1.1 401")), "bad values are refused after the door, too");
+}
