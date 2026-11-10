@@ -71,7 +71,7 @@ Each step merges on its own, with tests, the guards proven, and a review; each s
 | 1. Licence modules | done: signed `modules` line; old licences unchanged; the publishing script signs it (`--modules`) |
 | 2. Module registry | done: `GET /api/v1/office`, and every part's state in the maintenance report |
 | 3. Citadel part | watching done: Citadel Server's version read every 5 minutes on this machine, by its certificate pin, never its data. Next: installing and updating it from the same signed channel |
-| 4. HTTPS | server side done: its own certificate, HTTPS on 8715 beside HTTP, `secure_port` in /health. Next: the seats move to it and pin it (the View app), then plain HTTP can be turned off |
+| 4. HTTPS | server side done: its own certificate, HTTPS on TCP 8716 beside HTTP on 8714 (UDP 8715 stays the finding port), `secure_port` in /health. Next: the seats move to it and pin it (the View app), then plain HTTP can be turned off |
 | 5. CAD part | server side done: CAD's check-out/check-in store under `/api/v1/cad/...` with the office's own accounts; `hyperview-server --move-cad "<old CAD data folder>"` moves a CAD server's drawings in (every file checked, the old folder only read). Next: Excalibur CAD signs in to the Office Server |
 | 6. Archetype part, one installer and Manager, the USB kit | not started |
 

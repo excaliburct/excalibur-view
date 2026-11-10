@@ -250,7 +250,7 @@ fn stop_and_wait(service: &windows_service::service::Service) {
 fn open_firewall() -> Result<(), String> {
     let port = crate::config::DEFAULT_PORT.to_string();
     let finding = hub::discover::PORT.to_string();
-    let secure = crate::config::DEFAULT_SECURE_PORT.to_string(); // WHAT: 8715. WHY: HTTPS, the same office-network-only rule
+    let secure = crate::config::DEFAULT_SECURE_PORT.to_string(); // WHAT: 8716. WHY: HTTPS, the same office-network-only rule
     for (name, protocol, number) in [
         (FIREWALL_TCP, "TCP", port.as_str()),
         (FIREWALL_TLS, "TCP", secure.as_str()),
