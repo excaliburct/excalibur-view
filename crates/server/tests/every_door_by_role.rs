@@ -442,6 +442,12 @@ const TABLE: &[Route] = &[
     },
     Route {
         method: "GET",
+        path: "/office",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: the Office Server's parts. WHY: anybody signed in, like the licence's standing
+    Route {
+        method: "GET",
         path: "/audit",
         door: Door::Admin,
         sync: false,

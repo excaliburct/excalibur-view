@@ -769,6 +769,16 @@ another drawing.",
                 "responses": ok("Standing")
             }
         },
+        "/office": {
+            "get": {
+                "summary": "The parts this Excalibur Office Server runs.",
+                "description": "Every part Excalibur makes (view, cad, archetype, citadel), whether \
+                                this office's signed licence switches it on, and how it is: running, \
+                                not-in-this-build (licensed, but this server needs an update to run \
+                                it) or off. View is always on. Anybody signed in may ask.",
+                "responses": ok("Office")
+            }
+        },
         "/sets/{id}/copy": {
             "post": {
                 "summary": "A copy of this drawing set to take off on.",
@@ -1070,6 +1080,21 @@ fn schemas() -> Value {
             ("sharing", "boolean", "Whether new work can be shared through the server now."),
             ("message", "string", "One sentence to show."),
             ("buy_url", "string", "Where to buy or renew."),
+        ]),
+        "Office": { // WHAT: written out, not by object(). WHY: its parts are a list of OfficePart, which object() can't say
+            "type": "object",
+            "properties": {
+                "product": { "type": "string", "description": "Always excalibur-office." },
+                "version": { "type": "string", "description": "The server's version." },
+                "parts": { "type": "array", "items": { "$ref": "#/components/schemas/OfficePart" }, "description": "Every part Excalibur makes." }
+            }
+        },
+        "OfficePart": object(&[
+            ("name", "string", "view, cad, archetype or citadel."),
+            ("title", "string", "Its name for people."),
+            ("licensed", "boolean", "Whether the licence switches it on."),
+            ("state", "string", "running, not-in-this-build or off."),
+            ("version", "string", "The version it runs. Absent unless running."),
         ]),
         "CopyAsked": object(&[
             ("name", "string", "What to call the copy. Leave it out for \"<the set> — Takeoff\"."),

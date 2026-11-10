@@ -128,6 +128,9 @@ struct Ops {
     /// What this installation is actually holding, which is the thing somebody
     /// is deciding about when they look at the board.
     drawings: Drawings,
+    /// Every Office Server part and how it is (`crate::office`), so Fleet sees
+    /// one server whatever parts it runs.
+    parts: Vec<crate::office::Part>, // WHAT: each part's standing. WHY: a licensed part that isn't running shows on the board
 }
 
 #[derive(Serialize, Default)]
@@ -266,6 +269,7 @@ async fn ops(State(server): State<Shared>, headers: HeaderMap) -> Result<Json<Op
             .map(|m| m.len())
             .unwrap_or(0),
         route_failures: Vec::new(),
+        parts: crate::office::parts(&server), // WHAT: each part, read now. WHY: the board shows what runs, never what was hoped
         drawings,
     }))
 }

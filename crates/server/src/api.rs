@@ -461,6 +461,7 @@ pub fn router(server: Shared) -> Router {
         .route("/notices/:id/test", post(test_notice))
         .route("/notices/:id/remove", post(remove_notice))
         .route("/license", get(read_license).post(add_license))
+        .route("/office", get(crate::office::read)) // WHAT: the parts this Office Server runs. WHY: the Manager and the program show what an office has
         .route("/audit", get(read_audit))
         .route("/audit.csv", get(audit_csv))
         .route("/admin/pin", post(set_pin))
@@ -582,6 +583,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/notices/{id}/remove"),
     ("GET", "/license"),
     ("POST", "/license"),
+    ("GET", "/office"), // WHAT: the Office Server's parts. WHY: described, so the test holds the two together
     ("GET", "/audit"),
     ("GET", "/audit.csv"),
     ("POST", "/admin/pin"),

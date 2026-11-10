@@ -1298,6 +1298,11 @@ fn the_ops_route_needs_the_key_and_tells_the_truth_about_backups() {
     // from losing every takeoff it has done should show amber, not green.
     assert!(body.contains("\"backupDays\":null"), "{body}");
     assert!(body.contains("\"signingRequired\":true"), "{body}");
+    let ops: serde_json::Value = serde_json::from_str(&body).expect("ops is JSON"); // WHAT: the report, read. WHY: to check its parts
+    let parts = ops["parts"].as_array().expect("every Office Server part is reported"); // WHAT: the parts list. WHY: Fleet sees one server whatever it runs
+    assert_eq!(parts.len(), 4, "{body}"); // WHAT: view, cad, archetype, citadel. WHY: off parts are listed too
+    assert!(parts.iter().any(|p| p["name"] == "view" && p["state"] == "running"), "{body}"); // WHAT: View runs. WHY: it always does
+    assert!(parts.iter().all(|p| p["name"] == "view" || p["state"] == "off"), "{body}"); // WHAT: nothing else, with no licence. WHY: only a signed licence switches a part on
 }
 
 #[test]
