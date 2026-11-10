@@ -20,6 +20,7 @@
 pub mod api;
 pub mod audit;
 pub mod auth;
+pub mod cad; // WHAT: Excalibur CAD's office drawings, moved in. WHY: the Office Server's cad part
 pub mod citadel; // WHAT: Citadel Server, watched alongside by its pin. WHY: the Office Server's citadel part, kept blind
 pub mod config;
 pub mod fleet;

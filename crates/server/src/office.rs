@@ -31,14 +31,14 @@ pub struct Part {
 
 /// The parts whose code this build carries. A part is added here in the same
 /// change that brings its code in, and never before.
-pub const IN_THIS_BUILD: &[Module] = &[Module::View]; // WHAT: only View so far. WHY: a licensed part this build can't run must say so, not pretend
+pub const IN_THIS_BUILD: &[Module] = &[Module::View, Module::Cad]; // WHAT: View, and CAD's office drawings (crate::cad). WHY: a licensed part this build can't run must say so, not pretend
 
 /// The parts this office's licence switches on. View always; the rest only
 /// from a licence that checks out.
 pub fn licensed(server: &Server) -> Vec<Module> {
-    match crate::license::state(server) {
-        crate::license::State::Licensed(license) | crate::license::State::Beyond(license) => license.parts(), // WHAT: the licence's own list. WHY: it is signed, so nobody here can add to it
-        _ => vec![Module::View], // WHAT: founding, trial or no licence: View only. WHY: every other part is paid for by a licence
+    match crate::license::held_license(server) {
+        Some(license) => license.parts(), // WHAT: the licence's own list, its signature checked. WHY: it is signed, so nobody here can add to it; a founding office with a licence gets its parts too
+        None => vec![Module::View], // WHAT: no licence: View only. WHY: every other part is paid for by a licence
     }
 }
 
@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn this_build_carries_view_and_view_alone_until_a_part_is_brought_in() {
-        assert_eq!(IN_THIS_BUILD, &[Module::View]); // WHAT: pinned. WHY: adding a part here must be a deliberate, reviewed change
+    fn this_build_carries_view_and_cad_and_nothing_else_until_a_part_is_brought_in() {
+        assert_eq!(IN_THIS_BUILD, &[Module::View, Module::Cad]); // WHAT: pinned. WHY: adding a part here must be a deliberate, reviewed change
     }
 }

@@ -94,7 +94,7 @@ pub fn begin(server: &Server) {
 /// that would otherwise reach the outside world knows before it tries.
 /// Called as the server opens and again whenever a license is installed.
 pub fn settle_sealed(server: &Server) {
-    let edition = held(server, &crate::license_trust()).map(|l| l.edition);
+    let edition = held(server, &trust(server)).map(|l| l.edition);
     hub::sealed::license_says(edition.map(|e| e.name()));
 }
 
@@ -117,7 +117,7 @@ pub fn begin_at(server: &Server, now: &str, founding_before: &str) {
 /// Checks a license file and keeps it. The error is a sentence for whoever
 /// chose the file.
 pub fn install(server: &Server, text: &str) -> Result<License, String> {
-    install_with(server, text, &crate::license_trust())
+    install_with(server, text, &trust(server))
 }
 
 fn install_with(server: &Server, text: &str, trusted: &Trusted) -> Result<License, String> {
@@ -161,7 +161,7 @@ pub fn renewal_url(server: &Server) -> Option<String> {
     if hub::sealed::is_sealed() {
         return None;
     }
-    let held = held(server, &crate::license_trust())?;
+    let held = held(server, &trust(server))?;
     Some(format!("{base}/{}.evlicense", name_for(&held.id)))
 }
 
@@ -203,9 +203,9 @@ pub fn is_a_renewal(held: &License, fresh: &License) -> bool {
 /// checked today is a shop that carries on with the one it has.
 pub fn look_for_renewal(server: &Server) -> Option<String> {
     let url = renewal_url(server)?;
-    let held = held(server, &crate::license_trust())?;
+    let held = held(server, &trust(server))?;
     let text = hub::web::fetch_small("Checking for a renewed license", &url).ok()?;
-    let fresh = License::read(&text, &crate::license_trust()).ok()?;
+    let fresh = License::read(&text, &trust(server)).ok()?;
     if !is_a_renewal(&held, &fresh) {
         return None;
     }
@@ -226,8 +226,23 @@ fn held(server: &Server, trusted: &Trusted) -> Option<License> {
     License::read(&text, trusted).ok()
 }
 
+/// The keys a licence on this server may be signed with: the compiled-in
+/// ones, and a test's own when a test set one (`Config::license_keys_for_tests`).
+fn trust(server: &Server) -> Trusted {
+    let mut trust = crate::license_trust(); // WHAT: every release and licence key built in. WHY: the real list
+    trust.keys.extend(server.config.license_keys_for_tests.iter().cloned()); // WHAT: a test's key, when one is set. WHY: empty in every server started as a program
+    trust
+}
+
+/// The licence this server holds, checked against its keys, whatever else
+/// its standing is: a founding office that adds a licence for more parts gets
+/// them too.
+pub fn held_license(server: &Server) -> Option<License> {
+    held(server, &trust(server)) // WHAT: the stored licence, its signature checked. WHY: the parts it switches on are only ever read from a checked licence
+}
+
 pub fn state(server: &Server) -> State {
-    state_at(server, &now(), &crate::license_trust())
+    state_at(server, &now(), &trust(server))
 }
 
 pub fn state_at(server: &Server, now: &str, trusted: &Trusted) -> State {

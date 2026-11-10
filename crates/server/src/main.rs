@@ -70,6 +70,23 @@ fn main() {
             if std::env::var_os("HYPERVIEW_DATA").is_none() && hyperview_server::winsvc::data_folder().exists() { config.data = hyperview_server::winsvc::data_folder(); } // WHAT: the installed service's drawings. WHY: the service keeps them in ProgramData, not beside this program.
             std::process::exit(hyperview_server::offsite::main_from_args(&hyperview_server::offsite::VIEW, &config, VERSION, &args)); // WHAT: run it and end with its code. WHY: 0 good, 5 good with a warning, anything else says why.
         }
+        "--move-cad" => { // WHAT: Excalibur CAD's server's drawings moved into this server's cad part. WHY: one server for the office (docs/OFFICE-SERVER.md)
+            let Some(from) = std::env::args_os().nth(2) else {
+                eprintln!("  Say which folder: hyperview-server --move-cad \"C:\\ProgramData\\Excalibur CAD Server\\data\""); // WHAT: how to use it. WHY: a person types it
+                std::process::exit(2);
+            };
+            #[allow(unused_mut)] // WHAT: only Windows changes it. WHY: no warning elsewhere
+            let mut config = Config::from_environment(); // WHAT: this server's settings. WHY: its data folder
+            #[cfg(windows)]
+            if std::env::var_os("HYPERVIEW_DATA").is_none() && hyperview_server::winsvc::data_folder().exists() { config.data = hyperview_server::winsvc::data_folder(); } // WHAT: the installed service's data. WHY: the same folder the service serves
+            match hyperview_server::cad::move_from(std::path::Path::new(&from), &hyperview_server::cad::folder(&config.data)) {
+                Ok(m) => println!("  Moved {} drawings ({} versions, {} files). {} were checked out there and are checked in here. The old CAD server's folder was not changed.", m.drawings, m.versions, m.files, m.released), // WHAT: what came. WHY: a person checks it against the old server
+                Err(why) => {
+                    eprintln!("  {why}");
+                    std::process::exit(1);
+                }
+            }
+        }
         "--console" | "--serve" => console(),
         #[cfg(windows)]
         "" => front_door(),

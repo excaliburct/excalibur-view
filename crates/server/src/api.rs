@@ -411,6 +411,7 @@ pub fn fresh_id(prefix: &str) -> String {
 pub fn router(server: Shared) -> Router {
     let limit = server.config.largest_upload as usize; // WHAT: the largest drawing or file the office takes. WHY: only the routes that take a whole file are given it.
     let uploads = DefaultBodyLimit::max(limit); // WHAT: the upload limit, as a layer. WHY: put on each upload route below, and nowhere else.
+    let cad_uploads = DefaultBodyLimit::max(limit.min(crate::cad::MOST_BYTES)); // WHAT: a CAD drawing's limit, never over CAD's own. WHY: the same drawings fit as on CAD's server
     let api = Router::new()
         .route("/health", get(health))
         .route("/openapi.json", get(openapi))
@@ -462,6 +463,13 @@ pub fn router(server: Shared) -> Router {
         .route("/notices/:id/remove", post(remove_notice))
         .route("/license", get(read_license).post(add_license))
         .route("/office", get(crate::office::read)) // WHAT: the parts this Office Server runs. WHY: the Manager and the program show what an office has
+        .route("/cad/drawings", get(crate::cad::list).post(crate::cad::create).layer(cad_uploads)) // WHAT: the office's CAD drawings, and a new one. WHY: the cad part; 404 unless licensed
+        .route("/cad/drawings/:id", get(crate::cad::one)) // WHAT: one CAD drawing. WHY: who has it out, its version
+        .route("/cad/drawings/:id/file", get(crate::cad::file).put(crate::cad::save).layer(cad_uploads)) // WHAT: its bytes, and a new version. WHY: opened and saved by Excalibur CAD
+        .route("/cad/drawings/:id/lock", post(crate::cad::lock).delete(crate::cad::unlock)) // WHAT: checked out and back in. WHY: one person changes a drawing at a time
+        .route("/cad/drawings/:id/versions", get(crate::cad::versions)) // WHAT: every version. WHY: nothing is ever lost
+        .route("/cad/drawings/:id/restore", post(crate::cad::restore)) // WHAT: an old version brought back. WHY: as a new version, the others kept
+        .route("/cad/drawings/:id/archive", post(crate::cad::archive)) // WHAT: hidden, every version kept. WHY: administrators tidy the list without deleting anything
         .route("/audit", get(read_audit))
         .route("/audit.csv", get(audit_csv))
         .route("/admin/pin", post(set_pin))
@@ -584,6 +592,16 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/license"),
     ("POST", "/license"),
     ("GET", "/office"), // WHAT: the Office Server's parts. WHY: described, so the test holds the two together
+    ("GET", "/cad/drawings"), // WHAT: CAD drawings. WHY: likewise
+    ("POST", "/cad/drawings"), // WHAT: a new CAD drawing. WHY: likewise
+    ("GET", "/cad/drawings/{id}"), // WHAT: one. WHY: likewise
+    ("GET", "/cad/drawings/{id}/file"), // WHAT: its bytes. WHY: likewise
+    ("PUT", "/cad/drawings/{id}/file"), // WHAT: a new version. WHY: likewise
+    ("POST", "/cad/drawings/{id}/lock"), // WHAT: checked out. WHY: likewise
+    ("DELETE", "/cad/drawings/{id}/lock"), // WHAT: checked in. WHY: likewise
+    ("GET", "/cad/drawings/{id}/versions"), // WHAT: its versions. WHY: likewise
+    ("POST", "/cad/drawings/{id}/restore"), // WHAT: one brought back. WHY: likewise
+    ("POST", "/cad/drawings/{id}/archive"), // WHAT: hidden. WHY: likewise
     ("GET", "/audit"),
     ("GET", "/audit.csv"),
     ("POST", "/admin/pin"),

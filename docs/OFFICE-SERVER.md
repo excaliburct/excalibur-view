@@ -63,3 +63,28 @@ company-blind already: one Office Server build serves any company's Citadel, bec
 6. **The `archetype` module**, then **one installer and Manager** for everything, and the new USB kit.
 
 Each step merges on its own, with tests, the guards proven, and a review; each ships as a normal signed update.
+
+## Where it stands (2026-11-10, branch office-server-20261110)
+
+| Step | State |
+|---|---|
+| 1. Licence modules | done: signed `modules` line; old licences unchanged; the publishing script signs it (`--modules`) |
+| 2. Module registry | done: `GET /api/v1/office`, and every part's state in the maintenance report |
+| 3. Citadel part | watching done: Citadel Server's version read every 5 minutes on this machine, by its certificate pin, never its data. Next: installing and updating it from the same signed channel |
+| 4. HTTPS | server side done: its own certificate, HTTPS on 8715 beside HTTP, `secure_port` in /health. Next: the seats move to it and pin it (the View app), then plain HTTP can be turned off |
+| 5. CAD part | server side done: CAD's check-out/check-in store under `/api/v1/cad/...` with the office's own accounts; `hyperview-server --move-cad "<old CAD data folder>"` moves a CAD server's drawings in (every file checked, the old folder only read). Next: Excalibur CAD signs in to the Office Server |
+| 6. Archetype part, one installer and Manager, the USB kit | not started |
+
+Existing servers get the HTTPS port opened to the office network by the Manager's next install/repair (the
+service account can't change the firewall); until then HTTPS answers on the server itself and through the
+tunnel.
+
+### Moving a CAD server in (once CAD signs in to the Office Server)
+1. Stop the old Excalibur CAD server's service.
+2. On the server, in an administrator's Command Prompt:
+   `"C:\Program Files\Excalibur View Server\hyperview-server.exe" --move-cad "C:\ProgramData\Excalibur CAD Server\data"`
+   (the paths as installed there).
+3. It says how many drawings, versions and files came. The old folder isn't changed, so the old server can be
+   started again if anything looks wrong.
+4. Each person signs in to CAD with their Office Server account. Drawings that were checked out on the old server
+   are checked in; whoever had one checks it out again.

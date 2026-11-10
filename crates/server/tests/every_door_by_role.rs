@@ -442,6 +442,66 @@ const TABLE: &[Route] = &[
     },
     Route {
         method: "GET",
+        path: "/cad/drawings",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/cad/drawings",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "GET",
+        path: "/cad/drawings/{id}",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "GET",
+        path: "/cad/drawings/{id}/file",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "PUT",
+        path: "/cad/drawings/{id}/file",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/cad/drawings/{id}/lock",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "DELETE",
+        path: "/cad/drawings/{id}/lock",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "GET",
+        path: "/cad/drawings/{id}/versions",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/cad/drawings/{id}/restore",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/cad/drawings/{id}/archive",
+        door: Door::Admin,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "GET",
         path: "/office",
         door: Door::Signed,
         sync: false,
@@ -639,6 +699,32 @@ struct Office {
     _runtime: tokio::runtime::Runtime, // WHAT: the runtime serving it. WHY: dropped, the server stops.
 }
 
+const LICENSE_KEY: &str = "probe-2026"; // WHAT: the test licence key's name. WHY: named in the licence it signs
+
+/// The test's own licence signing key, from a made-up seed.
+fn licensing() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]) // WHAT: never a real key. WHY: only this test's server trusts it
+}
+
+/// A licence switching the cad part on, signed as the publishing script signs one.
+fn a_license_with_cad() -> String {
+    use ed25519_dalek::Signer;
+    let mut license = hub::license::License {
+        id: "evl_probe".into(),
+        company: "Probe Steel".into(),
+        edition: hub::license::Edition::Office,
+        users: 0,
+        updates_through: "2099-12-31".into(),
+        issued: "2026-11-10".into(),
+        note: String::new(),
+        modules: vec!["cad".into()],
+        key: LICENSE_KEY.into(),
+        signature: String::new(),
+    }; // WHAT: an office licence with CAD. WHY: the probe's office runs it
+    license.signature = hub::update::hex(&licensing().sign(&license.signing_payload()).to_bytes()); // WHAT: signed. WHY: unsigned, it switches nothing on
+    serde_json::to_string(&license).unwrap()
+}
+
 const ADMIN: &str = "usr_admin"; // WHAT: the administrator's id. WHY: keys and sessions are made for them.
 const ESTIMATOR: &str = "usr_estimator"; // WHAT: the estimator's id. WHY: likewise.
 const VIEWER: &str = "usr_viewer"; // WHAT: the viewer's id. WHY: likewise.
@@ -650,6 +736,7 @@ fn an_office() -> Office {
         data: scratch.0.clone(),    // WHAT: its folder. WHY: the scratch one.
         listen: "127.0.0.1:0".parse().unwrap(), // WHAT: any free port here. WHY: tests run side by side.
         maintenance_key: Some(MAINTENANCE.into()), // WHAT: Fleet's doors are open to this key. WHY: so they can be probed.
+        license_keys_for_tests: vec![(LICENSE_KEY.into(), licensing().verifying_key().to_bytes())], // WHAT: this test's own licence key. WHY: the cad part is switched on by a licence it really signs
         ..Config::default() // WHAT: everything else as shipped. WHY: the server an office runs.
     };
     let store = Store::open(&config.database(), &config.blobs()).expect("a store"); // WHAT: the database. WHY: the people go in it.
@@ -670,6 +757,9 @@ fn an_office() -> Office {
         })
         .expect("three people"); // WHAT: all in. WHY: every knock is one of them.
     let server = Arc::new(Server::new(store, config.clone())); // WHAT: the server's state. WHY: kept, to write sessions and keys into.
+    hyperview_server::license::install(&server, &a_license_with_cad()).expect("the licence with CAD"); // WHAT: CAD switched on. WHY: its doors are probed like every other
+    let mut cad = hyperview_server::cad::Store::open(&hyperview_server::cad::folder(&config.data)).expect("CAD's drawings"); // WHAT: CAD's store. WHY: a real drawing to knock on
+    assert_eq!(cad.create("Probe", "Plate.excad", b"v1", "sam@example.com"), Ok(1)); // WHAT: drawing 1. WHY: the id the CAD routes are asked with
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -941,6 +1031,7 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
                 p if p.starts_with("/people/") => fresh_person(),
                 p if p.starts_with("/keys/") => key(office, ADMIN, "assistant", None).1,
                 p if p.starts_with("/signoffs/") => fresh_signoff(), // WHAT: a line of its own. WHY: a signature is final, so each knock signs a fresh one.
+                p if p.starts_with("/cad/drawings/") => "1".to_string(), // WHAT: the probe's CAD drawing. WHY: a real one, so the door is what answers
                 _ => "nothing_by_that_id".to_string(),
             },
         )
@@ -1008,6 +1099,7 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
         ("POST", "/files/{id}/folder") | ("POST", "/sets/{id}/folder") => {
             Body::Json(json!({"folder": null}))
         }
+        ("POST", "/cad/drawings") | ("PUT", "/cad/drawings/{id}/file") => Body::Raw("application/octet-stream".into(), b"a drawing".to_vec()), // WHAT: a drawing's bytes. WHY: what CAD sends
         ("POST", _) | ("DELETE", _) => Body::Raw("application/json".into(), Vec::new()), // WHAT: nothing in the body. WHY: the routes that take none.
         _ => Body::None,
     };

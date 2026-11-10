@@ -769,6 +769,78 @@ another drawing.",
                 "responses": ok("Standing")
             }
         },
+        "/cad/drawings": {
+            "get": {
+                "summary": "The office's Excalibur CAD drawings, by folder then name.",
+                "description": "The cad part of the Office Server: answers 404 unless the office's licence switches it on. Archived drawings are not listed. Anybody signed in may ask.",
+                "responses": ok_list("CadDrawing")
+            },
+            "post": {
+                "summary": "A new CAD drawing, its first version from the body.",
+                "description": "Writers only. The name is 1 to 120 characters with no slashes; a folder is names joined by '/', at most 8 deep. 409 when that folder already has that name.",
+                "parameters": [query_param("folder", "Where it goes. Empty is the top."), query_param("name", "Its name, such as Base plate.excad.")],
+                "requestBody": { "required": true, "description": "The drawing file's bytes, as Excalibur CAD saves it. Up to 256 MB.", "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
+                "responses": ok("CadDrawing")
+            }
+        },
+        "/cad/drawings/{id}": {
+            "get": {
+                "summary": "One CAD drawing: its newest version, and who has it checked out.",
+                "parameters": [path_param("id", "The drawing.")],
+                "responses": ok("CadDrawing")
+            }
+        },
+        "/cad/drawings/{id}/file": {
+            "get": {
+                "summary": "A version's bytes; the newest unless one is named.",
+                "description": "The X-Cad-Version header says which version came, for the next save's base.",
+                "parameters": [path_param("id", "The drawing."), query_param("version", "A version number. Leave it out for the newest.")],
+                "responses": { "200": { "description": "The drawing file." } }
+            },
+            "put": {
+                "summary": "A new version, by the person who has the drawing checked out.",
+                "description": "Writers only, and only with the drawing checked out to them. 409 when someone saved since the version named as base: nothing is overwritten.",
+                "parameters": [path_param("id", "The drawing."), query_param("base", "The version this was opened from."), query_param("note", "What changed, up to 500 characters.")],
+                "requestBody": { "required": true, "description": "The drawing file's bytes, as Excalibur CAD saves it. Up to 256 MB.", "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
+                "responses": ok("CadDrawing")
+            }
+        },
+        "/cad/drawings/{id}/lock": {
+            "post": {
+                "summary": "Check the drawing out: nobody else can save it until it is checked in.",
+                "description": "Writers only. 409, saying who, when someone else has it.",
+                "parameters": [path_param("id", "The drawing.")],
+                "responses": ok("CadDrawing")
+            },
+            "delete": {
+                "summary": "Check it back in.",
+                "description": "By the person who has it; with force=true, by an administrator signed in, whoever has it.",
+                "parameters": [path_param("id", "The drawing."), query_param("force", "true to take it back from someone else. Administrators only.")],
+                "responses": ok("CadDrawing")
+            }
+        },
+        "/cad/drawings/{id}/versions": {
+            "get": {
+                "summary": "Every version of the drawing, newest first. Nothing is ever deleted.",
+                "parameters": [path_param("id", "The drawing.")],
+                "responses": ok_list("CadVersion")
+            }
+        },
+        "/cad/drawings/{id}/restore": {
+            "post": {
+                "summary": "Bring an old version back as the newest, the others kept.",
+                "description": "A save, so the drawing must be checked out to whoever asks.",
+                "parameters": [path_param("id", "The drawing."), query_param("version", "The version to bring back.")],
+                "responses": ok("CadDrawing")
+            }
+        },
+        "/cad/drawings/{id}/archive": {
+            "post": {
+                "summary": "Hide the drawing from the list, every version kept. Administrators only.",
+                "parameters": [path_param("id", "The drawing.")],
+                "responses": { "200": { "description": "Archived." } }
+            }
+        },
         "/office": {
             "get": {
                 "summary": "The parts this Excalibur Office Server runs.",
@@ -1090,6 +1162,25 @@ fn schemas() -> Value {
                 "parts": { "type": "array", "items": { "$ref": "#/components/schemas/OfficePart" }, "description": "Every part Excalibur makes." }
             }
         },
+        "CadDrawing": object(&[
+            ("id", "integer", ""),
+            ("folder", "string", "Names joined by '/'. Empty is the top."),
+            ("name", "string", ""),
+            ("version", "integer", "The newest version."),
+            ("size", "integer", "Its bytes."),
+            ("saved_by", "string", "Who saved the newest version: their email."),
+            ("saved_at", "integer", "When, in seconds since 1970."),
+            ("locked_by", "string", "Who has it checked out: their email. Absent when nobody does."),
+            ("locked_at", "integer", "Since when, in seconds since 1970."),
+        ]),
+        "CadVersion": object(&[
+            ("version", "integer", ""),
+            ("size", "integer", ""),
+            ("sha256", "string", "The bytes' SHA-256."),
+            ("saved_by", "string", ""),
+            ("saved_at", "integer", ""),
+            ("note", "string", "What changed."),
+        ]),
         "OfficePart": object(&[
             ("name", "string", "view, cad, archetype or citadel."),
             ("title", "string", "Its name for people."),
