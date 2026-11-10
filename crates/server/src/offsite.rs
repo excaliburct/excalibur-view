@@ -818,7 +818,7 @@ impl Target {
                 let part = dst.with_extension("part"); // WHAT: a temporary name. WHY: a half copy is never taken for a whole one.
                 std::fs::copy(local, &part)
                     .with_context(|| format!("copying to {}", part.display()))?; // WHAT: copy it. WHY: the upload.
-                std::fs::File::open(&part)?.sync_all()?; // WHAT: onto the disk. WHY: a power cut must not leave a short file under a good name.
+                std::fs::OpenOptions::new().write(true).open(&part)?.sync_all()?; // WHAT: onto the disk, the file opened for writing. WHY: a power cut must not leave a short file under a good name; Windows refuses to flush a file opened read-only (Access is denied), which failed every night to a folder target there.
                 std::fs::rename(&part, &dst)?; // WHAT: the real name. WHY: only now is it whole.
                 Ok(())
             }
@@ -2163,6 +2163,11 @@ fn new_private_dir(path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
     } // WHAT: the tests' folder opened up after it is made. WHY: proves the check below catches it.
+    #[cfg(all(test, windows))]
+    if LOOSEN_SCRATCH.with(|l| l.get()) {
+        let ok = std::process::Command::new("icacls").arg(path).args(["/grant", "*S-1-5-32-545:(OI)(CI)M"]).output()?; // WHAT: let every account (BUILTIN\Users) change it, with Windows' own tool. WHY: the same proof on Windows.
+        anyhow::ensure!(ok.status.success(), "icacls: {ok:?}"); // WHAT: the loosening itself worked. WHY: else the test would prove nothing.
+    } // WHAT: the tests' folder opened up after it is made (Windows). WHY: proves the check below catches it there too.
     check_private_dir(path) // WHAT: look at what was made. WHY: trust it only once checked.
 }
 

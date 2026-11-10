@@ -38,7 +38,7 @@ a test release without waiting on CI.
 
 Setting the Mac half up for the first time: `docs/SETUP-THE-MAC-BUILD.md`.
 
-## Before releasing 0.6.29: the off-site backup on Windows
+## Before releasing 0.6.30: the off-site backup on Windows
 
 The off-site backup's Windows permissions have been compiled and linted for
 Windows but not yet run there. On a Windows server, before the release:
