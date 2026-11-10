@@ -520,12 +520,27 @@ mod tests {
     #[test]
     fn a_page_tree_of_a_great_many_missing_kids_is_walked_in_a_moment() {
         // WHAT: one page tree node listing three hundred thousand pages that aren't there. WHY: each was checked against every one seen before it, so the walk took the square of the count, from two megabytes of file.
+        // WHAT: the walk timed at a quarter of the count and at the whole, side by side, and the growth compared. WHY: a stopwatch alone failed under load (0.3 s alone, 15 s beside the crypt tests); a busy machine slows both sizes alike, so only the growth says how the walk scales.
         let count = 300_000u32; // WHAT: how many. WHY: far past any drawing set; quadratic, it takes minutes.
+        let (mut small, mut large) = (std::time::Duration::MAX, std::time::Duration::MAX); // WHAT: the fastest walk seen at each size. WHY: the fastest of five is the one least slowed by whatever else is running
+        for _ in 0..5 {
+            small = small.min(walk_of_missing_kids(count / 4)); // WHAT: a quarter of the kids, timed. WHY: the baseline the whole count is compared with
+            let whole = walk_of_missing_kids(count); // WHAT: all of them, timed, straight after. WHY: interleaved, so both sizes see the same load
+            assert!(whole < std::time::Duration::from_secs(60), "walking the tree took {whole:?}"); // WHAT: a minute at most, however busy the machine. WHY: a hang fails here, at once, rather than three times over
+            large = large.min(whole); // WHAT: the fastest whole walk. WHY: as for small
+        }
+        let floor = small.max(std::time::Duration::from_millis(20)); // WHAT: the quarter's time, at least 20 ms. WHY: a walk too quick to time well must not make the ratio a coin toss
+        // WHAT: four times the kids takes under eleven times as long. WHY: one pass grows about four times (measured 4.5 to 5.5 on the HP); checking each kid against every one before it grows sixteen times
+        assert!(large < floor * 11, "{} kids took {small:?}, {count} took {large:?}", count / 4);
+    }
+
+    /// The time to walk a page tree of `count` kids that aren't there, the file opened before the clock starts.
+    fn walk_of_missing_kids(count: u32) -> std::time::Duration {
         let kids: String = (0..count).map(|n| format!("{} 0 R ", n + 10)).collect(); // WHAT: references to objects that don't exist. WHY: none costs a byte of object.
-        let doc = Document::from_bytes(build(&[("catalog", "<</Type/Catalog/Pages 2 0 R>>"), ("pages", &format!("<</Type/Pages/Kids[{kids}]/Count {count}>>"))], 1)); // WHAT: opened. WHY: as an upload is.
+        let doc = Document::from_bytes(build(&[("catalog", "<</Type/Catalog/Pages 2 0 R>>"), ("pages", &format!("<</Type/Pages/Kids[{kids}]/Count {count}>>"))], 1)); // WHAT: opened, a fresh one each time. WHY: the page list is kept once walked, so a reused one would time nothing
         let started = std::time::Instant::now(); // WHAT: now. WHY: timed.
-        assert_eq!(doc.page_count(), 0, "none of them is a page");
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "walking the tree took {:?}", started.elapsed());
+        assert_eq!(doc.page_count(), 0, "none of them is a page"); // WHAT: the tree walked and nothing kept. WHY: what is timed, and still checked
+        started.elapsed() // WHAT: how long the walk took. WHY: the test compares two sizes
     }
 
     #[test]
