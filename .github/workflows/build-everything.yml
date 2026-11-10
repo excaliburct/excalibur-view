@@ -1,0 +1,69 @@
+# Builds every platform Excalibur View ships for, on every push to main, at
+# the same time: Windows, Linux, Mac, iPad and Android, beside the whole test
+# suite on all three desktops.
+#
+# Each build is the platform's own workflow (windows.yml, linux.yml, mac.yml,
+# ios.yml, android.yml), run here in its check-only mode: it builds and tests
+# exactly as a release would, and keeps nothing and signs nothing. The Mac is
+# signed ad hoc, the iPad stops at the Simulator build, and the Android bundle
+# comes out unsigned. No secret is passed to any of them, so no store key,
+# signing certificate or upload key is in reach of a push.
+#
+# A red cross on a commit here means one platform stopped building, found the
+# day it happened rather than the day of a release.
+
+name: Build everything
+
+on:
+  push:  # WHAT: every push to the main branch. WHY: everything should build every time.
+    branches: [main, master]
+  workflow_dispatch:  # WHAT: by hand too. WHY: to run it again without a new commit.
+
+permissions:  # WHAT: read the code, nothing else. WHY: these builds publish nothing.
+  contents: read
+
+concurrency:  # WHAT: one run per branch; a newer push stops the older run. WHY: only the newest commit's answer matters.
+  group: build-everything-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:  # WHAT: the whole test suite on Windows, Mac and Linux. WHY: check.yml, as before.
+    uses: ./.github/workflows/check.yml
+    permissions:
+      contents: read
+
+  windows:  # WHAT: the Windows build, kept nothing. WHY: proves it builds.
+    uses: ./.github/workflows/windows.yml
+    with:
+      check_only: true
+    permissions:
+      contents: read
+
+  linux:  # WHAT: the Linux build, kept nothing. WHY: as above.
+    uses: ./.github/workflows/linux.yml
+    with:
+      check_only: true
+    permissions:
+      contents: read
+
+  mac:  # WHAT: the Mac build, signed ad hoc, not notarized, kept nothing. WHY: as above, with no Apple credential.
+    uses: ./.github/workflows/mac.yml
+    with:
+      check_only: true
+      notarize: false
+    permissions:
+      contents: read
+
+  ipad:  # WHAT: the iPad library, Xcode project and Simulator build. WHY: as above, with no App Store key.
+    uses: ./.github/workflows/ios.yml
+    with:
+      check_only: true
+    permissions:
+      contents: read
+
+  android:  # WHAT: the Android APK and an unsigned bundle, kept nothing. WHY: as above, with no upload key.
+    uses: ./.github/workflows/android.yml
+    with:
+      check_only: true
+    permissions:
+      contents: read

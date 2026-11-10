@@ -55,7 +55,10 @@ It leaves in `dist/android`:
 - `excalibur-view-<version>.aab` — the bundle Play takes
 - `native-debug-symbols-<version>.zip` — upload beside the bundle
 
-Or on GitHub: **Actions → Android build → Run workflow**.
+Or on GitHub: **Actions → Android build → Run workflow**. Every push to main
+also builds it, unsigned and kept nowhere (**Build everything**), and
+**Release** builds it signed and sends it to Google Play (see
+[Store releases](#store-releases)).
 
 Release signing uses Play's upload key, from `EXV_KEYSTORE`,
 `EXV_KEYSTORE_PASSWORD`, `EXV_KEY_ALIAS` and `EXV_KEY_PASSWORD`, or the
@@ -99,6 +102,49 @@ replace those three secrets.
 The app is iPad-only, iPadOS 15 or later. The PDF engine is our own build of the same PDFium
 (excaliburct/excalibur-pdfium, chromium/8066-ios15), made for iOS 15 because the ready-made one needs 17; build.sh
 checks each package against its pinned SHA-256. iPhone comes next, with a phone layout.
+
+## Store releases
+
+**Actions → Release → Run workflow**, on main, builds all five platforms from
+one commit and then puts the tablet apps in their stores:
+
+- **Android**: the bundle, signed with the upload key, goes to Google Play
+  (`tools/play_release.py`, with the `PLAY_SERVICE_ACCOUNT_JSON` secret) on
+  the chosen track, production by default, with the first 500 characters of
+  the release notes as "What's new". Status **completed** sends it out to
+  everybody once Play has looked at it; **draft** leaves the release button
+  in Play Console.
+- **iPad**: archived and sent to App Store Connect, then, once Apple has
+  processed it, submitted for review with the release notes as "What's New"
+  (`tools/appstore_release.py`, with the App Store Connect key). Release after
+  approval stays a button in App Store Connect unless **after-approval** is
+  chosen.
+
+The release notes are `notes-<version>.txt` from the commit being released;
+without one the release stops before building anything. The iPad build
+number is the date and time (`20261110.1530`), which is above every run
+number the iPad build used before; a by-hand iPad upload of the same version
+afterwards needs a higher number than that.
+
+**Dry run** builds everything (the iPad is archived but not uploaded) and runs
+both store scripts in their dry-run mode: every check, no call to either
+store. `python3 tools/test_stores.py` tests what the scripts would tell each
+store, offline.
+
+The store jobs run only from main, in this repository, started by hand, on a
+commit that is already on main, and one release at a time. Those checks are
+in the workflow file, so somebody with write access could get round them with
+an edited copy on a branch. What GitHub itself enforces is set once in
+**Settings → Environments**, for each of `google-play` and `app-store`:
+**Deployment branches and tags → Selected → main**, and **Required reviewers
+→ Creede**. Then a release waits for Creede's approval before either store
+job starts, and `PLAY_SERVICE_ACCOUNT_JSON` belongs in the `google-play`
+environment's own secrets (and not in the repository's), so only an approved
+run from main can read it.
+
+Google Play refuses an app's first release through the API while the app
+itself is still a draft in Play Console; then the first one goes with status
+**draft** and is released by hand there.
 
 ## What has been checked, and what hasn't
 

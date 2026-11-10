@@ -32,6 +32,13 @@
 # right on a Mac somebody is sitting at. A build on a machine with nobody in
 # front of it makes a keychain of its own and points this at it.
 : "${NOTARY_KEYCHAIN:=}"
+# SIGN_IDENTITY="-" is an ad hoc build: signed with no certificate, not
+# notarized, for proving on every push that the whole bundle builds. It is
+# never a release: Gatekeeper refuses it on any other Mac.
+adhoc=0  # WHAT: 1 for an ad hoc check build. WHY: the steps that need Apple are left out.
+[ "$SIGN_IDENTITY" = "-" ] && adhoc=1  # WHAT: "-" is codesign's own name for ad hoc. WHY: the check build passes it.
+stamp=(--timestamp)  # WHAT: Apple's secure timestamp on each signature. WHY: notarization requires it.
+[ "$adhoc" = 1 ] && stamp=()  # WHAT: none for ad hoc. WHY: an ad hoc signature cannot be timestamped. (Used as ${stamp[@]+...} below: macOS bash 3.2 calls an empty array unbound under set -u.)
 
 set -euo pipefail
 
@@ -117,9 +124,9 @@ say "Signing"
 # Anything nested is signed before the bundle that holds it, innermost first.
 find "$app/Contents" -type f \( -name '*.dylib' -o -name '*.so' \) -print0 |
   while IFS= read -r -d '' lib; do
-    codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$lib"
+    codesign --force ${stamp[@]+"${stamp[@]}"} --options runtime --sign "$SIGN_IDENTITY" "$lib"  # WHAT: each library. WHY: as before; no timestamp when ad hoc.
   done
-codesign --force --timestamp --options runtime \
+codesign --force ${stamp[@]+"${stamp[@]}"} --options runtime \
   --entitlements deploy/macos/entitlements.plist \
   --sign "$SIGN_IDENTITY" "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
@@ -134,7 +141,14 @@ cp -R "$app" "$staging/"
 ln -s /Applications "$staging/Applications"
 hdiutil create -volname "$name" -srcfolder "$staging" -ov -format UDZO "$dmg" >/dev/null
 rm -rf "$staging"
-codesign --force --timestamp --sign "$SIGN_IDENTITY" "$dmg"
+codesign --force ${stamp[@]+"${stamp[@]}"} --sign "$SIGN_IDENTITY" "$dmg"  # WHAT: the disk image. WHY: as before; no timestamp when ad hoc.
+
+if [ "$adhoc" = 1 ]; then  # WHAT: a check build stops short of Apple. WHY: it has no notary key, and an ad hoc build cannot be notarized.
+  say "Ad hoc check build: not notarized, not for release"  # WHAT: said plainly. WHY: nobody mistakes it for a release.
+  ditto -c -k --keepParent "$app" "$out/ExcaliburView-mac.zip"  # WHAT: the update zip, made as below. WHY: proves that step too.
+  codesign --verify --deep --strict --verbose=2 "$app"  # WHAT: the bundle's signature holds together. WHY: the one check an ad hoc build can pass.
+  exit 0  # WHAT: done. WHY: the rest is notarizing and Gatekeeper, which need Apple.
+fi
 
 # ---- 6. notarize ------------------------------------------------------------
 say "Sending it to Apple to be notarized (this takes a few minutes)"
