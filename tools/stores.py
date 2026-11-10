@@ -135,7 +135,11 @@ class Http:  # WHAT: the one door to the network. WHY: tests swap it for a recor
                 data = answer.read()  # WHAT: the body. WHY: parsed below.
                 return answer.status, (json.loads(data) if data else None)  # WHAT: status and JSON. WHY: what callers use.
         except urllib.error.HTTPError as e:  # WHAT: the store said no. WHY: its reason is worth reading.
-            raise StoreError(f"{method} {redact_url(url)} was refused ({e.code}): {store_reason(e.read())}") from None  # WHAT: the store's own words. WHY: says what to fix; from None keeps headers (the token) out of the trace.
+            try:  # WHAT: read the reason. WHY: the read itself can time out.
+                reason = store_reason(e.read())  # WHAT: the store's words. WHY: says what to fix.
+            except OSError:  # WHAT: it could not be read. WHY: still a plain message.
+                reason = "(the answer could not be read)"  # WHAT: said so. WHY: as above.
+            raise StoreError(f"{method} {redact_url(url)} was refused ({e.code}): {reason}") from None  # WHAT: the store's own words. WHY: says what to fix; from None keeps headers (the token) out of the trace.
         except urllib.error.URLError as e:  # WHAT: no answer at all. WHY: network trouble.
             raise StoreError(f"{method} {redact_url(url)} could not be reached: {e.reason}") from None  # WHAT: plain words. WHY: as above.
         except (OSError, ValueError) as e:  # WHAT: a timeout while reading, a dropped connection, or an answer that is not JSON. WHY: still a plain message, not a stack trace.

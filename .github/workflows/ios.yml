@@ -149,7 +149,7 @@ jobs:
           find "${TMPDIR:-/tmp}" /var/folders -maxdepth 6 -name '*.xcdistributionlogs' -print -exec cp -R {} "$RUNNER_TEMP/distlogs/" \; 2>/dev/null || true
           # WHAT: only the error lines, printed here, never the logs as an artifact. WHY: this repository is public, its artifacts can be downloaded by anyone signed in, and the full logs record the App Store Connect session.
           grep -r -h -i -E 'error|fail|reason' "$RUNNER_TEMP/distlogs" 2>/dev/null \
-            | grep -v -i -E 'authorization|bearer|token|cookie|password|secret' | sort -u | head -80 || true  # WHAT: without any line naming a credential. WHY: as above.
+            | grep -v -i -E 'authorization|bearer|token|cookie|password|secret|eyJ|-----BEGIN' | sort -u | head -80 || true  # WHAT: without any line naming a credential or holding one (eyJ starts every JWT; -----BEGIN starts a key). WHY: as above; a token Xcode makes itself is not masked by GitHub.
 
       - name: Forget the key
         if: always()

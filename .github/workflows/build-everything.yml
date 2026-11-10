@@ -16,7 +16,7 @@ name: Build everything
 
 on:
   push:  # WHAT: every push to the main branch. WHY: everything should build every time.
-    branches: [main, master, view-ci-all-20261110]  # TEMPORARY: this branch too, to prove the run before merging; removed in the next commit.
+    branches: [main, master]
   workflow_dispatch:  # WHAT: by hand too. WHY: to run it again without a new commit.
 
 permissions:  # WHAT: read the code, nothing else. WHY: these builds publish nothing.
