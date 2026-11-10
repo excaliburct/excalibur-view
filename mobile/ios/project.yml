@@ -11,15 +11,15 @@ name: ExcaliburView
 options:
   bundleIdPrefix: com.excaliburct
   deploymentTarget:
-    # The PDF engine's own minimum.
-    iOS: "17.0"
+    # The oldest iOS the app runs on (Apple's floor for Xcode 26; our PDF engine is built for it).
+    iOS: "15.0"
   createIntermediateGroups: true
 
 targets:
   ExcaliburView:
     type: application
     platform: iOS
-    deploymentTarget: "17.0"
+    deploymentTarget: "15.0"
     sources:
       - path: Sources
       - path: Resources
