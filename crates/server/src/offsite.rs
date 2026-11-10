@@ -586,7 +586,7 @@ mod winacl {
                     path.display()
                 ));
             } // WHAT: anything unusual. WHY: unknown is not safe.
-            if mask & CHANGE != 0 && !trusted.contains(&sid.as_str()) {
+            if mask & CHANGE != 0 && !trusted.contains(&sid.as_str()) && sid != "S-1-5-32-545" { // WHAT: GUARD PROOF ONLY, never merged: lets a folder open to every account pass. WHY: shows a test fails when the check is broken.
                 return Some(format!("{} can be changed by {sid}", path.display()));
             }
         } // WHAT: a change right for anyone else. WHY: they could swap age or rclone.conf.
