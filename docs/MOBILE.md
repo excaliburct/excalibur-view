@@ -132,9 +132,15 @@ store. `python3 tools/test_stores.py` tests what the scripts would tell each
 store, offline.
 
 The store jobs run only from main, in this repository, started by hand, on a
-commit that is already on main, and one release at a time. Each runs in a
-GitHub Environment (`google-play`, `app-store`), where a required reviewer
-can be added in Settings → Environments.
+commit that is already on main, and one release at a time. Those checks are
+in the workflow file, so somebody with write access could get round them with
+an edited copy on a branch. What GitHub itself enforces is set once in
+**Settings → Environments**, for each of `google-play` and `app-store`:
+**Deployment branches and tags → Selected → main**, and **Required reviewers
+→ Creede**. Then a release waits for Creede's approval before either store
+job starts, and `PLAY_SERVICE_ACCOUNT_JSON` belongs in the `google-play`
+environment's own secrets (and not in the repository's), so only an approved
+run from main can read it.
 
 Google Play refuses an app's first release through the API while the app
 itself is still a draft in Play Console; then the first one goes with status

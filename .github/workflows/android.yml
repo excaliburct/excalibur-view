@@ -105,25 +105,27 @@ jobs:
         if: ${{ !inputs.check_only }}  # WHAT: only for a build that ships. WHY: a check build has no key and needs none.
         env:
           UPLOAD_KEYSTORE: ${{ secrets.ANDROID_UPLOAD_KEYSTORE }}
-          UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
-          UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
-          UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           if [ -z "$UPLOAD_KEYSTORE" ]; then
             echo "No upload key in this repository's secrets: the bundle will be unsigned."
             exit 0
           fi
+          umask 077  # WHAT: the key file is ours alone. WHY: private from its first byte.
           echo "$UPLOAD_KEYSTORE" | base64 --decode > "$RUNNER_TEMP/upload.jks"
-          {
-            echo "EXV_KEYSTORE=$RUNNER_TEMP/upload.jks"
-            echo "EXV_KEYSTORE_PASSWORD=$UPLOAD_KEYSTORE_PASSWORD"
-            echo "EXV_KEY_ALIAS=$UPLOAD_KEY_ALIAS"
-            echo "EXV_KEY_PASSWORD=$UPLOAD_KEY_PASSWORD"
-          } >> "$GITHUB_ENV"
+          # WHAT: only the file's path goes to later steps. WHY: the passwords are given to the Build step alone (below), not to every step after this one.
+          echo "EXV_KEYSTORE=$RUNNER_TEMP/upload.jks" >> "$GITHUB_ENV"
 
       - name: Build
+        env:
+          EXV_KEYSTORE_PASSWORD: ${{ !inputs.check_only && secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD || '' }}  # WHAT: the key's passwords, for this step only, and never for a check build. WHY: Gradle signs here and nowhere else.
+          EXV_KEY_ALIAS: ${{ !inputs.check_only && secrets.ANDROID_UPLOAD_KEY_ALIAS || '' }}  # WHAT: as above. WHY: as above.
+          EXV_KEY_PASSWORD: ${{ !inputs.check_only && secrets.ANDROID_UPLOAD_KEY_PASSWORD || '' }}  # WHAT: as above. WHY: as above.
         run: mobile/android/build.sh
+
+      - name: Forget the key
+        if: always()  # WHAT: however the job ended. WHY: the key file never outlives the build.
+        run: rm -f "$RUNNER_TEMP/upload.jks"  # WHAT: removed. WHY: as above.
 
       - name: What came out
         id: files

@@ -37,7 +37,7 @@ jobs:
         include:
           - os: windows-latest
             name: Windows
-          - os: macos-14
+          - os: macos-15  # WHAT: the Mac the Mac build uses. WHY: GitHub no longer runs macos-14 ("not supported"), so this leg was cancelled on every run since early November.
             name: macOS
           - os: ubuntu-22.04
             name: Linux

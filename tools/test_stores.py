@@ -115,6 +115,17 @@ class Signing(Keys):  # WHAT: the tokens. WHY: a wrong token is refused by the s
         with self.assertRaises(stores.StoreError):  # WHAT: refused. WHY: as above.
             stores.make_jwt({"alg": "RS256"}, {}, self.rsa, "RS256")  # WHAT: tried. WHY: as above.
 
+    def test_redirect_not_followed(self):  # WHAT: a redirect is an error, not followed. WHY: urllib would carry the Authorization header to wherever it points.
+        handler = stores._NoRedirects()  # WHAT: the handler every call uses. WHY: under test.
+        import urllib.request as ur  # WHAT: for a request object. WHY: the handler takes one.
+        req = ur.Request("https://androidpublisher.googleapis.com/x", headers={"Authorization": "Bearer t"})  # WHAT: a call with a token. WHY: the case.
+        self.assertIsNone(handler.redirect_request(req, None, 302, "Found", {}, "http://elsewhere.example/"))  # WHAT: not followed. WHY: as above.
+        self.assertTrue(any(isinstance(h, stores._NoRedirects) for h in stores._OPENER.handlers))  # WHAT: and it is the one in use. WHY: a handler nobody installs proves nothing.
+
+    def test_odd_error_bodies_read_plainly(self):  # WHAT: error bodies that are a JSON list, a string, or not JSON. WHY: each still gives a message, not a crash.
+        for body in (b'["x"]', b'"just text"', b"<html>down</html>"):  # WHAT: the shapes. WHY: as above.
+            self.assertIsInstance(stores.store_reason(body), str)  # WHAT: a message. WHY: as above.
+
     def test_non_https_refused(self):  # WHAT: the network door refuses plain HTTP. WHY: a token must never go out in the clear.
         with self.assertRaisesRegex(stores.StoreError, "non-HTTPS"):  # WHAT: refused by the HTTPS check itself. WHY: not by a failed connection.
             stores.Http().send("GET", "http://example.invalid/")  # WHAT: tried. WHY: as above; refused before any connection.
@@ -277,6 +288,7 @@ class AppStoreCalls(Keys):  # WHAT: the calls a real App Store submission makes.
             (on("GET", "/v1/builds?"), {"data": []}),  # WHAT: not there yet. WHY: the wait.
             (on("GET", "/v1/builds?"), {"data": [{"id": "build-1", "attributes": {"processingState": "PROCESSING"}}]}),  # WHAT: processing. WHY: the wait.
             (on("GET", "/v1/builds?"), VALID),  # WHAT: ready. WHY: as above.
+            (on("GET", "filter%5BversionString%5D=0.6.30"), {"data": []}),  # WHAT: no 0.6.30 yet. WHY: asked for by number first.
             (on("GET", "/v1/apps/1234567890/appStoreVersions"), {"data": [{"id": "old", "attributes": {"versionString": "0.6.29", "appVersionState": "READY_FOR_DISTRIBUTION"}}]}),  # WHAT: only a released older one. WHY: so a new one is made.
             (on("POST", "/v1/appStoreVersions"), {"data": {"id": "ver-1"}}),  # WHAT: made. WHY: as above.
             (on("PATCH", "/v1/appStoreVersions/ver-1/relationships/build"), {}),  # WHAT: attached. WHY: as above.
@@ -292,13 +304,13 @@ class AppStoreCalls(Keys):  # WHAT: the calls a real App Store submission makes.
         self.assertEqual(self.slept, [60, 60])  # WHAT: waited twice, a minute each. WHY: two looks before VALID.
         q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.http.calls[1][1]).query)  # WHAT: the build filter. WHY: checked.
         self.assertEqual((q["filter[app]"], q["filter[version]"], q["filter[preReleaseVersion.version]"]), (["1234567890"], ["20261110.1530"], ["0.6.30"]))  # WHAT: exactly our build. WHY: as above.
-        made = json.loads(self.http.calls[5][3])["data"]  # WHAT: the new version's body. WHY: checked.
+        made = json.loads(self.http.calls[6][3])["data"]  # WHAT: the new version's body. WHY: checked.
         self.assertEqual(made["attributes"], {"platform": "IOS", "versionString": "0.6.30", "releaseType": "MANUAL"})  # WHAT: iPad, this number, manual release. WHY: release stays a person's button.
-        self.assertEqual(json.loads(self.http.calls[6][3]), {"data": {"type": "builds", "id": "build-1"}})  # WHAT: that build. WHY: as above.
-        self.assertEqual(json.loads(self.http.calls[8][3])["data"]["attributes"], {"whatsNew": "What changed."})  # WHAT: the notes. WHY: as above.
-        item = json.loads(self.http.calls[11][3])["data"]["relationships"]  # WHAT: the submission item. WHY: checked.
+        self.assertEqual(json.loads(self.http.calls[7][3]), {"data": {"type": "builds", "id": "build-1"}})  # WHAT: that build. WHY: as above.
+        self.assertEqual(json.loads(self.http.calls[9][3])["data"]["attributes"], {"whatsNew": "What changed."})  # WHAT: the notes. WHY: as above.
+        item = json.loads(self.http.calls[12][3])["data"]["relationships"]  # WHAT: the submission item. WHY: checked.
         self.assertEqual((item["reviewSubmission"]["data"]["id"], item["appStoreVersion"]["data"]["id"]), ("sub-1", "ver-1"))  # WHAT: our version in our submission. WHY: as above.
-        self.assertEqual(json.loads(self.http.calls[12][3])["data"]["attributes"], {"submitted": True})  # WHAT: sent. WHY: as above.
+        self.assertEqual(json.loads(self.http.calls[13][3])["data"]["attributes"], {"submitted": True})  # WHAT: sent. WHY: as above.
         for _, _, headers, _ in self.http.calls:  # WHAT: every call. WHY: each carries a token.
             self.assertTrue(headers["Authorization"].startswith("Bearer "))  # WHAT: a bearer. WHY: as above.
         _, claims = self.verify(self.http.calls[0][2]["Authorization"][7:], self.ec, "ES256")  # WHAT: the token verifies with the key. WHY: Apple would refuse anything else.
@@ -306,11 +318,12 @@ class AppStoreCalls(Keys):  # WHAT: the calls a real App Store submission makes.
 
     def test_editable_older_version_is_renamed(self):  # WHAT: an unsubmitted 0.6.29 becomes 0.6.30. WHY: Apple allows only one version being prepared.
         s = self.store([
+            (on("GET", "filter%5BversionString%5D=0.6.30"), {"data": []}),  # WHAT: no 0.6.30. WHY: asked for by number first.
             (on("GET", "/v1/apps/1234567890/appStoreVersions"), {"data": [{"id": "ver-9", "attributes": {"versionString": "0.6.29", "appStoreState": "PREPARE_FOR_SUBMISSION"}}]}),  # WHAT: an old editable one. WHY: the case.
             (on("PATCH", "/v1/appStoreVersions/ver-9"), {}),  # WHAT: renamed. WHY: as above.
         ])
         self.assertEqual(s.version_for("1234567890", "0.6.30", "AFTER_APPROVAL"), ("ver-9", True))  # WHAT: that one, to be set up. WHY: as above.
-        self.assertEqual(json.loads(self.http.calls[1][3])["data"]["attributes"], {"versionString": "0.6.30", "releaseType": "AFTER_APPROVAL"})  # WHAT: renamed, automatic release. WHY: the input asked for it.
+        self.assertEqual(json.loads(self.http.calls[2][3])["data"]["attributes"], {"versionString": "0.6.30", "releaseType": "AFTER_APPROVAL"})  # WHAT: renamed, automatic release. WHY: the input asked for it.
 
     def test_already_in_review_refused(self):  # WHAT: a version already with Apple is left alone. WHY: changing it would pull it from review.
         s = self.store([(on("GET", "appStoreVersions"), {"data": [{"id": "v", "attributes": {"versionString": "0.6.30", "appVersionState": "WAITING_FOR_REVIEW"}}]})])  # WHAT: in review. WHY: the case.
@@ -330,6 +343,20 @@ class AppStoreCalls(Keys):  # WHAT: the calls a real App Store submission makes.
         ])
         self.assertEqual(s.submit("1234567890", "ver-1"), "sub-7")  # WHAT: reused. WHY: as above.
         self.assertFalse(self.http.answers)  # WHAT: no item added. WHY: it was already in.
+
+    def test_unsent_submission_with_another_build_refused(self):  # WHAT: a version waiting in a submission with an older build. WHY: sending it would put the wrong build up for review.
+        waiting = {"data": [{"id": "ver-1", "attributes": {"versionString": "0.6.30", "appVersionState": "READY_FOR_REVIEW"}}]}  # WHAT: ours, in an unsent submission. WHY: the case.
+        s = self.store([(on("GET", "/v1/apps?"), APP), (on("GET", "/v1/builds?"), VALID), (on("GET", "appStoreVersions"), waiting),  # WHAT: app, our build, that version. WHY: as above.
+                        (on("GET", "/v1/appStoreVersions/ver-1/build"), {"data": {"id": "build-OLD"}})])  # WHAT: holding another build. WHY: as above.
+        with self.assertRaisesRegex(stores.StoreError, "different build"):  # WHAT: refused. WHY: as above.
+            appstore_release.release(s, "0.6.30", "20261110.1530", "x", "MANUAL", 90)  # WHAT: tried. WHY: as above.
+        s = self.store([(on("GET", "/v1/apps?"), APP), (on("GET", "/v1/builds?"), VALID), (on("GET", "appStoreVersions"), waiting),  # WHAT: the same, but holding our build. WHY: then only the sending is left.
+                        (on("GET", "/v1/appStoreVersions/ver-1/build"), {"data": {"id": "build-1"}}),  # WHAT: our build. WHY: as above.
+                        (on("GET", "/v1/reviewSubmissions?"), {"data": [{"id": "sub-7"}]}),  # WHAT: the open submission. WHY: as above.
+                        (on("GET", "/v1/reviewSubmissions/sub-7/items"), {"data": [{"relationships": {"appStoreVersion": {"data": {"id": "ver-1"}}}}]}),  # WHAT: ours in it. WHY: as above.
+                        (on("PATCH", "/v1/reviewSubmissions/sub-7"), {})])  # WHAT: sent. WHY: as above.
+        self.assertEqual(appstore_release.release(s, "0.6.30", "20261110.1530", "x", "MANUAL", 90), "sub-7")  # WHAT: sent. WHY: as above.
+        self.assertFalse(self.http.answers)  # WHAT: every planned call made, nothing else. WHY: no build or notes changed.
 
     def test_failed_build_and_timeout(self):  # WHAT: a build Apple turned down, and one that never finishes. WHY: neither may hang the runner.
         s = self.store([(on("GET", "/v1/builds?"), {"data": [{"id": "b", "attributes": {"processingState": "INVALID"}}]})])  # WHAT: invalid. WHY: the case.

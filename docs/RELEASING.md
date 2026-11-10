@@ -71,7 +71,7 @@ Windows but not yet run there. On a Windows server, before the release:
 | Workflow | Runner | Artifact | Holds |
 |---|---|---|---|
 | Windows build | `windows-latest` | `windows-<version>` | `ExcaliburView.exe`, `ExcaliburView-Server.exe` |
-| Mac build | `macos-14` | `mac-<version>` | `ExcaliburView-<version>.dmg`, `ExcaliburView-mac.zip` |
+| Mac build | `macos-15` | `mac-<version>` | `ExcaliburView-<version>.dmg`, `ExcaliburView-mac.zip` |
 | Linux build | `ubuntu-22.04` | `linux-<version>` | `ExcaliburView-linux` |
 
 Both run the whole test suite first. A release that does not pass its own

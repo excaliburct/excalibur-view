@@ -101,6 +101,7 @@ jobs:
           SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
         run: |
           set -euo pipefail
+          umask 077  # WHAT: the key file is ours alone. WHY: private from its first byte.
           echo "$API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/appstore.p8"
           team="$(printf '%s' "$SIGN_IDENTITY" | sed -n 's/.*(\([A-Z0-9]\{10\}\)).*/\1/p')"
           test -n "$team" || { echo "no team ID in MACOS_SIGN_IDENTITY" >&2; exit 1; }
@@ -146,16 +147,9 @@ jobs:
           set -u
           mkdir -p "$RUNNER_TEMP/distlogs"
           find "${TMPDIR:-/tmp}" /var/folders -maxdepth 6 -name '*.xcdistributionlogs' -print -exec cp -R {} "$RUNNER_TEMP/distlogs/" \; 2>/dev/null || true
-          ls -R "$RUNNER_TEMP/distlogs" | head -50
-
-      - name: Keep Xcode's distribution logs
-        if: ${{ failure() && !inputs.check_only }}  # WHAT: as before, never for a check build. WHY: a check build makes no archive, so there are no such logs.
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # WHAT: v4.6.2, 2025-03-19. WHY: pinned by commit, so a moved tag can never change what runs here.
-        with:
-          name: xcode-distribution-logs
-          path: ${{ runner.temp }}/distlogs
-          if-no-files-found: warn
-          retention-days: 3
+          # WHAT: only the error lines, printed here, never the logs as an artifact. WHY: this repository is public, its artifacts can be downloaded by anyone signed in, and the full logs record the App Store Connect session.
+          grep -r -h -i -E 'error|fail|reason' "$RUNNER_TEMP/distlogs" 2>/dev/null \
+            | grep -v -i -E 'authorization|bearer|token|cookie|password|secret' | sort -u | head -80 || true  # WHAT: without any line naming a credential. WHY: as above.
 
       - name: Forget the key
         if: always()

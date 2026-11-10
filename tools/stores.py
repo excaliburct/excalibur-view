@@ -112,6 +112,14 @@ def shorten(text, limit):  # WHAT: text cut to fit a store's limit. WHY: Play ta
     return text[:cut if cut > 0 else limit - 1].rstrip() + "…"  # WHAT: cut, with an ellipsis. WHY: shows it continues; the ellipsis is one character.
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):  # WHAT: a redirect handler that follows nothing. WHY: urllib would carry our Authorization header to wherever a redirect points, even plain http.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # WHAT: asked whether to follow. WHY: as above.
+        return None  # WHAT: never. WHY: neither store redirects these calls; a redirect is answered as the error it then is.
+
+
+_OPENER = urllib.request.build_opener(_NoRedirects)  # WHAT: urllib with that handler. WHY: every call goes through it.
+
+
 class Http:  # WHAT: the one door to the network. WHY: tests swap it for a recorder, so nothing in a test can reach a store.
     def __init__(self, timeout=120):  # WHAT: a client with a default timeout. WHY: a stuck call must end.
         self.timeout = timeout  # WHAT: seconds. WHY: as above.
@@ -123,13 +131,15 @@ class Http:  # WHAT: the one door to the network. WHY: tests swap it for a recor
             body = b""  # WHAT: an empty body. WHY: Content-Length: 0 goes out.
         request = urllib.request.Request(url, data=body, method=method, headers=headers or {})  # WHAT: the request. WHY: urllib's.
         try:  # WHAT: send it. WHY: errors are turned into plain words below.
-            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as answer:  # WHAT: the call. WHY: certificate checks are urllib's default and stay on.
+            with _OPENER.open(request, timeout=timeout or self.timeout) as answer:  # WHAT: the call. WHY: certificate checks are urllib's default and stay on.
                 data = answer.read()  # WHAT: the body. WHY: parsed below.
                 return answer.status, (json.loads(data) if data else None)  # WHAT: status and JSON. WHY: what callers use.
         except urllib.error.HTTPError as e:  # WHAT: the store said no. WHY: its reason is worth reading.
             raise StoreError(f"{method} {redact_url(url)} was refused ({e.code}): {store_reason(e.read())}") from None  # WHAT: the store's own words. WHY: says what to fix; from None keeps headers (the token) out of the trace.
         except urllib.error.URLError as e:  # WHAT: no answer at all. WHY: network trouble.
             raise StoreError(f"{method} {redact_url(url)} could not be reached: {e.reason}") from None  # WHAT: plain words. WHY: as above.
+        except (OSError, ValueError) as e:  # WHAT: a timeout while reading, a dropped connection, or an answer that is not JSON. WHY: still a plain message, not a stack trace.
+            raise StoreError(f"{method} {redact_url(url)} failed: {type(e).__name__}") from None  # WHAT: the kind of failure only. WHY: as above.
 
 
 def redact_url(url):  # WHAT: an address without its query string. WHY: a query could carry something nobody needs in a log.
@@ -141,6 +151,8 @@ def store_reason(body):  # WHAT: the readable part of a store's error answer. WH
         data = json.loads(body)  # WHAT: parse it. WHY: to pick the message out.
     except ValueError:  # WHAT: not JSON. WHY: a proxy or an outage page.
         return body[:300].decode("utf-8", "replace")  # WHAT: its start. WHY: enough to tell what happened.
+    if not isinstance(data, dict):  # WHAT: JSON, but not an object. WHY: a list or a string has no fields to read.
+        return json.dumps(data)[:600]  # WHAT: shortened. WHY: still something to read.
     if isinstance(data.get("error"), dict):  # WHAT: Google's shape. WHY: {"error": {"message": ...}}.
         return str(data["error"].get("message", data["error"]))[:600]  # WHAT: Google's message. WHY: says what is wrong.
     if isinstance(data.get("errors"), list):  # WHAT: Apple's shape. WHY: {"errors": [{"title", "detail"}]}.

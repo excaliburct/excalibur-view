@@ -137,7 +137,7 @@ jobs:
           security create-keychain -p "$password" "$keychain"
           security set-keychain-settings -lut 3600 "$keychain"
           security unlock-keychain -p "$password" "$keychain"
-          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          (umask 077 && echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12")  # WHAT: the certificate file, ours alone. WHY: private from its first byte; removed below.
           security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$CERT_PASSWORD" \
             -T /usr/bin/codesign -T /usr/bin/security
           rm -f "$RUNNER_TEMP/cert.p12"
@@ -157,7 +157,7 @@ jobs:
           API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
           set -euo pipefail
-          echo "$API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          (umask 077 && echo "$API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8")  # WHAT: the notary key file, ours alone. WHY: private from its first byte; removed below.
           xcrun notarytool store-credentials excalibur-notary \
             --key "$RUNNER_TEMP/notary.p8" \
             --key-id "$API_KEY_ID" \

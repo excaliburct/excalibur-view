@@ -17,6 +17,12 @@
 # that holds a store key checks all three. The commit must already be on main,
 # so code nobody merged can never be built with the store keys in reach.
 #
+# Those checks live in this file, so they bind this file as it is on main.
+# Somebody with write access could dispatch an edited copy from a branch; what
+# stops that is GitHub's side: the store keys kept as secrets of the
+# google-play and app-store Environments, which take only main and wait for
+# Creede's approval (docs/MOBILE.md, "Store releases").
+#
 # "dry_run" builds everything (the iPad is archived but not uploaded) and runs
 # both store scripts in their dry-run mode: every check, no call to a store.
 
@@ -95,7 +101,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/notes"  # WHAT: a folder for the notes. WHY: handed to the store jobs.
           git show "$sha:notes-$version.txt" > "$RUNNER_TEMP/notes/notes-$version.txt" 2>/dev/null \
             || fail "That commit has no notes-$version.txt. Write the release notes first; they become What's New in both stores."  # WHAT: the notes exist. WHY: both stores show them.
-          build_number="$(date -u +%Y%m%d.%H%M)"  # WHAT: the date, a dot, the time (20261110.1530). WHY: rises with every release and sits above every run number used before; two small parts, never one number too big for Apple.
+          now="$(date -u +%Y%m%d.%H%M)"  # WHAT: the date, a dot, the time, read once. WHY: both halves from the same moment.
+          build_number="${now%%.*}.$((10#${now#*.}))"  # WHAT: 20261110.1530, or 20261110.905 at 09:05. WHY: rises with every release and sits above every run number used before; no leading zero, so Apple's copy of the number matches ours exactly when it is looked up.
           {
             echo "sha=$sha"
             echo "version=$version"
@@ -192,7 +199,7 @@ jobs:
     if: github.repository == 'excaliburct/excalibur-view' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'  # WHAT: the gate again. WHY: this job holds the Play key.
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: google-play  # WHAT: a GitHub Environment. WHY: Creede can add a reviewer or a main-only rule to it in Settings without touching this file.
+    environment: google-play  # WHAT: a GitHub Environment. WHY: its secret (the Play key) and its rules (main only, Creede approves) are enforced by GitHub, whatever a branch's copy of this file says.
     permissions:
       contents: read  # WHAT: read the scripts. WHY: nothing else is needed.
     steps:
@@ -239,7 +246,7 @@ jobs:
     if: github.repository == 'excaliburct/excalibur-view' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'  # WHAT: the gate again. WHY: this job holds the App Store Connect key.
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    environment: app-store  # WHAT: a GitHub Environment. WHY: as Google Play.
+    environment: app-store  # WHAT: a GitHub Environment. WHY: as Google Play; it waits for Creede's approval before submitting.
     permissions:
       contents: read  # WHAT: read the scripts. WHY: nothing else is needed.
     steps:

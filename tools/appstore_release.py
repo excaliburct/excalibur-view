@@ -133,17 +133,18 @@ class AppStore:  # WHAT: the calls to App Store Connect, through an Http tests r
             self.sleep(60)  # WHAT: a minute between asks. WHY: Apple's own advice is not to hammer it.
 
     def version_for(self, app, version, release_type):  # WHAT: the App Store version to submit, found, renamed or made. WHY: step 2.
-        listed = self.call("GET", f"/apps/{app}/appStoreVersions", {"filter[platform]": "IOS", "limit": "20"}).get("data", [])  # WHAT: the app's recent versions. WHY: to find ours or an editable one.
+        same = self.call("GET", f"/apps/{app}/appStoreVersions", {"filter[platform]": "IOS", "filter[versionString]": version}).get("data", [])  # WHAT: ours, asked for by number. WHY: found however many versions the app has.
+        listed = same or self.call("GET", f"/apps/{app}/appStoreVersions", {"filter[platform]": "IOS", "limit": "200"}).get("data", [])  # WHAT: else all of them (200 is Apple's page size). WHY: to find one still being prepared under another number.
 
         def state(v):  # WHAT: a version's state. WHY: Apple renamed appStoreState to appVersionState; either may be there.
             a = v.get("attributes") or {}  # WHAT: attributes. WHY: as above.
             return a.get("appVersionState") or a.get("appStoreState") or ""  # WHAT: the newer name first. WHY: as above.
 
-        same = [v for v in listed if (v.get("attributes") or {}).get("versionString") == version]  # WHAT: ours, if it exists. WHY: reuse it.
+        same = [v for v in listed if (v.get("attributes") or {}).get("versionString") == version]  # WHAT: ours, if it exists, checked again. WHY: the filter is Apple's; the exact match is ours.
         if same:  # WHAT: it exists. WHY: see what state it is in.
             v = same[0]  # WHAT: that one. WHY: a version string is unique per platform.
             if state(v) == "READY_FOR_REVIEW":  # WHAT: already in a submission that was never sent. WHY: a run that stopped after step 4's first half; only the sending is left.
-                return safe_id(v), False  # WHAT: its id, and nothing to change. WHY: a version in a submission takes no new build or notes.
+                return safe_id(v), False  # WHAT: its id, and nothing to change. WHY: a version in a submission takes no new build or notes; release() checks its build is ours.
             if state(v) in IN_REVIEW:  # WHAT: already with Apple. WHY: submitting twice is refused.
                 raise stores.StoreError(f"{version} is already {state(v)} on the App Store; nothing to submit")  # WHAT: stop. WHY: as above.
             if state(v) not in EDITABLE:  # WHAT: released or something else final. WHY: a released version cannot change.
@@ -163,6 +164,10 @@ class AppStore:  # WHAT: the calls to App Store Connect, through an Http tests r
     def _set(self, v, attributes):  # WHAT: changes a version's attributes. WHY: release type, or the number.
         vid = safe_id(v)  # WHAT: its id. WHY: in the address.
         self.call("PATCH", f"/appStoreVersions/{vid}", body={"data": {"type": "appStoreVersions", "id": vid, "attributes": attributes}})  # WHAT: the change. WHY: as above.
+
+    def attached_build(self, version_id):  # WHAT: the id of the build a version has now, or None. WHY: a version already in a submission must hold the build this run made.
+        data = self.call("GET", f"/appStoreVersions/{version_id}/build").get("data")  # WHAT: its build. WHY: as above.
+        return safe_id(data) if data else None  # WHAT: checked id, or none. WHY: as above.
 
     def attach_build(self, version_id, build_id):  # WHAT: picks the build for the version. WHY: step 3.
         self.call("PATCH", f"/appStoreVersions/{version_id}/relationships/build", body={"data": {"type": "builds", "id": build_id}})  # WHAT: the relationship. WHY: Apple's way.
@@ -209,6 +214,9 @@ def release(store, version, build_number, notes, release_type, minutes, bundle_i
     if changeable:  # WHAT: not yet in a submission. WHY: only then can its build and notes be set.
         store.attach_build(vid, build)  # WHAT: its build. WHY: step 3.
         store.set_whats_new(vid, notes)  # WHAT: its notes. WHY: step 3.
+    elif store.attached_build(vid) != build:  # WHAT: in a submission, but with another build. WHY: sending it would put an older build up for review.
+        raise stores.StoreError(f"{version} is waiting in an unsent review submission with a different build. In App Store Connect, "  # WHAT: stop, with the way out. WHY: taking it out of the submission is a choice for a person.
+                                "remove it from that submission, then run the release again")  # WHAT: the rest of the message. WHY: as above.
     return store.submit(app, vid)  # WHAT: sent for review. WHY: step 4.
 
 
