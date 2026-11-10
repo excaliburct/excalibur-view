@@ -279,7 +279,7 @@ The one worth knowing about is `GET /api/v1/sets/{id}/takeoff`.
 ### Off-site backups
 
 A copy of the drawings on the same computer is not a backup: a dead disk, a
-fire or ransomware takes both. From 0.6.29 the server can send a copy
+fire or ransomware takes both. From 0.6.30 the server can send a copy
 somewhere else every night by itself, locked so that only the person holding
 the private key can open it. That key never sits on the server.
 

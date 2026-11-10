@@ -818,7 +818,7 @@ impl Target {
                 let part = dst.with_extension("part"); // WHAT: a temporary name. WHY: a half copy is never taken for a whole one.
                 std::fs::copy(local, &part)
                     .with_context(|| format!("copying to {}", part.display()))?; // WHAT: copy it. WHY: the upload.
-                std::fs::File::open(&part)?.sync_all()?; // WHAT: onto the disk. WHY: a power cut must not leave a short file under a good name.
+                std::fs::OpenOptions::new().write(true).open(&part)?.sync_all()?; // WHAT: onto the disk, the file opened for writing. WHY: a power cut must not leave a short file under a good name; Windows refuses to flush a file opened read-only (Access is denied), which failed every night to a folder target there.
                 std::fs::rename(&part, &dst)?; // WHAT: the real name. WHY: only now is it whole.
                 Ok(())
             }
