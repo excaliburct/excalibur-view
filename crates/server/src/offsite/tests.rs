@@ -74,6 +74,9 @@ fn world() -> World {
     store.with(|db| { db.execute_batch(&format!("INSERT INTO projects(id,number,name,created) VALUES('p1','2630','Real Job Name','2026-11-01'); INSERT INTO sets(id,project,name,filename,digest,bytes,sheets,uploaded,uploaded_by) VALUES('s1','p1','Structural','s.pdf','{d1}',{},1,'2026-11-01T10:00:00Z','x'); INSERT INTO files(id,project,name,digest,bytes,uploaded,uploaded_by) VALUES('f1','p1','note.txt','{d2}',12,'2026-11-01','x');", pdf.len()))?; Ok(()) }).unwrap(); // WHAT: a project, a set and a file. WHY: real records pointing at real files.
     drop(store); // WHAT: close it. WHY: as a running server would leave it, open or not.
     create_private_dir(&work).unwrap();
+    lock_work(&work); // WHAT: lock the work folder with the server's own code, as it does each time it starts. WHY: a new Windows folder inherits its parent's permissions (on a build machine, often write for every account); the server locks it before any night runs, so the tests take the same path.
+    #[cfg(windows)]
+    assert_eq!(others_can_change(&work), None, "the server's lock leaves the work folder its own"); // WHAT: the lock worked. WHY: lock_work only logs a failure, and the backup's refusal would hide where it went wrong.
     let pubk = fake_pub();
     put(
         work.join("age-recipients.txt"),
@@ -1371,7 +1374,10 @@ fn a_scratch_folder_opened_up_after_it_is_made_is_refused() {
     let e = drill(&w, &w.id, "s-loose").run();
     LOOSEN_SCRATCH.with(|l| l.set(false)); // WHAT: a scratch folder open to others once made. WHY: what another account could do in the gap.
     assert_eq!(e.code, 4, "{e:?}");
-    assert!(e.why.contains("not 0700"), "{}", e.why);
+    #[cfg(unix)]
+    assert!(e.why.contains("not 0700"), "{}", e.why); // WHAT: refused for its mode. WHY: what Unix says.
+    #[cfg(windows)]
+    assert!(e.why.contains("lets in S-1-5-32-545"), "{}", e.why); // WHAT: refused for the extra entry. WHY: what Windows says when every account was let in.
     assert!(!w.root.join("s-loose").exists(), "and taken away"); // WHAT: refused before anything is restored. WHY: plaintext only in a folder that is ours alone.
 }
 
@@ -1392,6 +1398,34 @@ fn a_folder_the_link_check_cannot_read_is_a_refusal() {
 
 #[test]
 fn a_work_folder_others_could_change_is_refused() {
+    #[cfg(windows)]
+    {
+        let w = world();
+        assert_eq!(job(&w).backup().code, 0, "the locked folder is fine"); // WHAT: the folder the server locked. WHY: the baseline.
+        let open = |p: &Path, how: &str| {
+            let ok = std::process::Command::new("icacls")
+                .arg(p)
+                .args(["/grant", &format!("*S-1-5-32-545:{how}")])
+                .output()
+                .unwrap();
+            assert!(ok.status.success(), "icacls: {ok:?}");
+        }; // WHAT: let every account (BUILTIN\Users) change it, with Windows' own tool. WHY: what a folder View didn't lock, or someone opening it later, looks like.
+        for (what, path, how) in [
+            ("the work folder", w.work.clone(), "(OI)(CI)M"),
+            ("the public key file", w.work.join("age-recipients.txt"), "M"),
+        ] {
+            open(&path, how);
+            std::thread::sleep(WAIT); // WHAT: open one to other accounts. WHY: each is checked.
+            let e = job(&w).backup();
+            let d = drill(&w, &w.id, &format!("s-open-{}", what.len())).run();
+            assert_eq!(e.code, 2, "{what}: {e:?}");
+            assert!(e.why.contains("can be changed by S-1-5-32-545"), "{what}: {}", e.why);
+            assert_eq!(d.code, 2, "{what}: the drill too: {d:?}"); // WHAT: a backup and a drill both refuse. WHY: whoever can swap age or rclone.conf can read or redirect every backup.
+            lock_work(&w.work); // WHAT: the server's lock again, as at its next start. WHY: it takes the extra entry off the whole tree.
+            std::thread::sleep(WAIT);
+            assert_eq!(job(&w).backup().code, 0, "{what}: locked again, it runs"); // WHAT: back to good. WHY: the lock, not luck, is what made it pass.
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

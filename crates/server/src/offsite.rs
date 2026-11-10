@@ -2163,6 +2163,11 @@ fn new_private_dir(path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
     } // WHAT: the tests' folder opened up after it is made. WHY: proves the check below catches it.
+    #[cfg(all(test, windows))]
+    if LOOSEN_SCRATCH.with(|l| l.get()) {
+        let ok = std::process::Command::new("icacls").arg(path).args(["/grant", "*S-1-5-32-545:(OI)(CI)M"]).output()?; // WHAT: let every account (BUILTIN\Users) change it, with Windows' own tool. WHY: the same proof on Windows.
+        anyhow::ensure!(ok.status.success(), "icacls: {ok:?}"); // WHAT: the loosening itself worked. WHY: else the test would prove nothing.
+    } // WHAT: the tests' folder opened up after it is made (Windows). WHY: proves the check below catches it there too.
     check_private_dir(path) // WHAT: look at what was made. WHY: trust it only once checked.
 }
 
