@@ -468,7 +468,7 @@ pub async fn file(State(server): State<Shared>, headers: HeaderMap, UrlPath(id):
     crate::api::caller(&server, &headers)?;
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known
     let (version, bytes) = blocking(&server, move |s| s.file(id, which.version)).await?;
-    Ok(([(header::CONTENT_TYPE, "application/octet-stream".to_string()), (header::HeaderName::from_static("x-cad-version"), version.to_string())], bytes).into_response()) // WHAT: the bytes, and which version they are. WHY: the next save names it as its base
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream".to_string()), (header::HeaderName::from_static("x-version"), version.to_string())], bytes).into_response()) // WHAT: the bytes, and which version they are (X-Version, as CAD's own server sends it). WHY: the next save names it as its base
 }
 
 #[derive(Deserialize)]

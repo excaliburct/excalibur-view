@@ -127,6 +127,8 @@ fn the_office_checks_cad_drawings_out_and_in_with_its_own_accounts() {
 
     assert_eq!(ask(&office, "GET", &format!("/cad/drawings/{id}/file"), &office.val, None).1, "v2", "everyone reads the newest");
     assert_eq!(ask(&office, "GET", &format!("/cad/drawings/{id}/file?version=1"), &office.val, None).1, "v1", "every version kept");
+    let file = ureq::get(&format!("{}/cad/drawings/{id}/file", office.base)).set("Authorization", &format!("Bearer {}", office.val)).call().unwrap(); // WHAT: the newest, with its headers. WHY: Excalibur CAD reads which version came
+    assert_eq!(file.header("x-version"), Some("2"), "the version, as CAD's own server says it");
 
     assert_eq!(ask(&office, "DELETE", &format!("/cad/drawings/{id}/lock?force=true"), &office.eve, None).0, 403, "forcing is an administrator's");
     assert_eq!(ask(&office, "DELETE", &format!("/cad/drawings/{id}/lock?force=true"), &office.sam, None).0, 200);

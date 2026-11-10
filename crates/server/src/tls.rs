@@ -56,6 +56,17 @@ pub fn pin(cert_pem: &str) -> Result<String, String> {
     hub::pinned::pin_of(der.as_ref()).ok_or_else(|| "the certificate file is damaged".to_string()) // WHAT: SHA-256 of the SPKI. WHY: the same rule as Citadel's pin
 }
 
+/// The certificate's fingerprint (SHA-256 of the whole certificate), as
+/// Excalibur CAD shows it for a person to compare: 64 hex digits in groups
+/// of four.
+pub fn fingerprint(cert_pem: &str) -> Result<String, String> {
+    use rustls::pki_types::pem::PemObject;
+    use sha2::Digest;
+    let der = rustls::pki_types::CertificateDer::from_pem_slice(cert_pem.as_bytes()).map_err(|_| "the certificate file is damaged".to_string())?; // WHAT: the certificate's DER. WHY: CAD fingerprints all of it
+    let hex = crate::store::hex(&sha2::Sha256::digest(der.as_ref())); // WHAT: its SHA-256. WHY: what CAD compares
+    Ok(hex.as_bytes().chunks(4).map(|c| String::from_utf8_lossy(c).to_uppercase()).collect::<Vec<_>>().join(" ")) // WHAT: in groups of four, upper case. WHY: exactly as CAD shows it
+}
+
 /// Answers `router` over HTTPS on `listener` until `shutdown` finishes: each
 /// connection encrypted, its address handed to the handlers (sign-ins are
 /// limited per address, and presence says where a seat is), a stalled
@@ -230,6 +241,9 @@ mod tests {
         let again = load_or_make(&data).unwrap();
         assert_eq!(again, (cert.clone(), key), "the second start keeps the first's identity");
         assert!(hub::pinned::is_pin(&pin(&cert).unwrap()));
+        let print = fingerprint(&cert).unwrap();
+        assert_eq!(print.len(), 64 + 15, "64 digits in 16 groups"); // WHAT: CAD's grouped form. WHY: compared by eye
+        assert!(print.chars().all(|c| c == ' ' || c.is_ascii_digit() || ('A'..='F').contains(&c)));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

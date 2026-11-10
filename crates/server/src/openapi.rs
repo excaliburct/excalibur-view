@@ -793,7 +793,7 @@ another drawing.",
         "/cad/drawings/{id}/file": {
             "get": {
                 "summary": "A version's bytes; the newest unless one is named.",
-                "description": "The X-Cad-Version header says which version came, for the next save's base.",
+                "description": "The X-Version header says which version came, for the next save's base.",
                 "parameters": [path_param("id", "The drawing."), query_param("version", "A version number. Leave it out for the newest.")],
                 "responses": { "200": { "description": "The drawing file." } }
             },

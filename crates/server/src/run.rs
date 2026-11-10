@@ -167,7 +167,7 @@ async fn secure_listener(data: &std::path::Path, at: SocketAddr) -> Result<(toki
     let config = crate::tls::server_config(&cert, &key).map_err(anyhow::Error::msg)?; // WHAT: the TLS settings. WHY: a damaged pair stops the start, saying so
     let pin = crate::tls::pin(&cert).map_err(anyhow::Error::msg)?; // WHAT: its pin. WHY: logged for a person to compare
     let listener = tokio::net::TcpListener::bind(at).await.with_context(|| format!("listening for HTTPS on {at}"))?; // WHAT: the HTTPS port. WHY: set HYPERVIEW_SECURE_LISTEN=off where it is taken
-    tracing::info!("serving HTTPS on {at}; certificate pin {}", hub::pinned::short(&pin)); // WHAT: said once at start. WHY: the Manager and a seat show the same short pin
+    tracing::info!("serving HTTPS on {at}; certificate pin {} (View); fingerprint {} (Excalibur CAD)", hub::pinned::short(&pin), crate::tls::fingerprint(&cert).unwrap_or_default()); // WHAT: said once at start, both ways the programs show it. WHY: a person compares what their program shows with this
     Ok((listener, config))
 }
 
