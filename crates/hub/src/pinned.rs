@@ -27,6 +27,12 @@ pub fn pin_of(certificate: &[u8]) -> Option<String> {
     Some(crate::update::hex(&Sha256::digest(parsed.subject_public_key_info().as_ref()))) // WHAT: SHA-256 of the SPKI, in hex. WHY: Citadel's pin, exactly
 }
 
+/// The pin in short, for a person to compare by eye: the first 16 hex digits
+/// in groups of four ("3F2A 91C0 …"), as Citadel shows it.
+pub fn short(pin: &str) -> String {
+    pin.chars().take(16).collect::<Vec<_>>().chunks(4).map(|c| c.iter().collect::<String>().to_uppercase()).collect::<Vec<_>>().join(" ") // WHAT: four groups of four, upper case. WHY: Citadel's Pinning.Short, so both read the same
+}
+
 /// Whether `pin` reads as a pin: 64 lowercase hex digits.
 pub fn is_pin(pin: &str) -> bool {
     pin.len() == 64 && pin.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) // WHAT: the shape. WHY: anything else can never match, and is refused before use

@@ -392,6 +392,13 @@ pub struct Health {
     /// turned it on, which is most of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reachable_at: Option<String>,
+    /// The port the same API answers on over HTTPS, on this same host, with
+    /// the server's own certificate. A seat that moves there keeps the
+    /// certificate's pin from its first HTTPS connection (`crate::pinned`)
+    /// and refuses any other after. The pin itself is never read from here:
+    /// this answer came over plain HTTP. Absent on an older server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secure_port: Option<u16>, // WHAT: where HTTPS answers. WHY: the way seats move off plain HTTP
 }
 
 /// What an administrator is told about reaching this server from a jobsite.

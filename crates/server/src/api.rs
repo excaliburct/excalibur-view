@@ -637,6 +637,7 @@ async fn health(State(server): State<Shared>) -> Json<Health> {
             crate::tunnel::State::On { address } => Some(address),
             _ => None,
         },
+        secure_port: crate::tls::serving_on(), // WHAT: the HTTPS port, once it is listening. WHY: a seat moves there; never claimed before it listens
     })
 }
 

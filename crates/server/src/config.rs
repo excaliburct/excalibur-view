@@ -9,12 +9,20 @@ use std::path::PathBuf;
 /// other.
 pub const DEFAULT_PORT: u16 = 8714;
 
+/// The port the same API is served on over HTTPS, with the server's own
+/// certificate (`crate::tls`), beside the plain-HTTP one until every seat has
+/// moved over.
+pub const DEFAULT_SECURE_PORT: u16 = 8715; // WHAT: the next port up. WHY: easy to remember beside 8714, and to open in a firewall
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// What the company calls this installation. It shows in the client, so
     /// nobody marks up a drawing on the wrong server.
     pub name: String,
     pub listen: SocketAddr,
+    /// Where the API is served over HTTPS too. None means plain HTTP only,
+    /// which is how a test or a server embedded in something else starts.
+    pub secure_listen: Option<SocketAddr>, // WHAT: HYPERVIEW_SECURE_LISTEN, or the listen address on 8715. WHY: sign-ins and drawings encrypted, the seats pinning the certificate
     /// Everything the server keeps: the database and the drawings.
     pub data: PathBuf,
     /// Largest drawing set it will accept, in bytes.
@@ -64,6 +72,7 @@ impl Default for Config {
         Config {
             name: "Excalibur View".into(),
             listen: SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
+            secure_listen: None, // WHAT: off by default. WHY: only a server started for real turns it on (from_environment)
             data: beside_the_program(),
             // Sixty drawing sets the size of a stamped structural package.
             largest_upload: 512 * 1024 * 1024,
@@ -123,6 +132,16 @@ impl Config {
                     "HYPERVIEW_LISTEN is not an address ({listen}); using {}",
                     config.listen
                 ),
+            }
+        }
+        config.secure_listen = Some(SocketAddr::new(config.listen.ip(), DEFAULT_SECURE_PORT)); // WHAT: HTTPS on 8715 beside the API's address. WHY: every real server serves it
+        if let Ok(secure) = std::env::var("HYPERVIEW_SECURE_LISTEN") {
+            match secure.trim() {
+                "off" => config.secure_listen = None, // WHAT: turned off. WHY: a machine where 8715 is taken can still serve
+                text => match text.parse() {
+                    Ok(address) => config.secure_listen = Some(address), // WHAT: another address. WHY: the administrator's choice
+                    Err(_) => eprintln!("HYPERVIEW_SECURE_LISTEN is not an address or off ({text}); using {:?}", config.secure_listen), // WHAT: said, and the default kept. WHY: the same as HYPERVIEW_LISTEN
+                },
             }
         }
         if let Ok(data) = std::env::var("HYPERVIEW_DATA") {

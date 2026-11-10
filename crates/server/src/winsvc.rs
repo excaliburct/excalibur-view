@@ -36,6 +36,7 @@ pub const PROGRAM: &str = "Hyperview-Server.exe";
 
 const FIREWALL_TCP: &str = "Excalibur Hyperview Server (drawings)";
 const FIREWALL_UDP: &str = "Excalibur Hyperview Server (being found)";
+const FIREWALL_TLS: &str = "Excalibur Hyperview Server (encrypted)"; // WHAT: the HTTPS port's rule. WHY: the seats move to it
 
 /// Where the installed server and the company's drawings live.
 ///
@@ -221,7 +222,7 @@ pub fn uninstall() -> Result<(), String> {
         stop_and_wait(&service);
         service.delete().map_err(|e| format!("could not remove the service: {e}"))?;
     }
-    for rule in [FIREWALL_TCP, FIREWALL_UDP] {
+    for rule in [FIREWALL_TCP, FIREWALL_UDP, FIREWALL_TLS] {
         let _ = netsh(&["advfirewall", "firewall", "delete", "rule", &format!("name={rule}")]);
     }
     Ok(())
@@ -249,8 +250,10 @@ fn stop_and_wait(service: &windows_service::service::Service) {
 fn open_firewall() -> Result<(), String> {
     let port = crate::config::DEFAULT_PORT.to_string();
     let finding = hub::discover::PORT.to_string();
+    let secure = crate::config::DEFAULT_SECURE_PORT.to_string(); // WHAT: 8715. WHY: HTTPS, the same office-network-only rule
     for (name, protocol, number) in [
         (FIREWALL_TCP, "TCP", port.as_str()),
+        (FIREWALL_TLS, "TCP", secure.as_str()),
         (FIREWALL_UDP, "UDP", finding.as_str()),
     ] {
         let _ = netsh(&["advfirewall", "firewall", "delete", "rule", &format!("name={name}")]);

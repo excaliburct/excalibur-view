@@ -88,6 +88,7 @@
     "Health.joining": "string",
     "Health.name": "string",
     "Health.ok": "boolean",
+    "Health.secure_port": "integer",
     "Health.version": "string",
     "Join.code": "string",
     "Join.email": "string",

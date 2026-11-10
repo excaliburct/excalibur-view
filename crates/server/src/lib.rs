@@ -38,6 +38,7 @@ pub mod quantities;
 pub mod run;
 pub mod signoffs; // WHAT: signatures asked for on a set and signed on View. WHY: the shop signs travelers and shipping tickets on its iPads.
 pub mod store;
+pub mod tls; // WHAT: the server's own certificate and HTTPS. WHY: sign-ins and drawings encrypted, the seats pinning it
 pub mod tunnel;
 pub mod updates;
 pub mod winsvc;

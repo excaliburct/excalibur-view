@@ -950,6 +950,7 @@ fn schemas() -> Value {
             ("name", "string", "What the company calls this installation."),
             ("claimed", "boolean", "False only on a server nobody has set up yet. Absent on an older server, which means claimed."),
             ("joining", "string", "How somebody without an account gets one: code, open or closed."),
+            ("secure_port", "integer", "The port this same API answers on over HTTPS, on this host, with the server's own certificate. A client keeps the certificate's pin (SHA-256 of its public key) from its first HTTPS connection and refuses another after; never take the pin from this answer. Absent when HTTPS is off."),
         ]),
         "SignIn": object(&[("email", "string", ""), ("password", "string", "")]),
         "Setup": object(&[
