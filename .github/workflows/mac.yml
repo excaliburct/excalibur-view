@@ -27,6 +27,31 @@ on:
         default: true
   push:
     tags: ["v*"]
+  # WHAT: lets "Build everything" (every push) and "Release" run this same build. WHY: one copy of each platform's build, never two drifting apart.
+  workflow_call:
+    inputs:
+      ref:  # WHAT: the commit to build; empty means the one the run started on. WHY: a release builds exactly the commit it names.
+        type: string
+        default: ""
+      check_only:  # WHAT: build and test, keep nothing, sign nothing. WHY: the build on every push proves it builds; it must not leave files a release could pick up.
+        type: boolean
+        default: false
+      notarize:  # WHAT: send it to Apple to be notarized. WHY: the same choice as a run by hand; a release always does.
+        type: boolean
+        default: true
+    secrets:  # WHAT: the Apple credentials, passed only by a caller that ships. WHY: the build on every push passes none, so none are in reach of it.
+      MACOS_CERT_P12:
+        required: false
+      MACOS_CERT_PASSWORD:
+        required: false
+      MACOS_SIGN_IDENTITY:
+        required: false
+      APPLE_API_KEY_P8:
+        required: false
+      APPLE_API_KEY_ID:
+        required: false
+      APPLE_API_ISSUER:
+        required: false
 
 # Never on a pull request. A pull request can come from anybody's fork and
 # would run their code with these credentials in reach.
@@ -35,7 +60,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: mac-build-${{ github.ref }}
+  group: mac-build-${{ github.workflow }}-${{ github.ref }}  # WHAT: one queue per calling workflow and branch. WHY: a push build must never cancel a release build of the same branch, or the other way round.
   cancel-in-progress: true
 
 jobs:
@@ -46,15 +71,17 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Rust, for both kinds of Mac
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # WHAT: v4.4.0, 2026-07-20. WHY: pinned by commit, so a moved tag can never change what runs here.
         with:
+          ref: ${{ inputs.ref }}  # WHAT: the commit asked for, or empty for the run's own. WHY: as the input says.
+          persist-credentials: false  # WHAT: the job's token is not left in .git/config. WHY: nothing after checkout needs it, so no later step can borrow it.
+      - name: Rust, for both kinds of Mac
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # WHAT: the stable branch, 2026-10-16. WHY: pinned by commit, as above.
+        with:
+          toolchain: stable  # WHAT: stable Rust. WHY: pinned by commit, the action no longer reads it from the ref.
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - uses: Swatinem/rust-cache@v2
-
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # WHAT: v2.9.3, 2026-10-20. WHY: pinned by commit, so a moved tag can never change what runs here.
       # The PDF engine is a third-party binary and is not in this repository.
       # The version is pinned by third_party/pdfium/embedded/VERSION, so this
       # fetches exactly the build a release was tested against rather than
@@ -99,6 +126,7 @@ jobs:
       # away with the machine. Never the default keychain, and never a file
       # left behind on disk.
       - name: Apple's certificate
+        if: ${{ !inputs.check_only }}  # WHAT: only for a build that ships. WHY: a check build is signed ad hoc and needs no certificate.
         env:
           CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -109,7 +137,7 @@ jobs:
           security create-keychain -p "$password" "$keychain"
           security set-keychain-settings -lut 3600 "$keychain"
           security unlock-keychain -p "$password" "$keychain"
-          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          (umask 077 && echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12")  # WHAT: the certificate file, ours alone. WHY: private from its first byte; removed below.
           security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$CERT_PASSWORD" \
             -T /usr/bin/codesign -T /usr/bin/security
           rm -f "$RUNNER_TEMP/cert.p12"
@@ -122,14 +150,14 @@ jobs:
           security find-identity -v -p codesigning "$keychain"
 
       - name: The notary credentials
-        if: ${{ github.event_name == 'push' || inputs.notarize }}
+        if: ${{ !inputs.check_only && (github.event_name == 'push' || inputs.notarize) }}  # WHAT: as before, and never for a check build. WHY: a check build is not sent to Apple.
         env:
           API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
           set -euo pipefail
-          echo "$API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          (umask 077 && echo "$API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8")  # WHAT: the notary key file, ours alone. WHY: private from its first byte; removed below.
           xcrun notarytool store-credentials excalibur-notary \
             --key "$RUNNER_TEMP/notary.p8" \
             --key-id "$API_KEY_ID" \
@@ -139,7 +167,7 @@ jobs:
 
       - name: Build, sign, notarize
         env:
-          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          SIGN_IDENTITY: ${{ inputs.check_only && '-' || secrets.MACOS_SIGN_IDENTITY }}  # WHAT: "-" (ad hoc, see build.sh) for a check build, else the Developer ID. WHY: a check build proves the whole bundle builds and signs without any credential.
           NOTARY_PROFILE: excalibur-notary
           NOTARY_KEYCHAIN: ${{ runner.temp }}/build.keychain
         run: deploy/macos/build.sh
@@ -156,7 +184,8 @@ jobs:
       # The two files the PC picks up. Named for the version, so there is never
       # a question about which build somebody is publishing.
       - name: Hand them over
-        uses: actions/upload-artifact@v4
+        if: ${{ !inputs.check_only }}  # WHAT: only when keeping the files. WHY: a check build must leave nothing a release could pick up.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # WHAT: v4.6.2, 2025-03-19. WHY: pinned by commit, so a moved tag can never change what runs here.
         with:
           name: mac-${{ steps.files.outputs.version }}
           path: |

@@ -16,12 +16,21 @@ on:
   workflow_dispatch:
   push:
     tags: ["v*"]
+  # WHAT: lets "Build everything" (every push) and "Release" run this same build. WHY: one copy of each platform's build, never two drifting apart.
+  workflow_call:
+    inputs:
+      ref:  # WHAT: the commit to build; empty means the one the run started on. WHY: a release builds exactly the commit it names.
+        type: string
+        default: ""
+      check_only:  # WHAT: build and test, keep nothing, sign nothing. WHY: the build on every push proves it builds; it must not leave files a release could pick up.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: windows-build-${{ github.ref }}
+  group: windows-build-${{ github.workflow }}-${{ github.ref }}  # WHAT: one queue per calling workflow and branch. WHY: a push build must never cancel a release build of the same branch, or the other way round.
   cancel-in-progress: true
 
 jobs:
@@ -32,9 +41,14 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # WHAT: v4.4.0, 2026-07-20. WHY: pinned by commit, so a moved tag can never change what runs here.
+        with:
+          ref: ${{ inputs.ref }}  # WHAT: the commit asked for, or empty for the run's own. WHY: as the input says.
+          persist-credentials: false  # WHAT: the job's token is not left in .git/config. WHY: nothing after checkout needs it, so no later step can borrow it.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # WHAT: the stable branch, 2026-10-16. WHY: pinned by commit, as above.
+        with:
+          toolchain: stable  # WHAT: stable Rust. WHY: pinned by commit, the action no longer reads it from the ref.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # WHAT: v2.9.3, 2026-10-20. WHY: pinned by commit, so a moved tag can never change what runs here.
 
       # The PDF engine is a third-party binary kept out of this repository and
       # pinned by third_party/pdfium/embedded/VERSION, so this fetches exactly
@@ -82,7 +96,8 @@ jobs:
           sha256sum out/*.exe
 
       - name: Hand them over
-        uses: actions/upload-artifact@v4
+        if: ${{ !inputs.check_only }}  # WHAT: only when keeping the files. WHY: a check build must leave nothing a release could pick up.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # WHAT: v4.6.2, 2025-03-19. WHY: pinned by commit, so a moved tag can never change what runs here.
         with:
           name: windows-${{ steps.files.outputs.version }}
           path: out/*.exe
