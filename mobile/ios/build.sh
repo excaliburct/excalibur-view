@@ -13,7 +13,7 @@
 # Settings, all optional:
 #   BUILD_NUMBER     the build's number, which App Store Connect needs to rise
 #                    with every upload. Default: the date and time.
-#   PDFIUM_BUILD     the pdfium-binaries build to pack. Default below.
+#   PDFIUM_BUILD     the PDF engine build to pack (excaliburct/excalibur-pdfium, chromium/<build>-ios15). Default below.
 #   STEPS            "native project simulator" by default. Add "archive" to
 #                    make an App Store archive, and "upload" to send it to
 #                    App Store Connect for TestFlight.
@@ -38,7 +38,17 @@ root="$(cd "$here/../.." && pwd)"
 work="$here/build"
 steps="${STEPS:-native project simulator}"
 pdfium_build="${PDFIUM_BUILD:-8066}"
-min_ios="17.0"
+# The PDF engine's two packages, each checked against the SHA-256 its release gave (SHA256SUMS.txt of
+# excaliburct/excalibur-pdfium chromium/8066-ios15), so a package can never change underneath the app.
+# (A case, not an associative array: macOS's own bash is 3.2, which has none.)
+pdfium_sha256() {
+    case "$1" in
+        device-arm64) echo 0fc9664245afd07a121ce3c78782bd14371c7ae154fd4b377d5711ac9f9a2248 ;;
+        simulator-arm64) echo 18a4bbc1f56579b222c20a9db4f810ab5283def1d1701c392a94bd5cc0e5a74d ;;
+        *) echo none ;;
+    esac
+}
+min_ios="15.0"   # the oldest iPadOS and iOS the app runs on: Apple's floor for App Store apps built with Xcode 26; our own PDF engine is built for it (excaliburct/excalibur-pdfium)
 
 version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' "$root/Cargo.toml")"
 build_number="${BUILD_NUMBER:-$(date -u +%Y%m%d%H%M)}"
@@ -93,8 +103,12 @@ EOF
         if [[ ! -f "$archive" ]]; then
             mkdir -p "$work/pdfium"
             curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
-                "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F$pdfium_build/pdfium-ios-$slice.tgz" \
+                "https://github.com/excaliburct/excalibur-pdfium/releases/download/chromium%2F$pdfium_build-ios15/pdfium-ios-$slice.tgz" \
                 -o "$archive"
+        fi
+        if [[ -z "${PDFIUM_BUILD:-}" ]]; then
+            got="$(shasum -a 256 "$archive" | cut -d' ' -f1)"
+            [[ "$got" == "$(pdfium_sha256 "$slice")" ]] || { rm -f "$archive"; fail "the PDF engine's $slice package isn't the one pinned (SHA-256 $got)"; }
         fi
         rm -rf "$unpacked" && mkdir -p "$unpacked"
         tar -xzf "$archive" -C "$unpacked"

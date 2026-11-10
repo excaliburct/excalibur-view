@@ -96,7 +96,9 @@ is not allowed to make certificates or profiles, make a new key with App
 Manager in App Store Connect → Users and Access → Integrations → Keys and
 replace those three secrets.
 
-The app is iPad-only, iPadOS 17 or later (the PDF engine's minimum).
+The app is iPad-only, iPadOS 15 or later. The PDF engine is our own build of the same PDFium
+(excaliburct/excalibur-pdfium, chromium/8066-ios15), made for iOS 15 because the ready-made one needs 17; build.sh
+checks each package against its pinned SHA-256. iPhone comes next, with a phone layout.
 
 ## What has been checked, and what hasn't
 
