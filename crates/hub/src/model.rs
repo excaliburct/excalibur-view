@@ -406,6 +406,48 @@ pub struct Health {
     pub product: String, // WHAT: the product word. WHY: one server, every part; each program finds its own
 }
 
+/// One part of an Excalibur Office Server (`GET /api/v1/office`): view, cad,
+/// archetype or citadel, whether the office's licence switches it on, and how
+/// it is.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OfficePart {
+    pub name: String, // WHAT: view, cad, archetype or citadel. WHY: the licence's word
+    pub title: String, // WHAT: its name for people. WHY: shown as is
+    #[serde(default)]
+    pub licensed: bool, // WHAT: on the licence. WHY: what the office has
+    #[serde(default)]
+    pub state: String, // WHAT: running, off, not-in-this-build, looking, not-found, not-answering, certificate-changed. WHY: what the panel says
+    #[serde(default)]
+    pub version: Option<String>, // WHAT: the version it runs. WHY: shown beside it
+}
+
+impl OfficePart {
+    /// How the part is, in words for the Office panel.
+    pub fn line(&self) -> String {
+        let version = self.version.as_deref().map(|v| format!(" {v}")).unwrap_or_default();
+        match self.state.as_str() {
+            "running" => format!("Running{version}."), // WHAT: it runs. WHY: the good case, said plainly
+            "off" => "Not on this office's license.".into(),
+            "not-in-this-build" => "On the license; the server needs an update to run it.".into(),
+            "looking" => "On the license; the server is looking for it.".into(),
+            "not-found" => "On the license, but not found on the server.".into(),
+            "not-answering" => "On the license, installed, but not answering.".into(),
+            "certificate-changed" => "Showing a different certificate than before. Ask whoever looks after the server before trusting it.".into(),
+            other => other.to_string(), // WHAT: a word a newer server uses. WHY: shown as it is, rather than hidden
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct OfficeParts {
+    #[serde(default)]
+    pub product: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub parts: Vec<OfficePart>,
+}
+
 /// What an administrator is told about reaching this server from a jobsite.
 ///
 /// Flattened booleans rather than a tagged enum on purpose: a panel asks
@@ -759,6 +801,17 @@ pub struct ProjectFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_office_server_part_reads_as_words_and_a_newer_word_is_shown_not_hidden() {
+        let part = |state: &str, version: Option<&str>| OfficePart { name: "cad".into(), title: "Excalibur CAD".into(), licensed: true, state: state.into(), version: version.map(str::to_string) };
+        assert_eq!(part("running", Some("0.7.0")).line(), "Running 0.7.0.");
+        assert!(part("certificate-changed", None).line().contains("Ask whoever looks after the server"));
+        assert_eq!(part("off", None).line(), "Not on this office's license.");
+        assert_eq!(part("someday-state", None).line(), "someday-state", "a newer server's word is shown as it is");
+        let read: OfficeParts = serde_json::from_str(r#"{"product":"excalibur-office","version":"0.7.0","parts":[{"name":"view","title":"Excalibur View","licensed":true,"state":"running","version":"0.7.0"}]}"#).unwrap();
+        assert_eq!(read.parts[0].line(), "Running 0.7.0.", "the server's own answer reads");
+    }
 
     #[test]
     fn a_folder_is_never_seen_by_more_people_than_the_folder_it_is_in() {

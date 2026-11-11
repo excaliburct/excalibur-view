@@ -93,6 +93,8 @@ pub struct SigningIn {
 /// The server panel's forms.
 #[derive(Default)]
 pub struct OfficePanel {
+    /// The Office Server's parts, as it last said: empty from an older server.
+    pub parts: Vec<hub::OfficePart>, // WHAT: view, cad, archetype, citadel and how each is. WHY: shown in Studio > Office
     /// A project being started: (job number, name).
     pub new_project: Option<(String, String)>,
     pub joining: Option<hub::Joining>,
@@ -514,6 +516,7 @@ impl App {
                     self.office.keys = office.keys;
                     self.office.notices = office.notices;
                 }
+                Told::Parts(parts) => self.office.parts = parts, // WHAT: kept. WHY: the Office panel shows them
                 Told::License { standing, added } => {
                     if added {
                         if let Some(l) = standing.as_deref() {
@@ -2242,6 +2245,10 @@ fn office_section(
                 );
                 ui.add_space(10.0);
             }
+            if !office.parts.is_empty() {
+                parts_section(ui, theme, &office.parts); // WHAT: the Office Server's parts. WHY: one place to see what this office runs
+                ui.add_space(10.0);
+            }
 
             // Join code
             ui.label(RichText::new("Join code").strong().size(12.0));
@@ -2703,6 +2710,17 @@ fn licenses_in(places: &[(std::path::PathBuf, String)]) -> Vec<FoundLicense> {
     found.sort_by(|a, b| b.0.cmp(&a.0));
     found.dedup_by(|a, b| a.1.company == b.1.company);
     found.into_iter().take(3).map(|(_, f)| f).collect()
+}
+
+/// Studio → Office → Parts: every part of the Office Server, and how each is.
+fn parts_section(ui: &mut egui::Ui, theme: ui::chrome::Theme, parts: &[hub::OfficePart]) {
+    ui.label(RichText::new("Office Server").strong().size(12.0)); // WHAT: the heading. WHY: names the one server
+    for part in parts {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(&part.title).size(11.0)); // WHAT: the part's name. WHY: View, Excalibur CAD, Archetype, Citadel
+            ui.label(RichText::new(part.line()).color(if part.state == "certificate-changed" { theme.warn } else { theme.faint }).size(10.0)); // WHAT: how it is, in words. WHY: a changed certificate stands out
+        });
+    }
 }
 
 /// Studio → Office → License: what the office has, and the three things an

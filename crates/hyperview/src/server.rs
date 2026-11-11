@@ -310,6 +310,8 @@ pub enum Told {
         standing: Option<Box<hub::license::Standing>>,
         added: bool,
     },
+    /// The Office Server's parts, as the server last said.
+    Parts(Vec<hub::OfficePart>),
     /// Fleet has been let in. `key` is set only when there was no Fleet on
     /// this computer to hand it to, so somebody has to be told it.
     FleetWatching {
@@ -1183,6 +1185,9 @@ pub fn start(repaint: egui::Context) -> Link {
                         if let Ok(client) = connected(&client) {
                             if let Ok(standing) = client.license() {
                                 say(&told, Told::License { standing: standing.map(Box::new), added: false });
+                            }
+                            if let Ok(Some(office)) = client.office_parts() {
+                                say(&told, Told::Parts(office.parts)); // WHAT: the parts and how each is. WHY: shown under the license
                             }
                         }
                     }

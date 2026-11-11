@@ -392,6 +392,16 @@ impl Client {
         }
     }
 
+    /// The Office Server's parts and how each is. `None` from a server older
+    /// than the Office Server.
+    pub fn office_parts(&self) -> Answer<Option<crate::OfficeParts>> {
+        match Self::read(self.get("/office").call()) {
+            Ok(parts) => Ok(Some(parts)),
+            Err(Trouble::Refused(problem)) if problem.error == "not_found" => Ok(None), // WHAT: an older server. WHY: shows nothing, never an error
+            Err(other) => Err(other),
+        }
+    }
+
     /// Adds a license file: its whole text. Administrators only. Checked by
     /// the server against the keys built into it.
     pub fn add_license(&self, text: &str) -> Answer<crate::license::Standing> {
