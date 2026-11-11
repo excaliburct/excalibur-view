@@ -407,7 +407,7 @@ fn latest_seen(server: &Server, now: &str) -> String {
         return now.to_string(); // WHAT: as given. WHY: an unreadable time is days_left's to handle, as before
     };
     let seen = server.store.setting(SEEN).ok().flatten().and_then(|s| time::OffsetDateTime::parse(&s, &Rfc3339).ok()); // WHAT: the latest kept. WHY: compared below
-    let believable = time::Date::parse(BUILT, &time::macros::format_description!("[year]-[month]-[day]")).map_or(true, |built| at.date() <= built + time::Duration::days(730)); // WHAT: no later than two years after this program was built. WHY: a clock set years ahead by mistake (a dead battery) must not end a trial for good
+    let believable = time::OffsetDateTime::parse(&format!("{BUILT}T00:00:00Z"), &Rfc3339).map_or(true, |built| at <= built + time::Duration::days(730)); // WHAT: no later than two years after this program was built. WHY: a clock set years ahead by mistake (a dead battery) must not end a trial for good
     if believable && seen.map_or(true, |seen| at > seen + time::Duration::hours(1)) {
         let _ = server.store.set_setting(SEEN, now); // WHAT: kept. WHY: the next look compares with it
     }
