@@ -14,7 +14,7 @@ fn start() -> (std::path::PathBuf, String, tokio::runtime::Runtime) {
         name: "Example Steel".into(),
         data: data.clone(),
         listen: "127.0.0.1:0".parse().unwrap(), // WHAT: any free port. WHY: tests run side by side
-        secure_listen: Some("127.0.0.1:0".parse().unwrap()), // WHAT: HTTPS on too, on any free port. WHY: the thing under test
+        tls: true, // WHAT: HTTPS on too, on the API's own port. WHY: the thing under test
         ..Config::default()
     };
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
@@ -52,7 +52,8 @@ fn ask_encrypted(port: u16, pin: Option<&str>) -> (Result<String, String>, Optio
 fn the_api_answers_over_https_by_the_pin_of_the_certificate_it_made_and_keeps() {
     let (data, base, _runtime) = start();
     let said = health(&base);
-    let port = said["secure_port"].as_u64().expect("health says where HTTPS answers") as u16;
+    let port = u16::try_from(said["secure_port"].as_u64().expect("health says where HTTPS answers")).expect("a port"); // WHAT: the HTTPS port. WHY: a port number always fits
+    assert_eq!(Some(port), base.rsplit(':').next().and_then(|p| p.parse().ok()), "HTTPS answers on the API's own port, so no new port is opened anywhere");
 
     let cert = std::fs::read_to_string(data.join(hyperview_server::tls::CERT)).expect("the certificate was made on start");
     let pin = hyperview_server::tls::pin(&cert).unwrap();

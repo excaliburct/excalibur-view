@@ -72,7 +72,7 @@ pub enum Module {
     Cad,
     /// Archetype's shared jobs.
     Archetype,
-    /// Citadel / LatCon Estimating's jobs, kept blind.
+    /// Citadel's estimating jobs, kept blind.
     Citadel,
 }
 
@@ -589,7 +589,7 @@ mod tests {
     /// `sign-license --modules citadel,cad`, with the same made-up key, pasted in as it came out (2026-11-10).
     const PARTS_FROM_THE_SCRIPT: &str = r#"{
   "id": "evl_fixture03",
-  "company": "Latcon Excavation",
+  "company": "Example Excavation",
   "edition": "office",
   "users": 0,
   "updates_through": "2027-11-10",
@@ -600,6 +600,6 @@ mod tests {
     "citadel",
     "cad"
   ],
-  "signature": "a6993a7c62594a205d7f7abbe581cdb3928ba7a5164e70832747ef0330f020fbce43aeefc9a891b405239bca24b8137e06703e5513c166bd80cb4c53945c0609"
+  "signature": "a5735d07bad85d16946578e3dc795640e7418ef3460e2e3f72e634b2286f1bc3bdfdf343898fecad91075222cb813ccedee65912561c511c73f3a6653938b409"
 }"#;
 }

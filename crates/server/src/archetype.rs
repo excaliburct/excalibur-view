@@ -16,7 +16,11 @@
 //! that was sent to it for a job (`arch_files`): a file's fingerprint alone
 //! never opens a drawing somebody can't see in View.
 
+// WHAT: whole-number conversions at the database's edge. WHY: SQLite keeps every integer as i64, and revisions, counts and sizes here are never negative or anywhere near 2^63.
+#![allow(clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 
 use axum::body::Body;
 use axum::extract::{Path as UrlPath, State};
@@ -153,6 +157,7 @@ pub struct Changes {
 }
 
 impl Changes {
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn between(before: &[FileEntry], after: &[FileEntry]) -> Changes {
         let old: BTreeMap<&str, &str> = before.iter().map(|f| (f.path.as_str(), f.digest.as_str())).collect(); // WHAT: the old paths and contents. WHY: compared by path
         let new: BTreeMap<&str, &str> = after.iter().map(|f| (f.path.as_str(), f.digest.as_str())).collect();
@@ -195,14 +200,15 @@ pub struct HistoryEntry {
 
 /// A path inside a job folder that is safe to write on any machine
 /// (Archetype's own rule, checked at both ends).
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn is_safe_path(path: &str) -> bool {
+    const RESERVED: [&str; 22] = ["con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"]; // WHAT: names Windows keeps for devices. WHY: a file can't be called that there
     if path.is_empty() || path.len() > 400 || path.contains('\\') || path.starts_with('/') {
         return false; // WHAT: empty, too long, backslashes or absolute. WHY: never outside the job folder
     }
     if path.chars().any(|c| c.is_control() || "<>:\"|?*".contains(c)) {
         return false; // WHAT: characters Windows refuses. WHY: every computer must be able to hold it
     }
-    const RESERVED: [&str; 22] = ["con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"]; // WHAT: names Windows keeps for devices. WHY: a file can't be called that there
     path.split('/').all(|part| {
         let stem = part.split('.').next().unwrap_or("").to_ascii_lowercase();
         !part.is_empty() && part != "." && part != ".." && !part.ends_with('.') && !part.ends_with(' ') && !RESERVED.contains(&stem.as_str()) // WHAT: each part a real name. WHY: no climbing out, no two paths that are one file on Windows
@@ -210,6 +216,7 @@ pub fn is_safe_path(path: &str) -> bool {
 }
 
 /// Sixty-four lower-case hex characters, and nothing else.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn is_digest(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) // WHAT: a SHA-256 as the store names files. WHY: what stops a digest walking out of the store
 }
@@ -246,6 +253,9 @@ fn held_line(h: &Holder) -> String {
     format!("{} has it checked out{on} since {}", h.name, when(&h.since))
 }
 
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
 pub fn may_check_out(holder: Option<&Holder>, who: &Who, machine: &str) -> Result<Taken, String> {
     if !who.role.may_write() {
         return Err("Your account opens jobs read-only. An administrator can change that.".into());
@@ -258,6 +268,9 @@ pub fn may_check_out(holder: Option<&Holder>, who: &Who, machine: &str) -> Resul
     }
 }
 
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
 pub fn may_check_in(holder: Option<&Holder>, who: &Who, base: u64, current: u64, machine: &str) -> Result<(), String> {
     if !who.role.may_write() {
         return Err("Your account opens jobs read-only. An administrator can change that.".into());
@@ -273,6 +286,9 @@ pub fn may_check_in(holder: Option<&Holder>, who: &Who, base: u64, current: u64,
     }
 }
 
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
 pub fn may_release(holder: Option<&Holder>, who: &Who) -> Result<bool, String> {
     match holder {
         None => Ok(false),
@@ -281,6 +297,9 @@ pub fn may_release(holder: Option<&Holder>, who: &Who) -> Result<bool, String> {
     }
 }
 
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
 pub fn may_take_back(holder: Option<&Holder>, who: &Who) -> Result<bool, String> {
     if !who.role.may_administer() {
         return Err("Only an administrator can take a check-out back from somebody.".into());
@@ -290,6 +309,10 @@ pub fn may_take_back(holder: Option<&Holder>, who: &Who) -> Result<bool, String>
 
 /// The files of a check-in, checked: every path safe and said once, a model
 /// in it, every content already sent to this part.
+///
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
 pub fn check_files(files: &[FileEntry], have: impl Fn(&str) -> bool) -> Result<(), String> {
     if files.len() > MOST_FILES {
         return Err(format!("That's more than {MOST_FILES} files: it isn't a job folder."));
@@ -350,12 +373,18 @@ fn sized(db: &Connection, mut job: JobInfo) -> rusqlite::Result<JobInfo> {
     Ok(job)
 }
 
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
 pub fn list(db: &Connection) -> rusqlite::Result<Vec<JobInfo>> {
     let mut statement = db.prepare(&format!("SELECT {COLUMNS} FROM arch_jobs ORDER BY lower(name)"))?;
     let jobs = statement.query_map([], job_from)?.collect::<rusqlite::Result<Vec<_>>>()?;
     jobs.into_iter().map(|j| sized(db, j)).collect()
 }
 
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
 pub fn one(db: &Connection, id: &str) -> rusqlite::Result<Option<JobInfo>> {
     match db.query_row(&format!("SELECT {COLUMNS} FROM arch_jobs WHERE id = ?1"), params![id], job_from).optional()? {
         Some(job) => Ok(Some(sized(db, job)?)),
@@ -374,6 +403,9 @@ fn files_of(db: &Connection, id: &str, revision: u64) -> anyhow::Result<Option<V
     })
 }
 
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
 pub fn history(db: &Connection, id: &str) -> anyhow::Result<Vec<HistoryEntry>> {
     let mut lines: Vec<(u64, i64, HistoryEntry)> = Vec::new();
     let mut statement = db.prepare("SELECT revision, at, who, comment, count, bytes, changes FROM arch_checkins WHERE job = ?1")?;
@@ -461,7 +493,7 @@ async fn json_body<T: serde::de::DeserializeOwned>(body: Body, most: usize) -> A
 /// The most a check-in's list may weigh: twenty thousand files' paths.
 const MOST_LIST: usize = 10 * 1024 * 1024; // WHAT: 10 MB of JSON. WHY: twenty thousand files at the longest path fit; no more is read
 
-pub async fn list_jobs(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<Vec<JobInfo>>> {
+pub(crate) async fn list_jobs(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<Vec<JobInfo>>> {
     on(&server)?;
     crate::api::caller(&server, &headers)?; // WHAT: anybody signed in. WHY: everyone opens any job read-only
     Ok(Json(server.store.with(|db| Ok(list(db)?)).map_err(|e| Denied::broke("list the jobs", e))?))
@@ -471,18 +503,18 @@ fn the_job(server: &crate::api::Server, id: &str) -> Answer<JobInfo> {
     server.store.with(|db| Ok(one(db, id)?)).map_err(|e| Denied::broke("find that job", e))?.ok_or_else(|| Denied::missing("job"))
 }
 
-pub async fn one_job(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<JobInfo>> {
+pub(crate) async fn one_job(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<JobInfo>> {
     on(&server)?;
     crate::api::caller(&server, &headers)?;
     Ok(Json(the_job(&server, &id)?))
 }
 
-pub async fn create_job(State(server): State<Shared>, headers: HeaderMap, body: Body) -> Answer<Json<JobInfo>> {
+pub(crate) async fn create_job(State(server): State<Shared>, headers: HeaderMap, body: Body) -> Answer<Json<JobInfo>> {
     on(&server)?;
     let who = crate::api::writer(&server, &headers)?; // WHAT: a writer, with sharing on. WHY: a viewer opens, never adds
     let asked: NewJob = json_body(body, 64 * 1024).await?;
     let name = asked.name.trim().to_string();
-    if name.is_empty() || name.chars().any(|c| c.is_control()) || name.len() > 120 {
+    if name.is_empty() || name.chars().any(char::is_control) || name.len() > 120 {
         return Err(Denied::wrong("Give the job a name: what's on its title block."));
     }
     let id = crate::api::fresh_id("job");
@@ -512,7 +544,7 @@ struct Which {
     revision: Option<u64>,
 }
 
-pub async fn job_files(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, uri: Uri) -> Answer<Json<JobFiles>> {
+pub(crate) async fn job_files(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, uri: Uri) -> Answer<Json<JobFiles>> {
     on(&server)?;
     crate::api::caller(&server, &headers)?;
     let which: Which = axum::extract::Query::try_from_uri(&uri).map(|q| q.0).map_err(|e| Denied::wrong(format!("Those values don't read: {e}")))?; // WHAT: the revision asked for, read after the checks. WHY: a stranger is answered 401/404 whatever they put there
@@ -523,14 +555,14 @@ pub async fn job_files(State(server): State<Shared>, headers: HeaderMap, UrlPath
     Ok(Json(JobFiles { job, revision, files }))
 }
 
-pub async fn job_history(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<Vec<HistoryEntry>>> {
+pub(crate) async fn job_history(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<Vec<HistoryEntry>>> {
     on(&server)?;
     crate::api::caller(&server, &headers)?;
     the_job(&server, &id)?;
     Ok(Json(server.store.with(|db| history(db, &id)).map_err(|e| Denied::broke("read that job's history", e))?))
 }
 
-pub async fn check_out(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, body: Body) -> Answer<Json<JobInfo>> {
+pub(crate) async fn check_out(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, body: Body) -> Answer<Json<JobInfo>> {
     on(&server)?;
     let who = crate::api::writer(&server, &headers)?; // WHAT: someone who may change jobs, with sharing on. WHY: a viewer is refused before anything is read; may_check_out says it again in Archetype's words
     let asked: CheckOut = json_body(body, 64 * 1024).await?;
@@ -559,7 +591,7 @@ pub async fn check_out(State(server): State<Shared>, headers: HeaderMap, UrlPath
     }
 }
 
-pub async fn check_in(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, body: Body) -> Answer<Json<CheckedIn>> {
+pub(crate) async fn check_in(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, body: Body) -> Answer<Json<CheckedIn>> {
     on(&server)?;
     let who = crate::api::writer(&server, &headers)?; // WHAT: someone who may change jobs, with sharing on. WHY: a viewer is refused before anything is read
     let asked: CheckIn = json_body(body, MOST_LIST).await?;
@@ -594,7 +626,7 @@ pub async fn check_in(State(server): State<Shared>, headers: HeaderMap, UrlPath(
     }
 }
 
-pub async fn release(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<JobInfo>> {
+pub(crate) async fn release(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<JobInfo>> {
     on(&server)?;
     let who = crate::api::caller(&server, &headers)?;
     let at = now();
@@ -622,7 +654,7 @@ pub async fn release(State(server): State<Shared>, headers: HeaderMap, UrlPath(i
     }
 }
 
-pub async fn take_back(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<JobInfo>> {
+pub(crate) async fn take_back(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<JobInfo>> {
     on(&server)?;
     let who = crate::api::administrator(&server, &headers)?; // WHAT: an administrator signed in, never a key. WHY: taking someone's check-out is theirs to decide
     let at = now();
@@ -651,7 +683,7 @@ pub async fn take_back(State(server): State<Shared>, headers: HeaderMap, UrlPath
     }
 }
 
-pub async fn missing_files(State(server): State<Shared>, headers: HeaderMap, body: Body) -> Answer<Json<Missing>> {
+pub(crate) async fn missing_files(State(server): State<Shared>, headers: HeaderMap, body: Body) -> Answer<Json<Missing>> {
     on(&server)?;
     crate::api::writer(&server, &headers)?; // WHAT: someone who may check in. WHY: only a check-in asks which files to send
     let asked: Missing = json_body(body, MOST_LIST).await?;
@@ -667,7 +699,7 @@ pub async fn missing_files(State(server): State<Shared>, headers: HeaderMap, bod
     Ok(Json(Missing { digests }))
 }
 
-pub async fn put_file(State(server): State<Shared>, headers: HeaderMap, UrlPath(digest): UrlPath<String>, body: Body) -> Answer<Json<serde_json::Value>> {
+pub(crate) async fn put_file(State(server): State<Shared>, headers: HeaderMap, UrlPath(digest): UrlPath<String>, body: Body) -> Answer<Json<serde_json::Value>> {
     on(&server)?;
     crate::api::writer(&server, &headers)?; // WHAT: someone who may check in. WHY: the store isn't filled by viewers or strangers
     if !is_digest(&digest) {
@@ -684,7 +716,7 @@ pub async fn put_file(State(server): State<Shared>, headers: HeaderMap, UrlPath(
     Ok(Json(serde_json::json!({ "kept": digest })))
 }
 
-pub async fn get_file(State(server): State<Shared>, headers: HeaderMap, UrlPath(digest): UrlPath<String>) -> Answer<Response> {
+pub(crate) async fn get_file(State(server): State<Shared>, headers: HeaderMap, UrlPath(digest): UrlPath<String>) -> Answer<Response> {
     on(&server)?;
     crate::api::caller(&server, &headers)?;
     if !is_digest(&digest) || !server.store.with(|db| Ok(sent(db, &digest))).unwrap_or(false) {
@@ -696,6 +728,13 @@ pub async fn get_file(State(server): State<Shared>, headers: HeaderMap, UrlPath(
 }
 
 // ---- moving in from Archetype's own server -----------------------------------------
+
+/// An old server's job row, as read: its id, name, number, when and by whom it was made, revision, last change and holder.
+type JobRow = (String, String, String, String, String, i64, String, String, Option<String>);
+/// An old server's check-in row, as read.
+type CheckinRow = (String, i64, String, String, String, String, String, i64, i64, String);
+/// An old server's history row, as read.
+type EventRow = (String, i64, String, String, String, String);
 
 /// What a move brought in.
 #[derive(Debug, PartialEq)]
@@ -713,6 +752,10 @@ pub struct Moved {
 /// before any job is written, and the jobs, check-ins and history go in as one
 /// transaction. Check-outs there are given back here: the people sign in with
 /// the office's accounts, and whoever had a job checks it out again.
+///
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
 pub fn move_from(from: &std::path::Path, database: &std::path::Path, blobs: &std::path::Path) -> Result<Moved, String> {
     let old_db = from.join("archetype.sqlite");
     if !old_db.is_file() {
@@ -732,17 +775,14 @@ pub fn move_from(from: &std::path::Path, database: &std::path::Path, blobs: &std
         return Err("This server already has Archetype jobs; a move only goes into an empty one, so nothing here is overwritten.".into());
     }
     let read = |e: rusqlite::Error| format!("reading the old jobs: {e}");
-    type JobRow = (String, String, String, String, String, i64, String, String, Option<String>);
     let mut st = old.prepare("SELECT id, name, number, created, created_by, revision, updated, updated_by, holder FROM jobs ORDER BY id").map_err(read)?;
     let jobs: Vec<JobRow> = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))).map_err(read)?.collect::<Result<_, _>>().map_err(read)?;
-    type CheckinRow = (String, i64, String, String, String, String, String, i64, i64, String);
     let mut st = old.prepare("SELECT job, revision, at, person, who, comment, files, count, bytes, changes FROM checkins ORDER BY job, revision").map_err(read)?;
     let checkins: Vec<CheckinRow> = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?))).map_err(read)?.collect::<Result<_, _>>().map_err(read)?;
-    type EventRow = (String, i64, String, String, String, String);
     let mut st = old.prepare("SELECT job, revision, at, who, what, comment FROM job_events ORDER BY id").map_err(read)?;
     let events: Vec<EventRow> = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).map_err(read)?.collect::<Result<_, _>>().map_err(read)?;
     for (_, name, ..) in &jobs {
-        if name.trim().is_empty() || name.chars().any(|c| c.is_control()) || name.len() > 120 {
+        if name.trim().is_empty() || name.chars().any(char::is_control) || name.len() > 120 {
             return Err(format!("the old server has a job whose name isn't allowed here ({name:.40}); no job was moved")); // WHAT: refused. WHY: only names this server would take come in
         }
     }
@@ -763,7 +803,6 @@ pub fn move_from(from: &std::path::Path, database: &std::path::Path, blobs: &std
             return Err(format!("file {digest:.12}… isn't a plain file; no job was moved")); // WHAT: a link, folder or device. WHY: never followed
         }
         let mut content = Vec::new();
-        use std::io::Read;
         if *bytes > MOST_FILE {
             return Err(format!("file {digest:.12}… is listed at {bytes} bytes, more than any job file; no job was moved")); // WHAT: refused. WHY: never read a file that size into memory
         }

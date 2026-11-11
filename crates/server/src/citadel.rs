@@ -45,6 +45,7 @@ pub enum Seen {
 
 impl Seen {
     /// The part's state, as the Manager and Fleet are told it.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn state(&self) -> &'static str {
         match self {
             Seen::Running { .. } => "running",
@@ -55,6 +56,7 @@ impl Seen {
     }
 
     /// The version it runs, when it is running.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn version(&self) -> Option<String> {
         match self {
             Seen::Running { version } => Some(version.clone()),
@@ -82,6 +84,7 @@ fn plain_version(v: &str) -> bool {
 }
 
 /// Reads an answer as Citadel Server's version, or `None`.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn version_in(body: &str) -> Option<String> {
     let read: Version = serde_json::from_str(body).ok()?; // WHAT: the JSON. WHY: Citadel answers {"version": ...}
     plain_version(&read.version).then_some(read.version) // WHAT: kept only when it looks like a version. WHY: it is shown on the board
@@ -89,6 +92,7 @@ pub fn version_in(body: &str) -> Option<String> {
 
 /// Looks once at `address` with `pin` kept from before. The new pin to keep,
 /// when this was the first good answer, comes back beside what was seen.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn look_at(address: &str, pin: Option<&str>) -> (Seen, Option<String>) {
     use std::io::Read;
     let Ok((agent, check)) = hub::pinned::agent(pin) else {
@@ -148,7 +152,7 @@ pub fn look(server: &Server) -> Seen {
 /// pin, so the next look keeps the certificate that answers then. For after
 /// Citadel Server was reinstalled, or when something else answered on its
 /// port first. Administrators signed in only; the log says who.
-pub async fn forget_pin(axum::extract::State(server): axum::extract::State<Shared>, headers: axum::http::HeaderMap) -> crate::api::Answer<axum::Json<serde_json::Value>> {
+pub(crate) async fn forget_pin(axum::extract::State(server): axum::extract::State<Shared>, headers: axum::http::HeaderMap) -> crate::api::Answer<axum::Json<serde_json::Value>> {
     let who = crate::api::administrator(&server, &headers)?; // WHAT: an administrator signed in, never a key. WHY: re-pinning decides which server is believed
     if !crate::office::licensed(&server).contains(&hub::license::Module::Citadel) {
         return Err(crate::api::Denied::missing("Citadel part on this server")); // WHAT: 404 without the part. WHY: nothing is looked at, or pinned, on an office that doesn't run Citadel
@@ -160,11 +164,11 @@ pub async fn forget_pin(axum::extract::State(server): axum::extract::State<Share
     tracing::warn!("Citadel Server's certificate pin was forgotten by {}; the next look keeps the one that answers", who.email); // WHAT: in the log, by name. WHY: who chose to trust a new certificate
     let server = server.clone();
     let _ = tokio::task::spawn_blocking(move || look(&server)).await; // WHAT: looks now. WHY: the administrator sees the result at once
-    Ok(axum::Json(serde_json::json!({ "state": last().map(|s| s.state()).unwrap_or("looking") })))
+    Ok(axum::Json(serde_json::json!({ "state": last().map_or("looking", |s| s.state()) })))
 }
 
 /// Looks at Citadel every [`LOOK_EVERY`] while the licence switches it on.
-pub async fn watch(server: Shared) {
+pub(crate) async fn watch(server: Shared) {
     loop {
         if crate::office::licensed(&server).contains(&hub::license::Module::Citadel) {
             let looking = std::sync::Arc::clone(&server);

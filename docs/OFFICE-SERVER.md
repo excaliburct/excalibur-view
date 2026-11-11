@@ -18,7 +18,7 @@ on by the office's signed licence:
 | `view` | drawings, takeoff, markups, sign-offs, the field package | View's server (always on) |
 | `cad` | Excalibur CAD's office drawings: check-out, check-in, versions | Excalibur CAD's server, moved in |
 | `archetype` | Archetype's shared jobs and releases | Archetype's server (a cut-down View server already) |
-| `citadel` | Citadel / LatCon Estimating's jobs, kept **blind** | Citadel Server, run alongside (below) |
+| `citadel` | Citadel's estimating jobs, kept **blind** | Citadel Server, run alongside (below) |
 
 A module that isn't licensed isn't served: its routes answer 404, as if it didn't exist.
 
@@ -43,11 +43,11 @@ A module that isn't licensed isn't served: its routes answer 404, as if it didn'
 | Mesa Fab's View server | the next View server update (Fleet push), in place |
 | Mesa Fab's Archetype server | its next update moves its jobs into the Office Server's `archetype` module, then the old service is retired |
 | The separate CAD server | a one-click move of its drawings into the `cad` module, then it is retired |
-| Latcon's Citadel Server | the Office Server takes it over as its `citadel` part: same service, same certificate, no re-pairing |
+| An office's Citadel Server | the Office Server takes it over as its `citadel` part: same service, same certificate, no re-pairing |
 
 ## Citadel and every company
 
-Citadel is one program for every company (Creede, 2026-11-01). LatCon Estimating becomes **Citadel + the Latcon pack**:
+Citadel is one program for every company (Creede, 2026-11-01). Each company's build becomes **Citadel + that company's pack**:
 a signed file with the company's name, rates, items, bid templates and switched-on abilities. The `citadel` module is
 company-blind already: one Office Server build serves any company's Citadel, because the server never sees inside it.
 
@@ -71,22 +71,19 @@ Each step merges on its own, with tests, the guards proven, and a review; each s
 | 1. Licence modules | done: signed `modules` line; old licences unchanged; the publishing script signs it (`--modules`) |
 | 2. Module registry | done: `GET /api/v1/office`, and every part's state in the maintenance report |
 | 3. Citadel part | watching done: Citadel Server's version read every 5 minutes on this machine, by its certificate pin, never its data; an administrator can forget the pin after a reinstall (`POST /api/v1/admin/citadel/forget-pin`). Updates: Fleet keeps sending Citadel Server its own signed updates directly, as today; the Office Server reports the version that results |
-| 4. HTTPS | server side done: its own certificate, HTTPS on TCP 8716 beside HTTP on 8714 (UDP 8715 stays the finding port), `secure_port` in /health. Next: the seats move to it and pin it (the View app), then plain HTTP can be turned off |
+| 4. HTTPS | server side done: its own certificate, and HTTPS on the API's own port 8714, beside plain HTTP on the same port (each connection's first byte says which), `secure_port` in /health. Next: the seats move to it and pin it (the View app), then plain HTTP can be turned off |
 | 5. CAD part | done on both sides: CAD's check-out/check-in store under `/api/v1/cad/...` with the office's own accounts, kept in the server's own database and file store (so the nightly off-site backup and its drill carry CAD's drawings); `hyperview-server --move-cad "<old CAD data folder>"` moves a CAD server's drawings in. Excalibur CAD signs in to an Office Server (branch excad-office-server-20261110) |
 | 6. Archetype part | done on both sides: Archetype's jobs under `/api/v1/archetype/...` with the office's accounts, in the server's own database and file store (backed up with the rest); only files sent to Archetype are handed out by it, so a View drawing's fingerprint opens nothing; `hyperview-server --move-archetype "<old Archetype data folder>"` moves an Archetype server's jobs in. Archetype finds its jobs on an Office Server (ExcaliburArchetype branch archetype-office-client-20261110). Branch office-archetype-20261110 |
 | One installer and Manager | the server program already installs itself as one Windows service carrying View, CAD and Archetype; Citadel Server stays its own installer and service on purpose (blind, its own account). Studio > Office in View shows every part and how it is (running and version, not licensed, needs an update, not found, not answering, a changed certificate) |
-| The USB kit | after **C** signs the releases: the Office Server (View Server 0.7.0), Citadel Server 1.0.2, LatCon, View, the checklists and the sums |
+| The USB kit | after **C** signs the releases: the Office Server (View Server 0.7.0), Citadel Server, the estimating program, View, the checklists and the sums |
 
-Ports: TCP 8714 (the API, plain HTTP until every seat has moved), TCP 8716 (the same API over HTTPS), UDP 8715
-(seats find the server). The program's own "host the drawings on this computer" server stays plain HTTP for now.
+Ports: TCP 8714 (the API, HTTPS and plain HTTP on the one port) and UDP 8715 (seats find the server). Nothing
+new to open: an office's firewall and its tunnel's rules stay exactly as they are when the server updates to the
+Office Server. The program's own "host the drawings on this computer" server stays plain HTTP for now.
 
 Independent security review (2026-11-10): one high (CAD read drawings before its checks), one medium (a seat's
 fallback address could take its sign-in after HTTPS was blocked) and nine lows, all fixed on this branch with tests;
 see the commit "Review fixes".
-
-Existing servers get the HTTPS port opened to the office network by the Manager's next install/repair (the
-service account can't change the firewall); until then HTTPS answers on the server itself and through the
-tunnel.
 
 ### Moving a CAD server in
 1. Stop the old Excalibur CAD server's service. (On Linux, run step 2 as the account the Office Server runs as,

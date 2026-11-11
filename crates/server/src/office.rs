@@ -48,6 +48,7 @@ pub fn serves(server: &Server, part: Module) -> bool {
 }
 
 /// [`serves`], from a licensed list and a built list.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn serves_of(licensed: &[Module], built: &[Module], part: Module) -> bool {
     built.contains(&part) && licensed.contains(&part) // WHAT: both carried and licensed. WHY: a part's routes answer 404 otherwise, as if it didn't exist
 }
@@ -59,6 +60,7 @@ pub fn parts(server: &Server) -> Vec<Part> {
 
 /// [`parts`], from a licensed list, a built list and the last look at
 /// Citadel. Kept apart so a test can ask about any of them.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn parts_of(licensed: &[Module], built: &[Module], citadel: Option<&crate::citadel::Seen>) -> Vec<Part> {
     Module::ALL
         .iter()
@@ -70,7 +72,7 @@ pub fn parts_of(licensed: &[Module], built: &[Module], citadel: Option<&crate::c
                     title: part.title(),
                     licensed: true,
                     state: citadel.map_or("looking", |s| s.state()), // WHAT: what the last look saw, or "looking" before the first. WHY: Citadel runs alongside, so its state is what it answers
-                    version: citadel.and_then(|s| s.version()), // WHAT: Citadel's own version. WHY: Fleet compares it with Citadel's shelf
+                    version: citadel.and_then(super::citadel::Seen::version), // WHAT: Citadel's own version. WHY: Fleet compares it with Citadel's shelf
                 };
             }
             let state = match (on, built.contains(&part)) {
@@ -99,7 +101,7 @@ pub struct Office {
 
 /// `GET /api/v1/office`: the parts this server runs. Anybody signed in may ask,
 /// as they may ask for the licence's standing.
-pub async fn read(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<Office>> {
+pub(crate) async fn read(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<Office>> {
     crate::api::caller(&server, &headers)?; // WHAT: anybody signed in, or a key. WHY: the same door as /license; nothing here is secret within the office
     Ok(Json(Office { product: "excalibur-office", version: crate::VERSION.to_string(), parts: parts(&server) }))
 }
@@ -139,7 +141,7 @@ mod tests {
     #[test]
     fn citadel_is_what_its_last_look_saw_and_off_unless_licensed() {
         use crate::citadel::Seen;
-        let on = [Module::View, Module::Citadel]; // WHAT: a licence with Citadel. WHY: the Latcon office
+        let on = [Module::View, Module::Citadel]; // WHAT: a licence with Citadel. WHY: an office that runs Citadel
         assert_eq!(state_of(&parts_of(&on, IN_THIS_BUILD, None), "citadel").state, "looking", "before the first look");
         let running = Seen::Running { version: "1.0.2".into() };
         let part = parts_of(&on, IN_THIS_BUILD, Some(&running));

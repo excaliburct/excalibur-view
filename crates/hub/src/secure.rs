@@ -28,6 +28,7 @@ pub struct PinBook {
 struct Damaged;
 
 impl PinBook {
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn at(path: PathBuf) -> PinBook {
         PinBook { path }
     }
@@ -41,14 +42,16 @@ impl PinBook {
     }
 
     /// The pin kept for `server`, if any and if it reads as one.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn pin(&self, server: &str) -> Option<String> {
         self.all().ok()?.remove(server).filter(|p| crate::pinned::is_pin(p)) // WHAT: the pin, only if it reads as one. WHY: a damaged entry is never used as a pin (and `holds` still sees it)
     }
 
     /// Whether anything at all is kept for `server`, readable or not. A book
     /// that doesn't read holds every server.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn holds(&self, server: &str) -> bool {
-        self.all().map(|all| all.contains_key(server)).unwrap_or(true) // WHAT: an entry, even a damaged one; or a damaged book. WHY: either still forbids falling back to plain HTTP
+        self.all().map_or(true, |all| all.contains_key(server)) // WHAT: an entry, even a damaged one; or a damaged book. WHY: either still forbids falling back to plain HTTP
     }
 
     fn keep(&self, server: &str, pin: &str) -> Result<(), String> {
@@ -57,7 +60,7 @@ impl PinBook {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
-        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0); // WHAT: a fresh number. WHY: two windows keeping a pin at once never write into one file
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()); // WHAT: a fresh number. WHY: two windows keeping a pin at once never write into one file
         let part = self.path.with_extension(format!("part{n}"));
         let written = (|| {
             use std::io::Write;
@@ -65,7 +68,7 @@ impl PinBook {
             f.write_all(&serde_json::to_vec_pretty(&all).unwrap_or_default())?;
             f.sync_all() // WHAT: on the disk before it is named. WHY: a power cut never leaves half a book
         })()
-        .and_then(|_| std::fs::rename(&part, &self.path)); // WHAT: moved into place. WHY: all at once
+        .and_then(|()| std::fs::rename(&part, &self.path)); // WHAT: moved into place. WHY: all at once
         if let Err(e) = written {
             let _ = std::fs::remove_file(&part); // WHAT: the leftover. WHY: never a stray part file
             return Err(e.to_string());
@@ -107,6 +110,7 @@ fn address(base: &str) -> Result<Address, Trouble> {
 
 /// Whether this seat holds a pin for `base`'s server (a damaged book counts).
 /// A seat that does never sends a sign-in anywhere else in its place.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn is_pinned(base: &str, book: &PinBook) -> bool {
     match address(base) {
         Ok(Address::Plain(server, _)) => book.holds(&server),
@@ -117,6 +121,10 @@ pub fn is_pinned(base: &str, book: &PinBook) -> bool {
 /// The client a seat should use for `base`: the server's HTTPS by its kept pin
 /// (kept now, on a first connection), or `base` itself when the server offers
 /// no HTTPS and this seat has never held a pin for it.
+///
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
 pub fn open(base: &str, book: &PinBook) -> Result<Client, Trouble> {
     let (server, host) = match address(base)? {
         Address::Https => return Ok(Client::new(base)), // WHAT: an https:// address as it is. WHY: its own certificate authority checks it

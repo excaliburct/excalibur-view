@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 
 /// The pin of a certificate: the SHA-256 of its SPKI, as 64 lowercase hex
 /// digits. `None` for something that doesn't read as a certificate.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn pin_of(certificate: &[u8]) -> Option<String> {
     let der = CertificateDer::from(certificate); // WHAT: the certificate's bytes, borrowed. WHY: rustls reads it from these
     let parsed = rustls::server::ParsedCertificate::try_from(&der).ok()?; // WHAT: read as an X.509 certificate. WHY: the SPKI is inside it
@@ -29,11 +30,13 @@ pub fn pin_of(certificate: &[u8]) -> Option<String> {
 
 /// The pin in short, for a person to compare by eye: the first 16 hex digits
 /// in groups of four ("3F2A 91C0 …"), as Citadel shows it.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn short(pin: &str) -> String {
     pin.chars().take(16).collect::<Vec<_>>().chunks(4).map(|c| c.iter().collect::<String>().to_uppercase()).collect::<Vec<_>>().join(" ") // WHAT: four groups of four, upper case. WHY: Citadel's Pinning.Short, so both read the same
 }
 
 /// Whether `pin` reads as a pin: 64 lowercase hex digits.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn is_pin(pin: &str) -> bool {
     pin.len() == 64 && pin.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) // WHAT: the shape. WHY: anything else can never match, and is refused before use
 }
@@ -110,6 +113,10 @@ impl ServerCertVerifier for Pinned {
 
 /// A client that reaches one server by its pin, and the check it uses, to read
 /// the pin it saw afterwards. A `pin` that isn't one is refused here.
+///
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
 pub fn agent(pin: Option<&str>) -> Result<(ureq::AgentBuilder, Arc<Pinned>), String> {
     if let Some(p) = pin {
         if !is_pin(p) {
@@ -135,6 +142,7 @@ pub fn agent(pin: Option<&str>) -> Result<(ureq::AgentBuilder, Arc<Pinned>), Str
 /// and in the crates that use this one (the `testing` feature). Never in a
 /// build that ships.
 #[cfg(any(test, feature = "testing"))]
+#[allow(clippy::missing_panics_doc, clippy::cast_possible_truncation)] // WHAT: test servers that stop on a broken setup, and DER lengths written as bytes. WHY: test helpers only; every length here is under 64 KiB, checked as it is written
 pub mod testing {
     use std::sync::Arc;
 
@@ -154,6 +162,7 @@ pub mod testing {
 
     /// A self-made Ed25519 certificate and its PKCS#8 key, from a made-up
     /// seed: no key file is kept anywhere, and each seed is another server.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn certificate(seed: u8) -> (Vec<u8>, Vec<u8>) {
         use ed25519_dalek::Signer;
         let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]); // WHAT: a key from the seed. WHY: the same every run, and never a real one
@@ -177,6 +186,7 @@ pub mod testing {
 
     /// An HTTPS server on this machine that answers one request with `body`,
     /// showing the certificate made from `seed`. Its address, and its pin.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn serve_once(seed: u8, body: &'static str) -> (String, String) {
         let (cert, pkcs8) = certificate(seed);
         let pin = pin_of(&cert).expect("the made-up certificate reads"); // WHAT: its pin. WHY: what the tests compare
@@ -201,7 +211,7 @@ pub mod testing {
         use std::io::{Read, Write};
         let mut asked = Vec::new();
         let mut byte = [0u8; 1];
-        while !asked.ends_with(b"\r\n\r\n") && tls.read(&mut byte).map(|n| n == 1).unwrap_or(false) {
+        while !asked.ends_with(b"\r\n\r\n") && tls.read(&mut byte).is_ok_and(|n| n == 1) {
             asked.push(byte[0]); // WHAT: the request, to its end. WHY: answered only after it has been read
         }
         let _ = write!(tls, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()); // WHAT: the answer. WHY: a well-formed HTTP reply
@@ -222,6 +232,7 @@ pub mod testing {
 
     /// A server showing the certificate made from `shown` while holding only
     /// the key made from `held`. Its address.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn impostor(shown: u8, held: u8) -> String {
         let (cert, _) = certificate(shown); // WHAT: the real server's certificate. WHY: copied, as anyone can
         let (_, pkcs8) = certificate(held); // WHAT: the impostor's own key. WHY: it doesn't have the real one

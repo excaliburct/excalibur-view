@@ -26,7 +26,7 @@ fn license(modules: &[&str]) -> String {
         updates_through: "2099-12-31".into(),
         issued: "2026-11-10".into(),
         note: String::new(),
-        modules: modules.iter().map(|m| m.to_string()).collect(),
+        modules: modules.iter().map(std::string::ToString::to_string).collect(),
         key: KEY.into(),
         signature: String::new(),
     };
@@ -155,7 +155,7 @@ fn a_licence_signed_by_anyone_else_switches_nothing_on() {
     assert_eq!(code, 400, "refused: {said}");
     let mut added: hub::license::License = serde_json::from_str(&license(&[])).unwrap(); // WHAT: a real licence without parts. WHY: then a part added after signing
     added.modules = vec!["cad".into()];
-    let (code, _) = match ureq::post(&format!("{}/license", office.base)).set("Authorization", &format!("Bearer {}", office.sam)).send_json(serde_json::json!({ "license": serde_json::to_string(&added).unwrap() })) {
+    let (code, ()) = match ureq::post(&format!("{}/license", office.base)).set("Authorization", &format!("Bearer {}", office.sam)).send_json(serde_json::json!({ "license": serde_json::to_string(&added).unwrap() })) {
         Ok(r) => (r.status(), ()),
         Err(ureq::Error::Status(c, _)) => (c, ()),
         Err(e) => panic!("{e}"),

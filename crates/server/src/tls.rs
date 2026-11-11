@@ -32,6 +32,10 @@ pub const CERT: &str = "tls-cert.pem"; // WHAT: the public certificate. WHY: kep
 pub const KEY: &str = "tls-key.pem"; // WHAT: the private key. WHY: readable by the server alone
 
 /// The encryption settings for the certificate and key (PEM).
+///
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
 pub fn server_config(cert_pem: &str, key_pem: &str) -> Result<Arc<rustls::ServerConfig>, String> {
     use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -50,6 +54,10 @@ pub fn server_config(cert_pem: &str, key_pem: &str) -> Result<Arc<rustls::Server
 
 /// The pin of a PEM certificate: the SHA-256 of its public key, as the seats
 /// keep it.
+///
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
 pub fn pin(cert_pem: &str) -> Result<String, String> {
     use rustls::pki_types::pem::PemObject;
     let der = rustls::pki_types::CertificateDer::from_pem_slice(cert_pem.as_bytes()).map_err(|_| "the certificate file is damaged".to_string())?; // WHAT: the certificate's DER. WHY: the pin is read from it
@@ -59,6 +67,10 @@ pub fn pin(cert_pem: &str) -> Result<String, String> {
 /// The certificate's fingerprint (SHA-256 of the whole certificate), as
 /// Excalibur CAD shows it for a person to compare: 64 hex digits in groups
 /// of four.
+///
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
 pub fn fingerprint(cert_pem: &str) -> Result<String, String> {
     use rustls::pki_types::pem::PemObject;
     use sha2::Digest;
@@ -67,56 +79,89 @@ pub fn fingerprint(cert_pem: &str) -> Result<String, String> {
     Ok(hex.as_bytes().chunks(4).map(|c| String::from_utf8_lossy(c).to_uppercase()).collect::<Vec<_>>().join(" ")) // WHAT: in groups of four, upper case. WHY: exactly as CAD shows it
 }
 
-/// Answers `router` over HTTPS on `listener` until `shutdown` finishes: each
-/// connection encrypted, its address handed to the handlers (sign-ins are
-/// limited per address, and presence says where a seat is), a stalled
-/// handshake dropped.
+/// The first byte of every TLS connection: a handshake record.
+const TLS_HANDSHAKE: u8 = 0x16; // WHAT: TLS's record type for a handshake. WHY: no HTTP request starts with it, so one port serves both
+
+/// How long a stopping server lets open requests finish.
+const DRAIN: Duration = Duration::from_secs(10); // WHAT: ten seconds. WHY: a save in flight lands; a held-open socket doesn't keep the service from stopping
+
+/// Answers `router` on `listener` until `shutdown` finishes, HTTPS and plain
+/// HTTP on the same port: a connection that opens with a TLS handshake is
+/// encrypted with the server's own certificate, any other is plain HTTP for a
+/// seat that hasn't moved yet. One port, so an office's firewall and its
+/// tunnel's rules stay exactly as they are when the server is updated. Each
+/// connection's address is handed to the handlers (sign-ins are limited per
+/// address, and presence says where a seat is); a stalled start is dropped.
 pub async fn serve(
     listener: tokio::net::TcpListener,
     config: Arc<rustls::ServerConfig>,
     router: axum::Router,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) {
-    use tower::ServiceExt;
     let acceptor = tokio_rustls::TlsAcceptor::from(config); // WHAT: the TLS side of each connection. WHY: rustls, as everywhere else
+    let mut open = tokio::task::JoinSet::new(); // WHAT: the connections being served. WHY: a stopping server lets them finish
     let slots = Arc::new(tokio::sync::Semaphore::new(MOST_CONNECTIONS)); // WHAT: the open-connection slots. WHY: the cap above
-    let per_address: Shares = Default::default(); // WHAT: connections per address. WHY: the per-machine cap
+    let per_address = Shares::default(); // WHAT: connections per address. WHY: the per-machine cap
     let mut shutdown = std::pin::pin!(shutdown);
     loop {
+        while open.try_join_next().is_some() {} // WHAT: finished connections forgotten. WHY: the set never grows with every connection ever served
         let accepted = tokio::select! {
-            _ = &mut shutdown => return, // WHAT: stop accepting. WHY: the server is stopping
+            () = &mut shutdown => break, // WHAT: stop accepting. WHY: the server is stopping
             a = listener.accept() => a,
         };
         let Ok((tcp, peer)) = accepted else {
             continue; // WHAT: a failed accept is skipped. WHY: one bad connection never stops the server
         };
-        let Some(share) = Share::take(&per_address, machine(peer.ip())) else {
-            continue; // WHAT: past its address's share, closed straight away. WHY: one machine can't take every slot
+        let share = if peer.ip().is_loopback() {
+            None // WHAT: this machine itself is never capped per machine. WHY: the office's tunnel connector runs here, and every remote seat comes through it from one address
+        } else {
+            match Share::take(&per_address, machine(peer.ip())) {
+                Some(share) => Some(share),
+                None => continue, // WHAT: past its machine's share, closed straight away. WHY: one machine can't take every slot
+            }
         };
         let slot = tokio::select! {
-            _ = &mut shutdown => return, // WHAT: stop, even with every slot taken. WHY: a full server still stops when asked
+            () = &mut shutdown => break, // WHAT: stop, even with every slot taken. WHY: a full server still stops when asked
             s = slots.clone().acquire_owned() => s,
         };
         let Ok(slot) = slot else {
-            return; // WHAT: the slots are gone. WHY: only when stopping
+            break; // WHAT: the slots are gone. WHY: only when stopping
         };
         let (acceptor, router) = (acceptor.clone(), router.clone());
-        tokio::spawn(async move {
+        open.spawn(async move {
             let (_slot, _share) = (slot, share); // WHAT: held for the connection's life. WHY: given back when it closes
-            let Ok(Ok(tls)) = tokio::time::timeout(HANDSHAKE, acceptor.accept(tcp)).await else {
-                return; // WHAT: a failed or stalled handshake. WHY: dropped, its slot given back
+            let mut first = [0u8; 1];
+            let Ok(Ok(n)) = tokio::time::timeout(HANDSHAKE, tcp.peek(&mut first)).await else {
+                return; // WHAT: nothing sent in time, or a broken socket. WHY: dropped, its slot given back
             };
-            let service = hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
-                req.extensions_mut().insert(axum::extract::ConnectInfo::<SocketAddr>(peer)); // WHAT: the caller's address. WHY: the same as the plain-HTTP API hands the handlers
-                router.clone().oneshot(req)
-            });
-            let connection = hyper::server::conn::http1::Builder::new()
-                .timer(hyper_util::rt::TokioTimer::new())
-                .header_read_timeout(Duration::from_secs(30)) // WHAT: headers within 30 seconds. WHY: a request trickled in to hold a slot is dropped
-                .serve_connection(hyper_util::rt::TokioIo::new(tls), service);
-            let _ = tokio::time::timeout(CONNECTION, connection).await; // WHAT: the connection, up to its limit. WHY: none is kept forever
+            if n == 1 && first[0] == TLS_HANDSHAKE {
+                let Ok(Ok(tls)) = tokio::time::timeout(HANDSHAKE, acceptor.accept(tcp)).await else {
+                    return; // WHAT: a failed or stalled handshake. WHY: dropped, its slot given back
+                };
+                answer(tls, peer, router).await; // WHAT: HTTPS. WHY: sign-ins and drawings encrypted
+            } else {
+                answer(tcp, peer, router).await; // WHAT: plain HTTP. WHY: a seat that hasn't moved yet, or an older one
+            }
         });
     }
+    let _ = tokio::time::timeout(DRAIN, async { while open.join_next().await.is_some() {} }).await; // WHAT: open requests given a moment to finish. WHY: a save in flight when the service stops for an update lands
+}
+
+/// One connection's requests answered by `router`, over whatever it is.
+async fn answer<I>(io: I, peer: SocketAddr, router: axum::Router)
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use tower::ServiceExt;
+    let service = hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
+        req.extensions_mut().insert(axum::extract::ConnectInfo::<SocketAddr>(peer)); // WHAT: the caller's address. WHY: the same as before for every handler
+        router.clone().oneshot(req)
+    });
+    let connection = hyper::server::conn::http1::Builder::new()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(Duration::from_secs(30)) // WHAT: headers within 30 seconds. WHY: a request trickled in to hold a slot is dropped
+        .serve_connection(hyper_util::rt::TokioIo::new(io), service);
+    let _ = tokio::time::timeout(CONNECTION, connection).await; // WHAT: the connection, up to its limit. WHY: none is kept forever
 }
 
 /// The machine an address belongs to, for the per-machine cap: an IPv4
@@ -129,7 +174,7 @@ fn machine(ip: std::net::IpAddr) -> std::net::IpAddr {
             std::net::IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0)) // WHAT: the first 64 bits. WHY: a LAN machine picks addresses freely within its /64
         }
         std::net::IpAddr::V6(v6) => std::net::IpAddr::V4(v6.to_ipv4_mapped().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED)), // WHAT: an IPv4 address written as IPv6. WHY: the same machine as its IPv4 form
-        v4 => v4,
+        std::net::IpAddr::V4(v4) => std::net::IpAddr::V4(v4), // WHAT: an IPv4 address, itself. WHY: one address, one machine
     }
 }
 
@@ -143,7 +188,7 @@ struct Share {
 
 impl Share {
     fn take(counts: &Shares, ip: std::net::IpAddr) -> Option<Share> {
-        let mut map = counts.lock().unwrap_or_else(|e| e.into_inner()); // WHAT: the counts. WHY: a poisoned lock still counts
+        let mut map = counts.lock().unwrap_or_else(std::sync::PoisonError::into_inner); // WHAT: the counts. WHY: a poisoned lock still counts
         let n = map.entry(ip).or_insert(0);
         if *n >= MOST_FROM_ONE {
             return None; // WHAT: this address has its share. WHY: the per-machine cap
@@ -155,7 +200,7 @@ impl Share {
 
 impl Drop for Share {
     fn drop(&mut self) {
-        let mut map = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.counts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(n) = map.get_mut(&self.ip) {
             *n -= 1; // WHAT: given back. WHY: the connection closed
             if *n == 0 {
@@ -166,9 +211,13 @@ impl Drop for Share {
 }
 
 /// The certificate and key (PEM), made and saved if there aren't any yet.
+///
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
 pub fn load_or_make(data: &Path) -> Result<(String, String), String> {
-    let (cert_path, key_path) = (data.join(CERT), data.join(KEY));
     use std::io::ErrorKind::NotFound;
+    let (cert_path, key_path) = (data.join(CERT), data.join(KEY));
     let (cert, key) = (std::fs::read_to_string(&cert_path), std::fs::read_to_string(&key_path));
     match (&cert, &key) {
         (Ok(c), Ok(k)) => return Ok((c.clone(), k.clone())), // WHAT: both there. WHY: the server's identity, kept
@@ -221,7 +270,7 @@ fn write_private(path: &Path, text: &str) -> Result<(), String> {
             return Err("Windows wouldn't make the server's key private.".into());
         }
     }
-    file.write_all(text.as_bytes()).and_then(|_| file.sync_all()).map_err(|e| format!("saving the server's key: {e}"))?; // WHAT: the key, once only its owners can read the file. WHY: never readable by anyone else, even for a moment
+    file.write_all(text.as_bytes()).and_then(|()| file.sync_all()).map_err(|e| format!("saving the server's key: {e}"))?; // WHAT: the key, once only its owners can read the file. WHY: never readable by anyone else, even for a moment
     Ok(())
 }
 
@@ -245,7 +294,7 @@ mod tests {
 
     #[test]
     fn one_address_gets_its_share_of_connections_and_no_more() {
-        let counts: Shares = Default::default();
+        let counts = Shares::default();
         let ip: std::net::IpAddr = [10, 0, 0, 9].into();
         let held: Vec<Share> = (0..MOST_FROM_ONE).map(|_| Share::take(&counts, ip).unwrap()).collect();
         assert!(Share::take(&counts, ip).is_none(), "the 17th waits its turn");

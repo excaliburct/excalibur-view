@@ -17,6 +17,9 @@
 //! reach outside the data folder. Nothing is deleted: an archived drawing is
 //! hidden, with all its versions kept.
 
+// WHAT: whole-number conversions at the database's edge. WHY: SQLite keeps every integer as i64, and versions, sizes and times here are never negative or anywhere near 2^63.
+#![allow(clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+
 use std::path::{Path, PathBuf};
 
 use axum::body::Body;
@@ -92,12 +95,14 @@ pub enum Refused {
     Bad(String),
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) // WHAT: seconds since 1970. WHY: CAD's own clock, so moved drawings read the same
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64) // WHAT: seconds since 1970. WHY: CAD's own clock, so moved drawings read the same
 }
 
 /// A drawing's or folder part's name: 1 to 120 characters, no control
 /// characters or slashes, not just dots, no spaces at the ends.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn good_name(s: &str) -> bool {
     !s.is_empty() && s.chars().count() <= 120 && s.trim() == s && !s.chars().any(|c| c.is_control() || c == '/' || c == '\\') && !s.chars().all(|c| c == '.') // WHAT: CAD's rule. WHY: a label that can never be mistaken for a path
 }
@@ -109,6 +114,10 @@ pub fn good_folder(s: &str) -> bool {
 
 impl Store {
     /// CAD's drawings in the server's database and file store.
+    ///
+    /// # Errors
+    ///
+    /// Refused, in words a person can act on, when it can't be done.
     pub fn open(database: &Path, blobs: &Path) -> rusqlite::Result<Store> {
         std::fs::create_dir_all(blobs).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?; // WHAT: the server's file store. WHY: made by the server already; here for a test's own folder
         let db = Connection::open(database)?;
@@ -137,7 +146,7 @@ impl Store {
                 f.write_all(bytes)?;
                 f.sync_all() // WHAT: on the disk before it is named. WHY: a power cut never leaves a short file under a whole drawing's name
             })();
-            if let Err(e) = written.and_then(|_| std::fs::rename(&part, &path)) {
+            if let Err(e) = written.and_then(|()| std::fs::rename(&part, &path)) {
                 let _ = std::fs::remove_file(&part); // WHAT: the leftover. WHY: never a stray part file
                 if !path.exists() {
                     return Err(e); // WHAT: nothing kept. WHY: said
@@ -187,6 +196,10 @@ impl Store {
     }
 
     /// A new drawing, its first version from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Refused, in words a person can act on, when it can't be done.
     pub fn create(&mut self, folder: &str, name: &str, bytes: &[u8], who: &str) -> Result<i64, Refused> {
         if !good_folder(folder) || !good_name(name) {
             return Err(Refused::Bad("A name is 1 to 120 characters with no slashes; folders are names joined by '/'.".into()));
@@ -207,6 +220,10 @@ impl Store {
     }
 
     /// A version's bytes (the newest when `version` is None).
+    ///
+    /// # Errors
+    ///
+    /// Refused, in words a person can act on, when it can't be done.
     pub fn file(&self, id: i64, version: Option<i64>) -> Result<(i64, Vec<u8>), Refused> {
         let d = self.drawing(id).ok_or(Refused::NotFound)?;
         let v = version.unwrap_or(d.version);
@@ -221,6 +238,10 @@ impl Store {
     }
 
     /// Check a drawing out to `who` (again, if it's already theirs).
+    ///
+    /// # Errors
+    ///
+    /// Refused, in words a person can act on, when it can't be done.
     pub fn lock(&self, id: i64, who: &str) -> Result<(), Refused> {
         let d = self.drawing(id).ok_or(Refused::NotFound)?;
         match (&d.locked_by, d.locked_at) {
@@ -239,6 +260,10 @@ impl Store {
     }
 
     /// Check it back in: by the person who has it, or by an admin forcing it.
+    ///
+    /// # Errors
+    ///
+    /// Refused, in words a person can act on, when it can't be done.
     pub fn unlock(&self, id: i64, who: &str, force: bool) -> Result<(), Refused> {
         let d = self.drawing(id).ok_or(Refused::NotFound)?;
         match &d.locked_by {
@@ -254,6 +279,10 @@ impl Store {
 
     /// A new version, saved by the person who has it out, on top of the
     /// version they opened (`base`); refused if someone saved since.
+    ///
+    /// # Errors
+    ///
+    /// Refused, in words a person can act on, when it can't be done.
     pub fn save(&mut self, id: i64, base: i64, bytes: &[u8], who: &str, note: &str) -> Result<i64, Refused> {
         if bytes.len() > MOST_BYTES {
             return Err(Refused::Bad("That drawing is too big.".into()));
@@ -293,6 +322,9 @@ impl Store {
         Ok(next)
     }
 
+    /// # Errors
+    ///
+    /// Refused, in words a person can act on, when it can't be done.
     pub fn versions(&self, id: i64) -> Result<Vec<Version>, Refused> {
         self.drawing(id).ok_or(Refused::NotFound)?;
         let mut st = self.db.prepare("SELECT version, size, sha256, saved_by, saved_at, note FROM cad_versions WHERE drawing = ?1 ORDER BY version DESC").map_err(|e| Refused::Bad(e.to_string()))?;
@@ -303,6 +335,10 @@ impl Store {
     }
 
     /// An old version brought back as the newest (by whoever has it out).
+    ///
+    /// # Errors
+    ///
+    /// Refused, in words a person can act on, when it can't be done.
     pub fn restore(&mut self, id: i64, version: i64, who: &str) -> Result<i64, Refused> {
         let (_, bytes) = self.file(id, Some(version))?;
         let base = self.drawing(id).ok_or(Refused::NotFound)?.version;
@@ -310,6 +346,10 @@ impl Store {
     }
 
     /// Hidden from the list, every version kept (administrators only).
+    ///
+    /// # Errors
+    ///
+    /// Refused, in words a person can act on, when it can't be done.
     pub fn archive(&self, id: i64, who: &str) -> Result<(), Refused> {
         let n = self.db.execute("UPDATE cad_drawings SET archived = 1, locked_by = NULL, locked_at = NULL WHERE id = ?1 AND archived = 0", [id]).unwrap_or(0);
         if n == 0 {
@@ -353,6 +393,11 @@ fn read_old_file(path: &Path, size: i64) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// An old server's drawing row, as read: its id, folder, name, who has it out, whether it's archived, and who made it when.
+type OldDrawing = (i64, String, String, Option<String>, i64, String, i64);
+/// An old server's version row, as read: its drawing, version, fingerprint, size, who saved it when, and the note.
+type OldVersion = (i64, i64, String, i64, String, i64, String);
+
 /// What a move brought in.
 #[derive(Debug, PartialEq)]
 pub struct Moved {
@@ -370,6 +415,10 @@ pub struct Moved {
 /// written; the drawings and versions go in as one transaction. Stop the old
 /// server first, and run it as the account the Office Server runs as (on
 /// Windows, an administrator), so the files it copies are the server's.
+///
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
 pub fn move_from(from: &Path, database: &Path, blobs: &Path) -> Result<Moved, String> {
     let old_db = from.join("cad.sqlite");
     if !old_db.is_file() {
@@ -387,9 +436,9 @@ pub fn move_from(from: &Path, database: &Path, blobs: &Path) -> Result<Moved, St
     let mut moved = Moved { drawings: 0, versions: 0, files: 0, released: 0 };
     let read_err = |e: rusqlite::Error| format!("reading the old drawings: {e}");
     let mut st = old.prepare("SELECT id, folder, name, locked_by, archived, created_by, created_at FROM drawings ORDER BY id").map_err(read_err)?;
-    let drawings: Vec<(i64, String, String, Option<String>, i64, String, i64)> = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))).map_err(read_err)?.collect::<Result<_, _>>().map_err(read_err)?;
+    let drawings: Vec<OldDrawing> = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))).map_err(read_err)?.collect::<Result<_, _>>().map_err(read_err)?;
     let mut st = old.prepare("SELECT drawing, version, sha256, size, saved_by, saved_at, note FROM versions ORDER BY drawing, version").map_err(read_err)?;
-    let versions: Vec<(i64, i64, String, i64, String, i64, String)> = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))).map_err(read_err)?.collect::<Result<_, _>>().map_err(read_err)?;
+    let versions: Vec<OldVersion> = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))).map_err(read_err)?.collect::<Result<_, _>>().map_err(read_err)?;
     if let Some((_, folder, name, ..)) = drawings.iter().find(|(_, folder, name, ..)| !good_folder(folder) || !good_name(name)) {
         return Err(format!("the old server has a drawing whose name or folder isn't allowed here ({folder:.40}/{name:.40}); nothing was moved")); // WHAT: refused. WHY: CAD turns names into file names on a computer, so only names this server would take come in
     }
@@ -482,7 +531,7 @@ async fn blocking<T: Send + 'static>(server: &Shared, job: impl FnOnce(&mut Stor
     .map_err(|e| Denied::broke("finish with the CAD drawing", e))? // WHAT: the job's answer. WHY: a panicked job is a 500, never a hang
 }
 
-pub async fn list(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<Vec<Drawing>>> {
+pub(crate) async fn list(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<Vec<Drawing>>> {
     on(&server)?;
     crate::api::caller(&server, &headers)?; // WHAT: anybody signed in. WHY: everyone in the office may open the office's drawings
     blocking(&server, |s| Ok(s.drawings())).await.map(Json)
@@ -502,7 +551,7 @@ fn drawing_id(id: &str) -> Answer<i64> {
     id.parse().map_err(|_| Denied::missing("drawing")) // WHAT: 404 for anything not a number. WHY: the same answer as an id that doesn't exist
 }
 
-pub async fn create(State(server): State<Shared>, headers: HeaderMap, uri: Uri, body: Body) -> Answer<Json<Drawing>> {
+pub(crate) async fn create(State(server): State<Shared>, headers: HeaderMap, uri: Uri, body: Body) -> Answer<Json<Drawing>> {
     on(&server)?;
     let who = crate::api::writer(&server, &headers)?; // WHAT: someone who may change drawings. WHY: a viewer opens, never adds
     let at: Place = values(&uri)?;
@@ -515,7 +564,7 @@ pub async fn create(State(server): State<Shared>, headers: HeaderMap, uri: Uri, 
     .map(Json)
 }
 
-pub async fn one(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<Drawing>> {
+pub(crate) async fn one(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<Drawing>> {
     on(&server)?;
     crate::api::caller(&server, &headers)?;
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known
@@ -527,7 +576,7 @@ pub struct Which {
     version: Option<i64>,
 }
 
-pub async fn file(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, uri: Uri) -> Answer<Response> {
+pub(crate) async fn file(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, uri: Uri) -> Answer<Response> {
     on(&server)?;
     crate::api::caller(&server, &headers)?;
     let which: Which = values(&uri)?;
@@ -543,7 +592,7 @@ pub struct Saving {
     note: String,
 }
 
-pub async fn save(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, uri: Uri, body: Body) -> Answer<Json<Drawing>> {
+pub(crate) async fn save(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, uri: Uri, body: Body) -> Answer<Json<Drawing>> {
     on(&server)?;
     let who = crate::api::writer(&server, &headers)?;
     let saving: Saving = values(&uri)?;
@@ -557,7 +606,7 @@ pub async fn save(State(server): State<Shared>, headers: HeaderMap, UrlPath(id):
     .map(Json)
 }
 
-pub async fn lock(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<Drawing>> {
+pub(crate) async fn lock(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<Drawing>> {
     on(&server)?;
     let who = crate::api::writer(&server, &headers)?; // WHAT: checking out is the start of a change. WHY: a viewer can't hold a drawing others need
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known
@@ -575,7 +624,7 @@ pub struct Release {
     force: bool,
 }
 
-pub async fn unlock(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, uri: Uri) -> Answer<Json<Drawing>> {
+pub(crate) async fn unlock(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, uri: Uri) -> Answer<Json<Drawing>> {
     on(&server)?;
     let asked = values::<Release>(&uri); // WHAT: whether this is a forced check-in. WHY: it decides the door; a value that doesn't read is refused after the door
     let who = if asked.as_ref().is_ok_and(|r| r.force) {
@@ -593,7 +642,7 @@ pub async fn unlock(State(server): State<Shared>, headers: HeaderMap, UrlPath(id
     .map(Json)
 }
 
-pub async fn versions(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<Vec<Version>>> {
+pub(crate) async fn versions(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<Vec<Version>>> {
     on(&server)?;
     crate::api::caller(&server, &headers)?;
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known
@@ -605,7 +654,7 @@ pub struct Restoring {
     version: Option<i64>, // WHAT: the version to bring back. WHY: required, and refused after the caller is known
 }
 
-pub async fn restore(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, uri: Uri) -> Answer<Json<Drawing>> {
+pub(crate) async fn restore(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, uri: Uri) -> Answer<Json<Drawing>> {
     on(&server)?;
     let who = crate::api::writer(&server, &headers)?;
     let restoring: Restoring = values(&uri)?;
@@ -618,7 +667,7 @@ pub async fn restore(State(server): State<Shared>, headers: HeaderMap, UrlPath(i
     .map(Json)
 }
 
-pub async fn archive(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<serde_json::Value>> {
+pub(crate) async fn archive(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<serde_json::Value>> {
     on(&server)?;
     let who = crate::api::administrator(&server, &headers)?; // WHAT: hiding a drawing from everyone. WHY: an administrator's call only
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known

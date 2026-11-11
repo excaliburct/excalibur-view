@@ -26,7 +26,7 @@ fn license(modules: &[&str]) -> String {
         updates_through: "2099-12-31".into(),
         issued: "2026-11-10".into(),
         note: String::new(),
-        modules: modules.iter().map(|m| m.to_string()).collect(),
+        modules: modules.iter().map(std::string::ToString::to_string).collect(),
         key: KEY.into(),
         signature: String::new(),
     };
@@ -99,7 +99,11 @@ fn ask(office: &Office, method: &str, path: &str, token: &str, body: Option<&[u8
 
 fn sha(bytes: &[u8]) -> String {
     use sha2::Digest;
-    sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect() // WHAT: a file's SHA-256 in hex. WHY: Archetype names files by it
+    sha2::Sha256::digest(bytes).iter().fold(String::new(), |mut hex, b| {
+        use std::fmt::Write;
+        let _ = write!(hex, "{b:02x}"); // WHAT: two hex digits per byte. WHY: Archetype names files by its SHA-256 in hex
+        hex
+    })
 }
 
 #[test]

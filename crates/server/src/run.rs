@@ -66,13 +66,14 @@ pub async fn serve(
         .with_context(|| format!("listening on {}", config.listen))?;
     let address = listener.local_addr().unwrap_or(config.listen);
 
-    let secure = match config.secure_listen {
-        Some(at) => Some(secure_listener(&config.data, at).await?), // WHAT: HTTPS bound before anything is served. WHY: a server that can't keep its certificate private doesn't start half-secure
-        None => None,
+    let secure = if config.tls {
+        Some(secure_settings(&config.data, address)?) // WHAT: the certificate and TLS settings, before anything is served. WHY: a server that can't keep its certificate private doesn't start half-secure
+    } else {
+        None
     };
     let server = Arc::new(Server::new(store, config));
-    if let Some(port) = secure.as_ref().and_then(|s| s.0.local_addr().ok()).map(|a| a.port()) {
-        let _ = server.secure_port.set(port); // WHAT: where HTTPS listens. WHY: /health offers it from now on
+    if secure.is_some() {
+        let _ = server.secure_port.set(address.port()); // WHAT: HTTPS answers on the API's own port. WHY: /health offers it; a seat moves there
     }
     let claimed = !server.store.is_empty().unwrap_or(false);
     let name = api::installation_name(&server);
@@ -132,18 +133,13 @@ pub async fn serve(
     }
 
     let app = api::router(server).layer(tower_http::trace::TraceLayer::new_for_http());
-    let (stopping, stopped) = tokio::sync::watch::channel(false); // WHAT: one stop for both listeners. WHY: HTTP and HTTPS stop together
-    if let Some(secure) = secure {
-        let mut told = stopped.clone();
-        tokio::spawn(crate::tls::serve(secure.0, secure.1, app.clone(), async move {
-            let _ = told.wait_for(|s| *s).await; // WHAT: waits for the stop. WHY: the same moment the HTTP side stops
-        }));
-    }
-    let stop = async move {
-        stop.await; // WHAT: the caller's stop. WHY: Ctrl+C, or the service manager
-        let _ = stopping.send(true); // WHAT: passed on to HTTPS. WHY: both stop
-    };
     ready(&serving);
+    if let Some(settings) = secure {
+        tracing::info!("{name} is serving the Excalibur View API on {}/api/v1, HTTPS and plain HTTP on the one port", serving.url());
+        crate::tls::serve(listener, settings, app, stop).await; // WHAT: HTTPS and plain HTTP on the API's port. WHY: an update needs no new firewall rule or tunnel rule
+        tracing::info!("stopped cleanly");
+        return Ok(());
+    }
 
     tracing::info!("{name} is serving the Excalibur View API on {}/api/v1", serving.url());
     // With connect info, so the presence ledger can say which machine a seat
@@ -160,15 +156,14 @@ pub async fn serve(
     Ok(())
 }
 
-/// The HTTPS listener and its settings, with the certificate made the first
-/// time. Its pin goes in the log so a person can compare it with a seat's.
-async fn secure_listener(data: &std::path::Path, at: SocketAddr) -> Result<(tokio::net::TcpListener, Arc<rustls::ServerConfig>)> {
+/// The TLS settings, with the certificate made the first time. Its pin goes
+/// in the log so a person can compare it with a seat's.
+fn secure_settings(data: &std::path::Path, at: SocketAddr) -> Result<Arc<rustls::ServerConfig>> {
     let (cert, key) = crate::tls::load_or_make(data).map_err(anyhow::Error::msg)?; // WHAT: the server's own certificate. WHY: made once, kept after
     let config = crate::tls::server_config(&cert, &key).map_err(anyhow::Error::msg)?; // WHAT: the TLS settings. WHY: a damaged pair stops the start, saying so
     let pin = crate::tls::pin(&cert).map_err(anyhow::Error::msg)?; // WHAT: its pin. WHY: logged for a person to compare
-    let listener = tokio::net::TcpListener::bind(at).await.with_context(|| format!("listening for HTTPS on {at}"))?; // WHAT: the HTTPS port. WHY: set HYPERVIEW_SECURE_LISTEN=off where it is taken
-    tracing::info!("serving HTTPS on {at}; certificate pin {} (View); fingerprint {} (Excalibur CAD)", hub::pinned::short(&pin), crate::tls::fingerprint(&cert).unwrap_or_default()); // WHAT: said once at start, both ways the programs show it. WHY: a person compares what their program shows with this
-    Ok((listener, config))
+    tracing::info!("HTTPS on {at}; certificate pin {} (View); fingerprint {} (Excalibur CAD)", hub::pinned::short(&pin), crate::tls::fingerprint(&cert).unwrap_or_default()); // WHAT: said once at start, both ways the programs show it. WHY: a person compares what their program shows with this
+    Ok(config)
 }
 
 /// This machine's address on the network it is actually on. Asked of the
