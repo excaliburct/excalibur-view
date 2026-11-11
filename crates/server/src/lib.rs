@@ -18,6 +18,7 @@
 //! orchestration, and nothing that stops working when the machine reboots.
 
 pub mod api;
+pub mod archetype; // WHAT: Archetype's shared jobs, moved in. WHY: the Office Server's archetype part
 pub mod audit;
 pub mod auth;
 pub mod cad; // WHAT: Excalibur CAD's office drawings, moved in. WHY: the Office Server's cad part

@@ -848,6 +848,38 @@ another drawing.",
                 "responses": { "200": { "description": "Forgotten; the state after looking again." } }
             }
         },
+        "/archetype/jobs": {
+            "get": { "summary": "Archetype's jobs on this server, by name.", "description": "The archetype part of the Office Server: answers 404 unless the office's licence switches it on. Anybody signed in may read any job.", "responses": ok_list("ArchetypeJob") },
+            "post": { "summary": "Put a new job on the server, checked out to whoever put it there.", "description": "Writers only. Body: {name, number, machine}. 409 when a job with that name and number is already there.", "responses": ok("ArchetypeJob") }
+        },
+        "/archetype/jobs/{id}": {
+            "get": { "summary": "One job: its revision, and who has it checked out, on which computer.", "parameters": [path_param("id", "The job.")], "responses": ok("ArchetypeJob") }
+        },
+        "/archetype/jobs/{id}/files": {
+            "get": { "summary": "A check-in's files (path, SHA-256, size); the latest unless a revision is named.", "parameters": [path_param("id", "The job."), query_param("revision", "A revision. Leave it out for the latest.")], "responses": { "200": { "description": "{job, revision, files}." } } }
+        },
+        "/archetype/jobs/{id}/history": {
+            "get": { "summary": "Who checked in, out, gave back or took back, newest first. Every check-in is kept.", "parameters": [path_param("id", "The job.")], "responses": { "200": { "description": "The history." } } }
+        },
+        "/archetype/jobs/{id}/checkout": {
+            "post": { "summary": "Take the job to work on: one person, on one computer.", "description": "Body: {machine}. 409, saying who, where and since when, when someone else has it. Viewers are refused.", "parameters": [path_param("id", "The job.")], "responses": ok("ArchetypeJob") }
+        },
+        "/archetype/jobs/{id}/checkin": {
+            "post": { "summary": "Hand work back as a new revision, never over a newer one.", "description": "Body: {base_revision, comment, files, keep, machine}. Every file must have been sent first (PUT /archetype/files/{digest}); job.frame must be among them; paths are checked. 409 when it isn't this person's, or the server moved on.", "parameters": [path_param("id", "The job.")], "responses": { "200": { "description": "{job, revision, changes}." } } }
+        },
+        "/archetype/jobs/{id}/release": {
+            "post": { "summary": "Give a check-out back without checking anything in.", "parameters": [path_param("id", "The job.")], "responses": ok("ArchetypeJob") }
+        },
+        "/archetype/jobs/{id}/takeback": {
+            "post": { "summary": "Take a check-out back from somebody. Administrators signed in only.", "description": "Their work stays on their computer; the history says who took it back.", "parameters": [path_param("id", "The job.")], "responses": ok("ArchetypeJob") }
+        },
+        "/archetype/files/missing": {
+            "post": { "summary": "Which of these files Archetype hasn't been sent yet. Writers only.", "description": "Body: {digests}. Only files sent to Archetype count: nothing is learned about other files on the server.", "responses": { "200": { "description": "{digests}." } } }
+        },
+        "/archetype/files/{digest}": {
+            "put": { "summary": "Send one of a job's files. Writers only.", "description": "Kept only when its SHA-256 is the digest in the address. Read after the checks, up to the office's upload limit.", "parameters": [path_param("digest", "The file's SHA-256, lower-case hex.")], "responses": { "200": { "description": "Kept." } } },
+            "get": { "summary": "One of a job's files, by its SHA-256.", "description": "Only files sent to Archetype are handed out here.", "parameters": [path_param("digest", "The file's SHA-256, lower-case hex.")], "responses": { "200": { "description": "The file." } } }
+        },
         "/office": {
             "get": {
                 "summary": "The parts this Excalibur Office Server runs.",
@@ -1030,6 +1062,7 @@ fn schemas() -> Value {
             ("claimed", "boolean", "False only on a server nobody has set up yet. Absent on an older server, which means claimed."),
             ("joining", "string", "How somebody without an account gets one: code, open or closed."),
             ("secure_port", "integer", "The port this same API answers on over HTTPS, on this host, with the server's own certificate. A client keeps the certificate's pin (SHA-256 of its public key) from its first HTTPS connection and refuses another after; never take the pin from this answer. Absent when HTTPS is off."),
+            ("product", "string", "Always excalibur-office: one server for every Excalibur part."),
         ]),
         "SignIn": object(&[("email", "string", ""), ("password", "string", "")]),
         "Setup": object(&[
@@ -1187,6 +1220,19 @@ fn schemas() -> Value {
             ("saved_by", "string", ""),
             ("saved_at", "integer", ""),
             ("note", "string", "What changed."),
+        ]),
+        "ArchetypeJob": object(&[
+            ("id", "string", ""),
+            ("name", "string", "What's on its title block."),
+            ("number", "string", "The shop's job number."),
+            ("created", "string", "RFC 3339."),
+            ("created_by", "string", ""),
+            ("revision", "integer", "How many check-ins it has had."),
+            ("updated", "string", "The last check-in, RFC 3339."),
+            ("updated_by", "string", ""),
+            ("holder", "object", "Who has it checked out: person, name, since, machine. Absent when nobody does."),
+            ("files", "integer", "Files in the latest check-in."),
+            ("bytes", "integer", "Their size."),
         ]),
         "OfficePart": object(&[
             ("name", "string", "view, cad, archetype or citadel."),

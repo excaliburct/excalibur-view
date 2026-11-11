@@ -399,6 +399,11 @@ pub struct Health {
     /// this answer came over plain HTTP. Absent on an older server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secure_port: Option<u16>, // WHAT: where HTTPS answers. WHY: the way seats move off plain HTTP
+    /// What this server is: `excalibur-office`. Archetype's seats read it to
+    /// find their jobs under the Office Server's archetype part. Absent on an
+    /// older server.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub product: String, // WHAT: the product word. WHY: one server, every part; each program finds its own
 }
 
 /// What an administrator is told about reaching this server from a jobsite.

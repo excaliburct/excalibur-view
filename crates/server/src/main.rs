@@ -87,6 +87,23 @@ fn main() {
                 }
             }
         }
+        "--move-archetype" => { // WHAT: Archetype's server's jobs moved into this server's archetype part. WHY: one server for the office (docs/OFFICE-SERVER.md)
+            let Some(from) = std::env::args_os().nth(2) else {
+                eprintln!("  Say which folder: hyperview-server --move-archetype \"C:\\ProgramData\\Excalibur Archetype\\Server\\data\""); // WHAT: how to use it. WHY: a person types it
+                std::process::exit(2);
+            };
+            #[allow(unused_mut)] // WHAT: only Windows changes it. WHY: no warning elsewhere
+            let mut config = Config::from_environment(); // WHAT: this server's settings. WHY: its data folder
+            #[cfg(windows)]
+            if std::env::var_os("HYPERVIEW_DATA").is_none() && hyperview_server::winsvc::data_folder().exists() { config.data = hyperview_server::winsvc::data_folder(); } // WHAT: the installed service's data. WHY: the same folder the service serves
+            match hyperview_server::archetype::move_from(std::path::Path::new(&from), &config.database(), &config.blobs()) {
+                Ok(m) => println!("  Moved {} jobs ({} check-ins, {} files). {} were checked out there and are given back here. The old Archetype server's folder was not changed.", m.jobs, m.checkins, m.files, m.released), // WHAT: what came. WHY: a person checks it against the old server
+                Err(why) => {
+                    eprintln!("  {why}");
+                    std::process::exit(1);
+                }
+            }
+        }
         "--console" | "--serve" => console(),
         #[cfg(windows)]
         "" => front_door(),

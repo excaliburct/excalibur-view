@@ -333,6 +333,7 @@ impl Store {
             .with_context(|| format!("opening {}", database.display()))?;
         db.execute_batch(SCHEMA).context("setting up the database")?;
         db.execute_batch(crate::cad::SCHEMA).context("setting up CAD's drawings")?; // WHAT: the cad part's tables, in the same database. WHY: one backup and one restore carry them
+        db.execute_batch(crate::archetype::SCHEMA).context("setting up Archetype's jobs")?; // WHAT: the archetype part's tables. WHY: the same
         upgrade(&db).context("bringing the database up to date")?;
         Ok(Store {
             db: std::sync::Mutex::new(db),
@@ -346,6 +347,7 @@ impl Store {
         let db = Connection::open_in_memory()?;
         db.execute_batch(SCHEMA)?;
         db.execute_batch(crate::cad::SCHEMA)?; // WHAT: CAD's tables too. WHY: the same database as a real server
+        db.execute_batch(crate::archetype::SCHEMA)?; // WHAT: Archetype's too. WHY: the same
         upgrade(&db)?;
         Ok(Store {
             db: std::sync::Mutex::new(db),

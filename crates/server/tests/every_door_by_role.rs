@@ -508,6 +508,78 @@ const TABLE: &[Route] = &[
     }, // WHAT: Citadel's pin forgotten. WHY: an administrator signed in decides which certificate is believed
     Route {
         method: "GET",
+        path: "/archetype/jobs",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/archetype/jobs",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "GET",
+        path: "/archetype/jobs/{id}",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "GET",
+        path: "/archetype/jobs/{id}/files",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "GET",
+        path: "/archetype/jobs/{id}/history",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/archetype/jobs/{id}/checkout",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/archetype/jobs/{id}/checkin",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/archetype/jobs/{id}/release",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/archetype/jobs/{id}/takeback",
+        door: Door::Admin,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/archetype/files/missing",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "PUT",
+        path: "/archetype/files/{digest}",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "GET",
+        path: "/archetype/files/{digest}",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "GET",
         path: "/office",
         door: Door::Signed,
         sync: false,
@@ -712,7 +784,7 @@ fn licensing() -> ed25519_dalek::SigningKey {
     ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]) // WHAT: never a real key. WHY: only this test's server trusts it
 }
 
-/// A licence switching the cad part on, signed as the publishing script signs one.
+/// A licence switching the cad and archetype parts on, signed as the publishing script signs one.
 fn a_license_with_cad() -> String {
     use ed25519_dalek::Signer;
     let mut license = hub::license::License {
@@ -723,7 +795,7 @@ fn a_license_with_cad() -> String {
         updates_through: "2099-12-31".into(),
         issued: "2026-11-10".into(),
         note: String::new(),
-        modules: vec!["cad".into()],
+        modules: vec!["cad".into(), "archetype".into()],
         key: LICENSE_KEY.into(),
         signature: String::new(),
     }; // WHAT: an office licence with CAD. WHY: the probe's office runs it
@@ -766,6 +838,7 @@ fn an_office() -> Office {
     hyperview_server::license::install(&server, &a_license_with_cad()).expect("the licence with CAD"); // WHAT: CAD switched on. WHY: its doors are probed like every other
     let mut cad = hyperview_server::cad::Store::open(&config.database(), &config.blobs()).expect("CAD's drawings"); // WHAT: CAD's store. WHY: a real drawing to knock on
     assert_eq!(cad.create("Probe", "Plate.excad", b"v1", "sam@example.com"), Ok(1)); // WHAT: drawing 1. WHY: the id the CAD routes are asked with
+    server.store.with(|db| { db.execute("INSERT INTO arch_jobs (id, name, created, created_by) VALUES ('job_probe', 'Probe job', '2026-11-10T00:00:00Z', 'Sam')", [])?; Ok(()) }).expect("an Archetype job"); // WHAT: a real job. WHY: the id the Archetype routes are asked with
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -1038,9 +1111,12 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
                 p if p.starts_with("/keys/") => key(office, ADMIN, "assistant", None).1,
                 p if p.starts_with("/signoffs/") => fresh_signoff(), // WHAT: a line of its own. WHY: a signature is final, so each knock signs a fresh one.
                 p if p.starts_with("/cad/drawings/") => "1".to_string(), // WHAT: the probe's CAD drawing. WHY: a real one, so the door is what answers
+                p if p.starts_with("/archetype/jobs/") => "job_probe".to_string(), // WHAT: the probe's Archetype job. WHY: a real one, so the door is what answers
+                p if p.starts_with("/archetype/files/") => "a".repeat(64), // WHAT: a fingerprint. WHY: the door answers before the file is looked for
                 _ => "nothing_by_that_id".to_string(),
             },
         )
+        .replace("{digest}", &"a".repeat(64))
         .replace("{version}", "9.9.9")
         .replace("{code}", "beam-beam-beam-beam-beam-1234"); // WHAT: the ids put in. WHY: real ones where the thing exists, a missing one where it doesn't matter.
     let unique = format!("probe{n}"); // WHAT: a name used once. WHY: emails and job numbers mustn't clash.
@@ -1106,6 +1182,11 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
             Body::Json(json!({"folder": null}))
         }
         ("POST", "/cad/drawings") | ("PUT", "/cad/drawings/{id}/file") => Body::Raw("application/octet-stream".into(), b"a drawing".to_vec()), // WHAT: a drawing's bytes. WHY: what CAD sends
+        ("POST", "/archetype/jobs") => Body::Json(json!({"name": format!("Probe {unique}"), "machine": "PROBE"})), // WHAT: a new job, named once. WHY: two knocks never clash
+        ("POST", "/archetype/jobs/{id}/checkout") => Body::Json(json!({"machine": "PROBE"})),
+        ("POST", "/archetype/jobs/{id}/checkin") => Body::Json(json!({"base_revision": 0, "files": [], "machine": "PROBE"})),
+        ("POST", "/archetype/files/missing") => Body::Json(json!({"digests": []})),
+        ("PUT", "/archetype/files/{digest}") => Body::Raw("application/octet-stream".into(), b"x".to_vec()),
         ("POST", _) | ("DELETE", _) => Body::Raw("application/json".into(), Vec::new()), // WHAT: nothing in the body. WHY: the routes that take none.
         _ => Body::None,
     };

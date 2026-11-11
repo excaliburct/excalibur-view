@@ -31,7 +31,7 @@ pub struct Part {
 
 /// The parts whose code this build carries. A part is added here in the same
 /// change that brings its code in, and never before.
-pub const IN_THIS_BUILD: &[Module] = &[Module::View, Module::Cad]; // WHAT: View, and CAD's office drawings (crate::cad). WHY: a licensed part this build can't run must say so, not pretend
+pub const IN_THIS_BUILD: &[Module] = &[Module::View, Module::Cad, Module::Archetype]; // WHAT: View, CAD's office drawings (crate::cad) and Archetype's jobs (crate::archetype). WHY: a licensed part this build can't run must say so, not pretend
 
 /// The parts this office's licence switches on. View always; the rest only
 /// from a licence that checks out.
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn a_licensed_part_this_build_lacks_says_so_and_never_claims_to_run() {
-        let parts = parts_of(&[Module::View, Module::Archetype], IN_THIS_BUILD, None); // WHAT: Archetype licensed on a build without it. WHY: the gap Fleet must see
+        let parts = parts_of(&[Module::View, Module::Archetype], &[Module::View], None); // WHAT: Archetype licensed on a build without it. WHY: the gap Fleet must see
         assert_eq!(state_of(&parts, "archetype").state, "not-in-this-build");
         assert!(state_of(&parts, "archetype").licensed);
         assert!(state_of(&parts, "archetype").version.is_none());
@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn this_build_carries_view_and_cad_and_nothing_else_until_a_part_is_brought_in() {
-        assert_eq!(IN_THIS_BUILD, &[Module::View, Module::Cad]); // WHAT: pinned. WHY: adding a part here must be a deliberate, reviewed change
+    fn this_build_carries_view_cad_and_archetype_and_nothing_else_until_a_part_is_brought_in() {
+        assert_eq!(IN_THIS_BUILD, &[Module::View, Module::Cad, Module::Archetype]); // WHAT: pinned. WHY: adding a part here must be a deliberate, reviewed change
     }
 }

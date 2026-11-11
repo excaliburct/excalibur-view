@@ -466,6 +466,16 @@ pub fn router(server: Shared) -> Router {
         .route("/license", get(read_license).post(add_license))
         .route("/office", get(crate::office::read)) // WHAT: the parts this Office Server runs. WHY: the Manager and the program show what an office has
         .route("/admin/citadel/forget-pin", post(crate::citadel::forget_pin)) // WHAT: Citadel Server's pin forgotten. WHY: after a reinstall, an administrator lets the next look keep the new one
+        .route("/archetype/jobs", get(crate::archetype::list_jobs).post(crate::archetype::create_job)) // WHAT: Archetype's jobs, and a new one. WHY: the archetype part; 404 unless licensed; bodies are read after the checks
+        .route("/archetype/jobs/:id", get(crate::archetype::one_job)) // WHAT: one job. WHY: who has it, its revision
+        .route("/archetype/jobs/:id/files", get(crate::archetype::job_files)) // WHAT: a check-in's files. WHY: opened on any computer
+        .route("/archetype/jobs/:id/history", get(crate::archetype::job_history)) // WHAT: who did what. WHY: every check-in kept
+        .route("/archetype/jobs/:id/checkout", post(crate::archetype::check_out)) // WHAT: taken to work on. WHY: one person, one computer
+        .route("/archetype/jobs/:id/checkin", post(crate::archetype::check_in)) // WHAT: work handed back. WHY: a new revision, never over another
+        .route("/archetype/jobs/:id/release", post(crate::archetype::release)) // WHAT: given back. WHY: without checking anything in
+        .route("/archetype/jobs/:id/takeback", post(crate::archetype::take_back)) // WHAT: taken back by an administrator. WHY: somebody went home with it
+        .route("/archetype/files/missing", post(crate::archetype::missing_files)) // WHAT: which files a check-in must send. WHY: only those travel
+        .route("/archetype/files/:digest", axum::routing::put(crate::archetype::put_file).get(crate::archetype::get_file)) // WHAT: a job's file, sent and fetched. WHY: only files sent to Archetype are handed out here
         .route("/cad/drawings", get(crate::cad::list).post(crate::cad::create)) // WHAT: the office's CAD drawings, and a new one. WHY: the cad part; 404 unless licensed; the body is read by the handler, after its checks, capped at CAD's 256 MB
         .route("/cad/drawings/:id", get(crate::cad::one)) // WHAT: one CAD drawing. WHY: who has it out, its version
         .route("/cad/drawings/:id/file", get(crate::cad::file).put(crate::cad::save)) // WHAT: its bytes, and a new version. WHY: opened and saved by Excalibur CAD; the body is read after the checks
@@ -596,6 +606,18 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/license"),
     ("GET", "/office"), // WHAT: the Office Server's parts. WHY: described, so the test holds the two together
     ("POST", "/admin/citadel/forget-pin"), // WHAT: Citadel's pin forgotten. WHY: likewise
+    ("GET", "/archetype/jobs"), // WHAT: Archetype's jobs. WHY: likewise
+    ("POST", "/archetype/jobs"), // WHAT: a new one. WHY: likewise
+    ("GET", "/archetype/jobs/{id}"), // WHAT: one. WHY: likewise
+    ("GET", "/archetype/jobs/{id}/files"), // WHAT: its files. WHY: likewise
+    ("GET", "/archetype/jobs/{id}/history"), // WHAT: its history. WHY: likewise
+    ("POST", "/archetype/jobs/{id}/checkout"), // WHAT: checked out. WHY: likewise
+    ("POST", "/archetype/jobs/{id}/checkin"), // WHAT: checked in. WHY: likewise
+    ("POST", "/archetype/jobs/{id}/release"), // WHAT: given back. WHY: likewise
+    ("POST", "/archetype/jobs/{id}/takeback"), // WHAT: taken back. WHY: likewise
+    ("POST", "/archetype/files/missing"), // WHAT: files to send. WHY: likewise
+    ("PUT", "/archetype/files/{digest}"), // WHAT: a file sent. WHY: likewise
+    ("GET", "/archetype/files/{digest}"), // WHAT: a file fetched. WHY: likewise
     ("GET", "/cad/drawings"), // WHAT: CAD drawings. WHY: likewise
     ("POST", "/cad/drawings"), // WHAT: a new CAD drawing. WHY: likewise
     ("GET", "/cad/drawings/{id}"), // WHAT: one. WHY: likewise
@@ -660,6 +682,7 @@ async fn health(State(server): State<Shared>) -> Json<Health> {
             _ => None,
         },
         secure_port: server.secure_port.get().copied(), // WHAT: this server's HTTPS port, once it is listening. WHY: a seat moves there; never claimed before it listens
+        product: "excalibur-office".into(), // WHAT: what this server is. WHY: Archetype's seats find their jobs under its archetype part
     })
 }
 

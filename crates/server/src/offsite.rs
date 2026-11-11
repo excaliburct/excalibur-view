@@ -59,8 +59,8 @@ pub const VIEW: Product = Product {
     database: "hyperview.sqlite", // WHAT: the store's file. WHY: Config::database.
     blobs: "files",               // WHAT: the drawings by digest. WHY: Config::blobs.
     counts: &[
-        "people", "projects", "sets", "sheets", "markups", "chests", "folders", "files", "audit", "cad_drawings", "cad_versions",
-    ], // WHAT: what the drill counts, CAD's drawings and versions too. WHY: the records a shop would miss.
+        "people", "projects", "sets", "sheets", "markups", "chests", "folders", "files", "audit", "cad_drawings", "cad_versions", "arch_jobs", "arch_checkins",
+    ], // WHAT: what the drill counts, CAD's drawings and versions and Archetype's jobs and check-ins too. WHY: the records a shop would miss.
     references: view_references,  // WHAT: the digest columns. WHY: below.
     record: view_record,          // WHAT: the newest drawing set. WHY: the record the drill opens.
 };
@@ -73,6 +73,7 @@ fn view_references(db: &Connection) -> Result<BTreeSet<String>> {
         ("plugins", "digest"),
         ("files", "digest"),
         ("cad_versions", "sha256"),
+        ("arch_files", "digest"),
     ] {
         // WHAT: every table holding a file's digest. WHY: releases are left out: a server fetches those again from the feed.
         let sql = format!("SELECT {column} FROM {table}"); // WHAT: the column. WHY: names are constants above, never input.
@@ -3080,9 +3081,13 @@ mod cad_part {
         let db = rusqlite::Connection::open_in_memory().unwrap(); // WHAT: a database like the server's. WHY: the backup reads it
         db.execute_batch(crate::store::SCHEMA_FOR_TESTS).unwrap(); // WHAT: View's tables. WHY: the references query reads them all
         db.execute_batch(crate::cad::SCHEMA).unwrap(); // WHAT: CAD's. WHY: the same database
+        db.execute_batch(crate::archetype::SCHEMA).unwrap(); // WHAT: Archetype's. WHY: the same database
         db.execute("INSERT INTO cad_drawings (id, folder, name, created_by, created_at) VALUES (1, '', 'P.excad', 'sam', 1)", []).unwrap();
         db.execute("INSERT INTO cad_versions (drawing, version, sha256, size, saved_by, saved_at) VALUES (1, 1, ?1, 2, 'sam', 1)", [&"c".repeat(64)]).unwrap();
         assert!(super::view_references(&db).unwrap().contains(&"c".repeat(64)), "a CAD drawing's file is one the backup must carry");
         assert!(super::VIEW.counts.contains(&"cad_drawings") && super::VIEW.counts.contains(&"cad_versions"), "and the drill counts them");
+        db.execute("INSERT INTO arch_files (digest, bytes, sent) VALUES (?1, 3, 'now')", [&"d".repeat(64)]).unwrap(); // WHAT: a file sent for an Archetype job. WHY: it rides in the backup too
+        assert!(super::view_references(&db).unwrap().contains(&"d".repeat(64)), "an Archetype job's file is carried");
+        assert!(super::VIEW.counts.contains(&"arch_jobs") && super::VIEW.counts.contains(&"arch_checkins"), "and the drill counts Archetype's jobs");
     }
 }
