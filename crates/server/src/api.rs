@@ -3450,8 +3450,10 @@ pub fn address_of(peer: Option<std::net::SocketAddr>, headers: &HeaderMap, proxi
     let Some(peer) = peer else {
         return String::new(); // WHAT: nothing known. WHY: as before, such a request is not counted with the others.
     };
-    let cloudflare_here = peer.ip().to_canonical().is_loopback() && headers.contains_key("cf-connecting-ip"); // WHAT: Cloudflare's connector on this machine, set up by the program or by hand. WHY: without this, every internet caller shared 127.0.0.1, and one could hold up all of them, Fleet included (audit re-check)
-    if (proxied || cloudflare_here) && peer.ip().to_canonical().is_loopback() {
+    // WHAT: a forwarded address believed only when a proxy is expected here. WHY: believing Cloudflare's header from this
+    // machine without that let any program on the server claim a new address per guess and dodge the limits (the ASVS
+    // test caught it). An office running its own connector sets HYPERVIEW_BEHIND_PROXY=1 (docs/OFFICE-SERVER.md).
+    if proxied && peer.ip().to_canonical().is_loopback() {
         let said = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string); // WHAT: one header's text. WHY: read twice below.
         // WHAT: Cloudflare's own header first. WHY: Cloudflare sets it and overwrites any a caller sent.
         if let Some(ip) = said("cf-connecting-ip").and_then(|v| v.trim().parse::<std::net::IpAddr>().ok()) {

@@ -36,6 +36,13 @@ A module that isn't licensed isn't served: its routes answer 404, as if it didn'
 - **Nothing on the internet** except through the office's tunnel.
 - **Every change to the server core** gets an independent review and a live attack test before it merges.
 
+**Remote access through a connector set up by hand.** Remote access turned on in the program runs Cloudflare's
+connector itself, and the server then counts each internet caller by its own address. An office that runs its own
+`cloudflared` instead must set `HYPERVIEW_BEHIND_PROXY=1` on the service. Without it every internet caller looks
+like this machine, so one stranger's wrong guesses can hold up everyone else's sign-ins, Fleet's included. The
+server never believes a forwarded address unless a proxy is expected, so a program on the server can't claim a new
+address with each guess.
+
 ## How existing installs move over
 
 | Install | How it becomes an Office Server |
