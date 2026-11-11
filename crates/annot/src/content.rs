@@ -223,10 +223,11 @@ impl Content {
     }
 }
 
-/// A letter followed by a combining accent, as the one letter WinAnsi has
+/// A letter followed by a combining accent, as the one letter `WinAnsi` has
 /// for the pair: `e` + U+0301 is `é`. Text pasted from a Mac or a web page
 /// often comes this way, and each accent on its own became a question mark
 /// after its letter.
+#[must_use]
 pub fn composed(text: &str) -> String {
     // WHAT: for each combining accent, the letters it goes on and what they become. WHY: only the pairs WinAnsi has a letter for.
     const PAIRS: &[(char, &str, &str)] = &[
@@ -298,6 +299,8 @@ const HELVETICA_BOLD: [u16; 95] = [
 /// How wide a string will be in a family, in points. Courier is the same
 /// width for every letter; Times is measured as Helvetica, the same as the
 /// words typed on the sheet are shown, so the two wrap alike.
+#[must_use]
+#[allow(clippy::cast_precision_loss)] // WHAT: a letter count as a float. WHY: a note's letters are far below the 2^52 where a float loses a whole number
 pub fn width_of_in(text: &str, size: f64, family: crate::text::Family, bold: bool) -> f64 {
     match family {
         crate::text::Family::Courier => text.chars().count() as f64 * 600.0 * size / 1000.0, // WHAT: 600 thousandths of the size for every letter. WHY: Courier is fixed-width, and measuring it as Helvetica wrapped a Courier note far too late.
