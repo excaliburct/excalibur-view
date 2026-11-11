@@ -261,7 +261,14 @@ impl Store {
         let sha = self.put_blob(bytes).map_err(|e| Refused::Bad(format!("Couldn't store it: {e}")))?; // WHAT: the bytes kept first. WHY: the slow part, outside the write lock
         self.db.execute_batch("BEGIN IMMEDIATE").map_err(|e| Refused::Bad(e.to_string()))?; // WHAT: the check and the write as one. WHY: a check-out forced back and taken by someone else in between can't let this save land
         let saved = self.save_checked(id, base, &sha, bytes.len() as i64, who, note);
-        let _ = self.db.execute_batch(if saved.is_ok() { "COMMIT" } else { "ROLLBACK" }); // WHAT: kept or undone. WHY: all of it or none
+        if saved.is_err() {
+            let _ = self.db.execute_batch("ROLLBACK"); // WHAT: undone. WHY: a refused save leaves nothing behind
+            return saved;
+        }
+        if let Err(e) = self.db.execute_batch("COMMIT") {
+            let _ = self.db.execute_batch("ROLLBACK"); // WHAT: undone. WHY: a save that didn't commit is never reported as saved
+            return Err(Refused::Bad(format!("The save didn't finish ({e}). Save again.")));
+        }
         saved
     }
 

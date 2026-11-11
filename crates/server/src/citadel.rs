@@ -150,6 +150,9 @@ pub fn look(server: &Server) -> Seen {
 /// port first. Administrators signed in only; the log says who.
 pub async fn forget_pin(axum::extract::State(server): axum::extract::State<Shared>, headers: axum::http::HeaderMap) -> crate::api::Answer<axum::Json<serde_json::Value>> {
     let who = crate::api::administrator(&server, &headers)?; // WHAT: an administrator signed in, never a key. WHY: re-pinning decides which server is believed
+    if !crate::office::licensed(&server).contains(&hub::license::Module::Citadel) {
+        return Err(crate::api::Denied::missing("Citadel part on this server")); // WHAT: 404 without the part. WHY: nothing is looked at, or pinned, on an office that doesn't run Citadel
+    }
     server.store.set_setting(PIN, "").map_err(|e| crate::api::Denied::broke("forget Citadel's pin", e))?; // WHAT: no pin kept. WHY: the next look keeps the one that answers
     if let Ok(mut last) = LAST.lock() {
         *last = None; // WHAT: nothing seen yet. WHY: the parts list says "looking" until the next look
