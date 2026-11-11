@@ -96,6 +96,11 @@ impl<'a> Placer<'a> {
                 .replace(reference, Object::Dict(markup.dict.clone()));
             return true;
         }
+        if markup.subtype() == crate::markup::Subtype::FreeText && !markup.dict.has("Rotate") {
+            if let Some(turn) = self.turn_of_page_holding(reference) {
+                markup.turn_with_sheet(turn);
+            }
+        } // WHAT: a text box edited on a turned sheet takes the sheet's turn. WHY: one written sideways by 0.6.31 or earlier comes upright the next time it is touched
         let Some(appearance) = markup.finish_how(self.how) else {
             return false;
         };
@@ -109,6 +114,17 @@ impl<'a> Placer<'a> {
         self.update
             .replace(reference, Object::Dict(markup.dict.clone()));
         true
+    }
+
+    /// The turn (`/Rotate`) of the page whose annotations hold `reference`, or `None` when no page holds it.
+    fn turn_of_page_holding(&self, reference: Ref) -> Option<i32> {
+        (0..self.doc.page_count()).find_map(|i| {
+            let page = self.doc.page(i)?; // WHAT: each page. WHY: a replace is told the markup, not its page
+            self.doc
+                .annotations(&page)
+                .contains(&reference)
+                .then(|| self.doc.page_rotation(&page)) // WHAT: that page's turn. WHY: the text box reads upright with it
+        })
     }
 
     /// The scale in force on a page, read once and kept.
@@ -140,6 +156,9 @@ impl<'a> Placer<'a> {
                 }
             }
         }
+        if let Some(sheet) = self.doc.page(page) {
+            markup.turn_with_sheet(self.doc.page_rotation(&sheet));
+        } // WHAT: a new text box on a turned sheet takes the sheet's turn. WHY: its words read upright where the sheet is shown upright
         let mut appearance = markup.finish_how(self.how)?;
         // A picture inside a stamp is its own object: the appearance stream
         // names it, and one copy of the data serves however many times the
@@ -702,5 +721,77 @@ mod tests {
     fn a_known_instant_converts_to_the_right_calendar_date() {
         // 2026-09-17T12:00:00Z
         assert_eq!(civil(1_789_646_400), (2026, 9, 17, 12, 0, 0));
+    }
+}
+
+#[cfg(test)]
+mod turned_sheets {
+    // WHAT: a text box placed or edited on a sheet the PDF turns for showing. WHY: it takes the sheet's turn, so its words read upright (Creede, 2026-11-11)
+    use super::*;
+    use crate::markup::Subtype;
+
+    fn turned_doc() -> Document {
+        let bodies = [
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 2160 3024]/Rotate 90>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>",
+        ]; // WHAT: a 42 x 30 sheet stored sideways and turned, and an upright one. WHY: the sheet in Creede's screenshot, and the ordinary case
+        let mut file = b"%PDF-1.5\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in bodies.iter().enumerate() {
+            offsets.push(file.len());
+            file.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let table = file.len();
+        file.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", bodies.len() + 1).as_bytes());
+        for offset in &offsets {
+            file.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        file.extend_from_slice(format!("trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{table}\n%%EOF\n", bodies.len() + 1).as_bytes());
+        Document::from_bytes(file)
+    }
+
+    fn note() -> Markup {
+        let mut m = Markup::new(Subtype::FreeText);
+        m.set_box([100.0, 100.0, 200.0, 400.0]);
+        m.set_contents("SEE NOTE 1");
+        m
+    } // WHAT: a text box. WHY: the markup that has words
+
+    fn turn_in(saved: Vec<u8>, reference: Ref) -> Option<i64> {
+        let doc = Document::from_bytes(saved);
+        let back = doc.get(reference);
+        back.as_dict().unwrap().get("Rotate").and_then(|o| o.as_i64()) // WHAT: the saved box's turn. WHY: compared below
+    }
+
+    #[test]
+    fn a_text_box_put_on_a_turned_sheet_is_saved_with_the_sheets_turn() {
+        let doc = turned_doc();
+        let mut placer = Placer::new(&doc);
+        let turned = placer.add(0, &mut note()).unwrap();
+        let upright = placer.add(1, &mut note()).unwrap();
+        let mut cloud = Markup::new(Subtype::Square);
+        cloud.set_box([10.0, 10.0, 50.0, 50.0]);
+        let square = placer.add(0, &mut cloud).unwrap();
+        let saved = placer.finish().apply(&doc);
+        assert_eq!(turn_in(saved.clone(), turned), Some(90), "the turned sheet's box reads upright");
+        assert_eq!(turn_in(saved.clone(), upright), None, "an upright sheet's box is written as before");
+        assert_eq!(turn_in(saved, square), None, "a cloud is not turned");
+    }
+
+    #[test]
+    fn a_sideways_box_saved_by_an_older_view_comes_upright_when_it_is_edited() {
+        let doc = turned_doc();
+        let mut first = Placer::new(&doc);
+        let mut old = note();
+        old.set("Rotate", Object::Int(0));
+        let reference = first.add(0, &mut old).unwrap(); // WHAT: a box written unturned. WHY: stands in for one written by 0.6.31
+        let once = Document::from_bytes(first.finish().apply(&doc));
+        let mut back = read_page(&once, 0).into_iter().find(|(r, _)| *r == reference).unwrap().1; // WHAT: the box as read back. WHY: as the app reads it before an edit
+        back.dict.remove("Rotate"); // WHAT: as 0.6.31 left it, with no turn at all. WHY: the case on Creede's sheet
+        let mut edit = Placer::new(&once);
+        assert!(edit.replace(reference, &mut back));
+        assert_eq!(turn_in(edit.finish().apply(&once), reference), Some(90), "edited, it takes the sheet's turn");
     }
 }

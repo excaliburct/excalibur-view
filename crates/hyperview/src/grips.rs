@@ -394,6 +394,56 @@ pub fn move_box_only(m: &mut Markup, dx: f64, dy: f64) {
 /// side. A box with no leader is held by its top left corner, where it was
 /// put. Comes back true when the box changed.
 pub fn fit_to_words(markup: &mut Markup, text: &str) -> bool {
+    as_it_reads(markup, |m| fit_upright(m, text))
+}
+
+/// Turns a point a quarter turn at a time, counter-clockwise by `turn` degrees (0, 90, 180, 270), about the origin.
+fn turned(p: [f64; 2], turn: i32) -> [f64; 2] {
+    match turn.rem_euclid(360) {
+        90 => [-p[1], p[0]],
+        180 => [-p[0], -p[1]],
+        270 => [p[1], -p[0]],
+        _ => p,
+    } // WHAT: the exact quarter turns. WHY: no sine or cosine rounding; a box turned and back lands where it was
+}
+
+/// A box turned the same way: its two corners turned, and put back in order.
+fn turned_box(b: [f64; 4], turn: i32) -> [f64; 4] {
+    let (a, c) = (turned([b[0], b[1]], turn), turned([b[2], b[3]], turn)); // WHAT: two opposite corners. WHY: a quarter turn keeps a box a box
+    [a[0].min(c[0]), a[1].min(c[1]), a[0].max(c[0]), a[1].max(c[1])] // WHAT: left, bottom, right, top again. WHY: what the sizing reads
+}
+
+/// Runs `size` on a text box as its words read. A box on a turned sheet has its words turned (`/Rotate`), so "as wide
+/// as its longest line" runs up the page, not across it: its box and leader are turned upright, sized, and turned back.
+/// Nothing changes when `size` changes nothing.
+fn as_it_reads(markup: &mut Markup, size: impl FnOnce(&mut Markup) -> bool) -> bool {
+    let turn = markup.turn(); // WHAT: how far its words are turned. WHY: undone, then done again
+    if turn == 0 {
+        return size(markup);
+    } // WHAT: upright. WHY: exactly as before
+    let Some(b) = markup.drawn_box() else { return false };
+    let kept = markup.dict.clone(); // WHAT: the markup as it was. WHY: put back whole when nothing changed
+    markup.set_box(turned_box(b, -turn)); // WHAT: the box as the words read it. WHY: the sizing works upright
+    let line: Vec<[f64; 2]> = leader(markup).iter().map(|p| turned(*p, -turn)).collect();
+    if !line.is_empty() {
+        set_leader(markup, &line);
+    } // WHAT: the leader turned with it. WHY: the box is held on the side its leader comes in on
+    if !size(markup) {
+        markup.dict = kept;
+        return false;
+    } // WHAT: nothing to change. WHY: the file is left byte for byte as it was
+    if let Some(now) = markup.drawn_box() {
+        markup.set_box(turned_box(now, turn));
+    } // WHAT: the new box turned back onto the page. WHY: where the sheet shows it
+    let line: Vec<[f64; 2]> = leader(markup).iter().map(|p| turned(*p, turn)).collect();
+    if !line.is_empty() {
+        set_leader(markup, &line);
+    } // WHAT: the leader turned back. WHY: it still points at what it pointed at
+    true
+}
+
+/// [`fit_to_words`] for a box whose words read across the page.
+fn fit_upright(markup: &mut Markup, text: &str) -> bool {
     let Some(b) = markup.drawn_box() else { return false };
     let setting = annot::text::Setting::of(markup);
     let pad = 2.0 + markup.width().max(0.0);
@@ -443,6 +493,11 @@ pub fn fit_to_words(markup: &mut Markup, text: &str) -> bool {
 /// gets shorter than it was drawn: a box dragged out tall stays tall. Comes
 /// back true when the box changed.
 pub fn taller_for_words(markup: &mut Markup, text: &str) -> bool {
+    as_it_reads(markup, |m| taller_upright(m, text))
+}
+
+/// [`taller_for_words`] for a box whose words read across the page.
+fn taller_upright(markup: &mut Markup, text: &str) -> bool {
     let Some(b) = markup.drawn_box() else { return false };
     let setting = annot::text::Setting::of(markup);
     let pad = 2.0 + markup.width().max(0.0);
@@ -755,5 +810,45 @@ mod tests {
         // The top-left corner on the sheet is (100, 600).
         assert_eq!(grip_at(&hs, [102.0, 601.0], 5.0), Some(corner(true, true)));
         assert_eq!(grip_at(&hs, [150.0, 650.0], 5.0), None);
+    }
+}
+
+#[cfg(test)]
+mod turned_boxes {
+    // WHAT: a text box on a turned sheet grows the way its words read. WHY: 0.6.31 grew it up the stored page, which is sideways on the shown sheet (Creede, 2026-11-11)
+    use super::*;
+
+    fn turned_note(turn: i64) -> Markup {
+        let mut m = Markup::new(Subtype::FreeText);
+        m.set_box([100.0, 100.0, 140.0, 400.0]); // WHAT: 40 by 300 on the page. WHY: 300 wide and 40 tall as the turned sheet shows it
+        m.set("Rotate", pdf::Object::Int(turn));
+        m
+    }
+
+    #[test]
+    fn a_turned_box_keeps_its_shown_width_and_grows_down_the_shown_sheet() {
+        let mut m = turned_note(90);
+        let long = "Welds were completed 6 in on the top of the bars and 1 1/2 in on the vertical sides. Due to field conditions the welds on the bottom of the bar were unable to be completed.";
+        assert!(taller_for_words(&mut m, long), "the words need more room");
+        let b = m.drawn_box().unwrap();
+        assert!((b[1] - 100.0).abs() < 0.01 && (b[3] - 400.0).abs() < 0.01, "its shown width (the page's height) is kept: {b:?}"); // WHAT: 300 across as shown. WHY: a dragged-out box keeps its width
+        assert!((b[0] - 100.0).abs() < 0.01 && b[2] > 140.0, "it grows toward the shown bottom, the page's right: {b:?}"); // WHAT: down the shown sheet. WHY: shown down is page right on a sheet turned 90
+    }
+
+    #[test]
+    fn a_turned_box_with_room_is_left_byte_for_byte() {
+        let mut m = turned_note(90);
+        let before = m.dict.clone();
+        assert!(!taller_for_words(&mut m, "OK"), "one short line fits");
+        assert_eq!(format!("{:?}", m.dict), format!("{before:?}"), "nothing in it changed"); // WHAT: untouched. WHY: a no-op must not rewrite the file
+    }
+
+    #[test]
+    fn quarter_turns_go_and_come_back_exactly() {
+        for t in [0, 90, 180, 270, -90] {
+            let b = [100.0, 120.0, 140.0, 400.0];
+            assert_eq!(turned_box(turned_box(b, t), -t), b, "{t}"); // WHAT: there and back. WHY: an exact quarter turn loses nothing
+        }
+        assert_eq!(turned([1.0, 0.0], 90), [0.0, 1.0], "counter-clockwise, as /Rotate on a text box means");
     }
 }
