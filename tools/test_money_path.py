@@ -242,5 +242,37 @@ class PushingIt(unittest.TestCase):
             self.assertNotIn("Example Steel", log)
 
 
+class WhatASaleMeansForTheLicenceHeld(unittest.TestCase):
+    """square.py's own signing, with a made-up key, as the office server will read it."""
+
+    def a_folder(self, place, held):
+        key = os.path.join(place, "licence-signing.key")  # WHAT: a made-up key file. WHY: the real one never leaves the signing PC
+        with open(key, "w", encoding="utf-8") as f:
+            f.write("licence-test\n" + "0a" * 32 + "\n")  # WHAT: a name and a seed nobody uses. WHY: the shape publish.load_key reads
+        os.makedirs(os.path.join(place, "licenses"))
+        publish.write_license(held, os.path.join(place, "licenses", "held.evlicense"))  # WHAT: the licence the company has. WHY: a sale lands on it
+        return square.Folder(place)
+
+    def test_more_seats_keep_the_id_and_the_company_as_the_held_licence_spells_it(self):
+        with tempfile.TemporaryDirectory() as place:
+            held = dict(a_licence(company="Acme Builders, LLC", users=6), issued="2026-09-24", note="", key="licence-test")
+            folder = self.a_folder(place, held)
+            lic, why = square.next_license(folder, {"kind": "seats", "users": 3}, "Acme Builders", folder.key)  # WHAT: the buyer typed the name without ", LLC". WHY: the case that went wrong
+            self.assertIsNone(why)
+            self.assertEqual((lic["id"], lic["company"], lic["users"]), ("evl_abc123", "Acme Builders, LLC", 9))  # WHAT: the same licence, three more seats. WHY: what the server takes by itself
+
+    def test_a_date_the_server_would_not_read_is_never_signed(self):
+        with tempfile.TemporaryDirectory() as place:
+            key = os.path.join(place, "k.key")
+            with open(key, "w", encoding="utf-8") as f:
+                f.write("licence-test\n" + "0a" * 32 + "\n")
+            for bad in ("20271001", "2027-W40-1", "2027-02-30", "1999-01-01"):  # WHAT: shapes Python reads as dates and the server doesn't. WHY: a signed file every server refuses
+                with self.assertRaises(SystemExit):
+                    publish.make_license(key, "Acme", updates_through=bad)
+                with self.assertRaises(SystemExit):
+                    publish.make_license(key, "Acme", issued=bad)
+            self.assertEqual(publish.make_license(key, "Acme", updates_through="2027-10-01")["updates_through"], "2027-10-01")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

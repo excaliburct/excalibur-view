@@ -49,6 +49,11 @@ pub struct Config {
     /// file, the command line or the environment — and set only by a test,
     /// which cannot hold the publisher's private key.
     pub plugin_keys_for_tests: Vec<(String, [u8; 32])>,
+    /// Keys a licence may be signed with besides the ones compiled in. The
+    /// same rule as `plugin_keys_for_tests`: never read from a file, the
+    /// command line or the environment, set only by a test, so a test can
+    /// switch Office Server parts on with a licence it really signed.
+    pub license_keys_for_tests: Vec<(String, [u8; 32])>, // WHAT: a test's own licence key. WHY: parts are switched on only by a signed licence, in tests too
     /// Where the nightly off-site backup goes: a folder, or
     /// `rclone:REMOTE:bucket/folder`. None means the backup is off.
     pub offsite_target: Option<String>, // WHAT: HYPERVIEW_OFFSITE_TARGET. WHY: a copy on the same machine is not a backup (crate::offsite).
@@ -76,6 +81,7 @@ impl Default for Config {
             check_for_updates: false,
             replace_self: false,
             plugin_keys_for_tests: Vec::new(),
+            license_keys_for_tests: Vec::new(), // WHAT: none. WHY: only the compiled-in keys sign a licence in a real server
             offsite_target: None, // WHAT: off. WHY: nothing leaves the box until someone sets it up.
             offsite_work: None, // WHAT: none. WHY: the same.
             offsite_at: "01:30".into(), // WHAT: half past one at night. WHY: the office is shut and the night's sync is done.

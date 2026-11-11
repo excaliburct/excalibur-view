@@ -743,7 +743,10 @@ def next_license(folder, sale, company, key_path):
         through = publish.a_year_on(from_day)
         note = "Updates renewed"
     lic = publish.make_license(
-        key_path, company, edition=edition, users=users, updates_through=through, note=note,
+        # WHAT: the company exactly as the licence already held spells it, when there is one. WHY: the office server takes a renewal by
+        # itself only when id and company both match (license::is_a_renewal); "Acme Builders" on a licence held as "Acme Builders, LLC"
+        # would be paid for and never arrive. The cloud service does the same (licensing/src/index.js).
+        key_path, held["company"] if held else company, edition=edition, users=users, updates_through=through, note=note,
         id=held["id"] if held else None,
     )
     return lic, None
