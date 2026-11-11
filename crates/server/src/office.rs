@@ -55,7 +55,12 @@ pub fn serves_of(licensed: &[Module], built: &[Module], part: Module) -> bool {
 
 /// Every part Excalibur makes, with this office's standing for each.
 pub fn parts(server: &Server) -> Vec<Part> {
-    parts_of(&licensed(server), IN_THIS_BUILD, crate::citadel::last().as_ref())
+    let citadel = if server.cell.supervised() {
+        server.cell.seen().or_else(crate::citadel::last) // WHAT: the supervisor's word, else the last look at the cell's port while it starts. WHY: §6a: a cell given up on shows as not answering
+    } else {
+        Some(crate::citadel::Seen::NotFound) // WHAT: no cell here (no program, or not Windows). WHY: the cell is the only way Citadel runs; something else on 47110 is never reported as Citadel
+    };
+    parts_of(&licensed(server), IN_THIS_BUILD, citadel.as_ref())
 }
 
 /// [`parts`], from a licensed list, a built list and the last look at

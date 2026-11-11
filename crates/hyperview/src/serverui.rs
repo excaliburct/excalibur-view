@@ -5,7 +5,7 @@ use egui::{Color32, RichText};
 
 use crate::app::App;
 use crate::updatebox;
-use crate::server::{Ask, Standing, Told};
+use crate::server::{Ask, ComputerChange, Standing, Told};
 
 /// The purpose the server gives a sync key.
 pub const SYNC_PURPOSE: &str = "sync"; // WHAT: the word the server's POST /api/v1/me/keys takes. WHY: one spelling, used by the button and the label alike.
@@ -161,6 +161,20 @@ pub struct OfficePanel {
     pub folders_for: String, // WHAT: whose folders those are. WHY: a late answer for another project is dropped.
     /// A folder whose rule is being changed: (folder, the rule as it is being picked).
     pub changing_rule: Option<(String, hub::See)>, // WHAT: the folder and the rule being picked. WHY: changed only when Save is pressed.
+    /// The office's computers, when this computer is an admin's; `None`
+    /// otherwise, and then Studio shows no Computers section.
+    pub computers: Option<Vec<hub::device::Info>>, // WHAT: every computer on the office's device list. WHY: Studio → Office → Computers
+    pub computers_note: Option<String>, // WHAT: what was just done, or why not. WHY: said under the list
+    pub computers_asked: Option<std::time::Instant>, // WHAT: when the list was last asked for. WHY: a computer that isn't an admin's asks only once a minute
+    /// This computer waiting for an admin to approve it.
+    pub approval: Option<Approval>, // WHAT: the waiting screen, when it is open. WHY: §3: "Waiting for an admin to approve this computer"
+}
+
+/// The waiting screen's state.
+pub struct Approval {
+    pub device: String, // WHAT: this computer's device id. WHY: shown small, for an admin who asks which one
+    pub asked: Option<std::time::Instant>, // WHAT: when the server was last asked. WHY: every 5 s
+    pub said: Option<String>, // WHAT: an answer that ends the wait badly ("refused"). WHY: said in plain words
 }
 
 /// An account being made for somebody, as it is being typed.
@@ -228,6 +242,8 @@ struct PanelActions {
     make_group: Option<String>, // WHAT: Make group pressed, with the name. WHY: sent.
     /// (group, person, in): a tick in a group changed.
     change_group: Option<(String, String, bool)>, // WHAT: somebody ticked in or out. WHY: sent.
+    /// (device id, what to do, its name): an admin's button on a computer.
+    computer: Option<(String, ComputerChange, String)>, // WHAT: Approve, Refuse, Remove or Make/Unmake admin pressed. WHY: sent.
 }
 
 impl App {
@@ -517,6 +533,31 @@ impl App {
                     self.office.notices = office.notices;
                 }
                 Told::Parts(parts) => self.office.parts = parts, // WHAT: kept. WHY: the Office panel shows them
+                Told::Waiting { device } => {
+                    if let Some(signing) = self.signing_in.as_mut() {
+                        signing.waiting = false; // WHAT: the sign-in box stops its spinner. WHY: the waiting screen takes over
+                    }
+                    self.office.approval = Some(Approval { device, asked: Some(std::time::Instant::now()), said: None }); // WHAT: the waiting screen opens. WHY: §3
+                }
+                Told::Standing(me) => {
+                    if let Some(approval) = self.office.approval.as_mut() {
+                        match me.state.as_str() {
+                            "approved" => {
+                                self.office.approval = None; // WHAT: closed. WHY: approved; what waited carries on by itself
+                                self.status = "This computer is approved. Connecting…".into(); // WHAT: said. WHY: so nobody wonders what happened
+                            }
+                            "refused" => approval.said = Some("An admin said no to this computer. Ask them, then try again.".into()), // WHAT: said. WHY: plain words
+                            "removed" => approval.said = Some("This computer was taken off the office's list. Ask an admin, then try again.".into()), // WHAT: said. WHY: plain words
+                            _ => {} // WHAT: still waiting. WHY: asked again in 5 s
+                        }
+                    }
+                }
+                Told::Computers { list, note } => {
+                    self.office.computers = list; // WHAT: the list, or none for a computer that isn't an admin's. WHY: shown in Studio
+                    if note.is_some() {
+                        self.office.computers_note = note; // WHAT: what was done. WHY: said under the list
+                    }
+                }
                 Told::License { standing, added } => {
                     if added {
                         if let Some(l) = standing.as_deref() {
@@ -722,6 +763,51 @@ impl App {
     // window: find the server, set it up if nobody has, make an account if you
     // have not got one, sign in. Nobody types an address unless they want to,
     // and nobody runs anything.
+
+    /// "Waiting for an admin to approve this computer": shown while this
+    /// computer waits, asking the server every 5 s (§3).
+    pub fn approval_window(&mut self, ctx: &egui::Context) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(5); // WHAT: 5 s. WHY: §3
+        let Some(approval) = self.office.approval.as_mut() else { return }; // WHAT: nothing waits. WHY: no window
+        let due = approval.said.is_none() && approval.asked.is_none_or(|at| at.elapsed() >= EVERY); // WHAT: time to ask again, while still waiting. WHY: §3
+        if due {
+            approval.asked = Some(std::time::Instant::now());
+        }
+        let theme = self.chrome.theme;
+        let mut close = false;
+        egui::Window::new("Waiting for approval")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_min_width(380.0);
+                match approval.said.as_ref() {
+                    None => {
+                        ui.horizontal(|ui| {
+                            ui.spinner(); // WHAT: something is happening. WHY: nobody wonders if it froze
+                            ui.label(RichText::new("Waiting for an admin to approve this computer").strong().size(14.0));
+                        });
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("Ask whoever looks after the office server to open Studio, then Office, then Computers, and press Approve. This window closes by itself once they do.").size(11.5)); // WHAT: what to do, in plain words. WHY: for people who aren't technical
+                    }
+                    Some(said) => {
+                        ui.label(RichText::new(said).size(12.0)); // WHAT: refused or removed. WHY: plain words
+                    }
+                }
+                ui.add_space(6.0);
+                ui.label(RichText::new(format!("This computer: {} ({})", hub::device::machine_name(), &approval.device[..8.min(approval.device.len())])).color(theme.faint).size(10.0)); // WHAT: which computer, and the start of its id. WHY: an admin can match it
+                if ui.button(if approval.said.is_some() { "Close" } else { "Stop waiting" }).clicked() {
+                    close = true; // WHAT: closed. WHY: the person gave up
+                }
+            });
+        if close {
+            self.office.approval = None;
+            self.ask(Ask::StopWaiting); // WHAT: what waited is forgotten. WHY: never done later by surprise
+        } else if due {
+            self.ask(Ask::Standing); // WHAT: asked. WHY: every 5 s
+        }
+        ctx.request_repaint_after(EVERY); // WHAT: drawn again soon. WHY: so the next ask comes on time
+    }
 
     pub fn sign_in_dialog(&mut self, ctx: &egui::Context) {
         let Some(mut signing) = self.signing_in.take() else {
@@ -1333,6 +1419,7 @@ impl App {
                                 &mut actions,
                             );
                         }
+                        computers_section(ui, theme, &mut self.office, &mut actions); // WHAT: the office's computers, for an admin's computer. WHY: Studio → Office → Computers (§3)
                         password_section(ui, theme, &mut self.office, &mut actions);
                     }
                     Some(project) => {
@@ -1412,8 +1499,16 @@ impl App {
             self.standing.busy = Some("Removing them…".into());
             self.ask(Ask::RemovePerson { id, name });
         }
+        if let Some((id, change, name)) = actions.computer.take() {
+            self.ask(Ask::Computer { id, change, name }); // WHAT: an admin's answer. WHY: sent; the list comes back with it
+        }
         if actions.look_again {
             self.office.last_looked = Some(std::time::Instant::now());
+            let every = if self.office.computers.is_some() { std::time::Duration::from_secs(10) } else { std::time::Duration::from_secs(60) }; // WHAT: an admin's list every 10 s, others once a minute. WHY: a notice when someone is waiting, without asking the server needlessly
+            if self.office.computers_asked.is_none_or(|at| at.elapsed() >= every) {
+                self.office.computers_asked = Some(std::time::Instant::now());
+                self.ask(Ask::Computers); // WHAT: who is waiting. WHY: the notice and the list
+            }
             self.ask(Ask::Projects);
             self.ask(Ask::Chests);
             // And, if a project is open, what is in it -- a set issued again
@@ -2710,6 +2805,83 @@ fn licenses_in(places: &[(std::path::PathBuf, String)]) -> Vec<FoundLicense> {
     found.sort_by(|a, b| b.0.cmp(&a.0));
     found.dedup_by(|a, b| a.1.company == b.1.company);
     found.into_iter().take(3).map(|(_, f)| f).collect()
+}
+
+/// How long ago an RFC 3339 time was, in words: "2 minutes ago".
+fn ago(at: &str) -> String {
+    let Some(then) = hub::device::unix_of(at) else { return "a while ago".into() }; // WHAT: the time, or a vague word. WHY: a time that doesn't read isn't guessed at
+    let seconds = (hub::device::unix_now() - then).max(0); // WHAT: how long since. WHY: in words below
+    match seconds {
+        0..=59 => "just now".into(),
+        60..=119 => "a minute ago".into(),
+        120..=3599 => format!("{} minutes ago", seconds / 60),
+        3600..=7199 => "an hour ago".into(),
+        7200..=86_399 => format!("{} hours ago", seconds / 3600),
+        _ => format!("{} days ago", seconds / 86_400),
+    }
+}
+
+/// The sentence an admin reads for a waiting computer, in §3's words:
+/// who, which computer, the Windows user, which app, when and from where.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn waiting_sentence(c: &hub::device::Info) -> String {
+    let who = if c.display_name.trim().is_empty() { c.os_user.as_str() } else { c.display_name.as_str() }; // WHAT: the person, or the Windows user. WHY: always somebody
+    let from = if c.asked_from.is_empty() { String::new() } else { format!(" from {}", c.asked_from) }; // WHAT: where from, when known. WHY: an admin can tell the office's own computers
+    format!("{who} ({}, signed in to Windows as {}) wants to use {}. Asked {}{from}.", c.machine, c.os_user, hub::device::app_title(&c.app), ago(&c.asked))
+}
+
+/// Studio → Office → Computers: who is waiting, with Approve, Approve as
+/// admin and Refuse; who is in, with Remove and Make or Unmake admin. Shown
+/// only on an admin's computer.
+fn computers_section(ui: &mut egui::Ui, theme: ui::chrome::Theme, office: &mut OfficePanel, actions: &mut PanelActions) {
+    let Some(computers) = office.computers.as_ref() else { return }; // WHAT: not an admin's computer. WHY: nothing to show
+    let waiting: Vec<&hub::device::Info> = computers.iter().filter(|c| c.state == "waiting").collect(); // WHAT: who waits. WHY: first, and the notice
+    let approved: Vec<&hub::device::Info> = computers.iter().filter(|c| c.state == "approved").collect(); // WHAT: who is in. WHY: the second list
+    let title = if waiting.is_empty() { "Computers".to_string() } else { format!("Computers  ({} waiting)", waiting.len()) }; // WHAT: the heading, with the count. WHY: a notice when someone is waiting
+    ui.add_space(8.0);
+    if !waiting.is_empty() {
+        ui.label(RichText::new(if waiting.len() == 1 { "Someone is waiting for you to approve their computer.".to_string() } else { format!("{} people are waiting for you to approve their computers.", waiting.len()) }).color(theme.warn).strong().size(12.0)); // WHAT: the notice. WHY: §3: admins are told someone is waiting
+    }
+    egui::CollapsingHeader::new(RichText::new(title).color(theme.faint).size(11.0)).id_salt("computers").default_open(!waiting.is_empty()).show(ui, |ui| {
+        for c in &waiting {
+            ui.label(RichText::new(waiting_sentence(c)).size(11.5)); // WHAT: who, which computer, which app, when, from where. WHY: §3's wording
+            let name = if c.display_name.is_empty() { c.machine.clone() } else { c.display_name.clone() }; // WHAT: how the sentence after names it. WHY: plain
+            ui.horizontal(|ui| {
+                if ui.button("Approve").clicked() {
+                    actions.computer = Some((c.id.clone(), ComputerChange::Approve, name.clone())); // WHAT: let in. WHY: the usual answer
+                }
+                if ui.button("Approve as admin").on_hover_text("They can approve other computers too.").clicked() {
+                    actions.computer = Some((c.id.clone(), ComputerChange::ApproveAsAdmin, name.clone())); // WHAT: let in as an admin. WHY: §3
+                }
+                if ui.button("Refuse").clicked() {
+                    actions.computer = Some((c.id.clone(), ComputerChange::Refuse, name.clone())); // WHAT: turned down. WHY: §3
+                }
+            });
+            ui.add_space(6.0);
+        }
+        if waiting.is_empty() {
+            ui.label(RichText::new("Nobody is waiting.").color(theme.faint).size(10.5)); // WHAT: said. WHY: an empty list reads as broken otherwise
+        }
+        ui.add_space(4.0);
+        ui.label(RichText::new("Approved").strong().size(11.5)); // WHAT: the second list. WHY: who can use the office server
+        for c in &approved {
+            let who = if c.display_name.is_empty() { c.os_user.as_str() } else { c.display_name.as_str() }; // WHAT: the person. WHY: named first
+            let name = format!("{who} ({})", c.machine); // WHAT: "Dana (DANA-LAPTOP)". WHY: what an admin recognises
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{name}, {}{}", hub::device::app_title(&c.app), if c.admin { ", admin" } else { "" })).size(11.0)); // WHAT: who, the app, and whether an admin. WHY: one line each
+                if ui.small_button("Remove").on_hover_text("This computer has to ask again to come back.").clicked() {
+                    actions.computer = Some((c.id.clone(), ComputerChange::Remove, name.clone())); // WHAT: taken off. WHY: §3
+                }
+                let (label, change) = if c.admin { ("Unmake admin", ComputerChange::UnmakeAdmin) } else { ("Make admin", ComputerChange::MakeAdmin) }; // WHAT: the one that applies. WHY: §3
+                if ui.small_button(label).clicked() {
+                    actions.computer = Some((c.id.clone(), change, name.clone()));
+                }
+            });
+        }
+        if let Some(note) = office.computers_note.as_ref() {
+            ui.label(RichText::new(note).color(theme.faint).size(10.5)); // WHAT: what was just done, or why not. WHY: "Make someone else an admin first" is read here
+        }
+    });
 }
 
 /// Studio → Office → Parts: every part of the Office Server, and how each is.

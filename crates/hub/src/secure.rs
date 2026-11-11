@@ -118,6 +118,15 @@ pub fn is_pinned(base: &str, book: &PinBook) -> bool {
     }
 }
 
+/// Where else a seat looks, and what else it holds a server to: the file
+/// every app on this computer shares (`crate::office`), and the office
+/// certificate keys this build carries.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Also<'a> {
+    pub shared: Option<&'a std::path::Path>, // WHAT: the shared office.json, when the app uses it. WHY: §2.3: the second app on a PC never asks again
+    pub office_keys: &'a [(&'a str, &'a str)], // WHAT: the office certificate keys built in. WHY: §2.4; empty until certificates are signed
+}
+
 /// The client a seat should use for `base`: the server's HTTPS by its kept pin
 /// (kept now, on a first connection), or `base` itself when the server offers
 /// no HTTPS and this seat has never held a pin for it.
@@ -126,6 +135,23 @@ pub fn is_pinned(base: &str, book: &PinBook) -> bool {
 ///
 /// Refused, in words a person can act on, when it can't be done.
 pub fn open(base: &str, book: &PinBook) -> Result<Client, Trouble> {
+    open_with(base, book, Also::default()) // WHAT: the pin book alone. WHY: what every caller did before the shared file
+}
+
+/// [`open`], also reading and keeping the pin in the shared file, and holding
+/// a server once seen verified to its office certificate (§2).
+///
+/// - A first contact keeps a pin only when the server's address is on a
+///   local network (§2.2); anywhere else it is refused.
+/// - A pin kept, here or in the shared file, is never exchanged for another
+///   (guard 5).
+/// - A server whose office certificate was once seen verified is never
+///   accepted without one again (guard 6).
+///
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
+pub fn open_with(base: &str, book: &PinBook, also: Also<'_>) -> Result<Client, Trouble> {
     let (server, host) = match address(base)? {
         Address::Https => return Ok(Client::new(base)), // WHAT: an https:// address as it is. WHY: its own certificate authority checks it
         Address::Plain(server, host) => (server, host),
@@ -135,8 +161,13 @@ pub fn open(base: &str, book: &PinBook) -> Result<Client, Trouble> {
     if damaged {
         return Err(Trouble::Unreadable("this computer's record of the office server's certificate doesn't read. Ask whoever looks after the server for its fingerprint before connecting again.".into())); // WHAT: refused. WHY: a damaged book never means "no pins"
     }
-    let kept = book.pin(&server);
-    let held = book.holds(&server);
+    let shared = match also.shared.map(crate::office::read) {
+        Some(Err(why)) => return Err(Trouble::Unreadable(format!("{why}. Ask whoever looks after the server before connecting again."))), // WHAT: refused. WHY: a damaged shared record never means "no pin"
+        Some(Ok(found)) => found.filter(|s| crate::office::server_of(&s.address).as_deref() == Some(server.as_str())), // WHAT: the shared record, if it is for this server. WHY: another office's pin is never used here
+        None => None,
+    };
+    let kept = book.pin(&server).or_else(|| shared.as_ref().map(|s| s.pin.clone())); // WHAT: this app's pin, or the one another app on this PC kept. WHY: §2.3
+    let held = book.holds(&server) || shared.is_some(); // WHAT: whether any pin is held for it. WHY: then plain HTTP is never fallen back to
     let offered = Client::new(&plain).health().ok().and_then(|h| h.secure_port); // WHAT: where the server says HTTPS is. WHY: only the port is taken from plain HTTP, never the pin
     let port = match (offered, held) {
         (Some(port), _) => port,
@@ -146,22 +177,44 @@ pub fn open(base: &str, book: &PinBook) -> Result<Client, Trouble> {
         }
     };
     let secure = format!("https://{host}:{port}"); // WHAT: the same host, its HTTPS port. WHY: the server said where
-    match kept {
-        Some(pin) => Client::pinned(&secure, &pin).and_then(|c| c.health().map(|_| c)).map_err(|e| changed_or(e, &secure, &pin)), // WHAT: the kept pin, checked by answering. WHY: a changed certificate is refused with words, not a stack of TLS errors
-        None if held => Err(Trouble::Unreadable("this computer's record of the server's certificate is damaged. Ask whoever looks after the server for its fingerprint before connecting again.".into())), // WHAT: a damaged entry. WHY: never treated as a first connection
+    let client = match kept {
+        Some(pin) => Client::pinned(&secure, &pin).and_then(|c| c.health().map(|_| c)).map_err(|e| changed_or(e, &secure, &pin))?, // WHAT: the kept pin, checked by answering. WHY: guard 5: a changed certificate is refused with words, never accepted
+        None if held => return Err(Trouble::Unreadable("this computer's record of the server's certificate is damaged. Ask whoever looks after the server for its fingerprint before connecting again.".into())), // WHAT: a damaged entry. WHY: never treated as a first connection
         None => {
+            if !crate::office::host_is_local(&host, port) {
+                return Err(Trouble::Unreadable(format!("{host} isn't on the office network, so this computer won't take its certificate on trust. Link this computer to the office server once from inside the office."))); // WHAT: refused. WHY: §2.2: a first contact pins only on a local address
+            }
             let (agent, check) = crate::pinned::agent(None).map_err(Trouble::Unreadable)?; // WHAT: a first connection, no pin yet. WHY: the pin is kept from this handshake
             let answered = agent.timeout_connect(std::time::Duration::from_secs(8)).build().get(&format!("{secure}{}/health", crate::API_ROOT)).call(); // WHAT: the health answer, over HTTPS. WHY: proves the server answers there before its pin is kept
             let seen = check.seen();
             match (answered, seen) {
                 (Ok(_), Some(pin)) => {
                     book.keep(&server, &pin).map_err(|e| Trouble::Unreadable(format!("couldn't keep the server's certificate: {e}")))?; // WHAT: kept. WHY: every connection after must show this certificate
-                    Client::pinned(&secure, &pin)
+                    Client::pinned(&secure, &pin)?
                 }
-                _ => Ok(Client::new(&plain)), // WHAT: HTTPS offered but not answering, never pinned. WHY: a first connection may still use plain HTTP; once pinned it never will
+                _ => return Ok(Client::new(&plain)), // WHAT: HTTPS offered but not answering, never pinned. WHY: a first connection may still use plain HTTP; once pinned it never will
             }
         }
+    };
+    let pin = client.pin().unwrap_or_default().to_string(); // WHAT: the pin this connection is held to. WHY: compared with the certificate, and shared
+    let verified = match client.office_identity() {
+        Ok(Some(text)) => crate::office::check_certificate(&text, also.office_keys).is_some_and(|c| c.pin == pin), // WHAT: a valid certificate for this very pin. WHY: §2.4: then the server is verified
+        _ => false, // WHAT: none, or none that reads. WHY: unverified
+    };
+    let was_verified = shared.as_ref().is_some_and(|s| s.verified); // WHAT: whether this server was ever seen verified on this PC. WHY: guard 6
+    if was_verified && !verified {
+        return Err(Trouble::Refused(crate::model::Problem::new(
+            "office_unverified",
+            "The office server's certificate was checked before, and it isn't there or doesn't check out now. That happens when someone is pretending to be the server. Ask whoever looks after it before connecting.",
+        ))); // WHAT: refused. WHY: guard 6: once verified, never accepted unverified
     }
+    if let Some(path) = also.shared {
+        let record = crate::office::Shared { address: secure.clone(), pin: pin.clone(), verified: verified || was_verified }; // WHAT: this server's address, pin, and whether verified. WHY: the next app on this PC reads it
+        if shared.as_ref() != Some(&record) {
+            let _ = crate::office::write(path, &record); // WHAT: kept for the other apps. WHY: §2.3; a failure to share never stops this app connecting
+        }
+    }
+    Ok(client)
 }
 
 /// A failed pinned connection, in words a person can act on.
@@ -235,5 +288,16 @@ mod tests {
         assert!(is_pinned("http://never-seen:1", &book));
         assert!(book.keep("b:2", &"d".repeat(64)).is_err(), "nothing written over it");
         assert!(open("http://never-seen:1", &book).is_err(), "and no connection falls back to plain HTTP");
+    }
+
+    #[test]
+    fn a_damaged_shared_record_never_means_no_pin() {
+        let book = a_book();
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let shared = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("shared-{n}.json"));
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        std::fs::write(&shared, b"{trunc").unwrap();
+        assert!(open_with("http://127.0.0.1:1", &book, Also { shared: Some(&shared), office_keys: &[] }).is_err());
+        let _ = std::fs::remove_file(&shared);
     }
 }

@@ -1,6 +1,8 @@
 # Excalibur Office Server
 
-One server for every office, whatever Excalibur programs it runs. It is View's office server, grown: every View server
+One server for every office, whatever Excalibur programs it runs. **It is the only Excalibur server:** there is no
+separate CAD server, Archetype server or Citadel Server to install any more (Creede, 2026-11-11). Each of those is
+moved into the Office Server once, then retired. It is View's office server, grown: every View server
 already out there becomes an Office Server through its own signed update, keeping its drawings, accounts, join codes,
 certificate and settings. Nobody reinstalls anything and no computer connects again.
 
@@ -16,9 +18,9 @@ on by the office's signed licence:
 | Module | What it does | Where it comes from |
 |---|---|---|
 | `view` | drawings, takeoff, markups, sign-offs, the field package | View's server (always on) |
-| `cad` | Excalibur CAD's office drawings: check-out, check-in, versions | Excalibur CAD's server, moved in |
-| `archetype` | Archetype's shared jobs and releases | Archetype's server (a cut-down View server already) |
-| `citadel` | Citadel's estimating jobs, kept **blind** | Citadel Server, run alongside (below) |
+| `cad` | Excalibur CAD's office drawings: check-out, check-in, versions | built in; an old CAD server's drawings are moved in (`--move-cad`) |
+| `archetype` | Archetype's shared jobs and releases | built in; an old Archetype server's jobs are moved in (`--move-archetype`) |
+| `citadel` | Citadel's estimating jobs, kept **blind** | the Citadel cell: `citadel\Citadel Server.exe`, shipped inside the Office Server and run by it as a supervised child process under a restricted token (docs/OFFICE-ENROLLMENT.md §6a). This is the only way Citadel runs |
 
 A module that isn't licensed isn't served: its routes answer 404, as if it didn't exist.
 
@@ -28,8 +30,9 @@ A module that isn't licensed isn't served: its routes answer 404, as if it didn'
   without one (every licence today) means View only, so old licences keep working and still verify.
 - **One update channel, signed on the YubiKey,** with the rollback the parts already have. Nothing updates without a
   version Creede signed.
-- **Each part in its own limited account.** Citadel keeps its own Windows service account and its own locked folders; the
-  Office Server installs it, updates it and watches it, and never reads its data. Citadel stays blind: the bids are sealed
+- **Each part in its own limited account.** The Citadel cell runs under a restricted token with its own SID and its own
+  locked data folder (`ProgramData\Excalibur Office\citadel`); the Office Server starts it, restarts it and answers its
+  device questions over a locked pipe, and never reads its data. Citadel stays blind: the bids are sealed
   on the office's computers and the server only ever holds sealed bytes.
 - **Encrypted, pinned connections everywhere.** View's server moves to the same HTTPS with a pinned fingerprint that
   Citadel and CAD already use (today it is plain HTTP on the office network).
@@ -45,12 +48,14 @@ address with each guess.
 
 ## How existing installs move over
 
-| Install | How it becomes an Office Server |
-|---|---|
-| Mesa Fab's View server | the next View server update (Fleet push), in place |
-| Mesa Fab's Archetype server | its next update moves its jobs into the Office Server's `archetype` module, then the old service is retired |
-| The separate CAD server | a one-click move of its drawings into the `cad` module, then it is retired |
-| An office's Citadel Server | the Office Server takes it over as its `citadel` part: same service, same certificate, no re-pairing |
+Every separate server is **moved in, then retired**. Nothing is retired until the move has been checked.
+
+| Install | Moved in by | Then retired by Creede |
+|---|---|---|
+| Mesa Fab's View server | the next server update (Fleet push), in place: it *becomes* the Office Server | nothing to retire |
+| Mesa Fab's Archetype server | `hyperview-server --move-archetype "<old Archetype data folder>"` on the Office Server's machine | once the moved jobs are checked in Archetype: stop the old Archetype server's service, then remove it (`sc stop` / `sc delete`, or its own uninstaller); keep its data folder until the next verified backup |
+| A separate Excalibur CAD server | `hyperview-server --move-cad "<old CAD data folder>"` (below) | once the moved drawings are checked in CAD: stop the old CAD server's service, then remove it; keep its data folder until the next verified backup |
+| An office's Citadel Server 1.0.x | the Office Server's update carries `citadel\Citadel Server.exe`; on its first start over the old Citadel data the cell sends its paired computers to the Office Server once (`migrate`), approved, with who paired them | once LatCon Estimating links to the Office Server and the computers show approved: stop the old Citadel Server service and remove it, so only the cell answers on 47110 |
 
 ## How every part stays up to date
 
@@ -63,7 +68,7 @@ address with each guess.
 | View on iPads and Android | From the stores (Release workflow) | the store release scripts' tests |
 | Excalibur CAD | From its own signed feed (GitHub), whatever server it signs in to | CAD's update tests |
 | Archetype | From its own Archetype server, or from its own signed feed when its server is an Office Server (an Office Server hands out View's releases, which Archetype would refuse) | ExcaliburArchetype branch archetype-office-client-20261110 |
-| Citadel Server | Its own signed updates, sent by the maintenance channel as today; the Office Server reports the version that results | Citadel's own tests |
+| The Citadel cell | Inside the Office Server's own signed update: both update together | the cell supervisor's tests (`crate::cell`) and Citadel's own |
 | The estimating program on each computer | Its own signed feed, as today | its own tests |
 | Licences | The office's licence renews itself from the publisher when bought seats, parts or years are added; a renewal can never take a part, seat or year away | the licence tests |
 
@@ -102,8 +107,8 @@ Each step merges on its own, with tests, the guards proven, and a review; each s
 | 4. HTTPS | server side done: its own certificate, and HTTPS on the API's own port 8714, beside plain HTTP on the same port (each connection's first byte says which), `secure_port` in /health. Next: the seats move to it and pin it (the View app), then plain HTTP can be turned off |
 | 5. CAD part | done on both sides: CAD's check-out/check-in store under `/api/v1/cad/...` with the office's own accounts, kept in the server's own database and file store (so the nightly off-site backup and its drill carry CAD's drawings); `hyperview-server --move-cad "<old CAD data folder>"` moves a CAD server's drawings in. Excalibur CAD signs in to an Office Server (branch excad-office-server-20261110) |
 | 6. Archetype part | done on both sides: Archetype's jobs under `/api/v1/archetype/...` with the office's accounts, in the server's own database and file store (backed up with the rest); only files sent to Archetype are handed out by it, so a View drawing's fingerprint opens nothing; `hyperview-server --move-archetype "<old Archetype data folder>"` moves an Archetype server's jobs in. Archetype finds its jobs on an Office Server (ExcaliburArchetype branch archetype-office-client-20261110). Branch office-archetype-20261110 |
-| One installer and Manager | the server program already installs itself as one Windows service carrying View, CAD and Archetype; Citadel Server stays its own installer and service on purpose (blind, its own account). Studio > Office in View shows every part and how it is (running and version, not licensed, needs an update, not found, not answering, a changed certificate) |
-| The USB kit | after **C** signs the releases: the Office Server (View Server 0.7.0), Citadel Server, the estimating program, View, the checklists and the sums |
+| One installer and Manager | the server program installs itself as one Windows service carrying View, CAD, Archetype and the Citadel cell; there is no separate Citadel Server service any more (branch office-enroll-20261111: the cell is started, restarted and answered by the Office Server, under a restricted token). Studio > Office in View shows every part and how it is (running and version, not licensed, needs an update, not found, not answering, a changed certificate) |
+| The USB kit | after **C** signs the releases: the Office Server (View Server 0.7.0, carrying the Citadel cell), the estimating program, View, the checklists and the sums |
 
 Ports: TCP 8714 (the API, HTTPS and plain HTTP on the one port) and UDP 8715 (seats find the server). Nothing
 new to open: an office's firewall and its tunnel's rules stay exactly as they are when the server updates to the
@@ -112,6 +117,13 @@ Office Server. The program's own "host the drawings on this computer" server sta
 Independent security review (2026-11-10): one high (CAD read drawings before its checks), one medium (a seat's
 fallback address could take its sign-in after HTTPS was blocked) and nine lows, all fixed on this branch with tests;
 see the commit "Review fixes".
+
+### Moving an Archetype server in
+1. Stop the old Archetype server's service.
+2. On the server, in an administrator's Command Prompt:
+   `"C:\Program Files\Excalibur View Server\hyperview-server.exe" --move-archetype "C:\ProgramData\Excalibur Archetype\Server\data"`
+3. It says how many jobs, check-ins and files came. The old folder isn't changed.
+4. Once the jobs are checked in Archetype, Creede removes the old service (see the table above).
 
 ### Moving a CAD server in
 1. Stop the old Excalibur CAD server's service. (On Linux, run step 2 as the account the Office Server runs as,
@@ -123,3 +135,4 @@ see the commit "Review fixes".
    started again if anything looks wrong.
 4. Each person signs in to CAD with their Office Server account. Drawings that were checked out on the old server
    are checked in; whoever had one checks it out again.
+5. Once the drawings are checked, Creede removes the old CAD server's service (see the table above).

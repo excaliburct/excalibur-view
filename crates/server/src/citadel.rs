@@ -1,13 +1,14 @@
-//! The Office Server's `citadel` part: Citadel Server, run alongside and
-//! watched, never opened.
+//! The Office Server's `citadel` part: a look at the Citadel cell's port,
+//! never its data.
 //!
-//! Citadel keeps an office's estimating jobs sealed: the bids are sealed on
-//! the office's own computers, and Citadel Server only ever holds sealed bytes,
-//! under its own Windows service account and its own locked folders. The Office
-//! Server keeps it that way. It never reads Citadel's folders or its data; all
-//! it asks is the one question anybody may ask Citadel Server, "what version
-//! are you?", on this machine, over Citadel's own HTTPS, and by Citadel's
-//! certificate pin (`hub::pinned`).
+//! Citadel runs only as the Office Server's cell (`crate::cell`): started,
+//! restarted and answered over its pipe by this server, under a restricted
+//! token with its own locked folders. There is no separate Citadel Server to
+//! install any more. Citadel keeps an office's estimating jobs sealed: the
+//! bids are sealed on the office's own computers, and the cell only ever
+//! holds sealed bytes. The Office Server never reads its folders or its data;
+//! besides the pipe, all it asks is "what version are you?", on this machine,
+//! over the cell's own HTTPS on 47110, by its certificate pin (`hub::pinned`).
 //!
 //! The pin is kept from the first answer that reads as Citadel Server's. After
 //! that, a server on Citadel's port with another certificate is reported as

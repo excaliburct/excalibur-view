@@ -67,6 +67,21 @@ pub struct Config {
     pub offsite_work: Option<String>, // WHAT: HYPERVIEW_OFFSITE_WORK. WHY: the programs and the bucket's settings live outside what is backed up.
     /// The time of night the server runs it, on its own clock, 24-hour.
     pub offsite_at: String, // WHAT: HYPERVIEW_OFFSITE_AT, "01:30" unless set. WHY: after the office has gone home, before anyone is back.
+    /// Whether View's API needs an approved device as well as a sign-in
+    /// (docs/OFFICE-ENROLLMENT.md §5). The device routes themselves always
+    /// check their device, whatever this says.
+    pub devices: Devices, // WHAT: required for a server started for real (from_environment), not by default. WHY: as `tls`: only the Office Server started for real requires them, and there is no way to turn that off there
+    /// Where the Office Server's own program folder is, holding
+    /// `citadel\Citadel Server.exe` when Citadel ships inside it.
+    pub program_folder: Option<PathBuf>, // WHAT: the installed program's folder, when there is one. WHY: the Citadel cell is started from beside it (crate::cell)
+}
+
+/// Whether View's API needs an approved device as well as a sign-in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Devices {
+    #[default]
+    NotRequired, // WHAT: a sign-in alone, as before 0.7.0. WHY: tests and the program's own "host the drawings here" server
+    Required, // WHAT: an approved device too. WHY: the Office Server started for real (docs/OFFICE-ENROLLMENT.md §5)
 }
 
 impl Default for Config {
@@ -91,6 +106,8 @@ impl Default for Config {
             offsite_target: None, // WHAT: off. WHY: nothing leaves the box until someone sets it up.
             offsite_work: None, // WHAT: none. WHY: the same.
             offsite_at: "01:30".into(), // WHAT: half past one at night. WHY: the office is shut and the night's sync is done.
+            devices: Devices::NotRequired, // WHAT: off. WHY: only a server started for real requires devices
+            program_folder: None, // WHAT: none. WHY: only the installed service has one
         }
     }
 }
@@ -160,6 +177,7 @@ impl Config {
                 .filter(|o| !o.is_empty())
                 .collect();
         }
+        config.devices = Devices::Required; // WHAT: devices required. WHY: §5: every API call needs an approved device on the Office Server; there is deliberately no setting that turns it off
         config.offsite_target = non_empty("HYPERVIEW_OFFSITE_TARGET"); // WHAT: where the nightly backup goes. WHY: off when empty.
         config.offsite_work = non_empty("HYPERVIEW_OFFSITE_WORK"); // WHAT: the backup's own folder. WHY: its programs, key and log.
         if let Some(at) = non_empty("HYPERVIEW_OFFSITE_AT") {

@@ -202,6 +202,19 @@ pub enum Ask {
     },
     /// A drawing set's sign-off lines.
     SignOffs(String),
+    /// How this computer stands on the office's device list, asked every
+    /// 5 s while the waiting screen is open.
+    Standing, // WHAT: GET /devices/me for the computer waiting. WHY: §3: the app checks every 5 s
+    /// The waiting screen closed without waiting longer.
+    StopWaiting, // WHAT: forget what was waiting to be done. WHY: the person gave up
+    /// The office's computers, for an admin.
+    Computers, // WHAT: GET /devices. WHY: Studio → Office → Computers
+    /// An admin's answer for one computer.
+    Computer {
+        id: String, // WHAT: the device id. WHY: which computer
+        change: ComputerChange, // WHAT: what to do. WHY: one ask for each button
+        name: String, // WHAT: how it is named. WHY: the sentence afterwards
+    },
     /// A person signs a line; the set's lines are read again after.
     Sign {
         set: String, // WHAT: the set the line is on. WHY: its lines come back.
@@ -211,8 +224,25 @@ pub enum Ask {
     },
 }
 
+/// What an admin can do to a computer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComputerChange {
+    Approve, // WHAT: let it in. WHY: [Approve]
+    ApproveAsAdmin, // WHAT: let it in as an admin. WHY: [Approve as admin]
+    Refuse, // WHAT: turn it down. WHY: [Refuse]
+    Remove, // WHAT: take it off. WHY: [Remove]
+    MakeAdmin, // WHAT: make it an admin. WHY: [Make admin]
+    UnmakeAdmin, // WHAT: no longer an admin. WHY: [Unmake admin]
+}
+
 /// What comes back.
 pub enum Told {
+    /// This computer has asked to be let in and waits for an admin.
+    Waiting { device: String }, // WHAT: its device id. WHY: the waiting screen opens
+    /// How this computer stands now.
+    Standing(hub::device::Me), // WHAT: its state. WHY: the waiting screen closes once approved, or says it was refused
+    /// The office's computers, or `None` when this computer isn't an admin's.
+    Computers { list: Option<Vec<hub::device::Info>>, note: Option<String> }, // WHAT: the list and what was just done. WHY: Studio → Office → Computers
     /// A drawing set was copied to take off on.
     Copied {
         /// What the set it came from is called.
@@ -400,10 +430,64 @@ fn pin_book() -> hub::secure::PinBook {
     hub::secure::PinBook::at(folder.join("server-pins.json"))
 }
 
+/// This computer's device key for View, made on first run and kept in the
+/// program's settings folder (DPAPI on Windows, a 0600 file elsewhere).
+/// `None` when it can't be read, said once in the log.
+fn device() -> Option<std::sync::Arc<hub::device::Signer>> {
+    static KEY: std::sync::OnceLock<Option<std::sync::Arc<hub::device::Signer>>> = std::sync::OnceLock::new(); // WHAT: read once. WHY: the same key for the life of the program
+    KEY.get_or_init(|| {
+        let folder = directories::ProjectDirs::from("com", "Excalibur", "Hyperview").map_or_else(|| PathBuf::from("."), |d| d.config_dir().to_path_buf()); // WHAT: the settings folder. WHY: the key outlives the program, like the pins
+        match hub::keystore::load_or_make(&folder) {
+            Ok(key) => Some(std::sync::Arc::new(hub::device::Signer::new(key))), // WHAT: the signer. WHY: every request is signed
+            Err(why) => {
+                eprintln!("this computer's office server key: {why}"); // WHAT: said. WHY: a computer without its key can't be let in
+                None
+            }
+        }
+    })
+    .clone()
+}
+
 /// A client for `base`: the server's HTTPS by its pin when it offers HTTPS,
-/// as before when it is an older server this computer never pinned.
+/// as before when it is an older server this computer never pinned; the pin
+/// shared with the other Excalibur apps on this computer; every request
+/// signed by this computer's device key.
 fn open(base: &str) -> Result<Client, hub::client::Trouble> {
-    hub::secure::open(base, &pin_book()) // WHAT: moved to HTTPS and kept there. WHY: sign-ins and drawings encrypted on the office network
+    let shared = hub::office::shared_file(); // WHAT: the office.json every app shares. WHY: §2.3
+    let also = hub::secure::Also { shared: shared.as_deref(), office_keys: crate::trust::OFFICE_KEYS }; // WHAT: the shared file and the office keys. WHY: guards 5 and 6
+    let client = hub::secure::open_with(base, &pin_book(), also)?; // WHAT: moved to HTTPS and kept there. WHY: sign-ins and drawings encrypted on the office network
+    Ok(match device() {
+        Some(key) => client.with_device(key), // WHAT: signed. WHY: §4
+        None => client,
+    })
+}
+
+/// Whether this computer may go on, as the office's device list says.
+enum Admission {
+    In, // WHAT: approved, or a server without a device list. WHY: carry on
+    Waiting(String), // WHAT: waiting for an admin, with its id. WHY: the waiting screen
+    Outside, // WHAT: asked from outside the office. WHY: a join code or invitation is the way in from there
+}
+
+/// Asks the server to let this computer in (the session the client holds
+/// goes with it, so a seat signed in before 0.7.0 comes over approved).
+fn admitted(client: &Client) -> Result<Admission, String> {
+    if client.device().is_none() {
+        return Ok(Admission::In); // WHAT: no key. WHY: the server says no itself if it needs one
+    }
+    match client.ask_to_be_let_in("view", &hub::device::os_user()) {
+        Ok(None) => Ok(Admission::In), // WHAT: an older server. WHY: nothing to ask
+        Ok(Some(answer)) if answer.state == "approved" => Ok(Admission::In), // WHAT: let in. WHY: carry on
+        Ok(Some(answer)) => Ok(Admission::Waiting(answer.device_id)), // WHAT: waiting. WHY: an admin decides
+        Err(hub::client::Trouble::Refused(p)) if p.error == "not_on_the_office_network" => Ok(Admission::Outside), // WHAT: from outside. WHY: told apart
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Every computer, said to the panel, with what was just done.
+fn computers_now(client: &Client, told: &Sender<Told>, note: Option<String>) {
+    let list = client.devices().ok(); // WHAT: the list, or none for a computer that isn't an admin's. WHY: the section shows only for admins
+    let _ = told.send(Told::Computers { list, note });
 }
 
 /// Starts the worker.
@@ -411,10 +495,12 @@ pub fn start(repaint: egui::Context) -> Link {
     let (to_worker, asks) = unbounded::<Ask>();
     let (told, from_worker) = unbounded::<Told>();
 
+    let again = to_worker.clone(); // WHAT: the worker's own inbox. WHY: what waited for approval is asked again once approved
     std::thread::Builder::new()
         .name("hyperview-server".into())
         .spawn(move || {
             let mut client: Option<Client> = None;
+            let mut waiting: Option<(String, Ask)> = None; // WHAT: the server and what this computer was doing when it was told to wait. WHY: done once an admin approves
             let mut last_kept_look: Option<std::time::Instant> = None; // WHAT: when the kept drawings were last checked. WHY: every few minutes, not on every ask.
             let mut kept_for: Option<String> = None; // WHAT: the sign-in they were checked for. WHY: a new sign-in checks at once.
             let say = |told: &Sender<Told>, message: Told| {
@@ -460,6 +546,18 @@ pub fn start(repaint: egui::Context) -> Link {
                                 continue;
                             }
                         };
+                        match admitted(&fresh) {
+                            Ok(Admission::Waiting(device)) => {
+                                waiting = Some((base.clone(), Ask::Claim { base: base.clone(), setup: setup.clone() })); // WHAT: kept. WHY: set up once approved
+                                say(&told, Told::Waiting { device });
+                                continue;
+                            }
+                            Err(e) => {
+                                say(&told, Told::Trouble(e));
+                                continue;
+                            }
+                            Ok(_) => {} // WHAT: let in. WHY: carry on
+                        }
                         match fresh.claim(&setup) {
                             Ok(claimed) => {
                                 let session = claimed.session.clone();
@@ -486,7 +584,25 @@ pub fn start(repaint: egui::Context) -> Link {
                                 continue;
                             }
                         };
-                        match fresh.join(&join) {
+                        let outside = match admitted(&fresh) {
+                            Ok(Admission::Waiting(device)) => {
+                                waiting = Some((base.clone(), Ask::Join { base: base.clone(), join: join.clone() })); // WHAT: kept. WHY: joined once approved
+                                say(&told, Told::Waiting { device });
+                                continue;
+                            }
+                            Err(e) => {
+                                say(&told, Told::Trouble(e));
+                                continue;
+                            }
+                            Ok(Admission::Outside) => true, // WHAT: from outside. WHY: the join admits the computer too
+                            Ok(Admission::In) => false,
+                        };
+                        let joined = if outside {
+                            fresh.device_ask("view", &join.name).and_then(|ask| fresh.join_with_device(&join, &ask)) // WHAT: the join carrying this computer's request. WHY: §5
+                        } else {
+                            fresh.join(&join)
+                        };
+                        match joined {
                             Ok(session) => {
                                 client = Some(fresh);
                                 say(&told, Told::SignedIn(Box::new(session)));
@@ -507,6 +623,18 @@ pub fn start(repaint: egui::Context) -> Link {
                                 continue;
                             }
                         };
+                        match admitted(&fresh) {
+                            Ok(Admission::Waiting(device)) => {
+                                waiting = Some((base.clone(), Ask::SignIn { base: base.clone(), email: email.clone(), password: password.clone() })); // WHAT: kept. WHY: signed in once approved
+                                say(&told, Told::Waiting { device });
+                                continue;
+                            }
+                            Err(e) => {
+                                say(&told, Told::Trouble(e));
+                                continue;
+                            }
+                            Ok(_) => {} // WHAT: let in, or outside where the server decides. WHY: carry on
+                        }
                         match fresh.sign_in(&email, &password) {
                             Ok(session) => {
                                 client = Some(fresh);
@@ -548,6 +676,19 @@ pub fn start(repaint: egui::Context) -> Link {
                                 }
                                 Err(_) => continue, // WHAT: not reachable this way. WHY: the next address is tried
                             };
+                            match admitted(&fresh) {
+                                Ok(Admission::Waiting(device)) => {
+                                    waiting = Some((base.clone(), Ask::Resume { base: base.clone(), token: token.clone(), reachable_at: None })); // WHAT: kept. WHY: resumed once approved
+                                    say(&told, Told::Waiting { device });
+                                    refused = Some(String::new()); // WHAT: nothing more to try. WHY: the waiting screen says why
+                                    break;
+                                }
+                                Err(e) => {
+                                    refused = Some(e); // WHAT: said. WHY: a person can act on it
+                                    continue;
+                                }
+                                Ok(_) => {} // WHAT: let in. WHY: carry on
+                            }
                             // A kept token is checked before it is trusted,
                             // so a week-old one fails here rather than in the
                             // middle of saving somebody's takeoff.
@@ -577,6 +718,7 @@ pub fn start(repaint: egui::Context) -> Link {
                                 say(&told, Told::SignedIn(Box::new(session)));
                             }
                             None => match refused {
+                                Some(why) if why.is_empty() => {} // WHAT: waiting. WHY: the waiting screen is open
                                 Some(why) => say(&told, Told::Trouble(why)), // WHAT: the reason. WHY: a person can act on it
                                 None => say(&told, Told::SignedOut),
                             },
@@ -1174,6 +1316,44 @@ pub fn start(repaint: egui::Context) -> Link {
                         }
                     },
 
+                    Ask::Standing => {
+                        let Some((base, _)) = waiting.as_ref() else { continue }; // WHAT: nothing waits. WHY: a late tick
+                        if let Ok(me) = open(base).and_then(|c| c.device_me()) {
+                            let approved = me.state == "approved"; // WHAT: let in. WHY: then what waited is done
+                            let over = approved || me.state == "refused" || me.state == "removed"; // WHAT: answered, one way or the other. WHY: nothing more to wait for
+                            say(&told, Told::Standing(me));
+                            if over {
+                                if let Some((_, ask)) = waiting.take() {
+                                    if approved {
+                                        let _ = again.send(ask); // WHAT: what waited, asked again. WHY: the person carries on without pressing anything
+                                    }
+                                }
+                            }
+                        } // WHAT: no answer this time is asked again in 5 s. WHY: a server busy for a moment never ends the wait
+                    }
+                    Ask::StopWaiting => waiting = None, // WHAT: forgotten. WHY: the person closed the screen
+                    Ask::Computers => {
+                        if let Ok(client) = connected(&client) {
+                            computers_now(client, &told, None); // WHAT: the list, quietly. WHY: a computer that isn't an admin's simply has no such section
+                        }
+                    }
+                    Ask::Computer { id, change, name } => match connected(&client) {
+                        Err(message) => say(&told, Told::Trouble(message)),
+                        Ok(client) => {
+                            let done = match change {
+                                ComputerChange::Approve => client.approve_device(&id, false).map(|_| format!("{name} can use the office server now.")),
+                                ComputerChange::ApproveAsAdmin => client.approve_device(&id, true).map(|_| format!("{name} can use the office server now, and approve other computers.")),
+                                ComputerChange::Refuse => client.refuse_device(&id).map(|_| format!("{name} was refused.")),
+                                ComputerChange::Remove => client.remove_device(&id).map(|_| format!("{name} was removed. It has to ask again to come back.")),
+                                ComputerChange::MakeAdmin => client.device_admin(&id, true).map(|_| format!("{name} can approve other computers now.")),
+                                ComputerChange::UnmakeAdmin => client.device_admin(&id, false).map(|_| format!("{name} can't approve other computers any more.")),
+                            }; // WHAT: the change, and a plain sentence. WHY: said where the button was
+                            match done {
+                                Ok(note) => computers_now(client, &told, Some(note)),
+                                Err(e) => computers_now(client, &told, Some(e.to_string())), // WHAT: why not, under the list. WHY: "make someone else an admin first" is a sentence to read
+                            }
+                        }
+                    },
                     Ask::Office => match connected(&client) {
                         Err(message) => say(&told, Told::Trouble(message)),
                         Ok(client) => office(client, &told),

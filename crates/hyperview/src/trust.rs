@@ -65,6 +65,14 @@ pub const LICENSE_KEYS: &[(&str, &str)] = &[
 /// paste the line it prints below.
 pub const PLUGIN_KEYS: &[(&str, &str)] = &[];
 
+/// The keys an office certificate may be signed with, and nothing else
+/// (docs/OFFICE-ENROLLMENT.md §2.4): the `YubiKey`'s "office" slot.
+///
+/// Empty until certificates are signed: then no certificate verifies, and an
+/// office is held to the pin its first contact kept, as every office is
+/// today. A key here never signs a release, a licence or a plugin.
+pub const OFFICE_KEYS: &[(&str, &str)] = &[];
+
 /// Where new versions are published: a releases page on GitHub.
 ///
 /// A company's server reads this and passes new versions on to its seats. A

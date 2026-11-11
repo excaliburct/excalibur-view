@@ -15,6 +15,7 @@
 //! viewer does, so an integration cannot accidentally read a missing scale as
 //! a zero.
 
+pub mod device; // WHAT: device keys and the lines they sign. WHY: codeless linking to the Office Server (docs/OFFICE-ENROLLMENT.md)
 pub mod discover;
 pub mod license;
 pub mod site;
@@ -34,6 +35,12 @@ pub mod web;
 
 #[cfg(feature = "client")]
 pub mod pinned; // WHAT: HTTPS by a pinned certificate. WHY: Excalibur's own servers make their own certificates
+
+#[cfg(feature = "client")]
+pub mod keystore; // WHAT: where this computer keeps its device key. WHY: DPAPI on Windows, a 0600 file elsewhere (docs/OFFICE-ENROLLMENT.md §1)
+
+#[cfg(feature = "client")]
+pub mod office; // WHAT: the office server's address and pin, shared by every app on the PC. WHY: §2: the second app never asks again
 
 #[cfg(feature = "client")]
 pub mod secure; // WHAT: seats moved onto an Office Server's HTTPS and kept there. WHY: sign-ins and drawings encrypted, the certificate pinned

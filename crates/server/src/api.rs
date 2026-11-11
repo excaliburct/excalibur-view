@@ -49,6 +49,12 @@ pub struct Server {
     pub key_refusals_logged: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
     /// The port this server's HTTPS listens on, once it does (`crate::tls`).
     pub secure_port: std::sync::OnceLock<u16>, // WHAT: set once HTTPS is bound. WHY: /health never offers a port that isn't answering, and each server says its own
+    /// The pin of this server's HTTPS certificate, once it has one.
+    pub pin: std::sync::OnceLock<String>, // WHAT: the 8714 certificate's SPKI SHA-256. WHY: device requests are bound to it (crate::devices)
+    /// Signatures already seen inside the ±300 s window (`crate::devices`).
+    pub replays: crate::devices::Replays, // WHAT: the replay cache. WHY: a signed request is accepted once
+    /// The Citadel cell, as its supervisor last saw it (`crate::cell`).
+    pub cell: crate::cell::Watch, // WHAT: the cell's state. WHY: /api/v1/office reports it
 }
 
 impl Server {
@@ -63,8 +69,12 @@ impl Server {
             notices: Default::default(),
             key_refusals_logged: Default::default(), // WHAT: no refusals written yet. WHY: empty on every start, as patience is.
             secure_port: Default::default(), // WHAT: no HTTPS yet. WHY: set by run::serve once it listens
+            pin: std::sync::OnceLock::default(), // WHAT: no certificate yet. WHY: set by run::serve with HTTPS
+            replays: crate::devices::Replays::default(), // WHAT: nothing seen yet. WHY: empty on every start; a signature older than five minutes is refused by its time anyway
+            cell: crate::cell::Watch::default(), // WHAT: no cell yet. WHY: started by run::serve when the licence and the files allow
         };
         crate::license::begin(&server);
+        crate::devices::begin(&server); // WHAT: when the device list began and until when it can be claimed, noted once. WHY: guard 2 and guard 8 read them
         server
     }
 }
@@ -84,6 +94,11 @@ impl IntoResponse for Denied {
 }
 
 impl Denied {
+    /// Any status, with its problem. For the device list's own answers.
+    pub(crate) fn new(status: StatusCode, problem: Problem) -> Denied {
+        Denied(status, problem) // WHAT: as given. WHY: 401 device_unknown, 409 last_admin and the rest
+    }
+
     pub(crate) fn unauthorised() -> Denied {
         Denied(
             StatusCode::UNAUTHORIZED,
@@ -391,7 +406,7 @@ const KEY_REFUSAL_QUIET: std::time::Duration = std::time::Duration::from_secs(60
 
 /// Whether a refusal of key `id` should be written now: the first one, then
 /// at most one a minute. Notes the time when it says yes.
-fn refusal_worth_a_line(server: &Server, id: &str) -> bool {
+pub(crate) fn refusal_worth_a_line(server: &Server, id: &str) -> bool { // WHAT: crate-wide now. WHY: the device gate writes its refusals the same way
     let Ok(mut logged) = server.key_refusals_logged.lock() else {
         return true; // WHAT: the lock is poisoned. WHY: writing the line is the safe way round; losing it is not.
     };
@@ -474,6 +489,14 @@ pub fn router(server: Shared) -> Router {
         .route("/notices/:id/remove", post(remove_notice))
         .route("/license", get(read_license).post(add_license))
         .route("/office", get(crate::office::read)) // WHAT: the parts this Office Server runs. WHY: the Manager and the program show what an office has
+        .route("/office/identity", get(crate::devices::identity)) // WHAT: the office certificate, when one is stored. WHY: an app marks the server verified by it (§2.4)
+        .route("/devices/request", post(crate::devices::request)) // WHAT: a computer asks to be let in. WHY: codeless linking (docs/OFFICE-ENROLLMENT.md §3)
+        .route("/devices/me", get(crate::devices::me)) // WHAT: how this computer stands. WHY: the waiting screen asks every 5 s
+        .route("/devices", get(crate::devices::list)) // WHAT: every computer, newest waiting first. WHY: an admin's Computers list
+        .route("/devices/:id/approve", post(crate::devices::approve)) // WHAT: let one in. WHY: §3
+        .route("/devices/:id/refuse", post(crate::devices::refuse)) // WHAT: turn one down. WHY: §3
+        .route("/devices/:id/remove", post(crate::devices::remove)) // WHAT: take one off. WHY: §3
+        .route("/devices/:id/admin", post(crate::devices::make_admin)) // WHAT: make or unmake an admin. WHY: §3
         .route("/admin/citadel/forget-pin", post(crate::citadel::forget_pin)) // WHAT: Citadel Server's pin forgotten. WHY: after a reinstall, an administrator lets the next look keep the new one
         .route("/archetype/jobs", get(crate::archetype::list_jobs).post(crate::archetype::create_job)) // WHAT: Archetype's jobs, and a new one. WHY: the archetype part; 404 unless licensed; bodies are read after the checks
         .route("/archetype/jobs/:id", get(crate::archetype::one_job)) // WHAT: one job. WHY: who has it, its revision
@@ -513,6 +536,7 @@ pub fn router(server: Shared) -> Router {
         .route("/signoffs/:id/signature.png", get(crate::signoffs::picture)) // WHAT: a signature as a picture. WHY: printed on the form.
         .route("/sets/:id/folder", post(crate::folders::move_set)) // WHAT: a drawing set moved, with its issues. WHY: likewise.
         // WHAT: every matched route first checks that a key keeps to its purpose. WHY: one gate in front of all of them, so a new route is closed to sync keys unless it is put on SYNC_ROUTES on purpose.
+        .route_layer(axum::middleware::from_fn_with_state(server.clone(), crate::devices::gate)) // WHAT: every matched route held to its door: an approved device's signature, before View's own checks. WHY: §4 and §5; inside the key check, so a sync key off its list is refused as before
         .route_layer(axum::middleware::from_fn_with_state(server.clone(), keys_keep_to_their_purpose))
         .route_layer(axum::middleware::from_fn_with_state(server.clone(), refusals_logged)) // WHAT: every 403 written in the server's log. WHY: somebody signed in walking the API for doors they may not open left no trace.
         // WHAT: every other route takes at most a small body. WHY: a JSON extractor reads the whole body before the handler asks who is calling, so a large limit everywhere let anybody, signed in or not, make the server hold hundreds of megabytes per request.
@@ -633,6 +657,14 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/license"),
     ("POST", "/license"),
     ("GET", "/office"), // WHAT: the Office Server's parts. WHY: described, so the test holds the two together
+    ("GET", "/office/identity"), // WHAT: the office certificate. WHY: likewise
+    ("POST", "/devices/request"), // WHAT: a computer asks to be let in. WHY: likewise
+    ("GET", "/devices/me"), // WHAT: how it stands. WHY: likewise
+    ("GET", "/devices"), // WHAT: the list. WHY: likewise
+    ("POST", "/devices/{id}/approve"), // WHAT: approve. WHY: likewise
+    ("POST", "/devices/{id}/refuse"), // WHAT: refuse. WHY: likewise
+    ("POST", "/devices/{id}/remove"), // WHAT: remove. WHY: likewise
+    ("POST", "/devices/{id}/admin"), // WHAT: admin on or off. WHY: likewise
     ("POST", "/admin/citadel/forget-pin"), // WHAT: Citadel's pin forgotten. WHY: likewise
     ("GET", "/archetype/jobs"), // WHAT: Archetype's jobs. WHY: likewise
     ("POST", "/archetype/jobs"), // WHAT: a new one. WHY: likewise
@@ -3617,10 +3649,19 @@ async fn claim(State(server): State<Shared>, Json(body): Json<Setup>) -> Answer<
 
 // ---- and everybody after --------------------------------------------------
 
+/// A join, and the computer it came from when it came from outside (§5).
+#[derive(Deserialize)]
+struct JoinBody {
+    #[serde(flatten)]
+    join: Join, // WHAT: the join itself, as always. WHY: every program already sends it
+    #[serde(default)]
+    device: Option<hub::device::Ask>, // WHAT: the computer's request to be let in. WHY: a good code or invitation from outside admits the computer too
+}
+
 async fn join(
     State(server): State<Shared>,
     headers: HeaderMap,
-    Json(body): Json<Join>,
+    Json(JoinBody { join: body, device }): Json<JoinBody>,
 ) -> Answer<Json<Session>> {
     let (how, code, role) = how_joining(&server);
     let how = joining_for(how, from_outside(&headers)); // WHAT: "open" is for the office network; from the internet a code or an invitation is still asked for. WHY: open joining with remote access on gave anybody an estimator's account (audit, 2026-11-11)
@@ -3739,6 +3780,10 @@ async fn join(
     }
 
     crate::license::room_for_another(&server).map_err(Denied::license_users)?;
+    let device = device.filter(|_| from_outside(&headers)); // WHAT: a computer's request, only from outside. WHY: in the office a computer asks and an admin approves; the gate already let this one through
+    if let Some(ask) = device.as_ref() {
+        crate::devices::proven_for_join(&server, ask)?; // WHAT: its proof checked before any account is made. WHY: a join never admits a key nobody holds
+    }
     let name = body.name.trim().to_string();
     let email = body.email.trim().to_lowercase();
     if name.is_empty() {
@@ -3817,6 +3862,13 @@ async fn join(
     }
 
     tracing::info!("{email} made an account");
+    if let Some(ask) = device.as_ref() {
+        let by = match invited.as_ref() {
+            Some(invite) => format!("an invitation for {}", invite.email), // WHAT: the invitation. WHY: who let it in
+            None => "the join code".to_string(), // WHAT: the code. WHY: likewise
+        };
+        crate::devices::joined(&server, ask, &from, &by)?; // WHAT: the computer let in, approved. WHY: §5: the join code and invitations stay a way in from outside
+    }
     Ok(Json(issue_session(&server, &id, &name, &email, role)?))
 }
 

@@ -60,6 +60,7 @@ enum Door {
     Person, // WHAT: a person signed in with a password, any role. WHY: their own keys and password.
     Admin,  // WHAT: an administrator signed in with a password. WHY: running the server.
     Folders, // WHAT: an administrator signed in, or a sync key. WHY: deciding who sees a folder.
+    Device, // WHAT: a device's signature and nothing else; no session or key opens it. WHY: the office's device list (docs/OFFICE-ENROLLMENT.md); proven by devices_by_the_contract
 }
 
 /// One route: its method, its path as the router names it, its door, and
@@ -584,6 +585,14 @@ const TABLE: &[Route] = &[
         door: Door::Signed,
         sync: false,
     }, // WHAT: the Office Server's parts. WHY: anybody signed in, like the licence's standing
+    Route { method: "GET", path: "/office/identity", door: Door::Public, sync: false }, // WHAT: the office certificate. WHY: read before anything is trusted
+    Route { method: "POST", path: "/devices/request", door: Door::Public, sync: false }, // WHAT: asking to be let in. WHY: held by its own checks (local, rate-limited, proven)
+    Route { method: "GET", path: "/devices/me", door: Door::Device, sync: false }, // WHAT: how a device stands. WHY: its own signature only
+    Route { method: "GET", path: "/devices", door: Door::Device, sync: false }, // WHAT: the list. WHY: an admin device's signature only
+    Route { method: "POST", path: "/devices/{id}/approve", door: Door::Device, sync: false }, // WHAT: approve. WHY: likewise
+    Route { method: "POST", path: "/devices/{id}/refuse", door: Door::Device, sync: false }, // WHAT: refuse. WHY: likewise
+    Route { method: "POST", path: "/devices/{id}/remove", door: Door::Device, sync: false }, // WHAT: remove. WHY: likewise
+    Route { method: "POST", path: "/devices/{id}/admin", door: Door::Device, sync: false }, // WHAT: admin on or off. WHY: likewise
     Route {
         method: "GET",
         path: "/audit",
@@ -747,6 +756,7 @@ fn let_in(route: &Route, knock: Knock) -> bool {
         Door::Person => matches!(knock, Knock::Viewer | Knock::Estimator | Knock::Admin), // WHAT: a person signed in. WHY: a key can't make keys, change a password or sign out.
         Door::Admin => knock == Knock::Admin, // WHAT: an administrator with a password. WHY: no key runs the server.
         Door::Folders => knock == Knock::Admin, // WHAT: an administrator; the sync key is let in by the list above. WHY: who sees a folder is theirs to say.
+        Door::Device => false, // WHAT: nobody here holds a device key. WHY: a session or a key never stands in for one
     }
 }
 

@@ -27,9 +27,9 @@ pub fn document(name: &str) -> Value {
                     "description": "A token from POST /auth/token."
                 }
             },
-            "schemas": joined(schemas(), folder_schemas()),
+            "schemas": joined(joined(schemas(), folder_schemas()), device_schemas()), // WHAT: with the device list's. WHY: described with the rest
         },
-        "paths": joined(paths(), folder_paths()),
+        "paths": joined(joined(paths(), folder_paths()), device_paths()), // WHAT: with the device list's routes. WHY: the test holds every route described
     })
 }
 
@@ -50,6 +50,78 @@ fn see_schema(description: &str) -> Value {
             { "type": "array", "items": { "type": "string" } }
         ]
     }) // WHAT: a word or a list of group names. WHY: how a folder's rule travels.
+}
+
+/// The signed-request headers every device route needs, in words.
+const SIGNED: &str = "Signed by the device: X-Excalibur-Device, X-Excalibur-Time and X-Excalibur-Signature over \
+                      excalibur-request/1, the device id, the method, the path and query, the body's SHA-256 and the time, \
+                      each line ended by a line feed (docs/OFFICE-ENROLLMENT.md section 4). Any failure is 401 device_unknown.";
+
+/// The office's device list and identity (docs/OFFICE-ENROLLMENT.md).
+fn device_paths() -> Value {
+    let admin = format!("{SIGNED} Only an approved admin device may call it; the last admin can't be lost (409 last_admin)."); // WHAT: the admin routes' note. WHY: guard 4, said
+    json!({
+        "/office/identity": {
+            "get": {
+                "summary": "The office certificate.",
+                "description": "The certificate the office was given, exactly as stored, as text. 404 until there is one.",
+                "security": [],
+                "responses": { "200": { "description": "The certificate." }, "404": { "description": "None yet." } }
+            }
+        },
+        "/devices/request": {
+            "post": {
+                "summary": "A computer asks to be let in.",
+                "description": "From the office network only (403 otherwise), rate-limited per address. The proof signs \
+                                excalibur-enroll/1, the server's pin, the public key, the app, the machine, the Windows user \
+                                and the time, each on its own line. The first computer, while none is approved and within a \
+                                day of the service's first start, is approved as an admin. A seat with a session from before \
+                                devices began is approved at once.",
+                "security": [],
+                "requestBody": body("DeviceAsk"),
+                "responses": ok("DeviceAnswer")
+            }
+        },
+        "/devices/me": { "get": { "summary": "How this computer stands.", "description": SIGNED, "security": [], "responses": ok("DeviceMe") } },
+        "/devices": { "get": { "summary": "Every computer, newest waiting first.", "description": admin, "security": [], "responses": ok_list("DeviceInfo") } },
+        "/devices/{id}/approve": { "post": { "summary": "Approve a computer.", "description": admin, "security": [], "parameters": [path_param("id", "The device id.")], "requestBody": body("DeviceApprove"), "responses": ok("DeviceDone") } },
+        "/devices/{id}/refuse": { "post": { "summary": "Refuse a computer.", "description": admin, "security": [], "parameters": [path_param("id", "The device id.")], "responses": ok("DeviceDone") } },
+        "/devices/{id}/remove": { "post": { "summary": "Remove a computer; it must ask again.", "description": admin, "security": [], "parameters": [path_param("id", "The device id.")], "responses": ok("DeviceDone") } },
+        "/devices/{id}/admin": { "post": { "summary": "Make or unmake an admin computer.", "description": admin, "security": [], "parameters": [path_param("id", "The device id.")], "requestBody": body("DeviceAdmin"), "responses": ok("DeviceDone") } }
+    })
+}
+
+/// The device list's schemas.
+fn device_schemas() -> Value {
+    json!({
+        "DeviceAsk": object(&[
+            ("public_key", "string", "The Ed25519 public key, base64 (44 characters)."),
+            ("app", "string", "view, cad, archetype or latcon-estimating."),
+            ("app_version", "string", ""),
+            ("machine", "string", "The computer's name."),
+            ("os_user", "string", "The Windows user."),
+            ("display_name", "string", "The person's name."),
+            ("platform", "string", "windows-x64 and the like."),
+            ("time", "integer", "Unix seconds."),
+            ("proof", "string", "The base64 Ed25519 signature of the enrol lines."),
+        ]),
+        "DeviceAnswer": object(&[("device_id", "string", "32 lowercase hex."), ("state", "string", "waiting or approved.")]),
+        "DeviceMe": object(&[
+            ("state", "string", "waiting, approved, refused or removed."),
+            ("admin", "boolean", ""),
+            ("approved_by", "string", ""),
+            ("approved_at", "string", "RFC 3339."),
+        ]),
+        "DeviceInfo": object(&[
+            ("id", "string", ""), ("app", "string", ""), ("app_version", "string", ""), ("machine", "string", ""), ("os_user", "string", ""),
+            ("display_name", "string", ""), ("platform", "string", ""), ("state", "string", ""), ("admin", "boolean", ""), ("asked", "string", "RFC 3339."),
+            ("asked_from", "string", "The address it asked from."), ("approved_by", "string", ""), ("approved_at", "string", ""),
+            ("how", "string", "asked, claimed, migrated, joined or citadel."),
+        ]),
+        "DeviceApprove": object(&[("admin", "boolean", "Approve as an admin.")]),
+        "DeviceAdmin": object(&[("on", "boolean", "Make (true) or unmake (false) an admin.")]),
+        "DeviceDone": object(&[("id", "string", ""), ("done", "string", "What was done.")]),
+    })
 }
 
 /// The routes for groups, folders and files that aren't drawings.

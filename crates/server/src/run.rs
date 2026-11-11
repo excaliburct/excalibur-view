@@ -72,9 +72,11 @@ pub async fn serve(
         None
     };
     let server = Arc::new(Server::new(store, config));
-    if secure.is_some() {
+    if let Some((_, pin)) = &secure {
         let _ = server.secure_port.set(address.port()); // WHAT: HTTPS answers on the API's own port. WHY: /health offers it; a seat moves there
+        let _ = server.pin.set(pin.clone()); // WHAT: the certificate's pin. WHY: device requests are bound to it (crate::devices)
     }
+    let secure = secure.map(|(settings, _)| settings); // WHAT: the TLS settings alone. WHY: served with below
     let claimed = !server.store.is_empty().unwrap_or(false);
     let name = api::installation_name(&server);
 
@@ -126,7 +128,8 @@ pub async fn serve(
     if server.config.check_for_updates {
         tokio::spawn(crate::updates::keep_up_to_date(Arc::clone(&server)));
     }
-    tokio::spawn(crate::citadel::watch(Arc::clone(&server))); // WHAT: looks at Citadel Server every five minutes. WHY: only while the licence switches the citadel part on
+    tokio::spawn(crate::citadel::watch(Arc::clone(&server))); // WHAT: looks at the Citadel cell's port every five minutes. WHY: only while the licence switches the citadel part on; its version and pin
+    crate::cell::start(&server); // WHAT: the Citadel cell started and watched, when the licence lists it and its program is here. WHY: Citadel runs inside the Office Server (docs/OFFICE-ENROLLMENT.md §6a)
     if server.config.offsite_target.is_some() {
         if let Some(work) = server.config.offsite_work.as_deref() { crate::offsite::lock_work(std::path::Path::new(work)); } // WHAT: the work folder made the system's, administrators' and this server's only (Windows). WHY: it holds the programs run on the data and the bucket's key.
         tokio::spawn(crate::offsite::nightly(Arc::clone(&server))); // WHAT: tonight's off-site backup, once a night. WHY: off until HYPERVIEW_OFFSITE_TARGET is set.
@@ -162,12 +165,12 @@ pub async fn serve(
 
 /// The TLS settings, with the certificate made the first time. Its pin goes
 /// in the log so a person can compare it with a seat's.
-fn secure_settings(data: &std::path::Path, at: SocketAddr) -> Result<Arc<rustls::ServerConfig>> {
+fn secure_settings(data: &std::path::Path, at: SocketAddr) -> Result<(Arc<rustls::ServerConfig>, String)> {
     let (cert, key) = crate::tls::load_or_make(data).map_err(anyhow::Error::msg)?; // WHAT: the server's own certificate. WHY: made once, kept after
     let config = crate::tls::server_config(&cert, &key).map_err(anyhow::Error::msg)?; // WHAT: the TLS settings. WHY: a damaged pair stops the start, saying so
     let pin = crate::tls::pin(&cert).map_err(anyhow::Error::msg)?; // WHAT: its pin. WHY: logged for a person to compare
     tracing::info!("HTTPS on {at}; certificate pin {} (View); fingerprint {} (Excalibur CAD)", hub::pinned::short(&pin), crate::tls::fingerprint(&cert).unwrap_or_default()); // WHAT: said once at start, both ways the programs show it. WHY: a person compares what their program shows with this
-    Ok(config)
+    Ok((config, pin)) // WHAT: the settings and the pin. WHY: the pin binds device requests to this server
 }
 
 /// This machine's address on the network it is actually on. Asked of the

@@ -65,7 +65,7 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 windows-service = "0.7"
 # WHAT: Windows' own security calls. WHY: the drill's folder is made with its permissions already in place, and the
 # off-site work folder is locked and checked; already in the build through tokio and others.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Pipes", "Win32_System_IO"] } # WHAT: with named pipes added. WHY: the Citadel cell asks the Office Server over one (crate::cell)
 
 # WHAT: this process's own account, through a safe call. WHY: the off-site work folder trusts only files that root or
 # this account owns; already in the build through ctrlc.

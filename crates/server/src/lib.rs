@@ -22,8 +22,10 @@ pub mod archetype; // WHAT: Archetype's shared jobs, moved in. WHY: the Office S
 pub mod audit;
 pub mod auth;
 pub mod cad; // WHAT: Excalibur CAD's office drawings, moved in. WHY: the Office Server's cad part
-pub mod citadel; // WHAT: Citadel Server, watched alongside by its pin. WHY: the Office Server's citadel part, kept blind
+pub mod cell; // WHAT: the Citadel cell, started, watched and answered over its pipe. WHY: Citadel runs inside the Office Server (docs/OFFICE-ENROLLMENT.md §6a)
+pub mod citadel; // WHAT: the Citadel cell's port, looked at by its pin. WHY: the Office Server's citadel part, kept blind; the cell is the only way Citadel runs (crate::cell)
 pub mod config;
+pub mod devices; // WHAT: the office's device list and the signed-request gate. WHY: codeless linking (docs/OFFICE-ENROLLMENT.md §3, §4)
 pub mod fleet;
 pub mod folders; // WHAT: groups, who sees which folder, and files that aren't drawings. WHY: the field and the shop see only the folders given to them.
 pub mod license;

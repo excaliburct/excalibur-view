@@ -308,6 +308,35 @@ CREATE TABLE IF NOT EXISTS signoffs (
 );
 CREATE INDEX IF NOT EXISTS signoffs_by_set ON signoffs(set_id);
 CREATE INDEX IF NOT EXISTS signoffs_by_seq ON signoffs(seq);
+
+-- The office's device list (docs/OFFICE-ENROLLMENT.md): one row for each app
+-- on each computer for each Windows user, by its Ed25519 key. `id` is worked
+-- out from the key, never taken from the asker. `state` is waiting, approved,
+-- refused or removed; only approved devices pass the gate, and an admin
+-- device approves the others. `how` says how it came in: asked, claimed (the
+-- first computer), migrated (a seat signed in before 0.7.0), joined (a code
+-- or invitation from outside) or citadel (paired with Citadel Server 1.0.x).
+-- Never deleted: a removed computer stays listed, and must ask again.
+CREATE TABLE IF NOT EXISTS devices (
+    id          TEXT PRIMARY KEY,
+    public_key  TEXT NOT NULL UNIQUE,
+    app         TEXT NOT NULL,
+    app_version TEXT NOT NULL DEFAULT '',
+    machine     TEXT NOT NULL,
+    os_user     TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    platform    TEXT NOT NULL DEFAULT '',
+    state       TEXT NOT NULL,
+    admin       INTEGER NOT NULL DEFAULT 0,
+    asked       TEXT NOT NULL,
+    asked_from  TEXT NOT NULL DEFAULT '',
+    approved_by TEXT,
+    approved_at TEXT,
+    person      TEXT,
+    how         TEXT NOT NULL DEFAULT 'asked',
+    changed     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS devices_by_state ON devices(state, asked);
 "#;
 
 /// An invitation as it is written down.

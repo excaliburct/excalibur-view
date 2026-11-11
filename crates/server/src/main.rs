@@ -104,6 +104,19 @@ fn main() {
                 }
             }
         }
+        "--reopen-claim" => { // WHAT: claiming the office server opened again for a day. WHY: §3: the Manager window, on the server PC, can reopen it
+            #[allow(unused_mut)] // WHAT: only Windows changes it. WHY: no warning elsewhere
+            let mut config = Config::from_environment(); // WHAT: this server's settings. WHY: its data folder
+            #[cfg(windows)]
+            if std::env::var_os("HYPERVIEW_DATA").is_none() && hyperview_server::winsvc::data_folder().exists() { config.data = hyperview_server::winsvc::data_folder(); } // WHAT: the installed service's data. WHY: the same folder the service serves
+            match Store::open(&config.database(), &config.blobs()).and_then(|store| hyperview_server::devices::reopen_claim(&store)) {
+                Ok(until) => println!("  The first computer to ask, until {until}, becomes the office's admin, if no computer is approved yet."), // WHAT: what was done. WHY: a person reads it
+                Err(why) => {
+                    eprintln!("  {why}");
+                    std::process::exit(1);
+                }
+            }
+        }
         "--console" | "--serve" => console(),
         #[cfg(windows)]
         "" => front_door(),
