@@ -539,13 +539,13 @@ const TABLE: &[Route] = &[
     Route {
         method: "POST",
         path: "/archetype/jobs/{id}/checkout",
-        door: Door::Signed,
+        door: Door::Writer,
         sync: false,
     }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
     Route {
         method: "POST",
         path: "/archetype/jobs/{id}/checkin",
-        door: Door::Signed,
+        door: Door::Writer,
         sync: false,
     }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
     Route {

@@ -133,6 +133,8 @@ fn the_office_checks_archetype_jobs_out_and_in_and_never_hands_out_view_s_files(
     let files = format!(r#"[{{"path":"job.frame","digest":"{}","bytes":9}},{{"path":"underlays/S-201.pdf","digest":"{}","bytes":11}}]"#, sha(&model), sha(&under));
     let checkin = format!(r#"{{"base_revision":0,"comment":"first","files":{files},"machine":"EVE-PC"}}"#);
     assert_eq!(ask(&office, "POST", &format!("/archetype/jobs/{id}/checkin"), &office.sam, Some(checkin.as_bytes())).0, 409, "only who has it checks in");
+    let wrong_size = checkin.replace(r#""bytes":9"#, r#""bytes":999999"#); // WHAT: the model listed at a size it didn't arrive at. WHY: the job's sizes must be true
+    assert_eq!(ask(&office, "POST", &format!("/archetype/jobs/{id}/checkin"), &office.eve, Some(wrong_size.as_bytes())).0, 400);
     let (code, said) = ask(&office, "POST", &format!("/archetype/jobs/{id}/checkin"), &office.eve, Some(checkin.as_bytes()));
     assert_eq!(code, 200, "{said}");
     assert_eq!(serde_json::from_str::<Value>(&said).unwrap()["revision"], 1);
@@ -141,8 +143,7 @@ fn the_office_checks_archetype_jobs_out_and_in_and_never_hands_out_view_s_files(
     assert_eq!(ask(&office, "GET", &format!("/archetype/files/{}", sha(&model)), &office.val, None).1.as_bytes(), model.as_slice(), "everyone reads a job's files");
     let (_, listed) = ask(&office, "GET", &format!("/archetype/jobs/{id}/files"), &office.val, None);
     assert_eq!(serde_json::from_str::<Value>(&listed).unwrap()["files"].as_array().unwrap().len(), 2);
-    let (code, said) = ask(&office, "POST", &format!("/archetype/jobs/{id}/checkout"), &office.val, Some(br#"{"machine":"VAL-PC"}"#));
-    assert!(code == 409 && said.contains("read-only"), "a viewer opens read-only: {said}");
+    assert_eq!(ask(&office, "POST", &format!("/archetype/jobs/{id}/checkout"), &office.val, Some(br#"{"machine":"VAL-PC"}"#)).0, 403, "a viewer opens read-only, refused before anything is read");
     assert_eq!(ask(&office, "POST", &format!("/archetype/jobs/{id}/checkout"), &office.sam, Some(br#"{"machine":"SAM-PC"}"#)).0, 200);
     assert_eq!(ask(&office, "POST", &format!("/archetype/jobs/{id}/takeback"), &office.eve, None).0, 403, "taking back is an administrator's");
     assert_eq!(ask(&office, "POST", &format!("/archetype/jobs/{id}/takeback"), &office.sam, None).0, 200);
@@ -166,11 +167,13 @@ fn a_file_is_never_read_before_the_server_knows_who_sent_it() {
     use std::io::{Read, Write};
     let office = an_office(Some(license(&["archetype"])));
     let address = office.base.trim_start_matches("http://").split('/').next().unwrap().to_string();
-    for (token, expect) in [(None, "401"), (Some(office.val.clone()), "403")] {
+    let checkin = "POST /api/v1/archetype/jobs/job_none/checkin".to_string(); // WHAT: a check-in, from a viewer. WHY: refused before its list is read
+    let put = format!("PUT /api/v1/archetype/files/{}", sha(b"x")); // WHAT: a file. WHY: the same
+    for (line, token, expect) in [(&put, None, "401"), (&put, Some(office.val.clone()), "403"), (&checkin, Some(office.val.clone()), "403"), (&checkin, None, "401")] {
         let mut tcp = std::net::TcpStream::connect(&address).unwrap();
         tcp.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap(); // WHAT: five seconds. WHY: a server reading the body first would still be waiting
         let auth = token.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
-        write!(tcp, "PUT /api/v1/archetype/files/{} HTTP/1.1\r\nHost: {address}\r\n{auth}Content-Length: 200000000\r\n\r\n", sha(b"x")).unwrap(); // WHAT: 200 MB promised, none sent. WHY: the door must answer first
+        write!(tcp, "{line} HTTP/1.1\r\nHost: {address}\r\n{auth}Content-Type: application/json\r\nContent-Length: 200000000\r\n\r\n").unwrap(); // WHAT: 200 MB promised, none sent. WHY: the door must answer first
         let mut first = [0u8; 32];
         let n = tcp.read(&mut first).expect("answered without waiting for the body");
         assert!(String::from_utf8_lossy(&first[..n]).starts_with(&format!("HTTP/1.1 {expect}")));

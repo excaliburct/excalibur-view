@@ -33,6 +33,9 @@ use crate::auth::Who;
 /// The most files a job folder holds (Archetype's own limit).
 pub const MOST_FILES: usize = 20_000; // WHAT: Archetype's folder limit. WHY: a list longer than any job is refused before it is read
 
+/// The largest single file a move reads: 4 GB.
+const MOST_FILE: u64 = 4 << 30; // WHAT: 4 GB. WHY: larger than any drawing or model a job holds, and a cap on what one read takes
+
 /// Archetype's tables, made in the server's database as it opens.
 pub const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS arch_jobs (
@@ -424,6 +427,11 @@ fn record_check_in(db: &Connection, job: &JobInfo, who: &Who, comment: &str, fil
     Ok((revision, changes))
 }
 
+/// The size a file arrived at, when it was sent to Archetype.
+fn sent_size(db: &Connection, digest: &str) -> Option<u64> {
+    db.query_row("SELECT bytes FROM arch_files WHERE digest = ?1", params![digest], |r| r.get::<_, i64>(0)).optional().ok().flatten().map(|n| n as u64) // WHAT: its recorded size. WHY: compared with what a check-in says
+}
+
 /// Whether a file was sent to Archetype (and so may be handed out by it).
 fn sent(db: &Connection, digest: &str) -> bool {
     db.query_row("SELECT 1 FROM arch_files WHERE digest = ?1", params![digest], |_| Ok(())).optional().ok().flatten().is_some() // WHAT: in Archetype's own list. WHY: View's drawings share the store and are never reached through here
@@ -451,7 +459,7 @@ async fn json_body<T: serde::de::DeserializeOwned>(body: Body, most: usize) -> A
 }
 
 /// The most a check-in's list may weigh: twenty thousand files' paths.
-const MOST_LIST: usize = 16 * 1024 * 1024; // WHAT: 16 MB of JSON. WHY: room for the biggest job folder's list, and no more
+const MOST_LIST: usize = 10 * 1024 * 1024; // WHAT: 10 MB of JSON. WHY: twenty thousand files at the longest path fit; no more is read
 
 pub async fn list_jobs(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<Vec<JobInfo>>> {
     on(&server)?;
@@ -524,7 +532,7 @@ pub async fn job_history(State(server): State<Shared>, headers: HeaderMap, UrlPa
 
 pub async fn check_out(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, body: Body) -> Answer<Json<JobInfo>> {
     on(&server)?;
-    let who = crate::api::caller(&server, &headers)?; // WHAT: anybody signed in may ask. WHY: may_check_out says no to a viewer, in Archetype's words
+    let who = crate::api::writer(&server, &headers)?; // WHAT: someone who may change jobs, with sharing on. WHY: a viewer is refused before anything is read; may_check_out says it again in Archetype's words
     let asked: CheckOut = json_body(body, 64 * 1024).await?;
     let at = now();
     let outcome = server
@@ -553,11 +561,14 @@ pub async fn check_out(State(server): State<Shared>, headers: HeaderMap, UrlPath
 
 pub async fn check_in(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, body: Body) -> Answer<Json<CheckedIn>> {
     on(&server)?;
-    let who = crate::api::caller(&server, &headers)?;
-    crate::api::sharing(&server)?; // WHAT: new work shared only while the office's licence allows. WHY: reading is never behind it
+    let who = crate::api::writer(&server, &headers)?; // WHAT: someone who may change jobs, with sharing on. WHY: a viewer is refused before anything is read
     let asked: CheckIn = json_body(body, MOST_LIST).await?;
-    let sent_here = server.store.with(|db| Ok(asked.files.iter().filter(|f| sent(db, &f.digest)).map(|f| f.digest.clone()).collect::<BTreeSet<_>>())).map_err(|e| Denied::broke("check the job's files", e))?; // WHAT: the files Archetype has. WHY: a check-in may only name files sent for it
-    check_files(&asked.files, |d| sent_here.contains(d)).map_err(Denied::wrong)?;
+    check_files(&asked.files, |_| true).map_err(Denied::wrong)?; // WHAT: the list's length, paths and fingerprints first. WHY: nothing is looked up for a list no job could hold
+    let sent_here = server.store.with(|db| Ok(asked.files.iter().filter_map(|f| sent_size(db, &f.digest).map(|n| (f.digest.clone(), n))).collect::<BTreeMap<_, _>>())).map_err(|e| Denied::broke("check the job's files", e))?; // WHAT: the files Archetype has, with the size each arrived at. WHY: a check-in may only name files sent for it
+    if let Some(f) = asked.files.iter().find(|f| sent_here.get(&f.digest).is_some_and(|n| *n != f.bytes)) {
+        return Err(Denied::wrong(format!("{} is listed at a size it didn't arrive at. Check in again.", f.path))); // WHAT: refused. WHY: the job's sizes and history say what really came
+    }
+    check_files(&asked.files, |d| sent_here.contains_key(d)).map_err(Denied::wrong)?; // WHAT: every file already sent. WHY: only those can be fetched later
     let at = now();
     let outcome = server
         .store
@@ -753,14 +764,21 @@ pub fn move_from(from: &std::path::Path, database: &std::path::Path, blobs: &std
         }
         let mut content = Vec::new();
         use std::io::Read;
-        std::fs::File::open(&path).and_then(|f| f.take(bytes + 1).read_to_end(&mut content)).map_err(|e| format!("reading file {digest:.12}…: {e}"))?; // WHAT: one byte past its size at most. WHY: a longer file is caught below, never read whole
+        if *bytes > MOST_FILE {
+            return Err(format!("file {digest:.12}… is listed at {bytes} bytes, more than any job file; no job was moved")); // WHAT: refused. WHY: never read a file that size into memory
+        }
+        std::fs::File::open(&path).and_then(|f| f.take(bytes.saturating_add(1)).read_to_end(&mut content)).map_err(|e| format!("reading file {digest:.12}…: {e}"))?; // WHAT: one byte past its size at most. WHY: a longer file is caught below, never read whole
         if content.len() as u64 != *bytes || crate::store::hex(&Sha256::digest(&content)) != *digest {
             return Err(format!("file {digest:.12}… doesn't match its fingerprint; no job was moved")); // WHAT: damaged. WHY: never brought in as if good
         }
         store.put_blob(&content).map_err(|e| format!("copying a file: {e}"))?;
         moved.files += 1;
     }
-    let tx = new.unchecked_transaction().map_err(|e| e.to_string())?; // WHAT: all rows or none. WHY: a move cut short leaves this server's Archetype jobs empty, not half there
+    let tx = rusqlite::Transaction::new_unchecked(&new, rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?; // WHAT: all rows or none, the write lock held from the start. WHY: a move cut short leaves nothing half there, and nobody adds a job in between
+    let still_empty: i64 = tx.query_row("SELECT COUNT(*) FROM arch_jobs", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    if still_empty > 0 {
+        return Err("A job was put on this server while the move ran; nothing was moved. Stop the server, then move again.".into()); // WHAT: refused, inside the lock. WHY: never mixed with jobs made meanwhile
+    }
     let at = crate::api::now();
     for (id, name, number, created, created_by, revision, updated, updated_by, holder) in &jobs {
         tx.execute("INSERT INTO arch_jobs (id, name, number, created, created_by, revision, updated, updated_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", params![id, name, number, created, created_by, revision, updated, updated_by]).map_err(|e| format!("moving job {name}: {e}"))?; // WHAT: the same id and name, given back. WHY: Archetype's links keep working; the old accounts aren't accounts here
