@@ -104,3 +104,22 @@ fn a_seat_moves_to_https_keeps_the_pin_and_never_falls_back() {
     drop(runtime); // WHAT: the server gone, HTTPS with it. WHY: a seat holding a pin must not drop to plain HTTP
     assert!(hub::secure::open(&base, &book).is_err(), "never back to plain HTTP once pinned");
 }
+
+#[test]
+fn this_machine_can_never_take_the_slots_the_office_s_own_computers_need() {
+    use std::io::Read;
+    let (_data, base, _runtime) = start();
+    let address = base.trim_start_matches("http://").to_string(); // WHAT: host:port on 127.0.0.1. WHY: every connection here comes from this machine, as the tunnel connector's do
+    let held: Vec<std::net::TcpStream> = (0..448).map(|_| std::net::TcpStream::connect(&address).unwrap()).collect(); // WHAT: this machine's whole share, held open. WHY: a stranger through the tunnel trying to take every slot
+    std::thread::sleep(std::time::Duration::from_millis(500)); // WHAT: a moment for the server to take them all. WHY: accepting is asynchronous
+    let mut one_more = std::net::TcpStream::connect(&address).unwrap(); // WHAT: the 449th from this machine. WHY: past its share
+    one_more.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    let _ = std::io::Write::write_all(&mut one_more, format!("GET /api/v1/health HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n").as_bytes()); // WHAT: a real request. WHY: a served connection answers it; a turned-away one can't
+    let mut answer = Vec::new();
+    let _ = one_more.read_to_end(&mut answer); // WHAT: whatever comes back. WHY: nothing, when turned away
+    assert!(!String::from_utf8_lossy(&answer).starts_with("HTTP/1.1"), "the 449th connection from this machine is turned away, not answered");
+    drop(held); // WHAT: the share given back. WHY: then this machine is served again
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let health: serde_json::Value = ureq::get(&format!("{base}/api/v1/health")).call().unwrap().into_json().unwrap();
+    assert_eq!(health["name"], "Example Steel", "served again once the share is free");
+}
