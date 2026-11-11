@@ -45,6 +45,25 @@ A module that isn't licensed isn't served: its routes answer 404, as if it didn'
 | The separate CAD server | a one-click move of its drawings into the `cad` module, then it is retired |
 | An office's Citadel Server | the Office Server takes it over as its `citadel` part: same service, same certificate, no re-pairing |
 
+## How every part stays up to date
+
+| What | How it updates | Proven by |
+|---|---|---|
+| The Office Server itself (View, CAD and Archetype parts in one program) | The same signed update channel View's server has today: pushed by the maintenance channel or fetched from the publisher's feed, checked against the keys built in, the old version kept for a rollback. Nothing else to install | `kept_up_to_date` tests; every release since 0.6 |
+| Its data across an update | New tables are made as the server opens, if not there yet; nothing is rewritten. The certificate and key stay in the data folder, so every seat's pin still matches | the server suites open a fresh and an existing database every run |
+| Ports, firewall, tunnel | Unchanged: HTTPS answers on the API's own port 8714 | `served_encrypted` |
+| View on each computer | From the office server, as today | `kept_up_to_date` |
+| View on iPads and Android | From the stores (Release workflow) | the store release scripts' tests |
+| Excalibur CAD | From its own signed feed (GitHub), whatever server it signs in to | CAD's update tests |
+| Archetype | From its own Archetype server, or from its own signed feed when its server is an Office Server (an Office Server hands out View's releases, which Archetype would refuse) | ExcaliburArchetype branch archetype-office-client-20261110 |
+| Citadel Server | Its own signed updates, sent by the maintenance channel as today; the Office Server reports the version that results | Citadel's own tests |
+| The estimating program on each computer | Its own signed feed, as today | its own tests |
+| Licences | The office's licence renews itself from the publisher when bought seats, parts or years are added; a renewal can never take a part, seat or year away | the licence tests |
+
+**Never roll the Office Server back below 0.7.0 once seats have moved to HTTPS.** A seat that holds the server's
+pin never falls back to plain HTTP, and an older server has no HTTPS: every seat would refuse to connect until it
+is updated again. A rollback between 0.7.x versions is fine (same certificate).
+
 ## Citadel and every company
 
 Citadel is one program for every company (Creede, 2026-11-01). Each company's build becomes **Citadel + that company's pack**:
