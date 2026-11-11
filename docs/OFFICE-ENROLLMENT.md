@@ -177,6 +177,42 @@ Citadel's existing `citadel-request/1` signing stays exactly as it is, for LatCo
 - **Device checks:** the cell asks the Office Server over the pipe ("is device X approved, and with what key?") and caches the answer for 60 s.
 - **The licence:** the cell runs only when the licence lists the `citadel` module.
 
+## 6a. The cell contract (exact)
+
+**How the Office Server starts the cell** (Windows):
+
+```
+"<office program folder>\citadel\Citadel Server.exe" --cell --pipe excalibur-office-<install id> --data "C:\ProgramData\Excalibur Office\citadel" --port 47110
+```
+
+- `--cell` means:
+  - no Manager window and no Windows service of its own;
+  - no own pairing, and its `/v1/pair*` routes answer 410 `pairing_moved`;
+  - its devices are the Office Server's;
+  - it exits when the pipe closes.
+- The Office Server restarts the cell after 5 s if it exits, at most 5 times in 10 minutes, then writes it in the log and shows it on `/api/v1/office` as "not answering".
+
+**The pipe:** `\\.\pipe\excalibur-office-<install id>`.
+
+- Created by the Office Server.
+- ACL: SYSTEM, plus the cell's own SID. Nobody else may connect.
+- Messages are one JSON object per line, UTF-8, at most 4 KiB per line. Each request gets exactly one answer line.
+
+The messages:
+
+- Cell to server: `{"op":"device","id":"<32 hex>"}`
+  - Server to cell: `{"state":"approved","public_key":"<base64>","admin":false,"name":"Dana","machine":"DANA-LAPTOP","app":"latcon-estimating"}`
+  - or `{"state":"waiting"|"refused"|"removed"|"unknown"}`
+- Cell to server: `{"op":"hello","version":"1.1.0"}`
+  - Server to cell: `{"ok":true,"office":"<company>","modules":["view","citadel",...]}`
+- Cell to server: `{"op":"migrate","devices":[{"public_key":"...","name":"...","machine":"...","paired_at":"...","paired_by":"..."}]}`
+  - Server to cell: `{"ok":true,"added":N}`
+  - Sent once, on the first start of a cell over an old Citadel Server's data. It brings its paired computers into the device list, approved.
+
+**Device ids for Citadel traffic:** the cell takes the Office Server's answer for the public key and works out Citadel's own id from it (`citadel-device/1` label). Both ids name the same key.
+
+**Failing closed:** if the pipe doesn't answer within 2 s, the cell refuses the request with 503 `office_unreachable`. It never falls back to an old list.
+
 ## 7. Rules (the guards; each one proven by a test that breaks it)
 
 1. A device request from outside the office network is refused.
