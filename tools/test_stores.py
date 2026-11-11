@@ -15,6 +15,7 @@ import subprocess  # WHAT: runs openssl. WHY: makes test keys and checks signatu
 import sys  # WHAT: the module path. WHY: imports the scripts beside this.
 import tempfile  # WHAT: a folder per test. WHY: nothing left behind.
 import unittest  # WHAT: the test runner. WHY: as the repo's other tool tests.
+from unittest import mock  # WHAT: stands a fake in for the network. WHY: put back by itself, even when a test fails
 import urllib.parse  # WHAT: reads form bodies and queries. WHY: the token request is a form.
 import zipfile  # WHAT: makes fake bundles. WHY: an .aab is a zip.
 
@@ -120,7 +121,7 @@ class Signing(Keys):  # WHAT: the tokens. WHY: a wrong token is refused by the s
         import urllib.request as ur  # WHAT: for a request object. WHY: the handler takes one.
         req = ur.Request("https://androidpublisher.googleapis.com/x", headers={"Authorization": "Bearer t"})  # WHAT: a call with a token. WHY: the case.
         self.assertIsNone(handler.redirect_request(req, None, 302, "Found", {}, "http://elsewhere.example/"))  # WHAT: not followed. WHY: as above.
-        self.assertTrue(any(isinstance(h, stores._NoRedirects) for h in stores._OPENER.handlers))  # WHAT: and it is the one in use. WHY: a handler nobody installs proves nothing.
+        self.assertTrue(any(isinstance(h, stores._NoRedirects) for h in getattr(stores._OPENER, "handlers", [])))  # WHAT: and it is the one in use. WHY: a handler nobody installs proves nothing.
 
     def test_odd_error_bodies_read_plainly(self):  # WHAT: error bodies that are a JSON list, a string, or not JSON. WHY: each still gives a message, not a crash.
         for body in (b'["x"]', b'"just text"', b"<html>down</html>"):  # WHAT: the shapes. WHY: as above.
@@ -208,12 +209,8 @@ class PlayChecks(Keys):  # WHAT: what play_release refuses before calling Google
                 play_release.plan(*args, notes="")  # WHAT: tried. WHY: as above.
 
     def test_dry_run_calls_nothing(self):  # WHAT: --dry-run checks all and calls nothing. WHY: the promise of a dry run.
-        original = stores.Http.send  # WHAT: the real door. WHY: replaced, then put back.
-        stores.Http.send = lambda *a, **k: self.fail("a dry run made a network call")  # WHAT: any call fails the test. WHY: as above.
-        try:  # WHAT: run it. WHY: as above.
+        with mock.patch.object(stores.Http, "send", lambda *a, **k: self.fail("a dry run made a network call")):  # WHAT: any network call fails the test, and the real one comes back after. WHY: the promise of a dry run
             code = play_release.main(["--account-file", self.account(), "--aab", self.bundle(), "--version", "0.6.30", "--dry-run"])  # WHAT: a dry run. WHY: as above.
-        finally:  # WHAT: put back. WHY: other tests.
-            stores.Http.send = original  # WHAT: restored. WHY: as above.
         self.assertEqual(code, 0)  # WHAT: success. WHY: everything checked.
 
 
@@ -238,7 +235,7 @@ class PlayCalls(Keys):  # WHAT: the calls a real Play release makes. WHY: the re
         form = urllib.parse.parse_qs(http.calls[0][3].decode())  # WHAT: the token request's form. WHY: checked.
         self.assertEqual(form["grant_type"], ["urn:ietf:params:oauth:grant-type:jwt-bearer"])  # WHAT: the JWT bearer grant. WHY: Google's.
         self.assertEqual(form["assertion"], ["signed.assertion.here"])  # WHAT: our assertion. WHY: as above.
-        for method, url, headers, _ in http.calls[1:]:  # WHAT: every API call. WHY: each carries the token.
+        for _method, _url, headers, _ in http.calls[1:]:  # WHAT: every API call. WHY: each carries the token.
             self.assertEqual(headers["Authorization"], "Bearer tok-123")  # WHAT: the bearer. WHY: as above.
         self.assertEqual(http.calls[2][3], b"bundle-bytes")  # WHAT: the bundle went as the body. WHY: a media upload.
         self.assertIn("uploadType=media", http.calls[2][1])  # WHAT: as a media upload. WHY: Google's upload protocol.
@@ -277,7 +274,7 @@ VALID = {"data": [{"id": "build-1", "attributes": {"processingState": "VALID", "
 class AppStoreCalls(Keys):  # WHAT: the calls a real App Store submission makes. WHY: the request building, proven offline.
     def store(self, answers, clock=None):  # WHAT: a client with a recorder. WHY: shared.
         self.http = Recorder(answers)  # WHAT: the recorder. WHY: read by the tests.
-        self.slept = []  # WHAT: waits asked for. WHY: the processing wait is checked.
+        self.slept: list[float] = []  # WHAT: waits asked for. WHY: the processing wait is checked.
         ticks = iter(range(0, 10 ** 6, 30))  # WHAT: a clock moving 30 s per look. WHY: deterministic.
         return appstore_release.AppStore(self.http, self.ec, "ABCDE12345", "11111111-2222-3333-4444-555555555555",  # WHAT: the client. WHY: test key, made-up ids.
                                          clock=clock or (lambda: next(ticks)), sleep=self.slept.append)  # WHAT: fake time. WHY: no real waiting.
@@ -379,13 +376,9 @@ class AppStoreCalls(Keys):  # WHAT: the calls a real App Store submission makes.
         notes = os.path.join(self.dir, "notes.txt")  # WHAT: a notes file. WHY: required.
         with open(notes, "w", encoding="utf-8") as f:  # WHAT: written. WHY: as above.
             f.write("Something new.\n")  # WHAT: text. WHY: as above.
-        original = stores.Http.send  # WHAT: the real door. WHY: replaced, then put back.
-        stores.Http.send = lambda *a, **k: self.fail("a dry run made a network call")  # WHAT: any call fails the test. WHY: as above.
-        try:  # WHAT: run it. WHY: as above.
+        with mock.patch.object(stores.Http, "send", lambda *a, **k: self.fail("a dry run made a network call")):  # WHAT: any network call fails the test, and the real one comes back after. WHY: the promise of a dry run
             code = appstore_release.main(["--key-file", self.ec, "--key-id", "ABCDE12345", "--issuer", "11111111-2222-3333-4444-555555555555",  # WHAT: a dry run. WHY: as above.
                                           "--version", "0.6.30", "--build-number", "1", "--notes-file", notes, "--dry-run"])  # WHAT: the rest. WHY: as above.
-        finally:  # WHAT: put back. WHY: other tests.
-            stores.Http.send = original  # WHAT: restored. WHY: as above.
         self.assertEqual(code, 0)  # WHAT: success. WHY: everything checked.
 
     def test_wrong_key_refused_in_dry_run(self):  # WHAT: a file that is not a key fails the dry run. WHY: a broken secret is found before a release.

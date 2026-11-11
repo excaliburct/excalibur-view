@@ -293,13 +293,13 @@ impl Markup {
             (colour[2] * 255.0).round() as u8
         );
         // WHAT: one <p> for each line of the words, split at every kind of line break. WHY: in rich text a line break inside a <p> is only a space, so a note of three lines came back as one line in any program that reads /RC first, as Revu does.
-        let paragraphs: String = crate::text::paragraphs(text)
-            .into_iter()
-            .map(|range| {
-                let line: String = text.chars().skip(range.start).take(range.end - range.start).collect(); // WHAT: the line's characters. WHY: ranges are by character.
-                format!("<p>{}</p>", escape_xml(&line)) // WHAT: the line as its own paragraph. WHY: as above.
-            })
-            .collect();
+        let paragraphs: String = crate::text::paragraphs(text).into_iter().fold(String::new(), |mut out, range| {
+            let line: String = text.chars().skip(range.start).take(range.end - range.start).collect(); // WHAT: the line's characters. WHY: ranges are by character.
+            out.push_str("<p>"); // WHAT: the line as its own paragraph. WHY: in rich text a line break inside a <p> is only a space
+            out.push_str(&escape_xml(&line));
+            out.push_str("</p>");
+            out
+        });
         let rich = format!(
             "<?xml version=\"1.0\"?><body xmlns=\"http://www.w3.org/1999/xhtml\" \
              xmlns:xfa=\"http://www.xfa.org/schema/xfa-data/1.0/\" \

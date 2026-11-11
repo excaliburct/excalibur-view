@@ -295,6 +295,7 @@ fn family_of_resource(name: &str) -> Family {
 /// The paragraphs of a text, split at every kind of line break a file may
 /// carry: `\n`, the `\r` Revu writes, and the `\r\n` a pasted Windows text
 /// brings. Each is a range of characters, by character, not by byte.
+#[must_use]
 pub fn paragraphs(text: &str) -> Vec<std::ops::Range<usize>> {
     let chars: Vec<char> = text.chars().collect(); // WHAT: the text as characters. WHY: every position here is a character's, so a degree sign or an emoji is one place, never half of one.
     let mut out = Vec::new(); // WHAT: the paragraphs found. WHY: returned.
@@ -349,6 +350,7 @@ pub struct Line {
 /// Words that are themselves too long for the box are broken rather than
 /// allowed to run out past the edge, because a note that runs off the sheet is
 /// a note nobody reads.
+#[must_use]
 pub fn breaks(text: &str, width: f64, setting: &Setting) -> Vec<Line> {
     let chars: Vec<char> = text.chars().collect(); // WHAT: the text as characters. WHY: lines are ranges of characters.
     let measure = |from: usize, to: usize| -> f64 {
