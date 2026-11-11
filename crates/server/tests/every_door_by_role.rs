@@ -1334,3 +1334,50 @@ fn fleet_doors_open_to_the_maintenance_key_and_to_nothing_any_person_or_program_
     let (status, _) = send(&office, "GET", "/api/version", None, &Body::None); // WHAT: the version, asked by nobody. WHY: Fleet's contract keeps it public.
     assert_eq!(status, 200);
 }
+
+
+/// The rows in the audit log. WHAT: counted straight from the store. WHY: a refusal must not grow it without limit.
+fn audit_rows(office: &Office) -> i64 {
+    office.server.store.with(|db| Ok(db.query_row("SELECT COUNT(*) FROM audit", [], |r| r.get(0))?)).unwrap()
+}
+
+#[test]
+fn a_sign_in_with_an_enormous_address_is_refused_and_writes_nothing() {
+    // WHAT: audit, 2026-11-11, H1: a megabyte "email" a try filled the disk. WHY: proven closed.
+    let office = an_office();
+    let before = audit_rows(&office);
+    let (status, _) = send(&office, "POST", "/api/v1/auth/token", None, &Body::Json(json!({"email": "x".repeat(500_000), "password": "x"})));
+    assert_eq!(status, 401); // WHAT: refused as any wrong sign-in. WHY: nothing told
+    assert_eq!(audit_rows(&office), before); // WHAT: no line written. WHY: refused before anything is kept
+}
+
+#[test]
+fn a_web_page_from_elsewhere_is_refused_before_any_door_and_programs_are_not() {
+    // WHAT: audit, 2026-11-11, M3: DNS rebinding. WHY: proven closed.
+    let office = an_office();
+    let url = format!("{}/api/v1/auth/token", office.base);
+    let from_a_page = ureq::post(&url).set("Origin", "https://evil.example").send_json(json!({"email": "a@b.c", "password": "x"}));
+    assert!(matches!(from_a_page, Err(ureq::Error::Status(403, _))), "{from_a_page:?}"); // WHAT: a browser page from elsewhere. WHY: refused before the route
+    let (status, _) = send(&office, "POST", "/api/v1/auth/token", None, &Body::Json(json!({"email": "a@b.c", "password": "x"})));
+    assert_eq!(status, 401); // WHAT: a program sends no Origin. WHY: reaches the route as before
+}
+
+#[test]
+fn wrong_maintenance_keys_are_limited_and_a_request_without_one_is_not_counted() {
+    // WHAT: audit, 2026-11-11, L3. WHY: proven closed.
+    let office = an_office();
+    let url = format!("{}/api/admin/ops", office.base);
+    for _ in 0..10 {
+        let (status, _) = send(&office, "GET", "/api/admin/ops", None, &Body::None); // WHAT: no key at all. WHY: never counted
+        assert_eq!(status, 401);
+    }
+    let mut refused_for_a_while = false;
+    for _ in 0..8 {
+        match ureq::get(&url).set("x-av-update-key", "wrong-key-wrong-key-wrong-key-0000").call() {
+            Err(ureq::Error::Status(429, _)) => refused_for_a_while = true, // WHAT: told to wait. WHY: the limit
+            Err(ureq::Error::Status(401, _)) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(refused_for_a_while, "eight wrong keys from one place are limited");
+}

@@ -453,7 +453,11 @@ pub fn move_from(from: &Path, database: &Path, blobs: &Path) -> Result<Moved, St
         new.put_blob(&bytes).map_err(|e| format!("copying a drawing file: {e}"))?; // WHAT: copied, written beside then moved into place. WHY: the same way a save writes it
         moved.files += 1;
     }
-    let tx = new.db.transaction().map_err(|e| e.to_string())?; // WHAT: all rows or none. WHY: a move cut short leaves this server's CAD drawings empty, not half there
+    let tx = rusqlite::Transaction::new_unchecked(&new.db, rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?; // WHAT: all rows or none, the write lock held from the start. WHY: a move cut short leaves nothing half there, and nobody adds a drawing between the count and the move (audit, 2026-11-11, as Archetype's move)
+    let still_empty: i64 = tx.query_row("SELECT COUNT(*) FROM cad_drawings", [], |r| r.get(0)).map_err(|e| e.to_string())?; // WHAT: counted again inside the lock. WHY: the first count was taken before it
+    if still_empty > 0 {
+        return Err("A drawing was put on this server while the move ran; nothing was moved. Stop the server, then move again.".into()); // WHAT: refused, inside the lock. WHY: never mixed with drawings made meanwhile
+    }
     for (id, folder, name, locked_by, archived, created_by, created_at) in &drawings {
         tx.execute("INSERT INTO cad_drawings (id, folder, name, locked_by, locked_at, archived, created_by, created_at) VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5, ?6)", params![id, folder, name, archived, created_by, created_at]).map_err(|e| format!("moving drawing {id}: {e}"))?; // WHAT: the same id, folder and name, checked in. WHY: CAD's links keep working; the old sign-in names aren't accounts here
         moved.drawings += 1;

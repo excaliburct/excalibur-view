@@ -130,7 +130,7 @@ fn pick_up_from_the_data_folder(server: &Server) {
         .max_by(|a, b| newest_first(&a.2, &b.2).then_with(|| b.0.cmp(&a.0))); // WHAT: the newest of those wanted, and by name when two tie. WHY: one decision, the same at every start
     match best {
         Some((path, text, _)) => match install(server, text) {
-            Ok(license) => tracing::info!("license {} for {} added from {}", license.id, license.company, path.display()), // WHAT: said in the log. WHY: as before
+            Ok(license) => tracing::info!("license {}… for {} added from {}", license.id.chars().take(8).collect::<String>(), license.company, path.display()), // WHAT: said in the log, the id shortened. WHY: the whole id finds the licence file on the feed (audit, 2026-11-11)
             Err(why) => tracing::warn!("{} was not used: {why}", path.display()), // WHAT: said in the log. WHY: as before
         },
         None => tracing::info!("the licence files in the data folder are already in use, or older than the one this server holds; left alone"), // WHAT: said, nothing changed. WHY: a restart must never take seats or updates away
@@ -177,6 +177,13 @@ pub fn folder_file_wanted(held: Option<&License>, fresh: &License, seen_before: 
                 && fresh.edition == held.edition
                 && fresh.issued >= held.issued
                 && held.modules.iter().all(|m| fresh.modules.contains(m)) // WHAT: another licence: new, the same edition, not older, every part kept. WHY: dropped in on purpose, but never over what came after, and never switching CAD or Archetype off by itself
+                && fresh.company == held.company // WHAT: the same company. WHY: another company's licence in the folder swapped this office's (audit, 2026-11-11)
+                && (fresh.users == 0 || (held.users != 0 && fresh.users >= held.users)) // WHAT: no fewer seats. WHY: a reduction is added by hand, never by a file in a folder
+                && match (held.updates_through.as_str(), fresh.updates_through.as_str()) {
+                    (_, "forever") => true,
+                    ("forever", _) => false,
+                    (was, now) => now >= was,
+                } // WHAT: updates not ending sooner. WHY: as above
         }
     }
 }
@@ -216,8 +223,10 @@ pub fn begin_at(server: &Server, now: &str, founding_before: &str) {
         .ok()
         .flatten();
     if let Some(first) = earliest.filter(|first| first.as_str() < founding_before) {
-        let _ = store.set_setting(FOUNDING, &first);
-        tracing::info!("in use since {first}, before licensing: a founding install, never asked for a license");
+        // WHAT: said, never decided here. WHY: the people's dates and this setting are the office's own to change, so
+        // a clock set back at the first start, or one row typed in, made any server founding for good (audit,
+        // 2026-11-11). A founding office is given a signed founding license instead; one already marked keeps it.
+        tracing::warn!("in use since {first}, before licensing: if this is a founding office, it needs its signed founding license");
     }
     let _ = store.set_setting(BEGAN, now);
 }
@@ -370,9 +379,32 @@ pub fn state_as_built(server: &Server, now: &str, trusted: &Trusted, built: &str
         return if license.covers(built) { State::Licensed(license) } else { State::Beyond(license) };
     }
     let began = server.store.setting(BEGAN).ok().flatten().unwrap_or_else(|| now.to_string());
-    match days_left(&began, now) {
+    let now = latest_seen(server, now); // WHAT: the latest time this server has seen, less a day. WHY: a clock held back kept the trial going for ever (audit, 2026-11-11)
+    match days_left(&began, &now) {
         0 => State::Unlicensed,
         n => State::Trial { days_left: n },
+    }
+}
+
+/// WHAT: the setting keeping the latest time the license was looked at. WHY: the trial counts from it when the clock
+/// has gone back.
+const SEEN: &str = "licensing_seen";
+
+/// WHAT: `now`, or the latest time already seen less a day, whichever is later; the latest is kept, written at most
+/// once an hour. WHY: a day's slack lets an ordinary clock correction pass, while a clock held in the past no longer
+/// stops the trial.
+fn latest_seen(server: &Server, now: &str) -> String {
+    use time::format_description::well_known::Rfc3339;
+    let Ok(at) = time::OffsetDateTime::parse(now, &Rfc3339) else {
+        return now.to_string(); // WHAT: as given. WHY: an unreadable time is days_left's to handle, as before
+    };
+    let seen = server.store.setting(SEEN).ok().flatten().and_then(|s| time::OffsetDateTime::parse(&s, &Rfc3339).ok()); // WHAT: the latest kept. WHY: compared below
+    if seen.map_or(true, |seen| at > seen + time::Duration::hours(1)) {
+        let _ = server.store.set_setting(SEEN, now); // WHAT: kept. WHY: the next look compares with it
+    }
+    match seen {
+        Some(seen) if at < seen - time::Duration::days(1) => (seen - time::Duration::days(1)).format(&Rfc3339).unwrap_or_else(|_| now.to_string()), // WHAT: the clock has gone back more than a day. WHY: counted from what was seen
+        _ => now.to_string(), // WHAT: the clock as it is. WHY: the usual case
     }
 }
 
@@ -677,9 +709,20 @@ mod tests {
     }
 
     #[test]
-    fn a_server_in_use_before_licensing_is_never_asked_to_pay() {
+    fn a_server_in_use_before_licensing_is_no_longer_made_founding_by_itself() {
+        // WHAT: audit, 2026-11-11: a clock set back at the first start made any server founding. WHY: proven closed.
         let (server, dir) = a_server();
         someone(&server, "2026-06-01T12:00:00Z");
+        begin_at(&server, "2026-10-20T00:00:00Z", FOUNDING_BEFORE);
+        assert!(matches!(state_at(&server, "2026-10-21T00:00:00Z", &nobody()), State::Trial { .. })); // WHAT: an ordinary trial. WHY: a founding office is given a signed license instead
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_office_already_founding_is_never_asked_to_pay() {
+        let (server, dir) = a_server();
+        someone(&server, "2026-06-01T12:00:00Z");
+        server.store.set_setting(FOUNDING, "2026-06-01T12:00:00Z").unwrap(); // WHAT: marked founding by an earlier version. WHY: those offices keep it
         begin_at(&server, "2026-10-20T00:00:00Z", FOUNDING_BEFORE);
         // Years later, with no license file anywhere: still everything.
         let state = state_at(&server, "2031-01-01T00:00:00Z", &nobody());
@@ -715,6 +758,17 @@ mod tests {
     fn a_clock_turned_back_never_ends_a_trial_early() {
         assert_eq!(days_left("2026-09-10T00:00:00Z", "2026-09-01T00:00:00Z"), 30);
         assert_eq!(days_left("not a date", "2026-09-01T00:00:00Z"), 30);
+    }
+
+    #[test]
+    fn a_clock_held_back_no_longer_keeps_the_trial_going() {
+        // WHAT: audit, 2026-11-11. WHY: the trial ran for ever on a clock kept before it began.
+        let (server, dir) = a_server();
+        begin_at(&server, "2026-09-01T00:00:00Z", FOUNDING_BEFORE);
+        assert_eq!(state_at(&server, "2026-10-15T00:00:00Z", &nobody()), State::Unlicensed); // WHAT: seen after the trial. WHY: kept as the latest
+        assert_eq!(state_at(&server, "2026-08-01T00:00:00Z", &nobody()), State::Unlicensed); // WHAT: the clock set back: still over. WHY: counted from what was seen
+        assert_eq!(state_at(&server, "2026-10-14T06:00:00Z", &nobody()), State::Unlicensed); // WHAT: within a day back: as it is. WHY: still over anyway
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -876,7 +930,7 @@ mod tests {
         assert_eq!(users_held(&server, &trusted).map(|h| h.1), Some(9), "a better copy of the same licence is taken");
 
         // WHAT: a different licence dropped in. WHY: a person put it there on purpose, so it is used, once
-        std::fs::write(dir.join("New licence.evlicense"), a_license_called(&signing, "evl_other", 4, "2029-01-01")).unwrap();
+        std::fs::write(dir.join("New licence.evlicense"), a_license_called(&signing, "evl_other", 9, "2029-01-01")).unwrap(); // WHAT: no fewer seats, updates later. WHY: a worse one is refused from the folder (audit, 2026-11-11)
         begin(&server);
         assert_eq!(users_held(&server, &trusted).map(|h| h.0), Some("evl_other".into()));
         install_with(&server, &a_license_called(&signing, "evl_test", 12, "2030-01-01"), &trusted).unwrap(); // WHAT: an administrator adds another from a seat. WHY: the latest decision
@@ -1001,9 +1055,18 @@ mod tests {
         assert!(!folder_file_wanted(Some(&held), &read(a_license_called(&signing, "evl_test", 3, "2027-11-01")), false, true), "fewer seats: no");
         assert!(!folder_file_wanted(Some(&held), &read(a_license_called(&signing, "evl_test", 6, "2027-01-01")), false, true), "earlier end of updates: no");
         assert!(folder_file_wanted(Some(&held), &read(a_license_called(&signing, "evl_test", 9, "2027-11-01")), true, true), "more seats: yes, even seen before");
-        let other = read(a_license_called(&signing, "evl_other", 2, "2027-01-01"));
-        assert!(folder_file_wanted(Some(&held), &other, false, true), "another licence, new in the folder: yes");
+        let other = read(a_license_called(&signing, "evl_other", 6, "2027-11-01"));
+        assert!(folder_file_wanted(Some(&held), &other, false, true), "another licence, new in the folder, no worse: yes");
         assert!(!folder_file_wanted(Some(&held), &other, true, true), "another licence seen before: no");
+        // WHAT: audit, 2026-11-11: another licence that is worse is refused from the folder. WHY: a downgrade is added by hand, never by a file
+        assert!(!folder_file_wanted(Some(&held), &read(a_license_called(&signing, "evl_fewer", 2, "2027-11-01")), false, true), "another licence with fewer seats: no");
+        assert!(!folder_file_wanted(Some(&held), &read(a_license_called(&signing, "evl_sooner", 6, "2027-01-01")), false, true), "another licence whose updates end sooner: no");
+        // WHAT: another company's licence, otherwise as good. WHY: audit, 2026-11-11: it swapped this office's licence from the folder
+        let mut theirs: License = serde_json::from_str(&a_license_called(&signing, "evl_theirs", 9, "2028-11-01")).unwrap();
+        theirs.company = "Some Other Steel, Inc.".into(); // WHAT: another company. WHY: the case
+        use ed25519_dalek::Signer;
+        theirs.signature = signing.sign(&theirs.signing_payload()).to_bytes().iter().map(|b| format!("{b:02x}")).collect(); // WHAT: signed again. WHY: the company is in the signed text
+        assert!(!folder_file_wanted(Some(&held), &read(serde_json::to_string(&theirs).unwrap()), false, true), "another company's licence: no");
     }
 
     #[test]

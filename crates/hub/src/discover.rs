@@ -177,6 +177,7 @@ pub fn answer_for(mut describe: impl FnMut(SocketAddr) -> Answer) {
         return;
     };
     let mut buffer = [0u8; 256];
+    let mut last_answered: std::collections::HashMap<std::net::IpAddr, std::time::Instant> = std::collections::HashMap::new(); // WHAT: when each asker was last answered. WHY: one answer a second each
     loop {
         let Ok((n, from)) = socket.recv_from(&mut buffer) else {
             continue;
@@ -184,10 +185,37 @@ pub fn answer_for(mut describe: impl FnMut(SocketAddr) -> Answer) {
         if &buffer[..n] != ASKING {
             continue;
         }
+        if !on_a_local_network(from.ip()) {
+            continue; // WHAT: only the office's own networks answered. WHY: an answer to a forged internet address made this server an amplifier (audit, 2026-11-11)
+        }
+        let now = std::time::Instant::now(); // WHAT: now. WHY: compared with the last answer
+        if last_answered.get(&from.ip()).is_some_and(|at| now.duration_since(*at) < std::time::Duration::from_secs(1)) {
+            continue; // WHAT: answered under a second ago. WHY: a flood from one address costs one answer a second
+        }
+        if last_answered.len() >= 4096 {
+            last_answered.retain(|_, at| now.duration_since(*at) < std::time::Duration::from_secs(1)); // WHAT: the old ones forgotten. WHY: the map stays small
+        }
+        last_answered.insert(from.ip(), now); // WHAT: noted. WHY: as above
         let Ok(text) = serde_json::to_vec(&describe(from)) else {
             continue;
         };
         let _ = socket.send_to(&text, from);
+    }
+}
+
+/// WHAT: whether an address is on a local network: this machine, a private
+/// range, link-local, or carrier-grade NAT. WHY: discovery is for the office's
+/// own network; nobody on the internet needs an answer.
+pub fn on_a_local_network(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets(); // WHAT: the first two numbers. WHY: carrier-grade NAT is 100.64/10
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || (a == 100 && (64..128).contains(&b))
+        }
+        std::net::IpAddr::V6(v6) => {
+            let first = v6.segments()[0]; // WHAT: the first 16 bits. WHY: unique-local fc00::/7 and link-local fe80::/10
+            v6.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80 || v6.to_ipv4_mapped().is_some_and(|v4| on_a_local_network(v4.into()))
+        }
     }
 }
 
@@ -240,6 +268,16 @@ pub fn facing(peer: IpAddr) -> Option<IpAddr> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_local_networks_are_answered() {
+        for local in ["127.0.0.1", "10.1.2.3", "172.16.0.9", "192.168.20.3", "169.254.1.1", "100.64.0.1", "::1", "fd00::1", "fe80::1", "::ffff:192.168.1.5"] {
+            assert!(super::on_a_local_network(local.parse().unwrap()), "{local}"); // WHAT: answered. WHY: the office's own networks
+        }
+        for outside in ["8.8.8.8", "100.128.0.1", "2001:4860::8888", "::ffff:8.8.8.8"] {
+            assert!(!super::on_a_local_network(outside.parse().unwrap()), "{outside}"); // WHAT: not answered. WHY: the internet
+        }
+    }
     use super::*;
 
     fn an_answer(name: &str, url: &str, ready: bool) -> Answer {

@@ -1530,6 +1530,18 @@ fn check_for_update(
         });
     };
     log::info!("update check: version {} is on offer", release.version);
+    // WHAT: an offer no newer than this one taken only when the administrator's hold names exactly it, over a channel
+    // nobody between can change. WHY: otherwise anyone able to answer for the server (a man in the middle on plain HTTP)
+    // could put back an older signed build with known faults (audit, 2026-11-11). A hold over pinned or checked HTTPS
+    // still moves the office back on purpose.
+    if !hub::update::newer(&release.version, running) {
+        let trusted = client.is_some_and(|c| c.pin().is_some() || c.base().starts_with("https://")); // WHAT: pinned HTTPS, or HTTPS its certificate authority vouches for. WHY: the offer can't have been changed on the way
+        let held_there = pinned.as_deref() == Some(release.version.as_str()); // WHAT: the administrator's hold names this very version. WHY: the only reason to go back
+        if !(matches!(from, From::Server) && trusted && held_there) {
+            log::warn!("update check: version {} is not newer than {running}; not taken", release.version);
+            return note(format!("Excalibur View {running} is not replaced by the older {} it was offered.", release.version));
+        }
+    }
     if !crate::install::updates_itself() {
         return;
     }

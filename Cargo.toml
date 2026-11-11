@@ -23,6 +23,13 @@ rust-version = "1.89"
 opt-level = 3
 lto = "thin"
 codegen-units = 4
+# WHAT: no symbol names and no debug information in what ships. WHY: the
+# programs are machine code already; without function names in them, reading
+# one back is far slower work (Creede, 2026-11-11: make reverse engineering
+# nearly impossible). A crash report still names the version, which is what
+# finding a fault needs.
+strip = "symbols"
+debug = false
 # Unwinding rather than aborting. A little larger and a shade slower, and worth
 # both: the program tries more than one renderer at start-up and treats one that
 # blows up as a renderer to stop using. With `abort`, that attempt is not

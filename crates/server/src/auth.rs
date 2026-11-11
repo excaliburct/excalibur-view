@@ -43,6 +43,31 @@ pub fn password_matches(password: &str, stored: &str) -> bool {
         .is_ok()
 }
 
+/// WHAT: the password hashes and checks running at once. WHY: each is slow and
+/// heavy on purpose; unlimited, a crowd of addresses could keep every one of the
+/// server's threads hashing and stall every request (audit, 2026-11-11).
+fn hashing() -> &'static tokio::sync::Semaphore {
+    static TURNS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new(); // WHAT: made once. WHY: one limit for the whole server
+    TURNS.get_or_init(|| tokio::sync::Semaphore::new(4)) // WHAT: four at a time. WHY: enough for an office signing in together, few enough to leave the rest of the server free
+}
+
+/// `password_matches`, waited for in turn and run off the server's async
+/// threads.
+pub async fn password_matches_in_turn(password: &str, stored: &str) -> bool {
+    let Ok(_turn) = hashing().acquire().await else {
+        return false; // WHAT: no turn (the limit was closed). WHY: refusing is the safe answer
+    };
+    let (password, stored) = (password.to_string(), stored.to_string()); // WHAT: owned copies. WHY: moved to the blocking thread
+    tokio::task::spawn_blocking(move || password_matches(&password, &stored)).await.unwrap_or(false) // WHAT: checked on a blocking thread. WHY: never holds an async thread; a failed task is a refusal
+}
+
+/// `hash_password`, waited for in turn and run off the server's async threads.
+pub async fn hash_password_in_turn(password: &str) -> Result<String> {
+    let _turn = hashing().acquire().await.map_err(|e| anyhow!("waiting to hash that password: {e}"))?; // WHAT: a turn. WHY: as above
+    let password = password.to_string(); // WHAT: an owned copy. WHY: moved to the blocking thread
+    tokio::task::spawn_blocking(move || hash_password(&password)).await.map_err(|e| anyhow!("hashing that password: {e}"))? // WHAT: hashed on a blocking thread. WHY: as above
+}
+
 /// A stored password nobody has, checked against when an account does not
 /// exist so that the answer takes as long as a wrong password on a real one.
 pub fn no_such_account() -> &'static str {

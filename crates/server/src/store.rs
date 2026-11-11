@@ -382,9 +382,22 @@ impl Store {
         }
         // Written beside and moved into place, so a half-written drawing is
         // never visible under a digest that promises the whole one.
-        let temp = path.with_extension("part");
-        std::fs::write(&temp, bytes)?;
-        std::fs::rename(&temp, &path)?;
+        let mut tag = [0u8; 8]; // WHAT: a random tag for the temporary name. WHY: two uploads of the same bytes at once shared one ".part" and could move a half-written one into place (audit, 2026-11-11)
+        rand::Rng::fill(&mut rand::thread_rng(), &mut tag);
+        let temp = path.with_extension(format!("part{}", hex(&tag)));
+        {
+            use std::io::Write as _; // WHAT: write_all. WHY: below
+            let mut file = std::fs::File::create(&temp)?; // WHAT: the temporary file. WHY: written whole before it is moved
+            file.write_all(bytes)?;
+            file.sync_all()?; // WHAT: on the disk before the move. WHY: a power cut left a short file under a full digest
+        }
+        if let Err(e) = std::fs::rename(&temp, &path) {
+            let _ = std::fs::remove_file(&temp); // WHAT: the temporary file let go. WHY: nothing left behind
+            if path.exists() {
+                return Ok(digest); // WHAT: the other upload got there first. WHY: same bytes, same digest
+            }
+            return Err(e.into());
+        }
         Ok(digest)
     }
 

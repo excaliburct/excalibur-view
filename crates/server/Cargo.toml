@@ -24,7 +24,7 @@ takeoff = { path = "../takeoff" }
 chest = { path = "../chest" }
 
 axum = { version = "0.7", features = ["multipart", "macros"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs", "sync"] } # WHAT: sync added. WHY: a semaphore holds password hashing to a few at a time (audit, 2026-11-11)
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors", "limit", "timeout"] }
 rusqlite = { version = "0.41", features = ["bundled"] }

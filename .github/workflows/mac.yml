@@ -170,6 +170,7 @@ jobs:
           SIGN_IDENTITY: ${{ inputs.check_only && '-' || secrets.MACOS_SIGN_IDENTITY }}  # WHAT: "-" (ad hoc, see build.sh) for a check build, else the Developer ID. WHY: a check build proves the whole bundle builds and signs without any credential.
           NOTARY_PROFILE: excalibur-notary
           NOTARY_KEYCHAIN: ${{ runner.temp }}/build.keychain
+          RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=crate"  # WHAT: this machine's workspace path kept out of the binary. WHY: only CI knows it (reverse-engineering hardening, 2026-11-11)
         run: deploy/macos/build.sh
 
       - name: What came out

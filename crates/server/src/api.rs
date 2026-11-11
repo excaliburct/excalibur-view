@@ -319,7 +319,7 @@ async fn keys_keep_to_their_purpose(
 /// for, its query or its body, and where it came from. Only 403s: those
 /// come from somebody signed in or holding a key, so a stranger can't fill
 /// the log with them the way they could with 401s.
-async fn refusals_logged(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+async fn refusals_logged(State(server): State<Shared>, request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let method = request.method().clone(); // WHAT: GET, POST... WHY: half of which door.
     let route = request
         .extensions()
@@ -328,7 +328,7 @@ async fn refusals_logged(request: axum::extract::Request, next: axum::middleware
         .unwrap_or_default(); // WHAT: the route's pattern (`/sets/:id/file`). WHY: names the door without anything the caller typed.
     let from = seen_from(request.headers()); // WHAT: the caller's address, as `where_from` found it. WHY: one machine or forty.
     let answer = next.run(request).await; // WHAT: the route's answer. WHY: logged only when it was a refusal.
-    if answer.status() == StatusCode::FORBIDDEN {
+    if answer.status() == StatusCode::FORBIDDEN && refusal_worth_a_line(&server, &format!("403 {from}")) { // WHAT: at most a line a minute an address. WHY: some refusals need no credential, so a stranger could write lines without end (audit, 2026-11-11)
         tracing::warn!("refused {method} {route} from {}", if from.is_empty() { "an unknown address" } else { from.as_str() }); // WHAT: one line. WHY: an administrator reading the log sees who tried which door.
     }
     answer
@@ -505,7 +505,7 @@ pub fn router(server: Shared) -> Router {
         .route("/sets/:id/folder", post(crate::folders::move_set)) // WHAT: a drawing set moved, with its issues. WHY: likewise.
         // WHAT: every matched route first checks that a key keeps to its purpose. WHY: one gate in front of all of them, so a new route is closed to sync keys unless it is put on SYNC_ROUTES on purpose.
         .route_layer(axum::middleware::from_fn_with_state(server.clone(), keys_keep_to_their_purpose))
-        .route_layer(axum::middleware::from_fn(refusals_logged)) // WHAT: every 403 written in the server's log. WHY: somebody signed in walking the API for doors they may not open left no trace.
+        .route_layer(axum::middleware::from_fn_with_state(server.clone(), refusals_logged)) // WHAT: every 403 written in the server's log. WHY: somebody signed in walking the API for doors they may not open left no trace.
         // WHAT: every other route takes at most a small body. WHY: a JSON extractor reads the whole body before the handler asks who is calling, so a large limit everywhere let anybody, signed in or not, make the server hold hundreds of megabytes per request.
         .layer(DefaultBodyLimit::max(SMALL_BODY))
         // Who is connected, for the Fleet's board. Sees every API request,
@@ -527,8 +527,27 @@ pub fn router(server: Shared) -> Router {
         .merge(crate::fleet::router(server.clone()))
         // Where an assistant asks about the quantities. Same token as the
         // API, and read-only: see the note at the top of `crate::mcp`.
-        .merge(crate::mcp::router(server))
+        .merge(crate::mcp::router(server.clone()))
+        .layer(axum::middleware::from_fn_with_state(server, origin_checked)) // WHAT: a browser page from anywhere else refused. WHY: DNS rebinding let a web page someone in the office opened claim an unclaimed server or join an open one (audit, 2026-11-11)
         .layer(axum::middleware::from_fn(marked)) // WHAT: every answer marked not to be kept, sniffed or framed. WHY: the API said none of it, so a proxy or a browser was left to guess.
+}
+
+/// Refuses a request a web browser sent from a page that isn't on the
+/// office's list (`HYPERVIEW_ALLOW_ORIGINS`). Browsers always say where a
+/// page came from (`Origin`) on anything but a plain read; the seats, Fleet
+/// and the tunnel's connector send no such header, so they are unaffected.
+async fn origin_checked(
+    State(server): State<Shared>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if let Some(origin) = request.headers().get(header::ORIGIN) {
+        let named = origin.to_str().unwrap_or_default().trim_end_matches('/'); // WHAT: the page's origin, as sent. WHY: compared with the list
+        if !server.config.allow_origins.iter().any(|allowed| allowed.trim_end_matches('/') == named) {
+            return Denied(StatusCode::FORBIDDEN, Problem::new("forbidden", "Requests from web pages are not accepted here.")).into_response(); // WHAT: refused before any route. WHY: a page can't act as somebody in the office
+        }
+    }
+    next.run(request).await
 }
 
 /// What every answer says about itself, unless its route already said:
@@ -661,7 +680,7 @@ pub const ROUTES: &[(&str, &str)] = &[
 
 // ---- is it there ----------------------------------------------------------
 
-async fn health(State(server): State<Shared>) -> Json<Health> {
+async fn health(State(server): State<Shared>, headers: HeaderMap) -> Json<Health> {
     // Claimed unless the server can prove otherwise. If the database cannot be
     // read, the honest answer is not "help yourself" — a client that is told a
     // server is unclaimed offers to take it over.
@@ -672,7 +691,7 @@ async fn health(State(server): State<Shared>) -> Json<Health> {
         version: VERSION.to_string(),
         name: installation_name(&server),
         claimed,
-        joining: if claimed { how_joining(&server).0 } else { String::new() },
+        joining: if claimed { joining_for(how_joining(&server).0, from_outside(&headers)) } else { String::new() }, // WHAT: said as this caller is treated. WHY: "open" told strangers on the internet there was a door
         // Only when it has been checked from the outside. Handing a seat an
         // address that does not answer is worse than handing it nothing: it
         // would try the broken one in a truck and conclude the server is
@@ -739,7 +758,8 @@ fn days_of(body: &ChangeJoining) -> Option<u32> {
 
 /// A date that many days from now, as the settings store it.
 fn in_days(days: u32) -> String {
-    let when = time::OffsetDateTime::now_utc() + time::Duration::days(days as i64);
+    let days = days.min(auth::LONGEST_KEY_DAYS); // WHAT: at most ten years. WHY: a huge number overflowed the date and ended the request (audit, 2026-11-11)
+    let when = time::OffsetDateTime::now_utc() + time::Duration::days(i64::from(days));
     when.format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
 }
@@ -819,6 +839,12 @@ async fn sign_in(
 ) -> Answer<Json<Session>> {
     let email = body.email.trim().to_lowercase();
     let from = seen_from(&headers);
+    if email.chars().count() > 254 || email.chars().any(char::is_control) {
+        return Err(Denied(
+            StatusCode::UNAUTHORIZED,
+            Problem::new("unauthorised", "That email address and password do not match."),
+        )); // WHAT: refused before anything is kept or written. WHY: no account has such an address, and a megabyte one a try filled the audit log (audit, 2026-11-11)
+    }
 
     // The account is looked up first (one indexed read, no password check),
     // so that a real account's count can be kept for good. Counted against
@@ -840,18 +866,22 @@ async fn sign_in(
         .map_err(|e| Denied::broke("look you up", e))?;
 
     let counted = crate::patience::counted_as(&from); // WHAT: the address as it is counted: an IPv6 caller by its /64. WHY: a new address from the same /64 is the same caller.
-    let real: &[&str] = if session.is_some() { &[email.as_str()] } else { &[] }; // WHAT: the account, when there is one. WHY: a real account's count is never forgotten to make room.
+    // WHAT: the account counted apart for tries from the internet. WHY: a stranger's wrong guesses through the tunnel made the account wait on the office network too, so anybody who knew an administrator's address could lock them out (audit, 2026-11-11)
+    let account = if from_outside(&headers) { format!("{email}\u{1}outside") } else { email.clone() };
+    let real: &[&str] = if session.is_some() { &[account.as_str()] } else { &[] }; // WHAT: the account, when there is one. WHY: a real account's count is never forgotten to make room.
     // WHAT: asked and counted in one step: this try is counted as wrong before it is checked, and a right password clears it below. WHY: asked and counted apart, a burst sent together was all asked before any was counted.
     if let Err(owed) = server
         .patience
-        .begin_keeping(crate::patience::SIGNING_IN, &[email.as_str(), counted.as_str()], real)
+        .begin_keeping(crate::patience::SIGNING_IN, &[account.as_str(), counted.as_str()], real)
     {
-        record(
-            &server,
-            crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email)
-                .saying("too many wrong tries")
-                .from(from.clone()),
-        );
+        if refusal_worth_a_line(&server, &format!("wait:{counted}")) {
+            record(
+                &server,
+                crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email)
+                    .saying("too many wrong tries")
+                    .from(from.clone()),
+            ); // WHAT: written once a minute an address. WHY: every refused try wrote a line, so the limit didn't slow the log
+        }
         return Err(Denied(
             StatusCode::TOO_MANY_REQUESTS,
             Problem::new("too_many", crate::patience::refusal(owed)), // WHAT: the wait, in words. WHY: said to whoever is told to wait.
@@ -874,16 +904,16 @@ async fn sign_in(
         // for. And checked against a password all the same, so the answer
         // takes as long as a wrong password does: an answer that came back
         // at once said which addresses have no account.
-        let _ = auth::password_matches(&body.password, auth::no_such_account()); // WHAT: a password check that can never pass. WHY: the time it takes is the same as a real one, so timing tells nobody whether the account exists.
+        let _ = auth::password_matches_in_turn(&body.password, auth::no_such_account()).await; // WHAT: a password check that can never pass. WHY: the time it takes is the same as a real one, so timing tells nobody whether the account exists.
         return Err(Denied(
             StatusCode::UNAUTHORIZED,
             Problem::new("unauthorised", "That email address and password do not match."),
         ));
     };
-    if !auth::password_matches(&body.password, &stored) {
+    if !auth::password_matches_in_turn(&body.password, &stored).await {
         record(
             &server,
-            crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &body.email)
+            crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email) // WHAT: the address as checked. WHY: the raw one could be padded out
                 .by(&id)
                 .saying("the password did not match")
                 .from(from.clone()),
@@ -896,7 +926,7 @@ async fn sign_in(
     }
 
     // Right. Whatever was held against them goes.
-    server.patience.right(&email);
+    server.patience.right(&account); // WHAT: the account's count, as it was counted here. WHY: the same name `begin` used
     server.patience.right(&counted); // WHAT: the address's count, as it was counted. WHY: the same name `begin` used.
 
     let (token, hashed) = auth::new_token();
@@ -994,7 +1024,7 @@ async fn change_password(
             )?)
         })
         .map_err(|e| Denied::broke("look you up", e))?;
-    if !auth::password_matches(&body.current, &stored) {
+    if !auth::password_matches_in_turn(&body.current, &stored).await {
         // WHAT: nothing more to count. WHY: `begin` counted this try against the account and the address already.
         return Err(Denied(
             StatusCode::UNAUTHORIZED,
@@ -1003,7 +1033,7 @@ async fn change_password(
     }
     server.patience.right(&email); // WHAT: the right password clears the account's count. WHY: as a right sign-in does.
     server.patience.right(&from); // WHAT: and the address's. WHY: likewise.
-    let hashed = auth::hash_password(&body.new).map_err(|e| Denied::broke("keep that password", e))?;
+    let hashed = auth::hash_password_in_turn(&body.new).await.map_err(|e| Denied::broke("keep that password", e))?;
     // Every other place this person is signed in stops working: changing a
     // password is very often what somebody does because they think somebody
     // else has it.
@@ -2969,7 +2999,7 @@ async fn add_person(
              far harder to guess than a short one with symbols in it.",
         ));
     }
-    let hashed = auth::hash_password(&body.password)
+    let hashed = auth::hash_password_in_turn(&body.password).await
         .map_err(|e| Denied::broke("set that password", e))?;
     let user = User {
         id: fresh_id("usr"),
@@ -3211,7 +3241,7 @@ async fn add_license(
 ) -> Answer<Json<hub::license::Standing>> {
     let who = administrator(&server, &headers)?;
     let license = crate::license::install(&server, &body.license).map_err(Denied::wrong)?;
-    tracing::info!("license {} for {} added by {}", license.id, license.company, who.email);
+    tracing::info!("license {}… for {} added by {}", license.id.chars().take(8).collect::<String>(), license.company, who.email); // WHAT: the id shortened. WHY: the whole id finds the licence file on the feed (audit, 2026-11-11)
     record(
         &server,
         crate::audit::Entry::new(crate::audit::action::ADDED_LICENSE, &who.email)
@@ -3342,6 +3372,24 @@ pub(crate) fn seen_from(headers: &HeaderMap) -> String {
 /// caller sends under this name is removed first.
 const PEER: &str = "x-excalibur-peer"; // WHAT: a header only this server writes. WHY: the routes read the caller's address from one place.
 
+/// The header `where_from` sets to "1" for a request the tunnel's connector
+/// passed on from the internet. Whatever a caller sends under this name is
+/// removed first.
+const OUTSIDE: &str = "x-excalibur-outside"; // WHAT: a header only this server writes. WHY: routes that trust the office network treat the internet differently
+
+/// WHAT: how joining works for one caller: "open" becomes "code" for a
+/// caller from the internet; anything else is as set. WHY: open joining is for
+/// the office network (audit, 2026-11-11).
+pub(crate) fn joining_for(how: String, outside: bool) -> String {
+    if how == "open" && outside { "code".to_string() } else { how } // WHAT: the one rule. WHY: as above
+}
+
+/// Whether this request came from the internet, through the tunnel's
+/// connector on this machine, as `where_from` worked it out.
+pub(crate) fn from_outside(headers: &HeaderMap) -> bool {
+    headers.get(OUTSIDE).is_some_and(|v| v.as_bytes() == b"1") // WHAT: set only by `where_from`. WHY: a caller's own copy was thrown away
+}
+
 /// Works out where a request came from and writes it where `seen_from`
 /// reads it. Runs in front of every API route.
 ///
@@ -3363,6 +3411,13 @@ pub(crate) async fn where_from(
     let peer = connected.map(|axum::extract::ConnectInfo(at)| at); // WHAT: the socket's other end, when the server knows it. WHY: what actually connected.
     let address = address_of(peer, request.headers(), proxied); // WHAT: the caller's address. WHY: counted and written in the log.
     request.headers_mut().remove(PEER); // WHAT: anything the caller sent under that name, gone. WHY: it is this server's to write.
+    request.headers_mut().remove(OUTSIDE); // WHAT: the same for the outside mark. WHY: as above
+    let outside = proxied
+        && peer.is_some_and(|p| p.ip().to_canonical().is_loopback())
+        && (request.headers().contains_key("cf-connecting-ip") || request.headers().contains_key("x-forwarded-for")); // WHAT: passed on by the connector on this machine. WHY: only it adds those headers; a caller at the server's own keyboard sends none
+    if outside {
+        request.headers_mut().insert(OUTSIDE, header::HeaderValue::from_static("1")); // WHAT: marked. WHY: read by `from_outside`
+    }
     if let Ok(value) = header::HeaderValue::from_str(&address) {
         request.headers_mut().insert(PEER, value); // WHAT: written. WHY: `seen_from` reads it.
     }
@@ -3494,7 +3549,7 @@ async fn claim(State(server): State<Shared>, Json(body): Json<Setup>) -> Answer<
     check_password(&body.password)?;
 
     let hashed =
-        auth::hash_password(&body.password).map_err(|e| Denied::broke("set that password", e))?;
+        auth::hash_password_in_turn(&body.password).await.map_err(|e| Denied::broke("set that password", e))?;
     let id = fresh_id("usr");
     let created = now();
 
@@ -3556,6 +3611,7 @@ async fn join(
     Json(body): Json<Join>,
 ) -> Answer<Json<Session>> {
     let (how, code, role) = how_joining(&server);
+    let how = joining_for(how, from_outside(&headers)); // WHAT: "open" is for the office network; from the internet a code or an invitation is still asked for. WHY: open joining with remote access on gave anybody an estimator's account (audit, 2026-11-11)
     let from = seen_from(&headers);
     let counted = crate::patience::counted_as(&from); // WHAT: the address as it is counted: an IPv6 caller by its /64. WHY: a new address from the same /64 is the same caller.
 
@@ -3683,7 +3739,7 @@ async fn join(
     check_password(&body.password)?;
 
     let hashed =
-        auth::hash_password(&body.password).map_err(|e| Denied::broke("set that password", e))?;
+        auth::hash_password_in_turn(&body.password).await.map_err(|e| Denied::broke("set that password", e))?;
     // An invitation made out to one address is for that address. Otherwise
     // one forwarded email is a spare account for whoever got it.
     if let Some(invite) = invited.as_ref() {
@@ -4132,7 +4188,6 @@ async fn upload_release(
              so it is refused here.",
         ));
     }
-
     server
         .store
         .put_blob(&installer)
@@ -4149,7 +4204,8 @@ async fn upload_release(
                      channel = excluded.channel, published = excluded.published,
                      notes = excluded.notes, bytes = excluded.bytes,
                      digest = excluded.digest, signature = excluded.signature,
-                     signing_key = excluded.signing_key, minimum_api = excluded.minimum_api",
+                     signing_key = excluded.signing_key, minimum_api = excluded.minimum_api,
+                     ready = 0", // WHAT: replaced bytes are offered again only when made ready again. WHY: an upload silently swapped what seats were already being offered (audit, 2026-11-11)
                 params![
                     release.version,
                     channel_name(release.channel),
@@ -4827,5 +4883,23 @@ mod where_a_request_came_from {
         assert_eq!(address_of(local, &headers(&[("x-forwarded-for", "1.2.3.4, 203.0.113.9")]), true), "203.0.113.9", "else the last entry, the one the proxy added, not the caller's first");
         assert_eq!(address_of(local, &headers(&[("x-forwarded-for", "not an address")]), true), "127.0.0.1", "nonsense is not an address");
         assert_eq!(address_of(None, &headers(&[]), true), "", "no socket known, nothing to say");
+    }
+}
+
+
+#[cfg(test)]
+mod audit_2026_11_11 {
+    #[test]
+    fn open_joining_asks_a_caller_from_the_internet_for_a_code() {
+        assert_eq!(super::joining_for("open".into(), true), "code"); // WHAT: from the internet. WHY: a code or invitation still asked for
+        assert_eq!(super::joining_for("open".into(), false), "open"); // WHAT: the office network. WHY: unchanged
+        assert_eq!(super::joining_for("closed".into(), true), "closed"); // WHAT: other settings. WHY: as set
+        assert_eq!(super::joining_for("code".into(), true), "code");
+    }
+
+    #[test]
+    fn a_huge_number_of_days_is_ten_years_not_a_crash() {
+        let far = super::in_days(u32::MAX); // WHAT: the largest a caller could send. WHY: it overflowed the date before
+        assert!(far.starts_with("20"), "{far}"); // WHAT: a real date. WHY: clamped to ten years
     }
 }

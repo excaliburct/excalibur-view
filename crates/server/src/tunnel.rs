@@ -317,7 +317,7 @@ pub fn connector_command(connector: &Path, token: &str) -> std::process::Command
 /// remote access works and finds out otherwise in a truck has been failed
 /// twice.
 fn reachable(hostname: &str) -> Result<(), String> {
-    let url = format!("https://{hostname}/health");
+    let url = format!("https://{hostname}{}/health", hub::API_ROOT); // WHAT: the real health route. WHY: /health has never existed, so the check always said unreachable
     hub::web::outbound("Checking the tunnel answers", &url)?;
     let agent = hub::web::agent()
         .timeout(std::time::Duration::from_secs(20))

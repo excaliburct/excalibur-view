@@ -1,3 +1,13 @@
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"
 ar = "x86_64-w64-mingw32-ar"
+
+# WHAT: dependency source paths scrubbed from what ships, on every build
+# machine. WHY: a release binary otherwise carries the build machine's home
+# path to every crate it pulled in (Creede, 2026-11-11: make reverse
+# engineering nearly impossible). The workspace's own path is scrubbed in CI,
+# where it is known ($GITHUB_WORKSPACE / the Fleet checkout), because it is a
+# different folder on each machine. Together with strip = "symbols" in
+# Cargo.toml, a shipped binary carries no names and no paths.
+[build]
+rustflags = ["--remap-path-prefix=/home/runner/.cargo=cargo", "--remap-path-prefix=/root/.cargo=cargo"]

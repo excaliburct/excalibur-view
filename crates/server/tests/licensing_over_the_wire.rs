@@ -142,6 +142,11 @@ fn new_job(office: &Office, token: &str, number: &str) -> (u16, Value) {
 }
 
 /// Sets when licensing began on this office, straight in its database.
+fn founded(folder: &std::path::Path) {
+    let db = rusqlite::Connection::open(folder.join("hyperview.sqlite")).unwrap(); // WHAT: the office's database. WHY: as an earlier version left it
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('founding_install', '2026-09-01T00:00:00Z')", []).unwrap(); // WHAT: marked founding. WHY: an earlier version decided it
+}
+
 fn began(folder: &std::path::Path, when: &str) {
     let db = rusqlite::Connection::open(folder.join("hyperview.sqlite")).unwrap(); // WHAT: the office's database. WHY: the clock can't be moved, the start can.
     db.execute("UPDATE settings SET value = ?1 WHERE key = 'licensing_began'", params![when]).unwrap(); // WHAT: the trial's start. WHY: to end the trial
@@ -270,17 +275,34 @@ fn a_licence_whose_updates_ended_before_this_build_pauses_sharing_and_says_both_
 }
 
 #[test]
-fn a_founding_office_is_never_asked_and_a_founding_licence_changes_nothing_for_it() {
+fn an_office_already_founding_is_never_asked_and_a_founding_licence_changes_nothing_for_it() {
     let scratch = Scratch::new();
     people(&scratch.0, "2026-09-01T00:00:00Z"); // WHAT: people from before licensing. WHY: a founding office
     let office = serve(&scratch.0);
     let sam = session(&office, "sam@example.com");
+    founded(&scratch.0); // WHAT: marked founding by an earlier version. WHY: those offices keep it
     began(&scratch.0, "2020-01-01T00:00:00Z"); // WHAT: any trial long over. WHY: founding doesn't care
     let (_, standing) = ask(&office, "GET", "/license", &sam, None);
     assert_eq!((standing["state"].as_str(), standing["sharing"].as_bool(), standing["users_allowed"].as_u64()), (Some("founding"), Some(true), None), "{standing}");
     assert_eq!(new_job(&office, &sam, "4001").0, 200);
     assert_eq!(add(&office, &sam, &signed(&issuer(), "evl_f", Edition::Office, 0, "forever")).0, 200, "its backup founding file is taken");
     assert_eq!(ask(&office, "GET", "/license", &sam, None).1["state"], "founding", "and it stays founding");
+}
+
+#[test]
+fn people_from_before_licensing_no_longer_make_an_office_founding_and_a_signed_founding_licence_does() {
+    // WHAT: audit, 2026-11-11: a clock set back at the first start made any server founding. WHY: founding comes only from a signed licence now
+    let scratch = Scratch::new();
+    people(&scratch.0, "2026-09-01T00:00:00Z"); // WHAT: people dated before licensing, as a set-back clock would date them. WHY: the attack
+    let office = serve(&scratch.0);
+    let sam = session(&office, "sam@example.com");
+    began(&scratch.0, "2020-01-01T00:00:00Z"); // WHAT: the trial long over. WHY: nothing founding saves it now
+    let (_, standing) = ask(&office, "GET", "/license", &sam, None);
+    assert_eq!((standing["state"].as_str(), standing["sharing"].as_bool()), (Some("unlicensed"), Some(false)), "{standing}");
+    let (status, standing) = add(&office, &sam, &signed(&issuer(), "evl_founding", Edition::Office, 0, "forever")); // WHAT: the signed founding licence: every seat, every update. WHY: how a founding office is set up now
+    assert_eq!(status, 200, "{standing}");
+    assert_eq!((standing["state"].as_str(), standing["sharing"].as_bool()), (Some("licensed"), Some(true)), "{standing}");
+    assert_eq!(new_job(&office, &sam, "4002").0, 200, "and new work goes ahead");
 }
 
 #[test]

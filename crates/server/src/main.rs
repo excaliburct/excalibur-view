@@ -410,14 +410,49 @@ fn log_to_file(folder: &std::path::Path) {
     let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
         return;
     };
+    let path = path.clone(); // WHAT: kept for moving the file aside. WHY: `Rotating` reopens it
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "hyperview_server=info,tower_http=warn".into()),
         )
         .with_ansi(false)
-        .with_writer(std::sync::Mutex::new(file))
+        .with_writer(std::sync::Mutex::new(Rotating { file, path, written: 0 }))
         .init();
+}
+
+/// WHAT: the service's log file, moved aside to `.1` once it passes 10 MB while
+/// the server runs. WHY: it was only moved at start, so a flood of refusals
+/// between restarts could fill the disk (audit, 2026-11-11).
+#[cfg(windows)]
+struct Rotating {
+    file: std::fs::File,   // WHAT: the file written now. WHY: replaced when moved aside
+    path: std::path::PathBuf, // WHAT: where it lives. WHY: reopened there
+    written: u64,          // WHAT: bytes since the size was last looked at. WHY: looked at once a megabyte, not every line
+}
+
+#[cfg(windows)]
+impl std::io::Write for Rotating {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        use std::io::Write as _; // WHAT: the file's own write. WHY: called below
+        let n = self.file.write(bytes)?; // WHAT: written. WHY: the log line
+        self.written += n as u64; // WHAT: counted. WHY: as above
+        if self.written > 1024 * 1024 {
+            self.written = 0; // WHAT: counted afresh. WHY: the next look in a megabyte
+            if self.file.metadata().is_ok_and(|m| m.len() > 10 * 1024 * 1024) {
+                let _ = std::fs::rename(&self.path, self.path.with_extension("log.1")); // WHAT: moved aside, over the older one. WHY: one previous log kept, as at start
+                if let Ok(fresh) = std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
+                    self.file = fresh; // WHAT: a new file. WHY: the log goes on
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        use std::io::Write as _; // WHAT: as above. WHY: as above
+        self.file.flush() // WHAT: passed on. WHY: as the file does
+    }
 }
 
 /// What to try, in the cases a person can actually do something about.

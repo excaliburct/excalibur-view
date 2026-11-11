@@ -81,13 +81,28 @@ pub mod action {
     pub const MOVED: &str = "moved to another folder"; // WHAT: a set or a file moved. WHY: moving one can change who sees it.
 }
 
+/// WHAT: the longest any one field of an entry is kept. WHY: a field is
+/// often what a stranger typed; uncapped, a megabyte "email" a second filled
+/// the disk and an export of them ran the server out of memory (audit, 2026-11-11).
+pub const LONGEST_FIELD: usize = 512;
+
+/// WHAT: `text` cut to `LONGEST_FIELD` characters, marked when cut. WHY: as above.
+fn clip(text: &str) -> String {
+    if text.chars().count() <= LONGEST_FIELD {
+        return text.to_string(); // WHAT: as it was. WHY: the usual case
+    }
+    let mut cut: String = text.chars().take(LONGEST_FIELD).collect(); // WHAT: the first characters. WHY: enough to see what it was
+    cut.push('…'); // WHAT: marked. WHY: whoever reads it knows there was more
+    cut
+}
+
 impl Entry {
     pub fn new(action: &str, email: &str) -> Entry {
         Entry {
             at: now(),
             person: None,
-            email: email.to_string(),
-            action: action.to_string(),
+            email: clip(email), // WHAT: capped. WHY: often a stranger's typing
+            action: clip(action),
             subject: String::new(),
             detail: String::new(),
             address: String::new(),
@@ -95,22 +110,22 @@ impl Entry {
     }
 
     pub fn by(mut self, person: &str) -> Entry {
-        self.person = Some(person.to_string());
+        self.person = Some(clip(person)); // WHAT: capped. WHY: as every field
         self
     }
 
     pub fn about(mut self, subject: impl Into<String>) -> Entry {
-        self.subject = subject.into();
+        self.subject = clip(&subject.into()); // WHAT: capped. WHY: as every field
         self
     }
 
     pub fn saying(mut self, detail: impl Into<String>) -> Entry {
-        self.detail = detail.into();
+        self.detail = clip(&detail.into()); // WHAT: capped. WHY: as every field
         self
     }
 
     pub fn from(mut self, address: impl Into<String>) -> Entry {
-        self.address = address.into();
+        self.address = clip(&address.into()); // WHAT: capped. WHY: as every field
         self
     }
 
@@ -216,5 +231,19 @@ mod tests {
         let e = Entry::new(action::SIGNED_IN, "pat@acme.test");
         assert!(e.at.ends_with('Z') || e.at.contains('+'), "{}", e.at);
         assert_eq!(e.at.len() >= 20, true, "{}", e.at);
+    }
+}
+
+
+#[cfg(test)]
+mod clipped {
+    #[test]
+    fn every_field_of_an_entry_is_capped() {
+        let huge = "x".repeat(1_000_000); // WHAT: a megabyte of text. WHY: what a stranger sent as an email
+        let entry = super::Entry::new("sign-in refused", &huge).about(huge.clone()).saying(huge.clone()).from(huge.clone()).by(&huge);
+        for field in [&entry.email, &entry.subject, &entry.detail, &entry.address, entry.person.as_ref().unwrap()] {
+            assert!(field.chars().count() <= super::LONGEST_FIELD + 1, "{}", field.len()); // WHAT: capped, with its mark. WHY: the disk and the export stay bounded
+        }
+        assert_eq!(super::Entry::new("a", "sam@example.com").email, "sam@example.com"); // WHAT: an ordinary one untouched. WHY: nothing lost
     }
 }

@@ -192,6 +192,11 @@ fn maintainer(server: &Server, headers: &HeaderMap) -> Result<(), No> {
         _ => return Err(No(StatusCode::NOT_FOUND, "no such route")),
     };
     let (expected, given) = (expected.as_str(), given.as_str());
+    let counted = crate::patience::counted_as(&crate::api::seen_from(headers)); // WHAT: the caller, as counted. WHY: wrong keys from one place are limited (audit, 2026-11-11)
+    let presented = headers.get(KEY_HEADER).is_some_and(|v| !v.as_bytes().is_empty()); // WHAT: a key was given at all. WHY: only a key given is a guess; a request without one is refused below and never counted
+    if presented && server.patience.begin(crate::patience::MAINTAINING, &[&format!("maintenance {counted}")]).is_err() {
+        return Err(No(StatusCode::TOO_MANY_REQUESTS, "too many wrong maintenance keys; wait")); // WHAT: refused before comparing. WHY: no more guesses for a while
+    }
     // Compared to the end whichever way it goes, so how long this takes says
     // nothing about how much of the key was right.
     if given.len() != expected.len() || expected.is_empty() {
@@ -204,6 +209,7 @@ fn maintainer(server: &Server, headers: &HeaderMap) -> Result<(), No> {
     if same != 0 {
         return Err(No(StatusCode::UNAUTHORIZED, "wrong maintenance key"));
     }
+    server.patience.right(&format!("maintenance {counted}")); // WHAT: the count cleared. WHY: Fleet's right key isn't a guess
     Ok(())
 }
 
@@ -217,6 +223,7 @@ pub fn router(server: Shared) -> Router {
         .route("/api/admin/presence", get(presence))
         .route("/api/admin/update", post(update))
         .route("/api/admin/update/rollback", post(rollback))
+        .layer(axum::middleware::from_fn_with_state(server.clone(), crate::api::where_from)) // WHAT: the caller's address worked out, as for the API. WHY: wrong keys are counted by it
         .with_state(server)
 }
 

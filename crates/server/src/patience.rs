@@ -64,6 +64,14 @@ pub const JOINING: Rule = Rule {
     longest: Duration::from_secs(60 * 60),
 };
 
+/// Giving the maintenance key. Excalibur's Fleet always has it right, so a
+/// wrong one is somebody guessing (audit, 2026-11-11).
+pub const MAINTAINING: Rule = Rule {
+    free: 5,
+    first: Duration::from_secs(5),
+    longest: Duration::from_secs(60 * 60),
+};
+
 #[derive(Clone, Copy)]
 struct Wrong {
     times: u32,

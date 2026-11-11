@@ -420,9 +420,10 @@ fn an_office_whose_trial_ended_keeps_everything_readable_and_only_sharing_pauses
     let set = server.upload(&id, "S-101.pdf", &a_drawing(3024, 2160, "t"), false);
     server.push(&set.id, &[moments(3)]);
 
-    // A server set up before licensing is a founding install.
+    // A server set up before licensing starts an ordinary trial: founding is a signed licence now, never decided by the
+    // server itself (audit, 2026-11-11: a clock set back made any server founding).
     let standing = server.get("/license");
-    assert_eq!(standing["state"], "founding", "{standing}");
+    assert_eq!(standing["state"], "trial", "{standing}");
     assert_eq!(standing["sharing"], true);
 
     // Make this one an ordinary office whose trial ended long ago.
