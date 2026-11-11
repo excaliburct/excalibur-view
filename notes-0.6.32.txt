@@ -1,0 +1,13 @@
+TEXT BOXES ON TURNED SHEETS
+
+A text box or callout put on a sheet that is stored sideways in the PDF now
+reads upright, the same way the drawing does. Before, its words came out
+turned a quarter, running up the sheet, and there was no way to turn them
+back. Sheets combined from shop drawings are often stored this way.
+
+The box also grows the right way as you type: it keeps the width you drew
+and gets taller down the sheet, instead of running sideways.
+
+A box already saved sideways by an earlier version comes upright the next
+time you move it or change its words, size or look. Text boxes on ordinary
+sheets are saved exactly as before.

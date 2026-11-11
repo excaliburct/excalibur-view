@@ -275,6 +275,23 @@ impl Markup {
         self.text_of("Contents")
     }
 
+    /// How far a text box's words turn counter-clockwise on the page: 0, 90, 180 or 270 (`/Rotate`, as Acrobat and
+    /// Revu write it). Anything else reads as a quarter turn.
+    pub fn turn(&self) -> i32 {
+        let raw = self.dict.get("Rotate").and_then(|o| o.as_i64()).unwrap_or(0); // WHAT: the key, or none. WHY: most markups have none
+        (raw.rem_euclid(360) / 90 * 90) as i32 // WHAT: a quarter turn, 0 to 270. WHY: -90 and 450 mean 270 and 90; a PDF turns only in quarters
+    }
+
+    /// Gives a text box on a turned sheet the sheet's turn, so its words read upright where the sheet is shown upright.
+    /// Only a text box with no turn of its own takes it: a box Revu or a person already turned keeps theirs.
+    pub fn turn_with_sheet(&mut self, sheet_turn: i32) -> &mut Markup {
+        let turn = sheet_turn.rem_euclid(360) / 90 * 90; // WHAT: the sheet's quarter turn. WHY: the same reading as the page's own /Rotate
+        if self.subtype() == Subtype::FreeText && !self.dict.has("Rotate") && turn != 0 {
+            self.set("Rotate", Object::Int(i64::from(turn)));
+        } // WHAT: only an unturned text box on a turned sheet. WHY: an upright sheet changes nothing, and a turn already chosen stays
+        self
+    }
+
     pub fn set_subject(&mut self, text: &str) -> &mut Markup {
         self.set("Subj", Object::text(text))
     }
