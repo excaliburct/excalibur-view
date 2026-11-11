@@ -257,16 +257,28 @@ class WhatASaleMeansForTheLicenceHeld(unittest.TestCase):
         with tempfile.TemporaryDirectory() as place:
             held = dict(a_licence(company="Acme Builders, LLC", users=6), issued="2026-09-24", note="", key="licence-test")
             folder = self.a_folder(place, held)
-            lic, why = square.next_license(folder, {"kind": "seats", "users": 3}, "Acme Builders", folder.key)  # WHAT: the buyer typed the name without ", LLC". WHY: the case that went wrong
+            lic, why = square.next_license(folder, {"kind": "seats", "users": 3}, "Acme Builders", folder.key)  # WHAT: the buyer typed the name without ", LLC". WHY: may be another company; a person decides
+            self.assertIsNone(lic)
+            self.assertIn("Acme Builders, LLC", why)  # WHAT: both names said. WHY: so the person can tell
+            self.assertIn('--company "Acme Builders, LLC"', why)  # WHAT: the exact way to finish it. WHY: one command
+            lic, why = square.next_license(folder, {"kind": "seats", "users": 3}, "Acme Builders, LLC", folder.key)  # WHAT: finished with the name as held. WHY: then it is issued
             self.assertIsNone(why)
             self.assertEqual((lic["id"], lic["company"], lic["users"]), ("evl_abc123", "Acme Builders, LLC", 9))  # WHAT: the same licence, three more seats. WHY: what the server takes by itself
+
+    def test_a_name_that_is_all_noise_never_matches_a_licence(self):
+        with tempfile.TemporaryDirectory() as place:
+            held = dict(a_licence(company="LLC", users=6), issued="2026-09-24", note="", key="licence-test")  # WHAT: a licence whose name is all noise. WHY: "Inc." would match it
+            folder = self.a_folder(place, held)
+            lic, why = square.next_license(folder, {"kind": "seats", "users": 3}, "Inc.", folder.key)
+            self.assertIsNone(lic)
+            self.assertIn("--company", why)
 
     def test_a_date_the_server_would_not_read_is_never_signed(self):
         with tempfile.TemporaryDirectory() as place:
             key = os.path.join(place, "k.key")
             with open(key, "w", encoding="utf-8") as f:
                 f.write("licence-test\n" + "0a" * 32 + "\n")
-            for bad in ("20271001", "2027-W40-1", "2027-02-30", "1999-01-01"):  # WHAT: shapes Python reads as dates and the server doesn't. WHY: a signed file every server refuses
+            for bad in ("20271001", "2027-W40-1", "2027-02-30", "1999-01-01", "\u0662\u0660\u0662\u0667-10-01"):  # WHAT: shapes Python reads as dates and the server doesn't, and one in Arabic-Indic digits. WHY: a signed file every server refuses (re.ASCII keeps \d to 0-9)
                 with self.assertRaises(SystemExit):
                     publish.make_license(key, "Acme", updates_through=bad)
                 with self.assertRaises(SystemExit):

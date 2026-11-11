@@ -838,7 +838,7 @@ def a_license_date(text):
     """Whether `text` is a date as a license writes one: YYYY-MM-DD, a real
     day, from 2000 on. The same rule as `hub::license::is_date`, which every
     server applies; Python's own date reader takes other shapes too."""
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text or ""):  # WHAT: exactly ten characters, dashes in place. WHY: "20271001" and "2027-W40-1" are dates to Python, not to the server
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text or "", re.ASCII):  # WHAT: exactly ten characters, dashes in place. WHY: "20271001" and "2027-W40-1" are dates to Python, not to the server
         return False
     try:
         return datetime.date.fromisoformat(text).year >= 2000  # WHAT: a real day, 2000 or later. WHY: the server's rule

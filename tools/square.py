@@ -714,7 +714,13 @@ def next_license(folder, sale, company, key_path):
     """What this sale means for that company's license: a first one, more
     users on the one they have, or another year of updates."""
     today = datetime.date.today()
+    if not simple(company):  # WHAT: a name with nothing left once "Inc", "LLC" and punctuation are taken out. WHY: it would match any licence whose name is all noise too
+        return None, (f"'{company}' is not a company name a licence can be matched on. "
+                      "Finish it with --company and the company's real name.")
     held = held_by(folder, company)
+    if held and held["company"] != company:  # WHAT: matched loosely, spelled differently. WHY: "Acme Builders" might be another company than "Acme Builders, LLC"; a person decides
+        return None, (f"the order says '{company}' and the licence held says '{held['company']}'. If they are the same "
+                      f"company, finish it with --company \"{held['company']}\"; if not, issue theirs by hand.")
     if held and held.get("updates_through") == publish.FOREVER:
         return None, "that company's license already covers every user and every update, for good. Nothing to issue."
     edition, renewing = BUYING.get(sale["kind"], ("office", False))

@@ -88,7 +88,8 @@ const FOLDER_FILES_SEEN: &str = "license_files_seen";
 /// it: the renewal the server fetched for itself, or the newer licence an
 /// administrator added from a seat, put back to the old seats and the old
 /// end of updates by a restart. So a file is taken the first time it is
-/// seen, or later only when it is a renewal of the licence held.
+/// seen, or later only when it is a renewal of the licence held; and of
+/// several, only the newest is.
 fn pick_up_from_the_data_folder(server: &Server) {
     let Ok(entries) = std::fs::read_dir(&server.config.data) else { return }; // WHAT: the data folder's files. WHY: nothing there, nothing to do
     let mut paths: Vec<_> = entries
@@ -97,59 +98,86 @@ fn pick_up_from_the_data_folder(server: &Server) {
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some(hub::license::EXTENSION))
         .collect(); // WHAT: every .evlicense file there. WHY: the only kind a person drops in for the server
     paths.sort(); // WHAT: by name. WHY: the same order at every start, whatever the disk lists first
-    let mut seen: Vec<String> = server
-        .store
-        .setting(FOLDER_FILES_SEEN)
-        .ok()
-        .flatten()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default(); // WHAT: the files already taken. WHY: one is taken once, not at every start
+    let mut found: Vec<(std::path::PathBuf, String, License)> = Vec::new(); // WHAT: every file that checks out. WHY: weighed up together, not one after another
     for path in paths {
         let Ok(text) = std::fs::read_to_string(&path) else { continue }; // WHAT: the file's text. WHY: one that can't be read is left alone
-        let fresh = match License::read(&text, &trust(server)) {
-            Ok(fresh) => fresh, // WHAT: a licence that checks out. WHY: only those are weighed up
-            Err(why) => {
-                tracing::warn!("{} was not used: {why}", path.display()); // WHAT: why, in the log. WHY: whoever dropped it can find out
-                continue;
-            }
-        };
-        let print = fingerprint(&text); // WHAT: this file's fingerprint. WHY: whether it was taken before
-        let held = held(server, &trust(server)); // WHAT: the licence in use now. WHY: a file is never allowed to make it worse
-        if folder_file_wanted(held.as_ref(), &fresh, seen.contains(&print)) {
-            match install(server, &text) {
-                Ok(license) => tracing::info!("license {} for {} added from {}", license.id, license.company, path.display()), // WHAT: said in the log. WHY: as before
-                Err(why) => tracing::warn!("{} was not used: {why}", path.display()), // WHAT: said in the log. WHY: as before
-            }
-        } else {
-            tracing::info!("{} is already in use, or older than the license this server holds; left alone", path.display()); // WHAT: said, and nothing changed. WHY: a restart must never take seats or updates away
-        }
-        if !seen.contains(&print) {
-            seen.push(print); // WHAT: remembered. WHY: met again at the next start, it is not taken again
+        match License::read(&text, &trust(server)) {
+            Ok(fresh) => found.push((path, text, fresh)), // WHAT: a licence that checks out. WHY: only those are weighed up
+            Err(why) => tracing::warn!("{} was not used: {why}", path.display()), // WHAT: why, in the log. WHY: whoever dropped it can find out
         }
     }
-    if let Ok(text) = serde_json::to_string(&seen) {
-        let _ = server.store.set_setting(FOLDER_FILES_SEEN, &text); // WHAT: kept. WHY: across restarts
+    if found.is_empty() {
+        return; // WHAT: no licence files. WHY: nothing to weigh, and the list of files seen is left as it is
+    }
+    let held = held(server, &trust(server)); // WHAT: the licence in use now. WHY: a file is never allowed to make it worse
+    let (mut seen, list_known) = match server.store.setting(FOLDER_FILES_SEEN) {
+        Ok(Some(text)) => match serde_json::from_str::<Vec<String>>(&text) {
+            Ok(seen) => (seen, true), // WHAT: the list as kept. WHY: the usual case
+            Err(_) => {
+                tracing::warn!("the list of licence files already used is damaged; no other licence is taken from the data folder this start"); // WHAT: said. WHY: fails closed, never open
+                (Vec::new(), false)
+            }
+        },
+        Ok(None) => (Vec::new(), held.is_none()), // WHAT: no list yet. WHY: the first start of this version; with a licence held, every file there is taken as already seen, so an old one can't go over it
+        Err(why) => {
+            tracing::warn!("could not read the list of licence files already used ({why}); no other licence is taken from the data folder this start"); // WHAT: said. WHY: fails closed
+            (Vec::new(), false)
+        }
+    };
+    let best = found
+        .iter()
+        .filter(|(_, _, fresh)| folder_file_wanted(held.as_ref(), fresh, seen.contains(&fingerprint(fresh)), list_known))
+        .max_by(|a, b| newest_first(&a.2, &b.2).then_with(|| b.0.cmp(&a.0))); // WHAT: the newest of those wanted, and by name when two tie. WHY: one decision, the same at every start
+    match best {
+        Some((path, text, _)) => match install(server, text) {
+            Ok(license) => tracing::info!("license {} for {} added from {}", license.id, license.company, path.display()), // WHAT: said in the log. WHY: as before
+            Err(why) => tracing::warn!("{} was not used: {why}", path.display()), // WHAT: said in the log. WHY: as before
+        },
+        None => tracing::info!("the licence files in the data folder are already in use, or older than the one this server holds; left alone"), // WHAT: said, nothing changed. WHY: a restart must never take seats or updates away
+    }
+    for (_, _, fresh) in &found {
+        let print = fingerprint(fresh); // WHAT: this licence's fingerprint. WHY: met again, it is not new
+        if !seen.contains(&print) {
+            seen.push(print); // WHAT: remembered. WHY: whether it was used or not, it has been weighed
+        }
+    }
+    match serde_json::to_string(&seen).map_err(|e| e.to_string()).and_then(|text| server.store.set_setting(FOLDER_FILES_SEEN, &text).map_err(|e| e.to_string())) {
+        Ok(()) => {}
+        Err(why) => tracing::warn!("could not keep the list of licence files already used ({why}); the next start won't take another licence from the folder"), // WHAT: said. WHY: a failed write must not pass unnoticed
     }
 }
 
 /// Whether a licence file found in the data folder should be put in use.
 ///
 /// Nothing held: yes. The same licence as the one held: only when it is a
-/// renewal of it (more seats, longer updates), never the same or worse. A
-/// different licence: the first time its file is seen, because a person put
-/// it there on purpose; never again after, so it cannot undo a later one.
-pub fn folder_file_wanted(held: Option<&License>, fresh: &License, seen_before: bool) -> bool {
+/// renewal of it (more seats, longer updates, the same edition), never the
+/// same or worse. A different licence: only the first time it is seen, when
+/// the list of what was seen can be trusted, in the same edition, and issued
+/// no earlier than the one held; so a file can never undo a later licence,
+/// and a change of edition is always somebody's own decision, made by hand.
+pub fn folder_file_wanted(held: Option<&License>, fresh: &License, seen_before: bool, list_known: bool) -> bool {
     match held {
         None => true, // WHAT: no licence in use. WHY: what a file in the data folder is for
         Some(held) if held.id == fresh.id => is_a_renewal(held, fresh), // WHAT: the same licence, only if better. WHY: an old copy must not undo a renewal
-        Some(_) => !seen_before, // WHAT: another licence, once. WHY: dropped in on purpose, but never re-applied over what came after
+        Some(held) => list_known && !seen_before && fresh.edition == held.edition && fresh.issued >= held.issued, // WHAT: another licence: new, the same edition, not older. WHY: dropped in on purpose, but never over what came after
     }
 }
 
-/// SHA-256 of a licence file's text, as hex.
-fn fingerprint(text: &str) -> String {
+/// Orders two licences oldest to newest: by the day issued, then the end of
+/// updates (forever last), then seats (no limit last).
+fn newest_first(a: &License, b: &License) -> std::cmp::Ordering {
+    let through = |l: &License| if l.forever() { "9999-99-99".to_string() } else { l.updates_through.clone() }; // WHAT: forever as the latest day. WHY: it is the most updates there are
+    let seats = |l: &License| if l.unlimited() { u32::MAX } else { l.users }; // WHAT: no limit as the most seats. WHY: nought means no limit
+    (a.issued.as_str(), through(a), seats(a)).cmp(&(b.issued.as_str(), through(b), seats(b))) // WHAT: compared in that order. WHY: the newest licence wins, then the better one
+}
+
+/// A licence's fingerprint: SHA-256 of its signed text and signature, as hex.
+fn fingerprint(license: &License) -> String {
     use sha2::{Digest, Sha256};
-    Sha256::digest(text.trim().as_bytes()).iter().map(|b| format!("{b:02x}")).collect() // WHAT: the trimmed text's digest. WHY: a trailing newline added by an editor is the same file
+    let mut hasher = Sha256::new();
+    hasher.update(license.signing_payload()); // WHAT: what was signed. WHY: the licence itself, not how the file happens to be spaced
+    hasher.update(license.signature.to_ascii_lowercase().as_bytes()); // WHAT: and its signature. WHY: the same signed licence, saved again with a BOM or CRLF, is the same
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Tells the `sealed` module what this server's license says, so everything
@@ -254,10 +282,9 @@ pub fn is_a_renewal(held: &License, fresh: &License) -> bool {
         ("forever", _) => false,
         (was, now) => now >= was,
     };
-    let changed = fresh.users != held.users
-        || fresh.updates_through != held.updates_through
-        || fresh.edition != held.edition;
-    seats_kept && updates_kept && changed
+    let same_edition = fresh.edition == held.edition; // WHAT: office stays office, sealed stays sealed. WHY: sealing or unsealing an office is somebody's decision, made by adding the file by hand, never by a fetch or a file in a folder
+    let changed = fresh.users != held.users || fresh.updates_through != held.updates_through;
+    same_edition && seats_kept && updates_kept && changed
 }
 
 /// Fetches the renewal, if there is one, and keeps it. Returns what changed,
@@ -826,20 +853,111 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A licence under [`UNIT_KEY`] with every field the folder rule weighs.
+    fn a_license_with(signing: &ed25519_dalek::SigningKey, id: &str, users: u32, through: &str, issued: &str, edition: Edition) -> String {
+        let mut license: License = serde_json::from_str(&a_license_called(signing, id, users, through)).unwrap(); // WHAT: the usual one. WHY: issued and edition changed below
+        license.issued = issued.into(); // WHAT: its issue date. WHY: an older licence never wins over a newer one
+        license.edition = edition; // WHAT: office or sealed. WHY: an edition change is never automatic
+        use ed25519_dalek::Signer;
+        license.signature = signing.sign(&license.signing_payload()).to_bytes().iter().map(|b| format!("{b:02x}")).collect(); // WHAT: signed again. WHY: both are in the signed text
+        serde_json::to_string_pretty(&license).unwrap()
+    }
+
+    /// A server trusting the unit key, and that key.
+    fn a_unit_server() -> (Server, std::path::PathBuf, ed25519_dalek::SigningKey, Trusted) {
+        let (mut server, dir) = a_server();
+        let (signing, _) = issuer();
+        let trusted = Trusted { keys: vec![(UNIT_KEY.into(), signing.verifying_key().to_bytes())] }; // WHAT: the test key under its own name. WHY: see UNIT_KEY
+        server.config.license_keys_for_tests = trusted.keys.clone(); // WHAT: given to the server. WHY: begin() checks with its own keys
+        (server, dir, signing, trusted)
+    }
+
+    #[test]
+    fn the_first_start_of_this_version_never_puts_another_older_file_over_the_licence_held() {
+        // WHAT: a server from before this fix: a licence added from a seat, an old file still in the folder, no list of files seen. WHY: the upgrade restart
+        let (server, dir, signing, trusted) = a_unit_server();
+        std::fs::write(dir.join("Old.evlicense"), a_license_with(&signing, "evl_old", 3, "2027-01-01", "2026-12-01", Edition::Office)).unwrap(); // WHAT: an old licence's file, even dated later. WHY: no list yet, so it can't be told from a new one
+        install_with(&server, &a_license_with(&signing, "evl_new", 9, "2028-01-01", "2026-11-01", Edition::Office), &trusted).unwrap(); // WHAT: what the administrator added. WHY: must survive the restart
+        assert!(server.store.setting(FOLDER_FILES_SEEN).unwrap().is_none(), "the upgrade case: nothing seen yet");
+        begin(&server);
+        assert_eq!(users_held(&server, &trusted).map(|h| h.0), Some("evl_new".into()), "the upgrade restart keeps the licence held");
+        begin(&server);
+        assert_eq!(users_held(&server, &trusted).map(|h| h.0), Some("evl_new".into()), "and every restart after");
+        std::fs::write(dir.join("Renewed.evlicense"), a_license_with(&signing, "evl_new", 12, "2028-01-01", "2026-11-01", Edition::Office)).unwrap(); // WHAT: a renewal of the held one. WHY: still taken
+        begin(&server);
+        assert_eq!(users_held(&server, &trusted).map(|h| h.1), Some(12));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn of_several_new_files_the_newest_licence_wins_whatever_the_names() {
+        let (server, dir, signing, trusted) = a_unit_server();
+        std::fs::write(dir.join("A.evlicense"), a_license_with(&signing, "evl_b", 5, "2028-01-01", "2026-11-05", Edition::Office)).unwrap(); // WHAT: the newer, first by name. WHY: must win
+        std::fs::write(dir.join("Z.evlicense"), a_license_with(&signing, "evl_a", 2, "2027-01-01", "2026-10-01", Edition::Office)).unwrap(); // WHAT: an older one, last by name. WHY: used to win by being last
+        begin(&server);
+        assert_eq!(users_held(&server, &trusted).map(|h| h.0), Some("evl_b".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_same_licence_saved_again_with_other_line_ends_or_spacing_is_not_new() {
+        let (server, dir, signing, trusted) = a_unit_server();
+        let first = a_license_with(&signing, "evl_a", 3, "2027-01-01", "2026-10-01", Edition::Office);
+        std::fs::write(dir.join("A.evlicense"), &first).unwrap();
+        begin(&server); // WHAT: taken, nothing held. WHY: the usual first file
+        install_with(&server, &a_license_with(&signing, "evl_b", 9, "2028-01-01", "2026-10-01", Edition::Office), &trusted).unwrap(); // WHAT: another added from a seat, same issue day. WHY: the later decision
+        let resaved = format!("\u{feff}{}", serde_json::to_string(&serde_json::from_str::<serde_json::Value>(&first).unwrap()).unwrap().replace(',', ",\r\n")); // WHAT: the same licence with a byte-order mark, CRLF and no indentation. WHY: what Notepad or an email client makes of it
+        std::fs::write(dir.join("A copy.evlicense"), resaved).unwrap();
+        begin(&server);
+        assert_eq!(users_held(&server, &trusted).map(|h| h.0), Some("evl_b".into()), "a copy of a file already seen is not new");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_damaged_list_of_files_seen_never_lets_another_licence_in() {
+        let (server, dir, signing, trusted) = a_unit_server();
+        install_with(&server, &a_license_with(&signing, "evl_held", 5, "2028-01-01", "2026-10-01", Edition::Office), &trusted).unwrap();
+        server.store.set_setting(FOLDER_FILES_SEEN, "not a list").unwrap(); // WHAT: the list damaged. WHY: must fail closed
+        std::fs::write(dir.join("Other.evlicense"), a_license_with(&signing, "evl_other", 9, "2029-01-01", "2026-11-01", Edition::Office)).unwrap();
+        std::fs::write(dir.join("Renewal.evlicense"), a_license_with(&signing, "evl_held", 7, "2028-01-01", "2026-10-01", Edition::Office)).unwrap();
+        begin(&server);
+        assert_eq!(users_held(&server, &trusted).map(|h| (h.0, h.1)), Some(("evl_held".into(), 7)), "a renewal is still taken; another licence is not");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_edition_change_is_never_taken_by_itself() {
+        let (signing, _) = issuer();
+        let trusted = Trusted { keys: vec![(UNIT_KEY.into(), signing.verifying_key().to_bytes())] };
+        let read = |text: String| License::read(&text, &trusted).unwrap();
+        let office = read(a_license_with(&signing, "evl_a", 6, "2027-11-01", "2026-10-01", Edition::Office));
+        let sealed_more = read(a_license_with(&signing, "evl_a", 9, "2028-11-01", "2026-10-01", Edition::Sealed));
+        assert!(!is_a_renewal(&office, &sealed_more), "office to sealed, even with more, is somebody's decision");
+        assert!(!is_a_renewal(&sealed_more, &read(a_license_with(&signing, "evl_a", 12, "2029-11-01", "2026-10-01", Edition::Office))), "and sealed to office");
+        let other_sealed = read(a_license_with(&signing, "evl_b", 9, "2028-11-01", "2026-11-01", Edition::Sealed));
+        assert!(!folder_file_wanted(Some(&office), &other_sealed, false, true), "another licence in another edition: by hand only");
+        assert!(folder_file_wanted(None, &other_sealed, false, true), "nothing held: any edition");
+        let older = read(a_license_with(&signing, "evl_c", 9, "2028-11-01", "2026-09-01", Edition::Office));
+        assert!(!folder_file_wanted(Some(&office), &older, false, true), "another licence issued before the one held: no");
+        let newer = read(a_license_with(&signing, "evl_d", 9, "2028-11-01", "2026-10-01", Edition::Office));
+        assert!(folder_file_wanted(Some(&office), &newer, false, true), "issued the same day or later: yes");
+        assert!(!folder_file_wanted(Some(&office), &newer, false, false), "but not when the list of files seen can't be trusted");
+    }
+
     #[test]
     fn a_folder_file_is_wanted_when_nothing_is_held_or_it_is_better_and_never_when_worse() {
         let (signing, _) = issuer();
         let trusted = Trusted { keys: vec![(UNIT_KEY.into(), signing.verifying_key().to_bytes())] }; // WHAT: the test key under its own name. WHY: see UNIT_KEY
         let read = |text: String| License::read(&text, &trusted).unwrap(); // WHAT: a signed licence. WHY: the rule is about real ones
         let held = read(a_license_called(&signing, "evl_test", 6, "2027-11-01"));
-        assert!(folder_file_wanted(None, &held, true), "nothing held: always");
-        assert!(!folder_file_wanted(Some(&held), &held, false), "the same licence again: no");
-        assert!(!folder_file_wanted(Some(&held), &read(a_license_called(&signing, "evl_test", 3, "2027-11-01")), false), "fewer seats: no");
-        assert!(!folder_file_wanted(Some(&held), &read(a_license_called(&signing, "evl_test", 6, "2027-01-01")), false), "earlier end of updates: no");
-        assert!(folder_file_wanted(Some(&held), &read(a_license_called(&signing, "evl_test", 9, "2027-11-01")), true), "more seats: yes, even seen before");
+        assert!(folder_file_wanted(None, &held, true, true), "nothing held: always");
+        assert!(!folder_file_wanted(Some(&held), &held, false, true), "the same licence again: no");
+        assert!(!folder_file_wanted(Some(&held), &read(a_license_called(&signing, "evl_test", 3, "2027-11-01")), false, true), "fewer seats: no");
+        assert!(!folder_file_wanted(Some(&held), &read(a_license_called(&signing, "evl_test", 6, "2027-01-01")), false, true), "earlier end of updates: no");
+        assert!(folder_file_wanted(Some(&held), &read(a_license_called(&signing, "evl_test", 9, "2027-11-01")), true, true), "more seats: yes, even seen before");
         let other = read(a_license_called(&signing, "evl_other", 2, "2027-01-01"));
-        assert!(folder_file_wanted(Some(&held), &other, false), "another licence, new in the folder: yes");
-        assert!(!folder_file_wanted(Some(&held), &other, true), "another licence seen before: no");
+        assert!(folder_file_wanted(Some(&held), &other, false, true), "another licence, new in the folder: yes");
+        assert!(!folder_file_wanted(Some(&held), &other, true, true), "another licence seen before: no");
     }
 
     #[test]
