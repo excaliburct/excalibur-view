@@ -745,6 +745,7 @@ def next_license(folder, sale, company, key_path):
     lic = publish.make_license(
         key_path, company, edition=edition, users=users, updates_through=through, note=note,
         id=held["id"] if held else None,
+        modules=held.get("modules") if held else None,  # WHAT: the Office Server parts the held licence has. WHY: more seats must not switch CAD or Citadel off
     )
     return lic, None
 

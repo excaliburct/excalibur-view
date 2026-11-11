@@ -242,5 +242,22 @@ class PushingIt(unittest.TestCase):
             self.assertNotIn("Example Steel", log)
 
 
+class WhatASaleMeansForTheParts(unittest.TestCase):
+    """More seats on a licence with Office Server parts keep the parts."""
+
+    def test_more_seats_keep_every_part_the_licence_had(self):
+        with tempfile.TemporaryDirectory() as place:
+            key = os.path.join(place, "licence-signing.key")  # WHAT: a made-up key file. WHY: the real one never leaves the signing PC
+            with open(key, "w", encoding="utf-8") as f:
+                f.write("licence-test\n" + "0a" * 32 + "\n")  # WHAT: a name and a seed nobody uses. WHY: the shape publish.load_key reads
+            os.makedirs(os.path.join(place, "licenses"))
+            held = publish.make_license(key, "Example Steel, Inc.", users=6, updates_through="2027-09-24", modules=["cad", "citadel"])  # WHAT: a licence with two parts. WHY: the one a sale lands on
+            publish.write_license(held, os.path.join(place, "licenses", "held.evlicense"))
+            folder = square.Folder(place)
+            lic, why = square.next_license(folder, {"kind": "seats", "users": 3}, "Example Steel, Inc.", folder.key)  # WHAT: three more seats bought. WHY: the case
+            self.assertIsNone(why)
+            self.assertEqual((lic["id"], lic["users"], lic.get("modules")), (held["id"], 9, ["cad", "citadel"]))  # WHAT: same licence, more seats, same parts. WHY: the server refuses a renewal that drops one
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

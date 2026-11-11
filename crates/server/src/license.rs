@@ -192,10 +192,14 @@ pub fn is_a_renewal(held: &License, fresh: &License) -> bool {
         ("forever", _) => false,
         (was, now) => now >= was,
     };
+    // WHAT: every Office Server part the held licence switches on is still on the fresh one. WHY: a renewal signed without the parts
+    // line (more seats bought through the shop, which knows nothing of parts) would otherwise switch CAD or Archetype off by itself
+    let parts_kept = held.modules.iter().all(|m| fresh.modules.contains(m));
     let changed = fresh.users != held.users
         || fresh.updates_through != held.updates_through
-        || fresh.edition != held.edition;
-    seats_kept && updates_kept && changed
+        || fresh.edition != held.edition
+        || fresh.modules.iter().any(|m| !held.modules.contains(m)); // WHAT: a part added counts as a change. WHY: buying CAD arrives by itself, like more seats
+    seats_kept && updates_kept && parts_kept && changed
 }
 
 /// Fetches the renewal, if there is one, and keeps it. Returns what changed,
@@ -802,6 +806,26 @@ mod renewal_tests {
         let mut renamed = a_license(25, "2030-01-01");
         renamed.company = "Acme Steel LLC".into();
         assert!(!is_a_renewal(&mine, &renamed), "a company rename is not automatic");
+    }
+
+    fn with_parts(users: u32, through: &str, parts: &[&str]) -> License {
+        License { modules: parts.iter().map(|p| p.to_string()).collect(), ..a_license(users, through) } // WHAT: a licence with Office Server parts. WHY: the parts line in renewals
+    }
+
+    /// More seats bought through the shop come back signed without the parts
+    /// line. Taken by itself, that would switch CAD off in the middle of a job.
+    #[test]
+    fn a_renewal_that_drops_a_part_is_never_installed_by_itself() {
+        assert!(!is_a_renewal(&with_parts(6, "2027-09-01", &["cad"]), &with_parts(9, "2027-09-01", &[])), "more seats, but CAD gone");
+        assert!(!is_a_renewal(&with_parts(6, "2027-09-01", &["cad", "citadel"]), &with_parts(6, "2028-09-01", &["citadel"])), "another year, but CAD gone");
+        assert!(is_a_renewal(&with_parts(6, "2027-09-01", &["cad"]), &with_parts(9, "2027-09-01", &["cad"])), "more seats, parts kept");
+    }
+
+    #[test]
+    fn a_part_bought_arrives_by_itself_like_more_seats() {
+        assert!(is_a_renewal(&with_parts(6, "2027-09-01", &[]), &with_parts(6, "2027-09-01", &["cad"])), "CAD added, nothing else changed");
+        assert!(is_a_renewal(&with_parts(6, "2027-09-01", &["citadel"]), &with_parts(6, "2027-09-01", &["cad", "citadel"])), "order doesn't matter");
+        assert!(!is_a_renewal(&with_parts(6, "2027-09-01", &["cad", "citadel"]), &with_parts(6, "2027-09-01", &["citadel", "cad"])), "the same parts in another order is no change");
     }
 
     #[test]
