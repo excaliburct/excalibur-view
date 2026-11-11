@@ -265,6 +265,28 @@ class WhatASaleMeansForTheLicenceHeld(unittest.TestCase):
             self.assertIsNone(why)
             self.assertEqual((lic["id"], lic["company"], lic["users"]), ("evl_abc123", "Acme Builders, LLC", 9))  # WHAT: the same licence, three more seats. WHY: what the server takes by itself
 
+    def test_the_licence_spelled_exactly_as_typed_wins_over_a_loose_match(self):
+        with tempfile.TemporaryDirectory() as place:
+            exact = dict(a_licence(id="evl_exact", company="Acme Builders", users=4), issued="2026-09-01", note="", key="licence-test")  # WHAT: spelled exactly as the order. WHY: the one meant
+            folder = self.a_folder(place, exact)
+            loose = dict(a_licence(id="evl_loose", company="Acme Builders, LLC", users=6), issued="2026-10-01", note="", key="licence-test")  # WHAT: another company's licence, newer, matching loosely. WHY: used to be picked first
+            publish.write_license(loose, os.path.join(place, "licenses", "loose.evlicense"))
+            lic, why = square.next_license(folder, {"kind": "seats", "users": 2}, "Acme Builders", folder.key)
+            self.assertIsNone(why)
+            self.assertEqual((lic["id"], lic["users"]), ("evl_exact", 6))  # WHAT: seats added to the exact one. WHY: never to a look-alike
+
+    def test_several_loose_matches_are_all_named_and_nothing_is_issued(self):
+        with tempfile.TemporaryDirectory() as place:
+            one = dict(a_licence(id="evl_one", company="Acme Builders, LLC", users=4), issued="2026-09-01", note="", key="licence-test")
+            folder = self.a_folder(place, one)
+            two = dict(a_licence(id="evl_two", company="Acme Builders Inc.", users=6), issued="2026-10-01", note="", key="licence-test")  # WHAT: a second look-alike. WHY: which one is meant can't be guessed
+            publish.write_license(two, os.path.join(place, "licenses", "two.evlicense"))
+            lic, why = square.next_license(folder, {"kind": "seats", "users": 2}, "Acme Builders", folder.key)
+            self.assertIsNone(lic)
+            self.assertIn("Acme Builders, LLC", why)  # WHAT: both named. WHY: so a person can choose
+            self.assertIn("Acme Builders Inc.", why)
+            self.assertIn("--company", why)
+
     def test_a_name_that_is_all_noise_never_matches_a_licence(self):
         with tempfile.TemporaryDirectory() as place:
             held = dict(a_licence(company="LLC", users=6), issued="2026-09-24", note="", key="licence-test")  # WHAT: a licence whose name is all noise. WHY: "Inc." would match it

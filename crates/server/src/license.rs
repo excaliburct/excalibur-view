@@ -135,6 +135,18 @@ fn pick_up_from_the_data_folder(server: &Server) {
         },
         None => tracing::info!("the licence files in the data folder are already in use, or older than the one this server holds; left alone"), // WHAT: said, nothing changed. WHY: a restart must never take seats or updates away
     }
+    let used = best.map(|(path, _, _)| path.clone()); // WHAT: the file put in use, if any. WHY: every other different licence is said plainly below
+    for (path, _, fresh) in &found {
+        let other = held.as_ref().is_some_and(|h| h.id != fresh.id); // WHAT: a licence other than the one held. WHY: never taken by itself once one is held
+        if other && used.as_ref() != Some(path) && !seen.contains(&fingerprint(fresh)) {
+            tracing::warn!(
+                "{} holds license {} for {}, which is not the license in use, so it was not added by itself. To use it, an administrator adds it from a seat: Studio > Office > License.",
+                path.display(),
+                fresh.id,
+                fresh.company
+            ); // WHAT: said once, plainly, with the way to do it. WHY: a file dropped in on purpose and not taken must not pass in silence
+        }
+    }
     for (_, _, fresh) in &found {
         let print = fingerprint(fresh); // WHAT: this licence's fingerprint. WHY: met again, it is not new
         if !seen.contains(&print) {
