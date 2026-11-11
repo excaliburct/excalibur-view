@@ -60,9 +60,11 @@ A module that isn't licensed isn't served: its routes answer 404, as if it didn'
 | The estimating program on each computer | Its own signed feed, as today | its own tests |
 | Licences | The office's licence renews itself from the publisher when bought seats, parts or years are added; a renewal can never take a part, seat or year away | the licence tests |
 
-**Never roll the Office Server back below 0.7.0 once seats have moved to HTTPS.** A seat that holds the server's
-pin never falls back to plain HTTP, and an older server has no HTTPS: every seat would refuse to connect until it
-is updated again. A rollback between 0.7.x versions is fine (same certificate).
+**Never put a server program older than 0.7.0 back by hand once seats have moved to HTTPS.** A seat that holds the
+server's pin never falls back to plain HTTP, and an older server has no HTTPS: every seat would refuse to connect
+until the server is updated again. The maintenance channel's rollback is safe: it withdraws the newest View offered
+to the seats (an older View doesn't pin, and the server still answers plain HTTP), and a server between 0.7.x
+versions keeps the same certificate.
 
 ## Citadel and every company
 
