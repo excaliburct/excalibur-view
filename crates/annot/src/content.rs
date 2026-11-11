@@ -205,7 +205,7 @@ impl Content {
 
     fn show(&mut self, text: &str) {
         self.bytes.push(b'(');
-        for ch in text.chars() {
+        for ch in composed(text).chars() {
             let b = to_win_ansi(ch);
             match b {
                 b'(' | b')' | b'\\' => {
@@ -221,6 +221,36 @@ impl Content {
         self.bytes.push(b')');
         self.bytes.push(b'\n');
     }
+}
+
+/// A letter followed by a combining accent, as the one letter WinAnsi has
+/// for the pair: `e` + U+0301 is `é`. Text pasted from a Mac or a web page
+/// often comes this way, and each accent on its own became a question mark
+/// after its letter.
+pub fn composed(text: &str) -> String {
+    // WHAT: for each combining accent, the letters it goes on and what they become. WHY: only the pairs WinAnsi has a letter for.
+    const PAIRS: &[(char, &str, &str)] = &[
+        ('\u{300}', "AEIOUaeiou", "ÀÈÌÒÙàèìòù"),
+        ('\u{301}', "AEIOUYaeiouy", "ÁÉÍÓÚÝáéíóúý"),
+        ('\u{302}', "AEIOUaeiou", "ÂÊÎÔÛâêîôû"),
+        ('\u{303}', "ANOano", "ÃÑÕãñõ"),
+        ('\u{308}', "AEIOUaeiouy", "ÄËÏÖÜäëïöüÿ"),
+        ('\u{30a}', "Aa", "Åå"),
+        ('\u{327}', "Cc", "Çç"),
+    ];
+    let mut out = String::with_capacity(text.len()); // WHAT: the text with pairs made one. WHY: returned.
+    for ch in text.chars() {
+        let pair = PAIRS.iter().find(|(mark, _, _)| *mark == ch); // WHAT: whether this is an accent with letters. WHY: anything else goes through as it is.
+        if let (Some((_, bases, results)), Some(last)) = (pair, out.chars().last()) {
+            if let Some(at) = bases.chars().position(|b| b == last) {
+                out.pop(); // WHAT: the letter goes. WHY: it is replaced by the letter with its accent.
+                out.push(results.chars().nth(at).unwrap_or(last)); // WHAT: the accented letter. WHY: one character WinAnsi can set.
+                continue;
+            }
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Maps a character into WinAnsi, which is the encoding the base fonts use.
@@ -265,11 +295,21 @@ const HELVETICA_BOLD: [u16; 95] = [
     611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584, //
 ];
 
+/// How wide a string will be in a family, in points. Courier is the same
+/// width for every letter; Times is measured as Helvetica, the same as the
+/// words typed on the sheet are shown, so the two wrap alike.
+pub fn width_of_in(text: &str, size: f64, family: crate::text::Family, bold: bool) -> f64 {
+    match family {
+        crate::text::Family::Courier => text.chars().count() as f64 * 600.0 * size / 1000.0, // WHAT: 600 thousandths of the size for every letter. WHY: Courier is fixed-width, and measuring it as Helvetica wrapped a Courier note far too late.
+        _ => width_of(text, size, bold), // WHAT: Helvetica's widths. WHY: as before.
+    }
+}
+
 /// How wide a string will be, in points.
 pub fn width_of(text: &str, size: f64, bold: bool) -> f64 {
     let table = if bold { &HELVETICA_BOLD } else { &HELVETICA };
     let mut total = 0u32;
-    for ch in text.chars() {
+    for ch in composed(text).chars() { // WHAT: measured as it is drawn, accents joined to their letters. WHY: an accent measured on its own made the line wider than what was drawn.
         let b = to_win_ansi(ch);
         let w = if (32..127).contains(&b) {
             table[(b - 32) as usize]
@@ -343,5 +383,15 @@ mod tests {
         let out = text_of(c);
         assert_eq!(out.matches(" c\n").count(), 4);
         assert!(out.ends_with("h\n"));
+    }
+
+    #[test]
+    fn an_accent_typed_after_its_letter_is_drawn_as_one_letter() {
+        // WHAT: e + combining acute is drawn as é. WHY: text pasted from a Mac or a web page carries accents this way, and each became a question mark.
+        let mut c = Content::new();
+        c.text("F1", 10.0, [0.0, 0.0], [0.0, 0.0, 0.0], "Cafe\u{301} NIN\u{303}O");
+        let drawn = text_of(c);
+        assert!(drawn.contains("(Caf\\351 NI\\321O)"), "{drawn}");
+        assert_eq!(width_of("e\u{301}", 10.0, false), width_of("é", 10.0, false));
     }
 }

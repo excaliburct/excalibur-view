@@ -292,11 +292,18 @@ impl Markup {
             (colour[1] * 255.0).round() as u8,
             (colour[2] * 255.0).round() as u8
         );
+        // WHAT: one <p> for each line of the words, split at every kind of line break. WHY: in rich text a line break inside a <p> is only a space, so a note of three lines came back as one line in any program that reads /RC first, as Revu does.
+        let paragraphs: String = crate::text::paragraphs(text)
+            .into_iter()
+            .map(|range| {
+                let line: String = text.chars().skip(range.start).take(range.end - range.start).collect(); // WHAT: the line's characters. WHY: ranges are by character.
+                format!("<p>{}</p>", escape_xml(&line)) // WHAT: the line as its own paragraph. WHY: as above.
+            })
+            .collect();
         let rich = format!(
             "<?xml version=\"1.0\"?><body xmlns=\"http://www.w3.org/1999/xhtml\" \
              xmlns:xfa=\"http://www.xfa.org/schema/xfa-data/1.0/\" \
-             xfa:contentType=\"text/html\" xfa:spec=\"2.2.0\" style=\"{style}\"><p>{}</p></body>",
-            escape_xml(text)
+             xfa:contentType=\"text/html\" xfa:spec=\"2.2.0\" style=\"{style}\">{paragraphs}</body>"
         );
         self.set("RC", Object::text(&rich));
         self
@@ -870,6 +877,16 @@ mod tests {
         let rich = m.text_of("RC");
         assert!(rich.contains("<p>20'-6 1/2\"</p>"), "{rich}");
         assert!(rich.contains("color:#FF0000"), "{rich}");
+    }
+
+    #[test]
+    fn words_of_several_lines_keep_them_in_the_rich_text() {
+        // WHAT: each line is its own paragraph in /RC. WHY: a line break inside one <p> is a space to whatever reads /RC first, and a note of three lines came back as one.
+        let mut m = Markup::new(Subtype::FreeText);
+        m.set_contents("FIRST\nSECOND\r\nTHIRD");
+        let rich = m.text_of("RC");
+        assert!(rich.contains("<p>FIRST</p><p>SECOND</p><p>THIRD</p>"), "{rich}");
+        assert_eq!(m.contents(), "FIRST\nSECOND\r\nTHIRD", "/Contents is kept exactly as typed");
     }
 
     #[test]

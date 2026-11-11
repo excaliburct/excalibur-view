@@ -397,11 +397,12 @@ pub fn fit_to_words(markup: &mut Markup, text: &str) -> bool {
     let Some(b) = markup.drawn_box() else { return false };
     let setting = annot::text::Setting::of(markup);
     let pad = 2.0 + markup.width().max(0.0);
-    let longest = text
-        .split('\n')
-        .map(|line| annot::content::width_of(line, setting.size, setting.bold))
+    let lines = annot::text::wrap(text, f64::INFINITY, &setting); // WHAT: the lines as typed, split at every kind of line break. WHY: splitting at \n alone made a box Revu wrote with \r one long line wide.
+    let longest = lines
+        .iter()
+        .map(|line| annot::content::width_of_in(line, setting.size, setting.family, setting.bold)) // WHAT: each line's width in its own family. WHY: a Courier box was sized as Helvetica.
         .fold(0.0_f64, f64::max);
-    let lines = text.split('\n').count().max(1) as f64;
+    let lines = lines.len().max(1) as f64; // WHAT: how many lines. WHY: the box's height.
     // Room for the caret after the last letter, and never so narrow that
     // an empty box cannot be seen.
     let w = (longest + setting.size * 0.6).max(setting.size * 4.0) + pad * 2.0;
@@ -448,8 +449,7 @@ pub fn taller_for_words(markup: &mut Markup, text: &str) -> bool {
     let lines = annot::text::wrap(text, (b[2] - b[0] - pad * 2.0).max(1.0), &setting)
         .len()
         .max(1) as f64;
-    // A new line with nothing on it yet still needs its room.
-    let lines = if text.ends_with('\n') { lines + 1.0 } else { lines };
+    // WHAT: no extra line for a trailing Enter. WHY: the wrap already gives a new line with nothing on it yet a line of its own, and counting it twice made the box a line taller than its words each time Enter ended the text.
     let needed = lines * setting.size * 1.18 + pad * 2.0;
     if needed <= b[3] - b[1] + 0.01 {
         return false;
@@ -616,6 +616,26 @@ mod tests {
         let m = a_box(Subtype::Circle);
         let same = dragged(&m, &frame, corner(true, false), [0.0, 0.0], false);
         assert_eq!(same.drawn_box(), m.drawn_box());
+    }
+
+    #[test]
+    fn a_box_grows_one_line_for_one_enter_and_reads_revu_line_breaks() {
+        // WHAT: Enter at the end of the words makes room for one more line, not two. WHY: the trailing new line was counted twice, so the box grew a spare line every time.
+        let mut m = Markup::new(Subtype::FreeText);
+        m.set_box([0.0, 0.0, 200.0, 10.0]);
+        let setting = annot::text::Setting::of(&m);
+        let pad = 2.0 + m.width().max(0.0);
+        assert!(taller_for_words(&mut m, "FIRST\n"));
+        let b = m.drawn_box().unwrap();
+        assert!((b[3] - b[1] - (2.0 * setting.size * 1.18 + pad * 2.0)).abs() < 0.01, "{b:?}");
+        // WHAT: a box that grows with its words, from Revu with \r between its lines. WHY: it was made as wide as both lines end to end.
+        let mut grown = Markup::new(Subtype::FreeText);
+        grown.set_box([0.0, 0.0, 10.0, 10.0]);
+        assert!(fit_to_words(&mut grown, "FIRST LINE\rSECOND"));
+        let mut alone = Markup::new(Subtype::FreeText);
+        alone.set_box([0.0, 0.0, 10.0, 10.0]);
+        assert!(fit_to_words(&mut alone, "FIRST LINE\nSECOND"));
+        assert_eq!(grown.drawn_box(), alone.drawn_box(), "\r and \n are the same line break");
     }
 
     #[test]

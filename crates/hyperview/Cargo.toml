@@ -94,6 +94,8 @@ eframe = { version = "0.32", default-features = false, features = ["glow", "wayl
 # backend there, is left out of those builds.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 rfd = "0.16"
+# WHAT: the operating system's clipboard, read for a picture copied in another program. WHY: egui reads only words from it. The same version and features eframe's window layer already builds in, so nothing new is added to the build.
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "25", default-features = false, features = ["dx12", "vulkan"] }

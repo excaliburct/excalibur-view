@@ -1,0 +1,29 @@
+PASTING ONTO A SHEET
+
+Ctrl+V and Edit, Paste now put down whatever was copied last, from anywhere.
+Words copied in an email, a spreadsheet or a web page go on the sheet as a
+text box. A screenshot or a photo goes on as a picture. Markups copied in
+Excalibur View still paste as markups, the same as before.
+
+It works on every sheet, blank sheets added to a set included. Ctrl+V puts
+it where the mouse is; the menu puts it in the middle of what you're looking
+at. A picture file dragged onto a sheet goes where it is let go.
+
+Before this, Ctrl+V did nothing on Windows, the Mac or Linux, even for
+markups copied here. Edit, Paste worked only for markups.
+
+TEXT BOXES
+
+The words in a text box now break their lines in the same places while you
+type as they do once the box is finished, so nothing jumps around when you
+click away.
+
+Two spaces stay two spaces, an indent stays an indent, and the line breaks in
+a text box made in Revu are kept, both when it is opened here and when its
+size or font is changed. Before, a Revu note could come back as one long
+line. A note of several lines is also saved with its line breaks in the
+rich-text copy of its words that Revu reads.
+
+Accents, degree signs, plus-or-minus and fractions are kept exactly as typed
+through every save. Emoji are kept in the words, though the standard PDF
+fonts show them as a question mark on the sheet.

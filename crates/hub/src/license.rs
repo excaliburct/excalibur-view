@@ -584,6 +584,46 @@ mod tests {
         assert_eq!(founding.note, "Founding customer");
         let parts = License::read(PARTS_FROM_THE_SCRIPT, &trusted).expect("the script's license with parts"); // WHAT: a license with parts, as the script signs it. WHY: the two must agree on the parts line too
         assert_eq!(parts.parts(), vec![Module::View, Module::Citadel, Module::Cad]);
+        let sealed = License::read(SEALED_FROM_THE_SCRIPT, &trusted).expect("the sealed one"); // WHAT: every field set, the edition sealed, a company in more than ASCII. WHY: the script and this file must agree on each, byte for byte
+        assert_eq!((sealed.company.as_str(), sealed.edition, sealed.users, sealed.note.as_str()), ("Ünïcode Fab & Co, LLC", Edition::Sealed, 7, "Added users"));
+        assert_eq!((sealed.updates_through.as_str(), sealed.issued.as_str(), sealed.id.as_str()), ("2027-09-24", "2026-09-24", "evl_fixture04"));
+    }
+
+    /// `sign-license --company "Ünïcode Fab & Co, LLC" --edition sealed --users 7 --updates-through 2027-09-24
+    /// --issued 2026-09-24 --note "Added users" --id evl_fixture04`, with the same made-up key, pasted in as it
+    /// came out (2026-11-10). Python writes the company with \u escapes; the signed text is its UTF-8.
+    const SEALED_FROM_THE_SCRIPT: &str = r#"{
+  "id": "evl_fixture04",
+  "company": "\u00dcn\u00efcode Fab & Co, LLC",
+  "edition": "sealed",
+  "users": 7,
+  "updates_through": "2027-09-24",
+  "issued": "2026-09-24",
+  "note": "Added users",
+  "key": "mesafab-2026",
+  "signature": "12d26a196f03da7ee4a20af99d2c4634e1e879b001d8c97f71921908686c67a7d8f8513a4a002521309c924ad6c62289e7ace511b843bc225e133dacf4aa6405"
+}"#;
+
+    #[test]
+    fn the_signed_text_is_eight_lines_in_this_order_and_nothing_else() {
+        // WHAT: the signed text of a licence, written out. WHY: tools/publish.py, the licensing service and every server must sign and check exactly this
+        let license = a_license(&issuer().0);
+        assert_eq!(
+            String::from_utf8(license.signing_payload()).unwrap(),
+            "excalibur-license-v1\nid=evl_0001\ncompany=Example Steel, Inc.\nedition=office\nusers=10\nupdates_through=2027-10-01\nissued=2026-10-01\nnote=\n"
+        );
+    }
+
+    #[test]
+    fn every_state_reads_as_one_plain_line_on_a_seat() {
+        // WHAT: Help > About's line for each standing the server can send. WHY: what a seat shows, state by state
+        let line = |state: &str| Standing { state: state.into(), company: Some("Example Steel".into()), ..Default::default() }.about_line();
+        assert_eq!(line("founding"), "Excalibur View Office, Example Steel. Founding install: every user, every update.");
+        assert!(line("unlicensed").contains("Sharing new work is paused; everything already here can be opened and exported."));
+        let forever = Standing { state: "licensed".into(), edition: Some("sealed".into()), company: Some("Example Steel".into()), ..Default::default() };
+        assert_eq!(forever.about_line(), "Excalibur View Sealed, licensed to Example Steel. Every user. Updates forever.");
+        let trial = Standing { state: "trial".into(), trial_days_left: Some(30), ..Default::default() };
+        assert_eq!(trial.about_line(), "Excalibur View Office trial: 30 days left.");
     }
 
     /// `sign-license --modules citadel,cad`, with the same made-up key, pasted in as it came out (2026-11-10).
