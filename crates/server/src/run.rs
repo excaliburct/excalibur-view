@@ -132,7 +132,11 @@ pub async fn serve(
         tokio::spawn(crate::offsite::nightly(Arc::clone(&server))); // WHAT: tonight's off-site backup, once a night. WHY: off until HYPERVIEW_OFFSITE_TARGET is set.
     }
 
-    let app = api::router(server).layer(tower_http::trace::TraceLayer::new_for_http());
+    let app = api::router(server)
+        .layer(axum::middleware::map_request(|request: axum::extract::Request| async move {
+            request.map(|body| axum::body::Body::new(tower_http::timeout::TimeoutBody::new(crate::tls::BODY_IDLE, body))) // WHAT: every request body with an idle limit. WHY: a body that stops arriving gives its connection back
+        }))
+        .layer(tower_http::trace::TraceLayer::new_for_http());
     ready(&serving);
     if let Some(settings) = secure {
         tracing::info!("{name} is serving the Excalibur View API on {}/api/v1, HTTPS and plain HTTP on the one port", serving.url());

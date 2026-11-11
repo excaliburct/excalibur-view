@@ -20,6 +20,11 @@ use std::time::Duration;
 /// Connections served at once (an office has a handful of computers),
 /// and from any one address (so one machine can't take them all).
 const MOST_CONNECTIONS: usize = 512; // WHAT: the cap on open connections. WHY: a flood waits instead of exhausting the machine
+/// The most of those this machine itself may hold: the tunnel connector, through
+/// which every remote seat arrives. The rest are kept for the office's own computers.
+const MOST_FROM_HERE: usize = 448; // WHAT: 448 of the 512. WHY: a stranger through the tunnel can never take the slots the office's own seats need
+/// How long a request's body may go without sending anything.
+pub const BODY_IDLE: Duration = Duration::from_secs(120); // WHAT: two minutes between pieces of a body. WHY: a body that stops arriving gives its connection back
 const MOST_FROM_ONE: usize = 16; // WHAT: the cap from one address. WHY: one machine can't take every slot
 /// The longest one connection is kept, however it's used.
 const CONNECTION: Duration = Duration::from_secs(3600); // WHAT: an hour. WHY: a 512 MB drawing set over a slow tunnel fits; a held-open socket doesn't stay forever
@@ -99,7 +104,9 @@ pub async fn serve(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) {
     let acceptor = tokio_rustls::TlsAcceptor::from(config); // WHAT: the TLS side of each connection. WHY: rustls, as everywhere else
-    let mut open = tokio::task::JoinSet::new(); // WHAT: the connections being served. WHY: a stopping server lets them finish
+    let mut open = tokio::task::JoinSet::new(); // WHAT: the connections being served. WHY: any still open after the drain are ended with the set
+    let polite = hyper_util::server::graceful::GracefulShutdown::new(); // WHAT: every connection, told when the server stops. WHY: idle ones close at once; busy ones finish their request
+    let from_here = Arc::new(tokio::sync::Semaphore::new(MOST_FROM_HERE)); // WHAT: the slots this machine itself may hold. WHY: the office's computers always find one free
     let slots = Arc::new(tokio::sync::Semaphore::new(MOST_CONNECTIONS)); // WHAT: the open-connection slots. WHY: the cap above
     let per_address = Shares::default(); // WHAT: connections per address. WHY: the per-machine cap
     let mut shutdown = std::pin::pin!(shutdown);
@@ -112,11 +119,15 @@ pub async fn serve(
         let Ok((tcp, peer)) = accepted else {
             continue; // WHAT: a failed accept is skipped. WHY: one bad connection never stops the server
         };
-        let share = if peer.ip().is_loopback() {
-            None // WHAT: this machine itself is never capped per machine. WHY: the office's tunnel connector runs here, and every remote seat comes through it from one address
+        let here = peer.ip().to_canonical().is_loopback(); // WHAT: this machine itself, IPv4 written as IPv6 included. WHY: the tunnel connector may reach the server either way
+        let (share, local) = if here {
+            match from_here.clone().try_acquire_owned() {
+                Ok(local) => (None, Some(local)), // WHAT: one of this machine's slots. WHY: never capped per machine (every remote seat comes from here), but never all of them
+                Err(_) => continue, // WHAT: this machine already holds its share. WHY: the remaining slots are the office's own computers'
+            }
         } else {
             match Share::take(&per_address, machine(peer.ip())) {
-                Some(share) => Some(share),
+                Some(share) => (Some(share), None),
                 None => continue, // WHAT: past its machine's share, closed straight away. WHY: one machine can't take every slot
             }
         };
@@ -127,9 +138,9 @@ pub async fn serve(
         let Ok(slot) = slot else {
             break; // WHAT: the slots are gone. WHY: only when stopping
         };
-        let (acceptor, router) = (acceptor.clone(), router.clone());
+        let (acceptor, router, watcher) = (acceptor.clone(), router.clone(), polite.watcher());
         open.spawn(async move {
-            let (_slot, _share) = (slot, share); // WHAT: held for the connection's life. WHY: given back when it closes
+            let (_slot, _share, _local) = (slot, share, local); // WHAT: held for the connection's life. WHY: given back when it closes
             let mut first = [0u8; 1];
             let Ok(Ok(n)) = tokio::time::timeout(HANDSHAKE, tcp.peek(&mut first)).await else {
                 return; // WHAT: nothing sent in time, or a broken socket. WHY: dropped, its slot given back
@@ -138,17 +149,18 @@ pub async fn serve(
                 let Ok(Ok(tls)) = tokio::time::timeout(HANDSHAKE, acceptor.accept(tcp)).await else {
                     return; // WHAT: a failed or stalled handshake. WHY: dropped, its slot given back
                 };
-                answer(tls, peer, router).await; // WHAT: HTTPS. WHY: sign-ins and drawings encrypted
+                answer(tls, peer, router, watcher).await; // WHAT: HTTPS. WHY: sign-ins and drawings encrypted
             } else {
-                answer(tcp, peer, router).await; // WHAT: plain HTTP. WHY: a seat that hasn't moved yet, or an older one
+                answer(tcp, peer, router, watcher).await; // WHAT: plain HTTP. WHY: a seat that hasn't moved yet, or an older one
             }
         });
     }
-    let _ = tokio::time::timeout(DRAIN, async { while open.join_next().await.is_some() {} }).await; // WHAT: open requests given a moment to finish. WHY: a save in flight when the service stops for an update lands
+    let _ = tokio::time::timeout(DRAIN, polite.shutdown()).await; // WHAT: every connection told to close once its request is done, given up to ten seconds. WHY: a save in flight when the service stops for an update lands, and idle seats don't hold the stop up
+    open.abort_all(); // WHAT: any still open, ended. WHY: the service stops on time
 }
 
 /// One connection's requests answered by `router`, over whatever it is.
-async fn answer<I>(io: I, peer: SocketAddr, router: axum::Router)
+async fn answer<I>(io: I, peer: SocketAddr, router: axum::Router, watcher: hyper_util::server::graceful::Watcher)
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -161,7 +173,7 @@ where
         .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(Duration::from_secs(30)) // WHAT: headers within 30 seconds. WHY: a request trickled in to hold a slot is dropped
         .serve_connection(hyper_util::rt::TokioIo::new(io), service);
-    let _ = tokio::time::timeout(CONNECTION, connection).await; // WHAT: the connection, up to its limit. WHY: none is kept forever
+    let _ = tokio::time::timeout(CONNECTION, watcher.watch(connection)).await; // WHAT: the connection, up to its limit, closed politely when the server stops. WHY: none is kept forever
 }
 
 /// The machine an address belongs to, for the per-machine cap: an IPv4
@@ -297,7 +309,7 @@ mod tests {
         let counts = Shares::default();
         let ip: std::net::IpAddr = [10, 0, 0, 9].into();
         let held: Vec<Share> = (0..MOST_FROM_ONE).map(|_| Share::take(&counts, ip).unwrap()).collect();
-        assert!(Share::take(&counts, ip).is_none(), "the 17th waits its turn");
+        assert!(Share::take(&counts, ip).is_none(), "the 17th is turned away until one closes");
         assert!(Share::take(&counts, [10, 0, 0, 10].into()).is_some(), "another machine isn't held up");
         drop(held);
         assert!(Share::take(&counts, ip).is_some(), "closed ones are given back");

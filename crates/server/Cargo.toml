@@ -26,7 +26,7 @@ chest = { path = "../chest" }
 axum = { version = "0.7", features = ["multipart", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors", "limit"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "limit", "timeout"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -54,7 +54,7 @@ url = "2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-graceful"] } # WHAT: with polite shutdown of open connections. WHY: a stopping server closes idle seats' connections at once instead of waiting them out
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 
 # Being a real Windows service: answering the service manager, so Windows
