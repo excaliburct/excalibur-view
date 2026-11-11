@@ -275,18 +275,20 @@ fn a_licence_whose_updates_ended_before_this_build_pauses_sharing_and_says_both_
 }
 
 #[test]
-fn an_office_already_founding_is_never_asked_and_a_founding_licence_changes_nothing_for_it() {
+fn an_earlier_versions_founding_mark_no_longer_counts_and_its_signed_founding_licence_does() {
+    // WHAT: audit re-check, 2026-11-11: the unsigned mark could be had through an older release. WHY: founding is a signed licence only
     let scratch = Scratch::new();
-    people(&scratch.0, "2026-09-01T00:00:00Z"); // WHAT: people from before licensing. WHY: a founding office
+    people(&scratch.0, "2026-09-01T00:00:00Z");
     let office = serve(&scratch.0);
     let sam = session(&office, "sam@example.com");
-    founded(&scratch.0); // WHAT: marked founding by an earlier version. WHY: those offices keep it
-    began(&scratch.0, "2020-01-01T00:00:00Z"); // WHAT: any trial long over. WHY: founding doesn't care
+    founded(&scratch.0); // WHAT: marked founding by an earlier version. WHY: the route
+    began(&scratch.0, "2020-01-01T00:00:00Z"); // WHAT: any trial long over. WHY: the mark no longer saves it
     let (_, standing) = ask(&office, "GET", "/license", &sam, None);
-    assert_eq!((standing["state"].as_str(), standing["sharing"].as_bool(), standing["users_allowed"].as_u64()), (Some("founding"), Some(true), None), "{standing}");
+    assert_eq!((standing["state"].as_str(), standing["sharing"].as_bool()), (Some("unlicensed"), Some(false)), "{standing}");
+    let (status, standing) = add(&office, &sam, &signed(&issuer(), "evl_f", Edition::Office, 0, "forever")); // WHAT: its signed founding licence. WHY: what Mesa Fab, Arc Valley and LatCon are given
+    assert_eq!(status, 200, "{standing}");
+    assert_eq!((standing["state"].as_str(), standing["sharing"].as_bool()), (Some("licensed"), Some(true)), "{standing}");
     assert_eq!(new_job(&office, &sam, "4001").0, 200);
-    assert_eq!(add(&office, &sam, &signed(&issuer(), "evl_f", Edition::Office, 0, "forever")).0, 200, "its backup founding file is taken");
-    assert_eq!(ask(&office, "GET", "/license", &sam, None).1["state"], "founding", "and it stays founding");
 }
 
 #[test]

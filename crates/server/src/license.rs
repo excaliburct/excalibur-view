@@ -140,9 +140,9 @@ fn pick_up_from_the_data_folder(server: &Server) {
         let other = held.as_ref().is_some_and(|h| h.id != fresh.id); // WHAT: a licence other than the one held. WHY: never taken by itself once one is held
         if other && used.as_ref() != Some(path) && !seen.contains(&fingerprint(fresh)) {
             tracing::warn!(
-                "{} holds license {} for {}, which is not the license in use, so it was not added by itself. To use it, an administrator adds it from a seat: Studio > Office > License.",
+                "{} holds license {}… for {}, which is not the license in use, so it was not added by itself. To use it, an administrator adds it from a seat: Studio > Office > License.",
                 path.display(),
-                fresh.id,
+                fresh.id.chars().take(8).collect::<String>(), // WHAT: the id shortened. WHY: the whole id finds the licence on the feed (audit, 2026-11-11)
                 fresh.company
             ); // WHAT: said once, plainly, with the way to do it. WHY: a file dropped in on purpose and not taken must not pass in silence
         }
@@ -227,6 +227,9 @@ pub fn begin_at(server: &Server, now: &str, founding_before: &str) {
         // a clock set back at the first start, or one row typed in, made any server founding for good (audit,
         // 2026-11-11). A founding office is given a signed founding license instead; one already marked keeps it.
         tracing::warn!("in use since {first}, before licensing: if this is a founding office, it needs its signed founding license");
+    }
+    if store.setting(FOUNDING).ok().flatten().is_some() && held(server, &trust(server)).is_none() {
+        tracing::warn!("an earlier version marked this server a founding install; that mark no longer counts, so it needs its signed founding license (Studio > Office > License, or the file dropped in the data folder)"); // WHAT: said at every start until a licence is held. WHY: whoever looks after it knows what to do
     }
     let _ = store.set_setting(BEGAN, now);
 }
@@ -372,13 +375,18 @@ pub fn state_at(server: &Server, now: &str, trusted: &Trusted) -> State {
 
 /// The state of a server whose program was built on `built`.
 pub fn state_as_built(server: &Server, now: &str, trusted: &Trusted, built: &str) -> State {
-    if server.store.setting(FOUNDING).ok().flatten().is_some() {
-        return State::Founding;
-    }
+    // WHAT: an earlier version's founding mark no longer counts. WHY: it is unsigned, and any server could get it through an
+    // older release or one row typed in (audit re-check, 2026-11-11, H1); a founding office holds a signed founding licence instead.
     if let Some(license) = held(server, trusted) {
         return if license.covers(built) { State::Licensed(license) } else { State::Beyond(license) };
     }
-    let began = server.store.setting(BEGAN).ok().flatten().unwrap_or_else(|| now.to_string());
+    let began = match server.store.setting(BEGAN).ok().flatten() {
+        Some(began) if time::OffsetDateTime::parse(&began, &time::format_description::well_known::Rfc3339).is_ok() => began, // WHAT: the trial's start, as kept. WHY: the usual case
+        _ => {
+            let _ = server.store.set_setting(BEGAN, now); // WHAT: a missing or unreadable start kept as now. WHY: a damaged value gave the full trial every time; now it starts once and runs (audit re-check, 2026-11-11)
+            now.to_string()
+        }
+    };
     let now = latest_seen(server, now); // WHAT: the latest time this server has seen, less a day. WHY: a clock held back kept the trial going for ever (audit, 2026-11-11)
     match days_left(&began, &now) {
         0 => State::Unlicensed,
@@ -399,7 +407,8 @@ fn latest_seen(server: &Server, now: &str) -> String {
         return now.to_string(); // WHAT: as given. WHY: an unreadable time is days_left's to handle, as before
     };
     let seen = server.store.setting(SEEN).ok().flatten().and_then(|s| time::OffsetDateTime::parse(&s, &Rfc3339).ok()); // WHAT: the latest kept. WHY: compared below
-    if seen.map_or(true, |seen| at > seen + time::Duration::hours(1)) {
+    let believable = time::Date::parse(BUILT, &time::macros::format_description!("[year]-[month]-[day]")).map_or(true, |built| at.date() <= built + time::Duration::days(730)); // WHAT: no later than two years after this program was built. WHY: a clock set years ahead by mistake (a dead battery) must not end a trial for good
+    if believable && seen.map_or(true, |seen| at > seen + time::Duration::hours(1)) {
         let _ = server.store.set_setting(SEEN, now); // WHAT: kept. WHY: the next look compares with it
     }
     match seen {
@@ -719,20 +728,27 @@ mod tests {
     }
 
     #[test]
-    fn an_office_already_founding_is_never_asked_to_pay() {
+    fn an_earlier_versions_founding_mark_no_longer_counts_and_a_signed_founding_licence_does() {
+        // WHAT: audit re-check, 2026-11-11: the unsigned mark could still be had through an older release or one row. WHY: proven closed.
         let (server, dir) = a_server();
         someone(&server, "2026-06-01T12:00:00Z");
-        server.store.set_setting(FOUNDING, "2026-06-01T12:00:00Z").unwrap(); // WHAT: marked founding by an earlier version. WHY: those offices keep it
+        server.store.set_setting(FOUNDING, "2026-06-01T12:00:00Z").unwrap(); // WHAT: marked founding by an earlier version. WHY: the route the re-check found
         begin_at(&server, "2026-10-20T00:00:00Z", FOUNDING_BEFORE);
-        // Years later, with no license file anywhere: still everything.
-        let state = state_at(&server, "2031-01-01T00:00:00Z", &nobody());
-        assert_eq!(state, State::Founding);
-        assert!(state.sharing());
-        assert!(room_for_another(&server).is_ok());
-        assert!(covers(&server, "2031-01-01"));
-        // Starting again does not re-decide it.
-        begin_at(&server, "2031-01-01T00:00:00Z", FOUNDING_BEFORE);
-        assert_eq!(state_at(&server, "2031-01-02T00:00:00Z", &nobody()), State::Founding);
+        assert_eq!(state_at(&server, "2031-01-01T00:00:00Z", &nobody()), State::Unlicensed); // WHAT: the trial long over, the mark ignored. WHY: unsigned
+        let (signing, trusted) = issuer();
+        install_with(&server, &a_license(&signing, 0, "forever"), &trusted).unwrap(); // WHAT: the signed founding licence: every seat, every update. WHY: how a founding office holds it now
+        let state = state_as_built(&server, "2031-01-01T00:00:00Z", &trusted, "2031-01-01");
+        assert!(matches!(state, State::Licensed(_)) && state.sharing(), "{state:?}"); // WHAT: everything, for good. WHY: as founding gave
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unreadable_trial_start_starts_the_trial_once_rather_than_giving_it_every_time() {
+        let (server, dir) = a_server();
+        begin_at(&server, "2026-09-01T00:00:00Z", FOUNDING_BEFORE);
+        server.store.set_setting(BEGAN, "not a date").unwrap(); // WHAT: damaged. WHY: the re-check's fail-open case
+        assert!(matches!(state_at(&server, "2026-12-01T00:00:00Z", &nobody()), State::Trial { days_left: 30 })); // WHAT: starts now. WHY: kept as now
+        assert_eq!(state_at(&server, "2027-01-15T00:00:00Z", &nobody()), State::Unlicensed); // WHAT: and runs out. WHY: no longer the full trial every time
         let _ = std::fs::remove_dir_all(dir);
     }
 

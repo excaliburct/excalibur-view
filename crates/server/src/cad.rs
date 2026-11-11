@@ -207,6 +207,10 @@ impl Store {
         if bytes.len() > MOST_BYTES {
             return Err(Refused::Bad("That drawing is too big.".into()));
         }
+        let taken: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM cad_drawings WHERE folder = ?1 AND name = ?2)", params![folder, name], |r| r.get(0)).unwrap_or(false); // WHAT: the name checked before anything is stored. WHY: a refused create left its file behind for good (audit, 2026-11-11); the index still decides below
+        if taken {
+            return Err(Refused::Exists);
+        }
         let sha = self.put_blob(bytes).map_err(|e| Refused::Bad(format!("Couldn't store it: {e}")))?;
         let tx = self.db.transaction().map_err(|e| Refused::Bad(e.to_string()))?;
         if tx.execute("INSERT INTO cad_drawings (folder, name, created_by, created_at) VALUES (?1, ?2, ?3, ?4)", params![folder, name, who, now()]).is_err() {
@@ -286,6 +290,13 @@ impl Store {
     pub fn save(&mut self, id: i64, base: i64, bytes: &[u8], who: &str, note: &str) -> Result<i64, Refused> {
         if bytes.len() > MOST_BYTES {
             return Err(Refused::Bad("That drawing is too big.".into()));
+        }
+        let d = self.drawing(id).ok_or(Refused::NotFound)?; // WHAT: the drawing, looked at before anything is stored. WHY: a save to a drawing that isn't there, or isn't checked out to this person, left its file behind for good (audit, 2026-11-11); the same checks run again inside the lock
+        if d.locked_by.as_deref() != Some(who) {
+            return match d.locked_by {
+                Some(by) => Err(Refused::Locked(by, d.locked_at.unwrap_or(0))),
+                None => Err(Refused::NotYours),
+            };
         }
         let sha = self.put_blob(bytes).map_err(|e| Refused::Bad(format!("Couldn't store it: {e}")))?; // WHAT: the bytes kept first. WHY: the slow part, outside the write lock
         self.db.execute_batch("BEGIN IMMEDIATE").map_err(|e| Refused::Bad(e.to_string()))?; // WHAT: the check and the write as one. WHY: a check-out forced back and taken by someone else in between can't let this save land
@@ -559,6 +570,7 @@ pub(crate) async fn create(State(server): State<Shared>, headers: HeaderMap, uri
     on(&server)?;
     let who = crate::api::writer(&server, &headers)?; // WHAT: someone who may change drawings. WHY: a viewer opens, never adds
     let at: Place = values(&uri)?;
+    let _turn = crate::api::big_turn().await; // WHAT: one of four big reads at a time. WHY: parallel uploads could hold gigabytes (audit, 2026-11-11)
     let body = drawing_bytes(body).await?;
     blocking(&server, move |s| {
         let id = s.create(&at.folder, &at.name, &body, &who.email)?;
@@ -600,6 +612,7 @@ pub(crate) async fn save(State(server): State<Shared>, headers: HeaderMap, UrlPa
     on(&server)?;
     let who = crate::api::writer(&server, &headers)?;
     let saving: Saving = values(&uri)?;
+    let _turn = crate::api::big_turn().await; // WHAT: one of four big reads at a time. WHY: parallel uploads could hold gigabytes (audit, 2026-11-11)
     let body = drawing_bytes(body).await?;
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known
     blocking(&server, move |s| {

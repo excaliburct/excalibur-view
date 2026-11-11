@@ -1536,7 +1536,7 @@ fn check_for_update(
     // still moves the office back on purpose.
     if !hub::update::newer(&release.version, running) {
         let trusted = client.is_some_and(|c| c.pin().is_some() || c.base().starts_with("https://")); // WHAT: pinned HTTPS, or HTTPS its certificate authority vouches for. WHY: the offer can't have been changed on the way
-        let held_there = pinned.as_deref() == Some(release.version.as_str()); // WHAT: the administrator's hold names this very version. WHY: the only reason to go back
+        let held_there = pinned.as_deref() == Some(release.version.as_str()) && release.version != running; // WHAT: the administrator's hold names this very version, not the one running. WHY: the only reason to go back; the running build is never put in again on every check (audit re-check)
         if !(matches!(from, From::Server) && trusted && held_there) {
             log::warn!("update check: version {} is not newer than {running}; not taken", release.version);
             return note(format!("Excalibur View {running} is not replaced by the older {} it was offered.", release.version));

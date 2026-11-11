@@ -62,6 +62,46 @@ pub fn service_only_steps(folder: &Path) -> Vec<Vec<OsString>> {
     ]
 }
 
+/// WHAT: the steps that make the folder the service's folder sits in
+/// (`ProgramData\Excalibur Hyperview`) the system's and administrators' alone,
+/// on that folder only. WHY: ProgramData lets any account make a folder there
+/// and own it; an account that made this one first could rename the locked
+/// folder below it and put its own program in its place for the system to start
+/// (audit, 2026-11-11). Granted to the folder itself, not passed on: what is
+/// inside keeps its own permissions.
+pub fn parent_steps(parent: &Path) -> Vec<Vec<OsString>> {
+    let whole = || parent.as_os_str().to_os_string(); // WHAT: the folder, as one argument. WHY: every step is on it alone
+    let quiet = ["/C", "/Q"]; // WHAT: carry on past an error, quietly. WHY: as for the service's folder
+    let step = |rest: &[&str]| -> Vec<OsString> {
+        std::iter::once(whole()).chain(rest.iter().chain(quiet.iter()).map(|a| OsString::from(*a))).collect() // WHAT: one run's arguments. WHY: the path first, then the switches
+    };
+    vec![
+        step(&["/reset"]), // WHAT: the folder's own entries cleared, the creator's included. WHY: whoever made it no longer holds it
+        step(&["/inheritance:r", "/grant:r", SYSTEM_HERE, ADMINISTRATORS_HERE]), // WHAT: the system and administrators only, on this folder. WHY: nobody else may rename or delete what is in it
+        step(&["/setowner", ADMINISTRATORS_OWN]), // WHAT: administrators own it. WHY: the account that made it first no longer does
+    ]
+}
+
+/// WHAT: full control of one folder, not passed to what is inside. WHY: `parent_steps`.
+const SYSTEM_HERE: &str = "*S-1-5-18:F";
+/// WHAT: the same, for administrators. WHY: as above.
+const ADMINISTRATORS_HERE: &str = "*S-1-5-32-544:F";
+
+/// WHAT: runs `parent_steps` on `parent`. WHY: before the service's own folder is made in it.
+#[cfg(windows)]
+pub fn lock_parent(parent: &Path) {
+    use std::os::windows::process::CommandExt; // WHAT: Windows-only process options. WHY: no console window.
+    const NO_WINDOW: u32 = 0x0800_0000; // WHAT: CREATE_NO_WINDOW. WHY: as in lock_down
+    let system = std::env::var_os("SystemRoot").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows")); // WHAT: Windows' own folder. WHY: icacls by its full path
+    let icacls = system.join("System32").join("icacls.exe"); // WHAT: the program. WHY: as above
+    for args in parent_steps(parent) {
+        let done = std::process::Command::new(&icacls).args(&args).creation_flags(NO_WINDOW).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status(); // WHAT: run and waited for. WHY: done before the service's folder is made
+        if !matches!(done, Ok(status) if status.success()) {
+            tracing::warn!("could not limit who may change {} ({:?})", parent.display(), args.get(1)); // WHAT: said. WHY: whoever looks after the server can run it by hand
+        }
+    }
+}
+
 /// Whether `name`, a file directly in the service's folder, is one the
 /// service would load as a library and does not ship: any DLL, and the
 /// `.local` redirection folder Windows looks in beside a program.
@@ -179,6 +219,18 @@ mod tests {
             steps[closing].contains(&"/grant:r".to_string()),
             "the grants replace any before"
         );
+    }
+
+    #[test]
+    fn the_folder_above_is_locked_too_and_only_itself() {
+        // WHAT: audit, 2026-11-11, M3. WHY: an account that made it first could swap the service's folder.
+        let parent = Path::new("C:/ProgramData/Excalibur Hyperview"); // WHAT: the folder above. WHY: the one locked here
+        let steps: Vec<Vec<String>> = parent_steps(parent).iter().map(|s| as_text(s)).collect(); // WHAT: every run. WHY: checked below
+        assert!(steps.iter().all(|s| s[0] == parent.as_os_str().to_string_lossy()), "on the folder itself"); // WHAT: nothing below touched. WHY: what is inside keeps its own
+        let grants: Vec<&String> = steps.iter().flatten().filter(|a| a.starts_with("*S-1-5") && a.contains(':')).collect(); // WHAT: who is granted. WHY: exactly two
+        assert_eq!(grants, ["*S-1-5-18:F", "*S-1-5-32-544:F"], "the system and administrators, not passed on");
+        assert!(steps.iter().any(|s| s.contains(&"/setowner".to_string()) && !s.contains(&"/T".to_string())), "owned by administrators, the folder alone");
+        assert!(steps.iter().any(|s| s.contains(&"/inheritance:r".to_string())), "nothing from ProgramData");
     }
 
     #[test]

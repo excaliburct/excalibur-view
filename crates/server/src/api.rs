@@ -360,6 +360,15 @@ pub(crate) async fn turned_away(body: Body, denied: Denied) -> Response {
     refused
 }
 
+/// WHAT: a turn to read a large body; four at a time across the server. WHY: a
+/// few signed-in writers sending big uploads at once could hold gigabytes and
+/// stop the server (audit, 2026-11-11). Held for the whole request, so what was
+/// read stays counted until it is done with; a fifth waits its turn.
+pub(crate) async fn big_turn() -> Option<tokio::sync::SemaphorePermit<'static>> {
+    static TURNS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new(); // WHAT: one limit for the whole server. WHY: as above
+    TURNS.get_or_init(|| tokio::sync::Semaphore::new(4)).acquire().await.ok() // WHAT: a turn, waited for. WHY: never refused, only queued
+}
+
 /// The body of a request whose caller has already been let in, up to `limit`
 /// bytes; past it, a plain 413.
 pub(crate) async fn body_once_let_in(body: Body, limit: usize) -> Answer<axum::body::Bytes> {
@@ -2684,6 +2693,7 @@ async fn add_plugin(
         Ok(who) => who, // WHAT: let in. WHY: the file is read next.
         Err(denied) => return turned_away(body, denied).await, // WHAT: refused before the file is read. WHY: as above.
     };
+    let _turn = big_turn().await; // WHAT: one of four big reads at a time. WHY: a plugin file can be as large as any upload (audit, 2026-11-11)
     let body = match body_once_let_in(body, server.config.largest_upload as usize).await {
         Ok(body) => body, // WHAT: the plugin file. WHY: checked below.
         Err(denied) => return denied.into_response(), // WHAT: bigger than any upload. WHY: said plainly.
@@ -3412,9 +3422,8 @@ pub(crate) async fn where_from(
     let address = address_of(peer, request.headers(), proxied); // WHAT: the caller's address. WHY: counted and written in the log.
     request.headers_mut().remove(PEER); // WHAT: anything the caller sent under that name, gone. WHY: it is this server's to write.
     request.headers_mut().remove(OUTSIDE); // WHAT: the same for the outside mark. WHY: as above
-    let outside = proxied
-        && peer.is_some_and(|p| p.ip().to_canonical().is_loopback())
-        && (request.headers().contains_key("cf-connecting-ip") || request.headers().contains_key("x-forwarded-for")); // WHAT: passed on by the connector on this machine. WHY: only it adds those headers; a caller at the server's own keyboard sends none
+    let outside = request.headers().contains_key("cf-connecting-ip")
+        || (proxied && peer.is_some_and(|p| p.ip().to_canonical().is_loopback()) && request.headers().contains_key("x-forwarded-for")); // WHAT: Cloudflare's header on any request, or a proxy's on this machine. WHY: the marker was missed when an office ran its own connector or pointed the tunnel at the LAN address (audit re-check); a caller who adds the header only makes the server stricter with themselves
     if outside {
         request.headers_mut().insert(OUTSIDE, header::HeaderValue::from_static("1")); // WHAT: marked. WHY: read by `from_outside`
     }
@@ -3441,7 +3450,8 @@ pub fn address_of(peer: Option<std::net::SocketAddr>, headers: &HeaderMap, proxi
     let Some(peer) = peer else {
         return String::new(); // WHAT: nothing known. WHY: as before, such a request is not counted with the others.
     };
-    if proxied && peer.ip().to_canonical().is_loopback() {
+    let cloudflare_here = peer.ip().to_canonical().is_loopback() && headers.contains_key("cf-connecting-ip"); // WHAT: Cloudflare's connector on this machine, set up by the program or by hand. WHY: without this, every internet caller shared 127.0.0.1, and one could hold up all of them, Fleet included (audit re-check)
+    if (proxied || cloudflare_here) && peer.ip().to_canonical().is_loopback() {
         let said = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string); // WHAT: one header's text. WHY: read twice below.
         // WHAT: Cloudflare's own header first. WHY: Cloudflare sets it and overwrites any a caller sent.
         if let Some(ip) = said("cf-connecting-ip").and_then(|v| v.trim().parse::<std::net::IpAddr>().ok()) {

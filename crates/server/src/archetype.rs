@@ -705,6 +705,7 @@ pub(crate) async fn put_file(State(server): State<Shared>, headers: HeaderMap, U
     if !is_digest(&digest) {
         return Err(Denied::wrong("That is not a file's fingerprint."));
     }
+    let _turn = crate::api::big_turn().await; // WHAT: one of four big reads at a time. WHY: parallel uploads could hold gigabytes (audit, 2026-11-11)
     let bytes = axum::body::to_bytes(body, server.config.largest_upload as usize).await.map_err(|_| Denied::wrong("That file is larger than this server takes."))?; // WHAT: the file, read after the checks, no bigger than the office's upload limit. WHY: nothing is buffered for a stranger
     if crate::store::hex(&Sha256::digest(&bytes)) != digest {
         return Err(Denied::wrong("That file arrived damaged. Check in again.")); // WHAT: refused. WHY: the store names files by their bytes, and a wrong name would hand somebody the wrong file

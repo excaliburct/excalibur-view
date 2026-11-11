@@ -892,6 +892,9 @@ impl Client {
     /// [`crate::update::Trusted::check`] has passed on them.
     pub fn download_update(&self, download: &str) -> Answer<Vec<u8>> {
         let elsewhere = download.starts_with("http://") || download.starts_with("https://"); // WHAT: a whole address, not a path on this server. WHY: decides whether the token goes with it
+        if !elsewhere && !download.starts_with('/') {
+            return Err(Trouble::Unreadable(format!("the server named its download oddly ({download:.60}); not fetched"))); // WHAT: refused. WHY: "@evil.example/x" or ".evil.example/x" glued onto the address would send the token elsewhere (audit re-check)
+        }
         let url = if elsewhere { download.to_string() } else { format!("{}{}", self.base, download) };
         let here = !elsewhere || download.strip_prefix(self.base.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with('/')); // WHAT: on this server. WHY: the sign-in token is sent only to the server it belongs to (audit, 2026-11-11)
         let asking = if here { self.sign(self.agent.get(&url)) } else { self.agent.get(&url) }; // WHAT: signed only here. WHY: as above; the installer is checked by its signature either way
