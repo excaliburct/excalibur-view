@@ -318,7 +318,7 @@ pub fn serve() -> i32 {
 fn office_agent(pin: Option<&str>) -> hub::web::ureq::Agent {
     let builder = match pin.map(|p| hub::pinned::agent(Some(p))) {
         Some(Ok((pinned, _))) => pinned, // WHAT: held to the Office Server's pin. WHY: its own HTTPS, checked the way the program checks it
-        Some(Err(_)) => hub::pinned::agent(Some(&"0".repeat(64))).map(|(a, _)| a).unwrap_or_else(|_| hub::web::agent()), // WHAT: a kept pin that doesn't read matches nothing. WHY: never falls back to trusting any certificate
+        Some(Err(_)) => hub::pinned::agent(Some(&"0".repeat(64))).map_or_else(|_| hub::web::agent(), |(a, _)| a), // WHAT: a kept pin that doesn't read matches nothing. WHY: never falls back to trusting any certificate
         None => hub::web::agent(), // WHAT: authorities, as before. WHY: plain HTTP, or a tunnel's address
     };
     builder

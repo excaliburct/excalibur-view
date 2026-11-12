@@ -240,6 +240,7 @@ pub fn answer_for(mut describe: impl FnMut(SocketAddr) -> Answer) {
 /// WHAT: whether an address is on a local network: this machine, a private
 /// range, link-local, or carrier-grade NAT. WHY: discovery is for the office's
 /// own network; nobody on the internet needs an answer.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn on_a_local_network(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {

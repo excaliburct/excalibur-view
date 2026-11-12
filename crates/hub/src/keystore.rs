@@ -96,7 +96,8 @@ fn place_new(part: &Path, path: &Path, link: impl Fn(&Path, &Path) -> std::io::R
 
 /// Moves `from` to `to` only if nothing is at `to`: `AlreadyExists` if
 /// something is. Windows: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`;
-/// Linux: `renameat2` with `RENAME_NOREPLACE`; elsewhere refused.
+/// Linux: `renameat2` with `RENAME_NOREPLACE`; macOS and iOS: `renamex_np`
+/// with `RENAME_EXCL`; elsewhere refused.
 fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
@@ -117,7 +118,16 @@ fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
         let done = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Linux system call: a rename that never replaces
         if done == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) } // WHAT: moved, or why not (EEXIST reads as AlreadyExists). WHY: never a replace
     }
-    #[cfg(not(any(windows, all(target_os = "linux", target_env = "gnu"))))]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        use std::os::unix::ffi::OsStrExt as _; // WHAT: paths as bytes. WHY: as the system call takes them
+        let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput)); // WHAT: a path, ended by a zero. WHY: as the system call reads it
+        let (f, t) = (c(from)?, c(to)?); // WHAT: both paths. WHY: kept alive for the call
+        // SAFETY: both pointers are to zero-ended strings that live until the call returns; the system only reads them.
+        let done = unsafe { libc::renamex_np(f.as_ptr(), t.as_ptr(), libc::RENAME_EXCL) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Apple system call: a rename that never replaces
+        if done == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) } // WHAT: moved, or why not (EEXIST reads as AlreadyExists). WHY: never a replace; a disk without RENAME_EXCL says so and nothing moves
+    }
+    #[cfg(not(any(windows, all(target_os = "linux", target_env = "gnu"), target_os = "macos", target_os = "ios")))]
     {
         let _ = (from, to); // WHAT: unused here. WHY: no move that never replaces on this system
         Err(std::io::Error::other("this disk can't make a new file without risking replacing one, so the office server key wasn't kept; use a folder on a local disk")) // WHAT: refused, in plain words. WHY: never a replace

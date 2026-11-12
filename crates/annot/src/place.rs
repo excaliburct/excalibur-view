@@ -762,7 +762,7 @@ mod turned_sheets {
     fn turn_in(saved: Vec<u8>, reference: Ref) -> Option<i64> {
         let doc = Document::from_bytes(saved);
         let back = doc.get(reference);
-        back.as_dict().unwrap().get("Rotate").and_then(|o| o.as_i64()) // WHAT: the saved box's turn. WHY: compared below
+        back.as_dict().unwrap().get("Rotate").and_then(Object::as_i64) // WHAT: the saved box's turn. WHY: compared below
     }
 
     #[test]

@@ -81,6 +81,7 @@ impl Module {
     pub const ALL: [Module; 4] = [Module::View, Module::Cad, Module::Archetype, Module::Citadel];
 
     /// Its name in a license and the API.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub const fn name(self) -> &'static str {
         match self {
             Module::View => "view",
@@ -91,11 +92,13 @@ impl Module {
     }
 
     /// The part a license's name stands for, if this build knows it.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn named(name: &str) -> Option<Module> {
         Module::ALL.into_iter().find(|m| m.name() == name)
     }
 
     /// As people read it.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub const fn title(self) -> &'static str {
         match self {
             Module::View => "Excalibur View",
@@ -162,6 +165,7 @@ impl License {
 
     /// The Office Server's parts this license switches on: View always, then each part it names that this build knows.
     /// A part this build doesn't know yet is skipped, never an error: a license issued for a newer server still works here.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn parts(&self) -> Vec<Module> {
         let mut on = vec![Module::View]; // WHAT: View is always there. WHY: every Office Server is View's server grown
         for name in &self.modules {
