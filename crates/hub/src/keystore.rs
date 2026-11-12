@@ -41,14 +41,24 @@ pub fn load_or_make(folder: &Path) -> Result<DeviceKey, String> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let key = DeviceKey::generate()?; // WHAT: a new key. WHY: first run
-            keep(&path, &key)?; // WHAT: kept. WHY: the same key every run after
-            Ok(key)
+            keep(&path, &key)?; // WHAT: kept, unless another first run kept one first. WHY: the same key every run after
+            read_back(&path) // WHAT: whichever key is on the disk now. WHY: review: two first runs at once must agree on one key
         }
         Err(e) => Err(format!("this computer's office server key couldn't be read: {e}")), // WHAT: said. WHY: never replaced quietly
     }
 }
 
-/// Keeps `key` at `path`, written whole or not at all.
+/// The key kept at `path`, read back.
+fn read_back(path: &Path) -> Result<DeviceKey, String> {
+    let sealed = std::fs::read(path).map_err(|e| format!("this computer's office server key couldn't be read: {e}"))?; // WHAT: the file, as kept. WHY: opened below
+    let mut secret = open(&sealed)?; // WHAT: the 32 bytes. WHY: the key
+    let key = DeviceKey::from_secret(&secret); // WHAT: the key. WHY: signs
+    secret.fill(0); // WHAT: cleared. WHY: only the key holds it now
+    Ok(key)
+}
+
+/// Keeps `key` at `path`, written whole or not at all, and never over a key
+/// already there.
 fn keep(path: &Path, key: &DeviceKey) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?; // WHAT: the folder. WHY: first run
@@ -57,27 +67,23 @@ fn keep(path: &Path, key: &DeviceKey) -> Result<(), String> {
     let sealed = seal(&secret); // WHAT: sealed for this user. WHY: DPAPI, or as it is in a 0600 file
     secret.fill(0); // WHAT: cleared. WHY: as above
     let sealed = sealed?;
-    let mut fresh = [0u8; 8]; // WHAT: room for a random name. WHY: the part file's name can't be guessed and planted first
-    rustls::crypto::ring::default_provider().secure_random.fill(&mut fresh).map_err(|_| "this computer couldn't give random numbers for its key".to_string())?; // WHAT: random bytes. WHY: a name nobody else picks
-    let part = path.with_extension(format!("saving-{}", crate::update::hex(&fresh))); // WHAT: a fresh file beside it. WHY: moved into place whole
+    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()); // WHAT: a fresh number. WHY: two first runs never share a part file
+    let part = path.with_extension(format!("saving{}-{n}", std::process::id())); // WHAT: a file beside it, this run's own. WHY: put into place whole
     write_private(&part, &sealed).map_err(|e| e.to_string())?;
-    std::fs::rename(&part, path).map_err(|e| {
-        let _ = std::fs::remove_file(&part); // WHAT: the leftover. WHY: never a stray copy of a key
-        e.to_string()
-    })?;
-    let back = std::fs::read(path).map_err(|e| e.to_string())?; // WHAT: the key file, read again. WHY: review: what is kept must be what was written, not something swapped in between
-    let again = open(&back)?; // WHAT: opened. WHY: compared with the key
-    if DeviceKey::from_secret(&again).id() != key.id() {
-        return Err("this computer's office server key didn't read back as written; nothing was kept".into()); // WHAT: refused. WHY: a key file changed under us is never used
-    }
-    Ok(())
+    let placed = match std::fs::hard_link(&part, path) {
+        Ok(()) => Ok(()), // WHAT: linked into place, only if no key was there. WHY: never over another first run's key
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()), // WHAT: another first run kept one first. WHY: that one is read back and used
+        Err(e) => Err(format!("this computer's office server key couldn't be put in place ({e}); nothing was kept")), // WHAT: refused, never a move that could replace a key already there. WHY: review: a key is never written over, on any disk
+    };
+    let _ = std::fs::remove_file(&part); // WHAT: the part file gone. WHY: never a stray copy of a key
+    placed
 }
 
 /// Writes `bytes` to a new file only its owner may read (0600 on Unix).
 fn write_private(path: &PathBuf, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new(); // WHAT: how it is opened. WHY: made new, with its permissions from the start
-    options.write(true).create_new(true); // WHAT: a file that must not already be there. WHY: review: never written into a file, or a link, someone else made
+    options.write(true).create_new(true); // WHAT: a new file, never one already there. WHY: review: nothing else's file is ever written into
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -170,6 +176,17 @@ mod tests {
     }
 
     #[test]
+    fn two_first_runs_at_once_agree_on_one_key() {
+        let dir = folder(); // WHAT: a fresh folder. WHY: no key in it yet
+        let runs: Vec<_> = (0..8).map(|_| { let dir = dir.clone(); std::thread::spawn(move || load_or_make(&dir).unwrap().id()) }).collect(); // WHAT: eight first runs together. WHY: as two apps opening at once
+        let ids: std::collections::BTreeSet<String> = runs.into_iter().map(|r| r.join().unwrap()).collect(); // WHAT: the ids each got. WHY: must all be one
+        assert_eq!(ids.len(), 1, "one key for the computer: {ids:?}");
+        assert_eq!(load_or_make(&dir).unwrap().id(), ids.into_iter().next().unwrap(), "and it is the one on the disk"); // WHAT: the same key read later. WHY: the one on the disk
+        assert!(std::fs::read_dir(&dir).unwrap().flatten().all(|e| e.file_name() == FILE), "no part file left"); // WHAT: only the key file. WHY: every part file removed
+        let _ = std::fs::remove_dir_all(&dir); // WHAT: tidied. WHY: nothing left behind
+    }
+
+    #[test]
     fn a_damaged_key_is_said_and_never_replaced() {
         let dir = folder();
         std::fs::create_dir_all(&dir).unwrap();
@@ -180,16 +197,13 @@ mod tests {
     }
 
     #[test]
-    fn review_a_key_is_never_written_into_a_file_someone_else_made() {
-        let dir = folder();
+    fn a_key_is_never_written_into_a_file_someone_else_made() {
+        let dir = folder(); // WHAT: a fresh folder. WHY: its own files
         std::fs::create_dir_all(&dir).unwrap();
         let planted = dir.join("planted");
-        std::fs::write(&planted, b"theirs").unwrap();
+        std::fs::write(&planted, b"theirs").unwrap(); // WHAT: a file somebody else made. WHY: the attack
         assert!(write_private(&planted, b"ours").is_err(), "an existing file is never written into");
         assert_eq!(std::fs::read(&planted).unwrap(), b"theirs");
-        std::fs::write(dir.join("device.saving"), b"stale").unwrap(); // WHAT: a part file under the old fixed name. WHY: never used now
-        let key = load_or_make(&dir).unwrap();
-        assert_eq!(load_or_make(&dir).unwrap().id(), key.id());
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir); // WHAT: tidied. WHY: nothing left behind
     }
 }

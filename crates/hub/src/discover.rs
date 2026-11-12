@@ -30,8 +30,13 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-/// The port servers listen on to be found. Not the port they serve on.
+/// The port servers listen on to be found. Not the port they serve on
+/// ([`SERVE_PORT`]).
 pub const PORT: u16 = 8715;
+
+/// The port the Office Server serves on unless somebody says otherwise (its
+/// plain HTTP and its HTTPS, on the one port).
+pub const SERVE_PORT: u16 = 8714; // WHAT: the Office Server's port. WHY: a typed address without one goes there
 
 /// What a seat shouts. Version in the string, so an old seat and a new server
 /// can recognise each other's shouting and say so rather than sitting silent.
@@ -116,31 +121,36 @@ pub fn look(how_long: Duration) -> Vec<Found> {
         let _ = socket.send_to(ASKING, to);
     }
 
-    gather(&socket, how_long)
+    trustworthy(gather(&socket, how_long)) // WHAT: only answers that name the address they came from, on a local network. WHY: an answer can't send a seat anywhere else
 }
 
-/// Whether an IP address is on a local network: a private IPv4 range,
-/// `fc00::/7`, `fe80::/10` or loopback (docs/OFFICE-ENROLLMENT.md §2.2).
+/// The answers a seat may act on: each names, as its address, the very
+/// machine it came from, and that machine is on a local network. Anything
+/// else on the network could answer naming any address at all.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
-pub fn is_local(ip: IpAddr) -> bool {
+pub fn trustworthy(found: Vec<Found>) -> Vec<Found> {
+    found.into_iter().filter(|f| names_itself(f) && local(f.from)).collect() // WHAT: kept only when both hold. WHY: review: a discovery answer could name any URL
+}
+
+/// Whether an address is on a local network: the client's rule
+/// (`office::is_local`) when the client is built, the same rule here
+/// otherwise.
+fn local(ip: IpAddr) -> bool {
     match ip.to_canonical() {
-        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(), // WHAT: 10/8, 172.16/12, 192.168/16, 127/8, 169.254/16. WHY: §2.2's private ranges, and the address Windows gives itself without a router
+        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(), // WHAT: 10/8, 172.16/12, 192.168/16, 127/8, 169.254/16. WHY: §2.2
         IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80, // WHAT: ::1, fc00::/7, fe80::/10. WHY: §2.2
     }
 }
 
-/// Whether an answer's address is the machine that sent it, and on a local
-/// network: the host written in `url` is exactly the UDP sender's address,
-/// or, for an answer from this very computer over loopback, one of the
-/// office network's addresses.
-#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
-pub fn speaks_for_itself(url: &str, from: IpAddr) -> bool {
-    let Ok(parsed) = url::Url::parse(url.trim()) else { return false }; // WHAT: the address, read. WHY: one that doesn't read is never offered
-    let host = parsed.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']'); // WHAT: its host, an IPv6 one without brackets. WHY: compared as an address
-    let Ok(said) = host.parse::<IpAddr>() else { return false }; // WHAT: a name rather than an address. WHY: a server answers with its own address; a name could point anywhere
-    let itself = said.to_canonical() == from.to_canonical(); // WHAT: the sender's own address. WHY: an answer can't send this computer to a third machine
-    let this_machine = from.to_canonical().is_loopback(); // WHAT: answered by this very computer, over loopback. WHY: the server sitting here may name its own network address, the one others use
-    (itself || this_machine) && is_local(said) && is_local(from) // WHAT: on the office network, both. WHY: never the internet
+/// Whether an answer's address is the machine it came from.
+fn names_itself(found: &Found) -> bool {
+    let Ok(url) = url::Url::parse(found.answer.url.trim()) else { return false }; // WHAT: the address, read as the connection reads it. WHY: never guessed at
+    let host = match url.host() {
+        Some(url::Host::Ipv4(ip)) => IpAddr::V4(ip), // WHAT: an IPv4 address. WHY: compared as is
+        Some(url::Host::Ipv6(ip)) => IpAddr::V6(ip), // WHAT: an IPv6 address. WHY: compared as is
+        _ => return false, // WHAT: a name, or nothing. WHY: a name could point anywhere; only an address can be matched to the sender
+    };
+    host.to_canonical() == found.from.to_canonical() // WHAT: the same machine. WHY: an IPv4 sender heard over IPv6 compares as itself
 }
 
 /// Collects answers until the time is up, keeping one per address.
@@ -157,9 +167,6 @@ pub fn gather(socket: &UdpSocket, how_long: Duration) -> Vec<Found> {
         };
         if answer.url.trim().is_empty() {
             continue;
-        }
-        if !speaks_for_itself(&answer.url, from.ip()) {
-            continue; // WHAT: an answer naming some other machine, or one off the office network. WHY: review: only the machine that answered, on a local network, is ever offered
         }
         // The same server heard twice — over broadcast and directly — is one
         // server, not two.
@@ -458,15 +465,19 @@ mod tests {
         assert!(began.elapsed() < Duration::from_secs(2), "it has to give up");
     }
 
+    fn found(url: &str, from: &str) -> Found {
+        Found { answer: an_answer("Example Steel", url, true), from: from.parse().unwrap() } // WHAT: one answer heard from `from`. WHY: the filter is tested on its own
+    }
+
     #[test]
-    fn review_an_answer_counts_only_for_the_machine_that_sent_it_on_the_office_network() {
-        let here: IpAddr = "192.168.1.40".parse().unwrap();
-        assert!(speaks_for_itself("http://192.168.1.40:8714", here));
-        assert!(!speaks_for_itself("http://192.168.1.41:8714", here), "another machine named");
-        assert!(speaks_for_itself("http://192.168.1.40:8714", "127.0.0.1".parse().unwrap()), "this computer naming its own network address");
-        assert!(!speaks_for_itself("http://8.8.8.8:8714", "127.0.0.1".parse().unwrap()), "but never one off the office network");
-        assert!(!speaks_for_itself("http://office.example.com:8714", here), "a name, not the sender");
-        assert!(!speaks_for_itself("http://8.8.8.8:8714", "8.8.8.8".parse().unwrap()), "off the office network");
-        assert!(speaks_for_itself("http://127.0.0.1:8714", "127.0.0.1".parse().unwrap()), "this machine itself");
+    fn an_answer_counts_only_for_the_machine_that_sent_it_on_the_office_network() {
+        let kept = trustworthy(vec![
+            found("http://192.168.1.40:8714", "192.168.1.40"), // WHAT: names itself. WHY: kept
+            found("http://192.168.1.41:8714", "192.168.1.40"), // WHAT: names another machine. WHY: dropped
+            found("http://office.example.com:8714", "192.168.1.40"), // WHAT: names a name. WHY: dropped
+            found("http://8.8.8.8:8714", "8.8.8.8"), // WHAT: off the office network. WHY: dropped
+        ]);
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].answer.url, "http://192.168.1.40:8714");
     }
 }

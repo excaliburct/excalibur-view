@@ -79,8 +79,8 @@ pub struct SigningIn {
     /// Nothing answered, so say so rather than leaving an empty box.
     pub looked: bool,
     pub error: Option<String>,
-    /// A warning the person must confirm before connecting: (address, what, words).
-    pub confirm: Option<(String, String, String)>, // WHAT: the question and its words. WHY: an old unencrypted server, or another office server
+    /// A new office server the person must confirm: (address, its pin, words).
+    pub confirm: Option<(String, String, String)>, // WHAT: the question and its words. WHY: another office server than the one this computer knows
     pub waiting: bool,
     /// Set once a server has been claimed: the code to hand round, and what
     /// hosting it on this computer actually got them.
@@ -968,12 +968,11 @@ impl App {
                     ui.colored_label(Color32::from_rgb(235, 120, 120), error);
                 }
                 let mut answered = None; // WHAT: the person's answer to a warning, this frame. WHY: acted on after the window is drawn
-                if let Some((_, what, words)) = &signing.confirm {
+                if let Some((_, _, words)) = &signing.confirm {
                     ui.add_space(8.0);
-                    ui.colored_label(theme.warn, words); // WHAT: the warning, in full. WHY: the person decides having read it
+                    ui.colored_label(theme.warn, words); // WHAT: the warning, in full, both short pins in it. WHY: the person decides having read it
                     ui.horizontal(|ui| {
-                        let go = if what == hub::secure::CONFIRM_UNENCRYPTED { "It's an old server: connect without encryption" } else { "It's the office's new server: use it" }; // WHAT: what the button does, plainly. WHY: never a bare "OK"
-                        if ui.button(go).clicked() {
+                        if ui.button("It's the office's new server: use it").clicked() {
                             answered = Some(true);
                         }
                         if ui.button("Cancel").clicked() {

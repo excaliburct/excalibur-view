@@ -1,7 +1,7 @@
 //! Moving an office's Citadel Server 1.0 data into the Citadel cell, once,
 //! before the cell's first start.
 //!
-//! Citadel Server 1.0 ran as its own Windows service ("CitadelServer") and
+//! Citadel Server 1.0 ran as its own Windows service (`CitadelServer`) and
 //! kept its data in `ProgramData\Citadel Server`, locked to the system,
 //! administrators and that service. The cell runs under a restricted token
 //! and can't read it, so the Office Server does the move for it:
@@ -147,15 +147,15 @@ pub fn before_first_start(store: &crate::Store, old: &dyn OldService, mover: &dy
         record(store, &Moved::Nothing); // WHAT: no 1.0 data here. WHY: a fresh office
         return true;
     }
-    let moved = match mover.run(program, &arguments(old_folder, data), TIME_LIMIT) {
+    let outcome = match mover.run(program, &arguments(old_folder, data), TIME_LIMIT) {
         Ok((code, said)) => reading(code, &said), // WHAT: what it said. WHY: kept
         Err(why) => Moved::Failed { reason: format!("the move program couldn't be started ({why})") }, // WHAT: failed. WHY: said
     };
-    record(store, &moved); // WHAT: kept, whatever it was. WHY: shown on /api/v1/office, and never run twice after a success
-    if !moved.lets_the_cell_start() {
-        tracing::error!("ALARM: Citadel Server 1.0's data couldn't be moved into the cell ({}); the old data is untouched and the cell is not started", moved.words()); // WHAT: the alarm. WHY: the cell must never start empty and make a new certificate
+    record(store, &outcome); // WHAT: kept, whatever it was. WHY: shown on /api/v1/office, and never run twice after a success
+    if !outcome.lets_the_cell_start() {
+        tracing::error!("ALARM: Citadel Server 1.0's data couldn't be moved into the cell ({}); the old data is untouched and the cell is not started", outcome.words()); // WHAT: the alarm. WHY: the cell must never start empty and make a new certificate
     }
-    moved.lets_the_cell_start()
+    outcome.lets_the_cell_start()
 }
 
 /// Clears a recorded failure so the next start tries once more

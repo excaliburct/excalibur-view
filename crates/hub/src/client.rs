@@ -204,6 +204,22 @@ pub enum Trouble {
     Unreadable(String),
     /// This build is too old for that server, or the other way round.
     Mismatch { ours: u32, theirs: u32 },
+    /// A server other than the one this computer is linked to, at an address
+    /// it hasn't linked to before: never taken unless the person confirms it
+    /// is the office's new server, both short pins in front of them.
+    NewServer { seen: String, message: String }, // WHAT: the pin this server showed, and the words with both short pins. WHY: confirmed by that very pin, so a swap in between is refused again
+}
+
+impl Trouble {
+    /// The server's short name for why, when it gave one.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Trouble::Refused(p) => Some(p.error.as_str()), // WHAT: the server's own word. WHY: told apart by the app
+            Trouble::NewServer { .. } => Some("new_office_server"), // WHAT: its own code. WHY: the app offers the confirmation for it
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Trouble {
@@ -217,6 +233,7 @@ impl std::fmt::Display for Trouble {
                 "This copy of Excalibur View speaks version {ours} and that server speaks {theirs}. \
                  One of them needs updating."
             ),
+            Trouble::NewServer { message, .. } => write!(f, "{message}"), // WHAT: the words, both short pins in them. WHY: the person decides
         }
     }
 }
@@ -224,15 +241,6 @@ impl std::fmt::Display for Trouble {
 impl std::error::Error for Trouble {}
 
 type Answer<T> = Result<T, Trouble>;
-
-/// A resolver that answers every name with `addresses`, at the port asked.
-#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
-pub fn fixed(addresses: Vec<std::net::IpAddr>) -> impl ureq::Resolver {
-    move |netloc: &str| -> std::io::Result<Vec<std::net::SocketAddr>> {
-        let port = netloc.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).ok_or_else(|| std::io::Error::other("no port"))?; // WHAT: the port in "host:port". WHY: ureq always gives one
-        Ok(addresses.iter().map(|ip| std::net::SocketAddr::new(*ip, port)).collect()) // WHAT: the fixed addresses, at that port. WHY: never looked up again
-    }
-}
 
 impl Client {
     pub fn new(base: &str) -> Client {
@@ -247,21 +255,6 @@ impl Client {
             pin: None, // WHAT: no pin. WHY: plain HTTP, or an address its certificate authority vouches for
             device: None, // WHAT: no device yet. WHY: given with `with_device`
         }
-    }
-
-    /// A plain-HTTP client for `base` that connects only to `addresses`,
-    /// whatever its name looks up to later: the addresses checked as local
-    /// when it was opened.
-    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
-    pub fn plain_at(base: &str, addresses: Vec<std::net::IpAddr>) -> Client {
-        let mut client = Client::new(base); // WHAT: an ordinary client. WHY: its agent is replaced below
-        client.agent = crate::web::agent()
-            .redirects(0) // WHAT: no redirect followed. WHY: as every client
-            .resolver(fixed(addresses)) // WHAT: only the addresses checked. WHY: review: a name that looks up to the office network once and the internet next can't send the request elsewhere
-            .timeout_connect(Duration::from_secs(8))
-            .timeout_read(Duration::from_secs(120))
-            .build();
-        client
     }
 
     /// A client for `base` that accepts only the certificate with `pin`

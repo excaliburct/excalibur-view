@@ -14,7 +14,11 @@
 //! `address` is the server's HTTPS address; `pin` the SPKI SHA-256 of its
 //! certificate; `verified` true once an app has seen a valid office
 //! certificate for that pin, after which no app accepts the server
-//! unverified again.
+//! unverified again. Any other field another app wrote is kept as it was
+//! whenever an app writes the file.
+//!
+//! The contract is Excalibur View's `docs/OFFICE-ENROLLMENT.md` §2; every
+//! Excalibur app keeps this file the same.
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -28,6 +32,8 @@ pub struct Shared {
     pub pin: String, // WHAT: its certificate pin. WHY: the other apps hold it to the same certificate
     #[serde(default)]
     pub verified: bool, // WHAT: whether an app has seen its office certificate verified. WHY: guard 6: never accepted unverified after
+    #[serde(flatten)]
+    pub other: serde_json::Map<String, serde_json::Value>, // WHAT: every other field in the file, as it was. WHY: another app (View, CAD, Archetype, LatCon Estimating) may keep more there, and no app loses it
 }
 
 /// Where the shared file is for this user.
@@ -39,9 +45,6 @@ pub fn shared_file() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))); // WHAT: ~/.config. WHY: §2.3
     base.map(|b| b.join("Excalibur").join("office.json")) // WHAT: `Excalibur\office.json`. WHY: §2.3
 }
-
-/// The most the shared file may be.
-const MOST_BYTES: u64 = 16 * 1024; // WHAT: 16 KiB. WHY: an address and a pin are a few hundred bytes
 
 /// The shared file, read: `Ok(None)` when there is none, `Err` when it is
 /// there but doesn't read (which never means "no pin").
@@ -66,6 +69,9 @@ pub fn read(path: &Path) -> Result<Option<Shared>, String> {
         Err(_) => Err("the office server's shared record can't be read".into()), // WHAT: there, unreadable. WHY: the same as damaged
     }
 }
+
+/// The most the shared file may be.
+const MOST_BYTES: u64 = 16 * 1024; // WHAT: 16 KiB. WHY: an address and a pin are a few hundred bytes
 
 /// Writes the shared file whole.
 ///
@@ -98,24 +104,31 @@ pub fn server_of(address: &str) -> Option<String> {
 /// `fc00::/7`, `fe80::/10` or loopback (§2.2).
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn is_local(ip: IpAddr) -> bool {
-    crate::discover::is_local(ip) // WHAT: the one rule, kept beside discovery. WHY: discovery is built without the client and needs it too
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(), // WHAT: 10/8, 172.16/12, 192.168/16, 127/8, 169.254/16. WHY: §2.2's private ranges, and the address Windows gives itself without a router
+        IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80, // WHAT: ::1, fc00::/7, fe80::/10. WHY: §2.2
+    }
 }
 
 /// Whether `host:port` is on a local network: every address it resolves to
 /// is local. A name that resolves to nothing is not.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn host_is_local(host: &str, port: u16) -> bool {
+    local_addresses(host, port).is_some() // WHAT: resolved, every address local. WHY: the one rule, in one place
+}
+
+/// Every address `host:port` resolves to, looked up once, when every one is
+/// on a local network; `None` when any is not, or none is found. A first
+/// contact connects to exactly these, so a name can't be answered by one
+/// address at the check and another at the connection (DNS rebinding).
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn local_addresses(host: &str, port: u16) -> Option<Vec<std::net::SocketAddr>> {
     let bare = host.trim_start_matches('[').trim_end_matches(']'); // WHAT: an IPv6 address without its brackets. WHY: parsed as an address
-    if let Ok(ip) = bare.parse::<IpAddr>() {
-        return is_local(ip); // WHAT: an address as typed. WHY: nothing to look up
-    }
-    match std::net::ToSocketAddrs::to_socket_addrs(&(bare, port)) {
-        Ok(found) => {
-            let found: Vec<_> = found.collect(); // WHAT: every address it names. WHY: all must be local
-            !found.is_empty() && found.iter().all(|a| is_local(a.ip())) // WHAT: all local. WHY: a name that also points outside could be answered from there
-        }
-        Err(_) => false, // WHAT: doesn't resolve. WHY: never pinned
-    }
+    let found: Vec<std::net::SocketAddr> = match bare.parse::<IpAddr>() {
+        Ok(ip) => vec![std::net::SocketAddr::new(ip, port)], // WHAT: an address as typed. WHY: nothing to look up
+        Err(_) => std::net::ToSocketAddrs::to_socket_addrs(&(bare, port)).ok()?.collect(), // WHAT: every address the name gives, once. WHY: the same list is checked and connected to
+    };
+    (!found.is_empty() && found.iter().all(|a| is_local(a.ip()))).then_some(found) // WHAT: all local, or none taken. WHY: a name that also points outside could be answered from there
 }
 
 // ---- the office certificate (§2.4) ---------------------------------------------
@@ -187,9 +200,16 @@ mod tests {
         let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("office-{n}.json"));
         assert_eq!(read(&path), Ok(None));
-        let shared = Shared { address: "https://192.168.1.10:8714".into(), pin: "a".repeat(64), verified: false };
+        let shared = Shared { address: "https://192.168.1.10:8714".into(), pin: "a".repeat(64), verified: false, other: serde_json::Map::new() }; // WHAT: a record with no other fields. WHY: the plain case first
         write(&path, &shared).unwrap();
         assert_eq!(read(&path), Ok(Some(shared)));
+        std::fs::write(&path, format!("{{\"address\":\"https://192.168.1.10:8714\",\"pin\":\"{}\",\"verified\":true,\"seats\":[1,2],\"by\":\"view\"}}", "b".repeat(64))).unwrap(); // WHAT: a record another app wrote, with fields of its own. WHY: they must survive this app's write
+        let mut theirs = read(&path).unwrap().expect("it reads"); // WHAT: read with its extra fields. WHY: kept in `other`
+        assert_eq!(theirs.other.get("by"), Some(&serde_json::json!("view")), "another app's field is read");
+        theirs.verified = false; // WHAT: one field changed. WHY: as an app would
+        write(&path, &theirs).unwrap(); // WHAT: written back. WHY: the extra fields go with it
+        let again: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap(); // WHAT: the file as JSON. WHY: checked field by field
+        assert_eq!((again["seats"].clone(), again["by"].clone(), again["verified"].clone()), (serde_json::json!([1, 2]), serde_json::json!("view"), serde_json::json!(false)), "other fields kept, ours changed");
         std::fs::write(&path, b"{\"address\":").unwrap();
         assert!(read(&path).is_err(), "damaged is said, never read as nothing");
         let _ = std::fs::remove_file(&path);
@@ -211,8 +231,8 @@ mod tests {
     }
 
     #[test]
-    fn review_an_oversized_shared_record_is_refused_by_its_size() {
-        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    fn an_oversized_shared_record_is_refused_by_its_size() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(); // WHAT: a fresh name. WHY: tests run side by side
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("big-office-{n}.json"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut big = format!("{{\"address\":\"https://192.168.1.10:8714\",\"pin\":\"{}\",\"verified\":false}}", "a".repeat(64)).into_bytes(); // WHAT: a good record. WHY: only its size is wrong

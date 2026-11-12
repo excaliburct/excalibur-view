@@ -705,16 +705,16 @@ fn client_review_another_name_for_a_server_never_re_pins_quietly_or_clears_verif
     let office = start();
     let (book, shared) = books();
     let alias = format!("http://localhost:{}", office.port); // WHAT: the same machine under another name. WHY: the attack reached it as localhost while the record said 127.0.0.1
-    let known = hub::office::Shared { address: format!("https://127.0.0.1:{}", office.port), pin: "d".repeat(64), verified: true }; // WHAT: the other apps know a server with another certificate, verified. WHY: as if an impostor answers here now
+    let known = hub::office::Shared { address: format!("https://127.0.0.1:{}", office.port), pin: "d".repeat(64), verified: true, other: serde_json::Map::new() }; // WHAT: the other apps know a server with another certificate, verified. WHY: as if an impostor answers here now
     hub::office::write(&shared, &known).unwrap();
     match hub::secure::open_with(&alias, &book, hub::secure::Also { shared: Some(&shared), ..Default::default() }) {
-        Err(hub::client::Trouble::Refused(p)) => assert_eq!(p.error, hub::secure::CONFIRM_OTHER_SERVER, "{}", p.message),
+        Err(hub::client::Trouble::NewServer { seen, message }) => assert_eq!(seen, office.pin, "{message}"),
         other => panic!("re-pinned quietly: {:?}", other.map(|c| c.pin().map(str::to_string))),
     }
     assert_eq!(hub::office::read(&shared).unwrap(), Some(known.clone()), "the other apps' record is untouched, verified kept");
     assert!(!book.holds(&format!("localhost:{}", office.port)), "nothing kept for the alias either");
 
-    let same = hub::office::Shared { address: format!("https://127.0.0.1:{}", office.port), pin: office.pin.clone(), verified: false }; // WHAT: the record for this very server. WHY: reached by another name
+    let same = hub::office::Shared { address: format!("https://127.0.0.1:{}", office.port), pin: office.pin.clone(), verified: false, other: serde_json::Map::new() }; // WHAT: the record for this very server. WHY: reached by another name
     hub::office::write(&shared, &same).unwrap();
     let (book, _) = books();
     hub::secure::open_with(&alias, &book, hub::secure::Also { shared: Some(&shared), ..Default::default() }).expect("the same certificate under another name");
@@ -722,6 +722,28 @@ fn client_review_another_name_for_a_server_never_re_pins_quietly_or_clears_verif
 
     hub::office::write(&shared, &known).unwrap();
     let (book, _) = books();
-    hub::secure::open_with(&alias, &book, hub::secure::Also { shared: Some(&shared), replace_shared: true, ..Default::default() }).expect("confirmed by the person");
+    match hub::secure::open_with(&alias, &book, hub::secure::Also { shared: Some(&shared), confirmed: Some(&office.pin), ..Default::default() }) {
+        Err(hub::client::Trouble::Refused(p)) => assert_eq!(p.error, "office_unverified", "a verified record is never replaced by an unverified server, even confirmed"),
+        other => panic!("a verified record was replaced: {:?}", other.is_ok()),
+    }
+    let unverified = hub::office::Shared { verified: false, ..known.clone() }; // WHAT: the same record, never verified. WHY: then a confirmed new server may take its place
+    hub::office::write(&shared, &unverified).unwrap();
+    let (book, _) = books();
+    hub::secure::open_with(&alias, &book, hub::secure::Also { shared: Some(&shared), confirmed: Some(&office.pin), ..Default::default() }).expect("confirmed by the person, by its pin");
     assert_eq!(hub::office::read(&shared).unwrap().unwrap().pin, office.pin, "replaced only once confirmed");
+}
+
+#[test]
+fn client_review_a_new_server_is_asked_about_even_when_only_this_app_knew_the_old_one() {
+    let office = start();
+    let n: u64 = rand::random();
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("book-only-{n:016x}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("pins.json"), format!("{{\"192.168.1.10:8714\":\"{}\"}}", "e".repeat(64))).unwrap(); // WHAT: this app linked to another server before, and no shared file. WHY: the app's own book counts too
+    let book = hub::secure::PinBook::at(dir.join("pins.json"));
+    match hub::secure::open_with(&format!("http://127.0.0.1:{}", office.port), &book, hub::secure::Also::default()) {
+        Err(hub::client::Trouble::NewServer { seen, .. }) => assert_eq!(seen, office.pin),
+        other => panic!("taken without asking: {:?}", other.is_ok()),
+    }
+    hub::secure::open_with(&format!("http://127.0.0.1:{}", office.port), &book, hub::secure::Also { confirmed: Some(&office.pin), ..Default::default() }).expect("once confirmed by its pin");
 }
