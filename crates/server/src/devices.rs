@@ -771,13 +771,6 @@ pub(crate) async fn request(State(server): State<Shared>, headers: HeaderMap, bo
     }
 }
 
-/// `denied`, sent only once the small body a device ask carries has been
-/// read and dropped (within [`ASK_BODY`] and two seconds).
-async fn refused_after_reading(body: Body, denied: Denied) -> Answer<wire::Answer> {
-    let _ = read_within(body, ASK_BODY, std::time::Duration::from_secs(2)).await; // WHAT: the ask's body read and dropped, bounded both ways. WHY: answered with its body unread, the connection ends with bytes still waiting, and macOS turns that into a reset the asking computer sees as a network error instead of this refusal
-    Err(denied) // WHAT: the refusal, as before. WHY: the same answer, now always delivered
-}
-
 async fn asked(server: &Shared, headers: &HeaderMap, body: Body) -> Answer<wire::Answer> {
     let began = server.store.setting(settings::BEGAN).ok().flatten(); // WHAT: when the device list began. WHY: the migration cut-off
     let local = !api::from_outside(headers) && !proxied(headers) && api::seen_from(headers).parse::<std::net::IpAddr>().is_ok_and(hub::office::is_local); // WHAT: not marked as from the internet, no sign of a proxy, and the socket's address on a local network. WHY: §3; a router forwarding the port straight in, or a proxy, is not the office network
@@ -787,16 +780,15 @@ async fn asked(server: &Shared, headers: &HeaderMap, body: Body) -> Answer<wire:
         .map_err(|e| Denied::broke("check that session", e))?
         .map(|c| Carried { admin: c.admin && local, ..c }); // WHAT: a session from before 0.7.0, if one came; an administrator's only from the office network. WHY: §5's migration; security review H2d: from outside it carries a seat over as an ordinary one
     if !local && session.is_none() {
-        return refused_after_reading(body, Denied::new(
+        return Err(Denied::new(
             StatusCode::FORBIDDEN,
             Problem::new("not_on_the_office_network", "Computers ask to be let in from the office network. Connect from the office, or use a join code or invitation."),
-        ))
-        .await; // WHAT: refused (403). WHY: §3, guard 1; only a seat carrying a session from before 0.7.0 comes over from outside, because it was admitted before
+        )); // WHAT: refused (403). WHY: §3, guard 1; only a seat carrying a session from before 0.7.0 comes over from outside, because it was admitted before
     }
     let from = api::seen_from(headers); // WHAT: where it came from. WHY: counted, and shown to the admin
     let counted = format!("device-ask {}", crate::patience::counted_as(&from)); // WHAT: the address as counted, apart from sign-ins and joins. WHY: one door's tries never cost another's
     if let Err(owed) = server.patience.begin(crate::patience::JOINING, &[counted.as_str()]) {
-        return refused_after_reading(body, Denied::new(StatusCode::TOO_MANY_REQUESTS, Problem::new("too_many", crate::patience::refusal(owed)))).await; // WHAT: 429. WHY: §3: rate-limited per address with the JOINING rule; every ask counts (security review L2), and a computer already on the list asks how it stands with /devices/me instead
+        return Err(Denied::new(StatusCode::TOO_MANY_REQUESTS, Problem::new("too_many", crate::patience::refusal(owed)))); // WHAT: 429. WHY: §3: rate-limited per address with the JOINING rule; every ask counts (security review L2), and a computer already on the list asks how it stands with /devices/me instead
     }
     let ask: Ask = api::json_once_let_in(body, ASK_BODY).await?; // WHAT: the request, read only now. WHY: after the cheap checks
     let key = proven(server, &ask, wire::unix_now())?; // WHAT: the key, its proof checked. WHY: nothing is kept unproven
