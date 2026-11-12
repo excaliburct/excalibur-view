@@ -146,7 +146,6 @@ pub async fn serve(
     }
 
     let app = api::router(server)
-        .layer(axum::middleware::from_fn(api::small_bodies_read_first)) // WHAT: a small body read whole before any door looks at it. WHY: a refusal sent with the body unread is lost to a reset on a Mac (GitHub's macOS tests)
         .layer(axum::middleware::map_request(|request: axum::extract::Request| async move {
             request.map(|body| axum::body::Body::new(tower_http::timeout::TimeoutBody::new(crate::tls::BODY_IDLE, body))) // WHAT: every request body with an idle limit. WHY: a body that stops arriving gives its connection back
         }))
