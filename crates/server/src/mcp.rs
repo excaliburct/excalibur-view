@@ -255,7 +255,7 @@ fn call(server: &crate::api::Server, headers: &HeaderMap, body: &Value) -> Resul
     // person whose token it is would get, and nothing else: the person is
     // kept and handed to every tool, which applies the API's own project gate.
     let who = crate::api::mcp_caller(server, headers) // WHAT: whoever the token belongs to. WHY: kept, not thrown away: every answer is filtered by it.
-        .map_err(|()| Trouble::refused( // WHAT: refused when nobody is known. WHY: the endpoint answers nobody it can't name
+        .ok_or_else(|| Trouble::refused( // WHAT: refused when nobody is known. WHY: the endpoint answers nobody it can't name
             "this server does not know who is asking. Put an Excalibur View access token \
              in an Authorization: Bearer header.",
         ))?;

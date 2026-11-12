@@ -155,9 +155,8 @@ fn part_of_a_body(
     let until = Instant::now() + wait; // WHAT: when to give up. WHY: as above.
     while Instant::now() < until && !answer.windows(2).any(|w| w == b"\r\n") {
         match socket.read(&mut buffer) {
-            Ok(0) => break, // WHAT: closed. WHY: whatever came is all there is.
+            Ok(0) | Err(_) => break, // WHAT: closed, or timed out or reset. WHY: whatever came is all there is; nothing more will come.
             Ok(n) => answer.extend_from_slice(&buffer[..n]),
-            Err(_) => break, // WHAT: timed out or reset. WHY: nothing more will come.
         }
     }
     let line = String::from_utf8_lossy(&answer); // WHAT: the status line. WHY: its code is the answer.
@@ -391,6 +390,7 @@ fn signing_in_takes_as_long_for_an_address_with_no_account_as_for_a_wrong_passwo
 
 #[test]
 fn a_markup_nested_past_any_real_one_is_refused_and_the_server_lives() {
+    use base64::Engine as _; // WHAT: base64, for the markup's dictionary. WHY: named first, before the statements that use it
     let office = an_office(); // WHAT: a running office. WHY: sent the markup.
     let estimator = session(&office, "usr_estimator"); // WHAT: an estimator. WHY: who may add markups.
     let (_, project) = post(
@@ -402,7 +402,6 @@ fn a_markup_nested_past_any_real_one_is_refused_and_the_server_lives() {
     );
     let project = project["id"].as_str().unwrap().to_string(); // WHAT: its id. WHY: a set goes in it.
     let set = upload(&office, &estimator, &project, &a_drawing()); // WHAT: a drawing set. WHY: markups go on it.
-    use base64::Engine as _;
     let deep = format!(
         "<</Type/Annot/Subtype/Line/A {}1{}>>",
         "[".repeat(100_000),
@@ -460,7 +459,7 @@ fn every_answer_says_not_to_keep_sniff_or_frame_it() {
             Ok(r) => r,
             Err(e) => match *e {
                 ureq::Error::Status(_, r) => r,
-                other => panic!("nothing answered: {other}"),
+                other @ ureq::Error::Transport(_) => panic!("nothing answered: {other}"), // WHAT: no answer at all. WHY: every request must be answered
             },
         }; // WHAT: the answer, whatever its status. WHY: every one is checked.
         assert_eq!(

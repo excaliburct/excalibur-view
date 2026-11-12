@@ -171,7 +171,7 @@ impl Running {
     }
 
     /// What the assistant would be told: one tool call on the server's MCP.
-    fn mcp(&self, tool: &str, arguments: Value) -> String {
+    fn mcp(&self, tool: &str, arguments: &Value) -> String { // WHAT: the tool's arguments, lent. WHY: only written into the request
         let said: Value = ureq::post(&format!("{}/mcp", self.base))
             .set("Authorization", &format!("Bearer {}", self.token))
             .send_json(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -231,7 +231,7 @@ fn a_beam(points: f64, quantity: f64) -> String {
     m.set("IT", pdf::Object::name("LineDimension"));
     m.set_subject("W12x26");
     m.set_line([100.0, 100.0], [100.0 + points, 100.0]);
-    if quantity != 1.0 {
+    if (quantity - 1.0).abs() > f64::EPSILON { // WHAT: a quantity other than one. WHY: only then is it written, as the viewer does
         m.set("HVQuantity", pdf::Object::real(quantity));
     }
     encoded(m)
@@ -362,7 +362,7 @@ fn a_drawing_issued_again_brings_its_takeoff_and_says_it_needs_a_look() {
 
     // And the assistant, asking the office, is told which issue counts and what
     // still needs a look — by the job number, which is what people say.
-    let sets = server.mcp("list_sets", json!({ "project": "2632" }));
+    let sets = server.mcp("list_sets", &json!({ "project": "2632" })); // WHAT: the job's sets. WHY: found by its number
     assert!(sets.contains("2 drawing set(s), 1 current"), "{sets}");
     assert!(sets.contains("NOT the job's quantities"), "{sets}");
     assert!(sets.contains(&format!("superseded by {} [id {}]", new.name, new.id)), "{sets}");
@@ -370,7 +370,7 @@ fn a_drawing_issued_again_brings_its_takeoff_and_says_it_needs_a_look() {
     let current = sets.find(&new.id).unwrap();
     let old_at = sets.find(&format!("[id {}]", old.id)).unwrap();
     assert!(current < old_at, "the issue that counts comes first: {sets}");
-    let jobs = server.mcp("list_projects", json!({}));
+    let jobs = server.mcp("list_projects", &json!({})); // WHAT: the jobs. WHY: listed
     assert!(jobs.contains("2632  Addendum  —  1 current drawing set(s)"), "{jobs}");
 }
 
@@ -528,9 +528,9 @@ fn fabwire_is_told_when_a_takeoff_changes_and_can_prove_who_told_it() {
     server.push(&set.id, &[a_beam(720.0, 1.0)]);
     server.push(&set.id, &[moments(3)]);
 
-    let (head, body) = heard.recv_timeout(std::time::Duration::from_secs(20)).expect("a notice arrives");
-    assert_eq!(header(&head, "X-Excalibur-Event"), Some("markups.changed"));
-    let signed = header(&head, "X-Excalibur-Signature").expect("it is signed");
+    let (headers, body) = heard.recv_timeout(std::time::Duration::from_secs(20)).expect("a notice arrives"); // WHAT: the notice's headers and body. WHY: named apart from `heard`, the listener
+    assert_eq!(header(&headers, "X-Excalibur-Event"), Some("markups.changed")); // WHAT: the notice says what it is. WHY: the event header
+    let signed = header(&headers, "X-Excalibur-Signature").expect("it is signed"); // WHAT: and is signed. WHY: checked below
     assert_eq!(signed, format!("sha256={}", hyperview_server::notices::sign(&secret, body.as_bytes())));
     let said: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(said["set"], set.id.as_str());
@@ -550,8 +550,8 @@ fn fabwire_is_told_when_a_takeoff_changes_and_can_prove_who_told_it() {
     // A test sends a ping straight away.
     let tried = server.post(&format!("/notices/{id}/test"), json!({}));
     assert_eq!(tried["status"], "delivered");
-    let (head, _) = heard.recv_timeout(std::time::Duration::from_secs(10)).expect("the ping");
-    assert_eq!(header(&head, "X-Excalibur-Event"), Some("ping"));
+    let (headers, _) = heard.recv_timeout(std::time::Duration::from_secs(10)).expect("the ping"); // WHAT: the ping's headers. WHY: likewise
+    assert_eq!(header(&headers, "X-Excalibur-Event"), Some("ping")); // WHAT: the ping says it is one. WHY: the event header
 
     server.post(&format!("/notices/{id}/remove"), json!({}));
     assert_eq!(server.get("/notices").as_array().unwrap().len(), 0);

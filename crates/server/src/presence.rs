@@ -179,8 +179,7 @@ fn record(server: &crate::api::Server, token: &str, ip: &str, ua: &str) {
                 }
             }
         }
-        (None, None, true) => {}  // knocked with a token nobody recognises
-        (None, None, false) => {} // unreachable in practice; nothing to do
+        (None, None, _) => {} // WHAT: a token nobody recognises, or (unreachable in practice) none at all. WHY: nothing to do either way
     }
 }
 
@@ -256,7 +255,7 @@ pub fn roster(company: &str) -> Roster {
             )
         })
         .collect();
-    recent.sort_by(|a, b| b.0.cmp(&a.0));
+    recent.sort_by_key(|seat| std::cmp::Reverse(seat.0)); // WHAT: the most recently seen first. WHY: the same order as before, said as a key
     let cutoff = SystemTime::now()
         .checked_sub(NOW_WINDOW)
         .unwrap_or(SystemTime::UNIX_EPOCH);

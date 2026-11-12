@@ -668,6 +668,7 @@ pub fn private_key_in(work: &Path) -> Option<PathBuf> {
 ///
 /// Fails when the file has no keys or anything in it is not an age public key.
 pub fn check_recipients(text: &str) -> Result<usize> {
+    const CH: &str = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"; // WHAT: the letters an age key uses (bech32). WHY: anything else is a typo.
     if text.to_ascii_uppercase().contains("AGE-SECRET-KEY-") {
         bail!("the recipients file holds a PRIVATE key (AGE-SECRET-KEY-…). Only the public line (age1…) belongs on this server. Remove it now, and keep the private key with Creede, off this machine.");
     } // WHAT: refuse a private key. WHY: the key that opens every backup must never sit on the machine they are meant to survive.
@@ -676,7 +677,6 @@ pub fn check_recipients(text: &str) -> Result<usize> {
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .collect(); // WHAT: the key lines. WHY: age-keygen's comments are allowed.
-    const CH: &str = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"; // WHAT: the letters an age key uses (bech32). WHY: anything else is a typo.
     if let Some(bad) = keys.iter().find(|k| {
         !(k.len() == 62 && k.starts_with("age1") && k[4..].chars().all(|c| CH.contains(c)))
     }) {
@@ -1074,13 +1074,13 @@ impl Cipher {
         match self {
             Cipher::Age(exe) => {
                 let _ = std::fs::remove_file(out);
-                let file =
+                let encrypted = // WHAT: the encrypted file, named apart from `fill`. WHY: the two read alike
                     create_private(out).with_context(|| format!("making {}", out.display()))?; // WHAT: the encrypted file, owner-only before a byte is in it. WHY: everything in the work folder is this account's alone.
                 let mut child = Command::new(exe)
                     .arg("-R")
                     .arg(recipients)
                     .stdin(Stdio::piped())
-                    .stdout(file)
+                    .stdout(encrypted) // WHAT: age writes into the encrypted file. WHY: owner-only from its first byte
                     .stderr(Stdio::piped())
                     .spawn()
                     .with_context(|| format!("starting {}", exe.display()))?; // WHAT: age reads the stream and writes the encrypted file into it. WHY: the server locks with the public key only.
@@ -1292,7 +1292,7 @@ impl TarOut<'_> {
         if name.len() > 99 || !key_ok(name) {
             bail!("an archive name must be short and plain: {name}");
         } // WHAT: the names we write. WHY: the reader refuses anything else.
-        if size >= 0o77777777777 {
+        if size >= 0o77_777_777_777 { // WHAT: the largest size ustar's eleven octal digits hold. WHY: the same number, its digits grouped
             bail!("{name} is too big for the archive ({size} bytes)");
         } // WHAT: ustar's size limit (8 GiB). WHY: refuse rather than write a broken archive.
         let mut h = [0u8; 512]; // WHAT: the header block. WHY: ustar's fixed layout.
@@ -1627,9 +1627,9 @@ pub struct Report {
     pub last_failed_why: Option<String>, // WHAT: why it failed. WHY: what to look at first.
 }
 
-fn past_time(s: &Option<String>) -> Option<time::OffsetDateTime> {
+fn past_time(s: Option<&str>) -> Option<time::OffsetDateTime> { // WHAT: the time as text, if there is one. WHY: borrowed as it is read
     let t = time::OffsetDateTime::parse(
-        s.as_deref()?,
+        s?, // WHAT: the text, or no time. WHY: as before
         &time::format_description::well_known::Rfc3339,
     )
     .ok()?; // WHAT: read the time. WHY: a garbled one is unknown.
@@ -1656,20 +1656,20 @@ pub fn report(data: &Path) -> Report {
             .ok()
     }; // WHAT: back to text. WHY: one form in the report.
     Report {
-        last_good: past_time(&b.last_good).and_then(iso), // WHAT: a real past time, or None. WHY: never a guess.
+        last_good: past_time(b.last_good.as_deref()).and_then(iso), // WHAT: a real past time, or None. WHY: never a guess.
         r#where: b
             .r#where
-            .filter(|_| past_time(&b.last_good).is_some())
+            .filter(|_| past_time(b.last_good.as_deref()).is_some()) // WHAT: only with a real last good time. WHY: never a guess
             .map(|w| w.chars().take(200).collect()), // WHAT: where, with a good time only. WHY: half a marker is no marker.
         restore_tested: if d.ok == Some(true) {
-            past_time(&d.at).and_then(iso)
+            past_time(d.at.as_deref()).and_then(iso) // WHAT: the drill's time, if real. WHY: never a guess
         } else {
             None
         }, // WHAT: a passed drill's time only. WHY: a failed drill proves nothing.
-        last_failed: past_time(&f.at).and_then(iso), // WHAT: a real past time, or None. WHY: never a guess.
+        last_failed: past_time(f.at.as_deref()).and_then(iso), // WHAT: a real past time, or None. WHY: never a guess.
         last_failed_why: f
             .why
-            .filter(|_| past_time(&f.at).is_some())
+            .filter(|_| past_time(f.at.as_deref()).is_some()) // WHAT: only with a real failure time. WHY: never a guess
             .map(|w| w.chars().take(300).collect()), // WHAT: why, with a good time only. WHY: half a marker is no marker.
     }
 }
@@ -1677,7 +1677,7 @@ pub fn report(data: &Path) -> Report {
 /// Days since the last confirmed off-site backup, or `None` for never.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn backup_days(data: &Path) -> Option<f64> {
-    let t = past_time(&read_marker(&data.join(BACKUP_MARKER))?.last_good)?; // WHAT: its time. WHY: unknown when absent or damaged.
+    let t = past_time(read_marker(&data.join(BACKUP_MARKER))?.last_good.as_deref())?; // WHAT: its time. WHY: unknown when absent or damaged.
     Some(((time::OffsetDateTime::now_utc() - t).as_seconds_f64() / 86_400.0).max(0.0))
     // WHAT: in days. WHY: Fleet's backupDays.
 }
@@ -1807,9 +1807,7 @@ impl Job<'_> {
 
     fn backup_locked(&self, stage: &Path) -> std::result::Result<i32, Exit> {
         #[cfg(test)]
-        if FAULT.with(std::cell::Cell::get) { // WHAT: whether a test planted a fault. WHY: read from its cell
-            panic!("a fault planted by a test");
-        } // WHAT: the tests' fault. WHY: proves a fault becomes a failed run.
+        assert!(!FAULT.with(std::cell::Cell::get), "a fault planted by a test"); // WHAT: the tests' fault, when one is planted. WHY: proves a fault becomes a failed run.
         let own = self.own(); // WHAT: the job's folder. WHY: spool and salt.
         let recipients = self.work.join("age-recipients.txt"); // WHAT: the public key file. WHY: Creede puts it there.
         let keys = check_recipients(&std::fs::read_to_string(&recipients).unwrap_or_default())
@@ -1891,7 +1889,7 @@ impl Job<'_> {
         let (mut sent, mut sent_bytes, mut batch_bytes) = (0usize, 0u64, 0u64); // WHAT: tallies. WHY: the log and the batch size.
         let mut damaged = Vec::new(); // WHAT: files whose bytes don't match their name. WHY: never sent, and reported.
         let mut warned = 0usize; // WHAT: warnings that leave tonight's backup good but not clean. WHY: exit 5, for someone to look at.
-        let send = |sizes: &mut BTreeMap<String, u64>| -> std::result::Result<(), Exit> {
+        let send_batch = |sizes: &mut BTreeMap<String, u64>| -> std::result::Result<(), Exit> { // WHAT: named apart from `sent`, the count. WHY: the two read alike
             // WHAT: send one batch and note each file's encrypted size. WHY: the sizes the read-back expects.
             let mut batch = BTreeMap::new(); // WHAT: this batch's sizes. WHY: kept before sending, so a batch cut short is checked, not unknown.
             for e in std::fs::read_dir(&outgoing)
@@ -1956,12 +1954,12 @@ impl Job<'_> {
             sent_bytes += *size;
             batch_bytes += *size; // WHAT: count it. WHY: the log and the batch.
             if batch_bytes > 1 << 30 {
-                send(&mut sizes)?;
+                send_batch(&mut sizes)?; // WHAT: a batch sent. WHY: at each gigabyte
                 batch_bytes = 0;
             } // WHAT: send each gigabyte. WHY: the spool never holds the whole data.
         }
         if outgoing.exists() {
-            send(&mut sizes)?;
+            send_batch(&mut sizes)?; // WHAT: the last batch sent. WHY: whatever is left
         } // WHAT: the last batch. WHY: everything new is sent.
         if !damaged.is_empty() || !missing_on_disk.is_empty() {
             warned += 1;
@@ -2095,10 +2093,7 @@ impl Job<'_> {
         )); // WHAT: note it. WHY: the important line.
 
         // 5. mark it: only now does Fleet hear of it, and only for the target the server is set to
-        if !self.mark {
-            self.log(&format!("sent to {}, which isn't this server's own off-site target: not marked, backupDays unchanged", self.target.words()));
-        } else {
-            // WHAT: a hand run elsewhere. WHY: a USB disk tried once must not stand for the nightly off-site copy.
+        if self.mark { // WHAT: this server's own target. WHY: only then does Fleet hear of it
             let marker = Marker {
                 last_good: Some(manifest.created_at.clone()),
                 r#where: Some(self.target.words()),
@@ -2111,6 +2106,9 @@ impl Job<'_> {
             )
             .map_err(|e| refuse(3, format!("sent, but could not write the marker: {e:#}")))?;
             // WHAT: write it whole. WHY: Fleet never reads half a file.
+        } else { // WHAT: another target. WHY: not marked
+            // WHAT: a hand run elsewhere. WHY: a USB disk tried once must not stand for the nightly off-site copy.
+            self.log(&format!("sent to {}, which isn't this server's own off-site target: not marked, backupDays unchanged", self.target.words())); // WHAT: said in the log. WHY: Fleet hears nothing of it
         } // WHAT: the end of the marking. WHY: skipped for another target.
 
         // 6. weekly / monthly copies and the keep rule
@@ -2682,25 +2680,24 @@ impl Drill<'_> {
         let j = &self.job;
         let dl = self.scratch.join("download");
         std::fs::create_dir_all(&dl).map_err(|e| refuse(4, e))?; // WHAT: the download folder. WHY: inside the scratch.
-        let name = match &self.object {
-            Some(o) => o.clone(),
-            None => {
-                let mut all = Vec::new();
-                for f in ["daily", "weekly", "monthly"] {
-                    for (n, _) in j
-                        .target
-                        .list(f)
-                        .map_err(|e| refuse(3, format!("could not list the bucket: {e:#}")))?
-                    {
-                        if believable(j.product.id, &n, time::OffsetDateTime::now_utc()) {
-                            all.push(format!("{f}/{n}"));
-                        }
+        let name = if let Some(o) = &self.object { // WHAT: the catalog asked for. WHY: drilled as named
+            o.clone() // WHAT: the name asked for. WHY: drilled as named
+        } else { // WHAT: none named. WHY: the newest anywhere is drilled
+            let mut all = Vec::new();
+            for f in ["daily", "weekly", "monthly"] {
+                for (n, _) in j
+                    .target
+                    .list(f)
+                    .map_err(|e| refuse(3, format!("could not list the bucket: {e:#}")))?
+                {
+                    if believable(j.product.id, &n, time::OffsetDateTime::now_utc()) {
+                        all.push(format!("{f}/{n}"));
                     }
                 }
-                all.sort_by_key(|k| k.rsplit('/').next().unwrap_or("").to_string());
-                all.pop()
-                    .ok_or_else(|| refuse(3, "there is no backup in the target to drill"))?
             }
+            all.sort_by_key(|k| k.rsplit('/').next().unwrap_or("").to_string());
+            all.pop()
+                .ok_or_else(|| refuse(3, "there is no backup in the target to drill"))?
         }; // WHAT: the catalog, or the newest anywhere. WHY: --latest by default.
         let base = name.rsplit('/').next().unwrap_or(&name).to_string(); // WHAT: its own name. WHY: checked against the manifest.
         if parse_name(j.product.id, &base).is_none() || !key_ok(&name) {
@@ -2911,41 +2908,38 @@ impl Drill<'_> {
         if let Some(l) = link_inside(&self.scratch) {
             return Err(refuse(2, format!("{} is a link or reparse point inside the scratch folder; refusing to open the restore", l.display())));
         } // WHAT: no links anywhere in the restore. WHY: nothing it opens may point elsewhere.
-        let opened = match &record {
+        let opened = if let Some((id, d)) = &record { // WHAT: the newest set, if the backup has one. WHY: its drawing is read below
             // WHAT: open one real record through the server's own store. WHY: the app reads it, not just this check.
-            Some((id, d)) => {
-                let store = crate::Store::open(&db, &files).map_err(|e| {
-                    refuse(
-                        2,
-                        format!("the server could not open the restored data: {e:#}"),
-                    )
-                })?;
-                let bytes = store.get_blob(d).map_err(|e| {
-                    refuse(
-                        2,
-                        format!("the server could not read record {id}'s file: {e:#}"),
-                    )
-                })?;
-                format!(
-                    "record {id} opened ({} bytes, {})",
-                    bytes.len(),
-                    if bytes.starts_with(b"%PDF") {
-                        "a PDF"
-                    } else {
-                        "a file"
-                    }
+            let store = crate::Store::open(&db, &files).map_err(|e| {
+                refuse(
+                    2,
+                    format!("the server could not open the restored data: {e:#}"),
                 )
-            } // WHAT: the newest set, its drawing read. WHY: proof the restore is usable.
-            None => {
-                crate::Store::open(&db, &files).map_err(|e| {
-                    refuse(
-                        2,
-                        format!("the server could not open the restored data: {e:#}"),
-                    )
-                })?;
-                "no records yet; the server opened the data".to_string()
-            } // WHAT: an empty server. WHY: still proves it opens.
-        };
+            })?;
+            let bytes = store.get_blob(d).map_err(|e| {
+                refuse(
+                    2,
+                    format!("the server could not read record {id}'s file: {e:#}"),
+                )
+            })?;
+            format!(
+                "record {id} opened ({} bytes, {})",
+                bytes.len(),
+                if bytes.starts_with(b"%PDF") {
+                    "a PDF"
+                } else {
+                    "a file"
+                }
+            )
+        } else { // WHAT: the newest set, its drawing read, above; an empty server here. WHY: proof the restore is usable, or still that it opens
+            crate::Store::open(&db, &files).map_err(|e| {
+                refuse(
+                    2,
+                    format!("the server could not open the restored data: {e:#}"),
+                )
+            })?;
+            "no records yet; the server opened the data".to_string()
+        }; // WHAT: what was opened. WHY: said in the summary
         Ok(format!("{name} ({office}): counts match ({}), {} of {} files fetched and fingerprint-checked{}, every file present in the target, {opened}", counts.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "), want.len(), man.blobs.len(), if self.full { " (full restore)" } else { "" }))
         // WHAT: the summary. WHY: the log and the marker say what was proven.
     }
@@ -3090,7 +3084,7 @@ pub fn due(
     if last_good.is_some_and(|g| g >= from) {
         return false;
     } // WHAT: done today. WHY: one a day.
-    !last_try.is_some_and(|t| now - t < chrono::Duration::hours(1)) // WHAT: a failed try under an hour ago waits. WHY: tried again gently, not every look.
+    last_try.is_none_or(|t| now - t >= chrono::Duration::hours(1)) // WHAT: no failed try, or the last an hour or more ago; one under an hour ago waits. WHY: tried again gently, not every look.
 }
 
 /// How often the server looks whether tonight's backup is due.
@@ -3184,7 +3178,7 @@ fn clear_leftover_keys(identity: &Path, job: &Job) {
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let n = e.file_name().to_string_lossy().into_owned(); // WHAT: its name. WHY: only ours are touched.
         if n.starts_with(".drill-key-")
-            && n.ends_with(".txt")
+            && std::path::Path::new(&n).extension().is_some_and(|x| x == "txt") // WHAT: ends in .txt, exactly as written. WHY: only the drill's own opened keys
             && std::fs::remove_file(e.path()).is_ok()
         {
             job.log(&format!(

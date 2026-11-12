@@ -484,6 +484,7 @@ pub async fn stamp(
 /// The stamp of what `sight` sees of a project: a set in a folder hidden from
 /// it changes nothing and counts for nothing.
 pub(crate) fn stamp_seen(db: &Connection, id: &str, sight: &crate::folders::Sight) -> anyhow::Result<Option<Stamp>> {
+    use sha2::Digest; // WHAT: hashing, for the stamp. WHY: named first, before the statements that use it
     let Some(project) = read_project(db, id)? else {
         return Ok(None);
     };
@@ -508,7 +509,6 @@ pub(crate) fn stamp_seen(db: &Connection, id: &str, sight: &crate::folders::Sigh
         markups += here; // WHAT: added. WHY: the project's total.
         carried += brought; // WHAT: added. WHY: likewise.
     }
-    use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
     for (set, revision, _) in &current {
         hasher.update(format!("{set}:{revision};").as_bytes());
@@ -633,12 +633,12 @@ pub(crate) fn carry_forward(
     to: &str,
     to_sheets: &[Sheet],
 ) -> anyhow::Result<(usize, Option<String>)> {
+    type Old = (String, i64, String, String, String, String, String, Vec<u8>); // WHAT: one markup's row, as read. WHY: named first, before the statements that use it
     let from_sheets = sheets_for(db, from)?;
     let mut statement = db.prepare(
         "SELECT id, page, subject, kind, caption, author, colour, dictionary
          FROM markups WHERE set_id = ?1 AND removed = 0 ORDER BY revision, id",
     )?;
-    type Old = (String, i64, String, String, String, String, String, Vec<u8>);
     let old: Vec<Old> = statement
         .query_map(params![from], |r| {
             Ok((

@@ -133,7 +133,7 @@ fn a_key(office: &Office, token: &str, purpose: &str, name: &str) -> String {
 }
 
 /// One MCP tool call: its text and whether it was an error.
-fn tool(office: &Office, token: &str, name: &str, arguments: Value) -> (String, bool) {
+fn tool(office: &Office, token: &str, name: &str, arguments: &Value) -> (String, bool) { // WHAT: the tool's arguments, lent. WHY: only written into the request
     let (status, answer) = ask(
         office,
         "POST",
@@ -264,7 +264,7 @@ fn a_viewers_assistant_key_cannot_list_or_read_a_job_it_is_not_on() {
     let viewer = session(&office, "val@example.com"); // WHAT: the viewer signed in. WHY: makes their own assistant key.
     let key = a_key(&office, &viewer, "assistant", "Val's assistant"); // WHAT: the viewer's assistant key. WHY: the key under test.
 
-    let (jobs, _) = tool(&office, &key, "list_projects", json!({})); // WHAT: the jobs, as the assistant is told them. WHY: the listing must leave the private job off.
+    let (jobs, _) = tool(&office, &key, "list_projects", &json!({})); // WHAT: the jobs, as the assistant is told them. WHY: the listing must leave the private job off.
     assert!(
         jobs.contains("26-101"),
         "the open job is everybody's: {jobs}"
@@ -274,14 +274,14 @@ fn a_viewers_assistant_key_cannot_list_or_read_a_job_it_is_not_on() {
         "the private job is listed for a viewer not on it: {jobs}"
     ); // WHAT: the private job is not. WHY: the bug this fixes.
 
-    let (sets, _) = tool(&office, &key, "list_sets", json!({})); // WHAT: every set the assistant may see. WHY: must not include the private job's.
+    let (sets, _) = tool(&office, &key, "list_sets", &json!({})); // WHAT: every set the assistant may see. WHY: must not include the private job's.
     assert!(
         sets.contains(&open_set) && !sets.contains(&private_set),
         "{sets}"
     ); // WHAT: the open set only. WHY: the same rule as the list.
-    let (sets, _) = tool(&office, &key, "list_sets", json!({ "project": private })); // WHAT: asked for the private job by id. WHY: naming it must not open it.
+    let (sets, _) = tool(&office, &key, "list_sets", &json!({ "project": private })); // WHAT: asked for the private job by id. WHY: naming it must not open it.
     assert!(!sets.contains(&private_set), "{sets}"); // WHAT: nothing from it. WHY: refused as "no sets", as for a job that does not exist.
-    let (sets, _) = tool(&office, &key, "list_sets", json!({ "project": "26-202" })); // WHAT: asked by its job number. WHY: another way in.
+    let (sets, _) = tool(&office, &key, "list_sets", &json!({ "project": "26-202" })); // WHAT: asked by its job number. WHY: another way in.
     assert!(!sets.contains(&private_set), "{sets}"); // WHAT: nothing from it. WHY: the same.
 
     for (name, arguments) in [
@@ -298,7 +298,7 @@ fn a_viewers_assistant_key_cannot_list_or_read_a_job_it_is_not_on() {
             json!({ "was_bid": private_set, "arrived": open_set }),
         ), // WHAT: the other way round. WHY: both sides.
     ] {
-        let (text, refused) = tool(&office, &key, name, arguments); // WHAT: the call. WHY: each must be refused.
+        let (text, refused) = tool(&office, &key, name, &arguments); // WHAT: the call. WHY: each must be refused.
         assert!(
             refused,
             "{name} answered for a viewer not on the job: {text}"
@@ -308,7 +308,7 @@ fn a_viewers_assistant_key_cannot_list_or_read_a_job_it_is_not_on() {
             "{name} must refuse as 'not here': {text}"
         ); // WHAT: as "not found". WHY: nobody learns the job exists.
     }
-    let (text, refused) = tool(&office, &key, "sheets", json!({ "set": open_set })); // WHAT: the open job's sheets. WHY: what the viewer may see still answers.
+    let (text, refused) = tool(&office, &key, "sheets", &json!({ "set": open_set })); // WHAT: the open job's sheets. WHY: what the viewer may see still answers.
     assert!(!refused && text.contains("sheet(s) in"), "{text}"); // WHAT: answered. WHY: the gate is not a wall.
 }
 
@@ -317,7 +317,7 @@ fn an_administrators_assistant_key_still_sees_every_job() {
     let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
     let (admin, _, _, _, private_set) = two_jobs(&office); // WHAT: the two jobs. WHY: the administrator sees both.
     let key = a_key(&office, &admin, "assistant", "Sam's assistant"); // WHAT: the administrator's assistant key. WHY: reads what an administrator may.
-    let (jobs, _) = tool(&office, &key, "list_projects", json!({})); // WHAT: the jobs. WHY: both should be there.
+    let (jobs, _) = tool(&office, &key, "list_projects", &json!({})); // WHAT: the jobs. WHY: both should be there.
     assert!(jobs.contains("26-101") && jobs.contains("26-202"), "{jobs}"); // WHAT: both listed. WHY: administrators see every job.
     for (name, arguments) in [
         ("takeoff", json!({ "set": private_set })), // WHAT: each set tool on the private set. WHY: an administrator may read it.
@@ -330,7 +330,7 @@ fn an_administrators_assistant_key_still_sees_every_job() {
         ),
         ("list_sets", json!({ "project": "26-202" })),
     ] {
-        let (text, refused) = tool(&office, &key, name, arguments.clone()); // WHAT: the call. WHY: each must answer.
+        let (text, refused) = tool(&office, &key, name, &arguments); // WHAT: the call. WHY: each must answer.
         assert!(!refused, "{name} refused an administrator: {text}"); // WHAT: answered. WHY: the gate keeps what an administrator could always do.
         assert!(
             !text.contains("There is no drawing set called"),
@@ -345,9 +345,9 @@ fn an_estimator_named_on_a_job_reads_it_through_their_assistant() {
     let (_, _, _, _, private_set) = two_jobs(&office); // WHAT: the two jobs. WHY: the estimator is named on the private one.
     let estimator = session(&office, "eve@example.com"); // WHAT: the estimator signed in. WHY: makes their own assistant key.
     let key = a_key(&office, &estimator, "assistant", "Eve's assistant"); // WHAT: their key. WHY: membership, not role, opens the job.
-    let (jobs, _) = tool(&office, &key, "list_projects", json!({})); // WHAT: the jobs. WHY: the private one is theirs.
+    let (jobs, _) = tool(&office, &key, "list_projects", &json!({})); // WHAT: the jobs. WHY: the private one is theirs.
     assert!(jobs.contains("26-202"), "{jobs}"); // WHAT: listed. WHY: named on it.
-    let (text, refused) = tool(&office, &key, "takeoff", json!({ "set": private_set })); // WHAT: its takeoff. WHY: readable by someone on it.
+    let (text, refused) = tool(&office, &key, "takeoff", &json!({ "set": private_set })); // WHAT: its takeoff. WHY: readable by someone on it.
     assert!(!refused, "{text}"); // WHAT: answered. WHY: the same as the API would.
 }
 
@@ -398,7 +398,7 @@ fn a_sync_key_is_refused_by_every_route_not_on_its_list_even_when_an_administrat
         tried += 1; // WHAT: counted. WHY: for the check below.
     }
     assert!(tried > 40, "only {tried} routes were tried"); // WHAT: every admin route and every other write was in there. WHY: the list of routes is long; a short count means the test broke.
-    let (text, _) = tool(&office, &key, "list_projects", json!({})); // WHAT: the assistant endpoint with a sync key. WHY: not on the list either.
+    let (text, _) = tool(&office, &key, "list_projects", &json!({})); // WHAT: the assistant endpoint with a sync key. WHY: not on the list either.
     assert!(
         !text.contains("job(s)"),
         "a sync key read the jobs over /mcp: {text}"

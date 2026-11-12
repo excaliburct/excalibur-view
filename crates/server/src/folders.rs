@@ -270,29 +270,28 @@ pub(crate) fn make_folder(
                 |r| r.get(0),
             )
             .optional()?; // WHAT: the folder's row, and its rule. WHY: made only where missing.
-        match there {
-            Some(see) => ruled_above |= see.is_some(), // WHAT: there already. WHY: never changed by being named again.
-            None => {
-                let office = by_program && !ruled_above; // WHAT: a program's new folder with no rule above it. WHY: safe by default for a mirror of the whole job.
-                let see = office.then(|| stored(&See::Office)); // WHAT: the office's, or none to take the parent's. WHY: as just said.
-                db.execute(
-                    "INSERT INTO folders (project, key, path, see, set_in, set_by, set_at, made, made_by)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    params![
-                        project,
-                        key,
-                        above,
-                        see,
-                        office.then_some("program"),
-                        office.then(|| who.name.clone()),
-                        office.then(now),
-                        now(),
-                        who.name
-                    ],
-                )?; // WHAT: the folder written down. WHY: so an empty one shows, and so it can carry a rule.
-                ruled_above |= office; // WHAT: this one now has a rule. WHY: the folders under it take it.
-                made += 1; // WHAT: counted. WHY: said in the answer.
-            }
+        if let Some(see) = there { // WHAT: the folder is there already. WHY: never changed by being named again
+            ruled_above |= see.is_some(); // WHAT: its rule, if it has one, counts for the folders under it. WHY: as before
+        } else { // WHAT: not there yet. WHY: made below
+            let office = by_program && !ruled_above; // WHAT: a program's new folder with no rule above it. WHY: safe by default for a mirror of the whole job.
+            let see = office.then(|| stored(&See::Office)); // WHAT: the office's, or none to take the parent's. WHY: as just said.
+            db.execute(
+                "INSERT INTO folders (project, key, path, see, set_in, set_by, set_at, made, made_by)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    project,
+                    key,
+                    above,
+                    see,
+                    office.then_some("program"),
+                    office.then(|| who.name.clone()),
+                    office.then(now),
+                    now(),
+                    who.name
+                ],
+            )?; // WHAT: the folder written down. WHY: so an empty one shows, and so it can carry a rule.
+            ruled_above |= office; // WHAT: this one now has a rule. WHY: the folders under it take it.
+            made += 1; // WHAT: counted. WHY: said in the answer.
         }
     }
     Ok(made)
@@ -498,7 +497,7 @@ pub async fn make_group(
     if made {
         record(
             &server,
-            crate::audit::Entry::new(crate::audit::action::MADE_GROUP, &who.email)
+            &crate::audit::Entry::new(crate::audit::action::MADE_GROUP, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                 .by(&who.id)
                 .about(name),
         ); // WHAT: written down. WHY: groups decide who sees folders.
@@ -557,7 +556,7 @@ pub async fn change_group(
         .ok_or_else(|| Denied::missing("group"))?; // WHAT: the group as it is now. WHY: the answer.
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::CHANGED_GROUP, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::CHANGED_GROUP, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(group.name.clone())
             .saying(format!(
@@ -681,7 +680,7 @@ fn folders_made(
     let by_program = who.is_key(auth::purpose::SYNC); // WHAT: a program keeping its projects in step. WHY: its new folders are the office's until it says.
     let asked = asked(body)?; // WHAT: the folders asked for. WHY: all checked before anything is written.
     let set_in = if by_program { "program" } else { "view" }; // WHAT: where the rule was set. WHY: a rule changed in the Studio is kept until the program sets that folder again.
-    let (made, changed, groups_made, changes) = server
+    let (made, changed, groups_made, what_changed) = server // WHAT: what the request made and changed. WHY: said in the answer and the audit log
         .store
         .with(|db| {
             let tx = db.unchecked_transaction()?; // WHAT: one step. WHY: half a tree of folders is never visible.
@@ -689,7 +688,7 @@ fn folders_made(
             let mut made = 0usize; // WHAT: folders made. WHY: said in the answer.
             let mut changed = 0usize; // WHAT: rules changed. WHY: said in the answer.
             let mut groups_made: Vec<String> = Vec::new(); // WHAT: groups made empty. WHY: the answer says so, for an administrator to fill.
-            let mut changes: Vec<String> = Vec::new(); // WHAT: the folders whose rule changed. WHY: for the audit line.
+            let mut what_changed: Vec<String> = Vec::new(); // WHAT: the folders whose rule changed. WHY: for the audit line.
             for one in &asked {
                 made += make_folder(db, project, &one.path, who, by_program)?; // WHAT: the folder and those above it. WHY: an empty folder shows.
                 let Some(see) = &one.see else { continue }; // WHAT: no rule said. WHY: left as it is.
@@ -712,11 +711,11 @@ fn folders_made(
                         params![stored(see), set_in, who.name, now(), project, key],
                     )?; // WHAT: the new rule, and who set it where. WHY: shown in the Studio, and kept until changed.
                     changed += 1; // WHAT: counted. WHY: said.
-                    changes.push(format!("{}: {}", one.path, see.words())); // WHAT: what changed. WHY: the audit line.
+                    what_changed.push(format!("{}: {}", one.path, see.words())); // WHAT: what changed. WHY: the audit line.
                 }
             }
             tx.commit()?; // WHAT: all of it at once. WHY: as above.
-            Ok((made, changed, groups_made, changes))
+            Ok((made, changed, groups_made, what_changed)) // WHAT: all four. WHY: as above
         })
         .map_err(|e| Denied::broke("make those folders", e))?;
     let (listed, rules) = server
@@ -757,16 +756,16 @@ fn folders_made(
     for name in &groups_made {
         record(
             server,
-            crate::audit::Entry::new(crate::audit::action::MADE_GROUP, &who.email)
+            &crate::audit::Entry::new(crate::audit::action::MADE_GROUP, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                 .by(&who.id)
                 .about(name.clone()),
         ); // WHAT: each group the request made, written down. WHY: groups decide who sees folders, however they were made.
     }
-    let total = changes.len(); // WHAT: how many rules changed. WHY: every line says it, so none can be missed.
-    for (n, part) in changes.chunks(20).enumerate() {
+    let total = what_changed.len(); // WHAT: how many rules changed. WHY: every line says it, so none can be missed.
+    for (n, part) in what_changed.chunks(20).enumerate() { // WHAT: the changed folders, twenty a line. WHY: below
         record(
             server,
-            crate::audit::Entry::new(crate::audit::action::CHANGED_FOLDER, &who.email)
+            &crate::audit::Entry::new(crate::audit::action::CHANGED_FOLDER, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                 .by(&who.id)
                 .about(project)
                 .saying(format!(
@@ -983,7 +982,7 @@ pub async fn upload_file(
     if !file.already_here {
         record(
             &server,
-            crate::audit::Entry::new(crate::audit::action::UPLOADED_FILE, &who.email)
+            &crate::audit::Entry::new(crate::audit::action::UPLOADED_FILE, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                 .by(&who.id)
                 .about(file.name.clone())
                 .saying(file.folder.clone().unwrap_or_default()),
@@ -1038,7 +1037,7 @@ pub async fn file_bytes(
     let file = may_reach_file(&server, &who, &id)?; // WHAT: the file, if theirs to see. WHY: not found otherwise.
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::DOWNLOADED_FILE, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::DOWNLOADED_FILE, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(file.name.clone()),
     ); // WHAT: written down. WHY: reaching a file is the line an auditor wants.
@@ -1132,7 +1131,7 @@ pub async fn move_file(
         .ok_or_else(|| Denied::missing("file"))?;
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::MOVED, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::MOVED, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(moved.name.clone())
             .saying(moved.folder.clone().unwrap_or_default()),
@@ -1214,7 +1213,7 @@ pub async fn move_set(
         .ok_or_else(|| Denied::missing("drawing set"))?;
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::MOVED, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::MOVED, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(moved.name.clone())
             .saying(moved.folder.clone().unwrap_or_default()),

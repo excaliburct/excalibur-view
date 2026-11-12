@@ -96,7 +96,7 @@ pub fn fleet_is_on(server: &Server) -> bool {
 // ---- what it says about itself --------------------------------------------
 
 #[derive(Serialize)]
-struct Version {
+struct Running { // WHAT: what the server says it is running. WHY: named for what it holds, so its `version` field doesn't repeat the type's name; the wire names are the fields' and are unchanged
     /// What is *running*, always. Not what is staged, not what is on offer to
     /// the seats — the Fleet asserts a rollout worked by reading this back, so
     /// a hopeful answer here would turn a failed update into a green board.
@@ -232,8 +232,8 @@ pub fn router(server: Shared) -> Router {
         .with_state(server)
 }
 
-async fn version(State(server): State<Shared>) -> Json<Version> {
-    Json(Version {
+async fn version(State(server): State<Shared>) -> Json<Running> { // WHAT: the running version, as JSON. WHY: the Fleet reads it back
+    Json(Running { // WHAT: the answer. WHY: the same fields as before
         version: VERSION.to_string(),
         wave: match crate::updates::office_channel(&server) {
             hub::update::Channel::Preview => "early".into(),
@@ -394,6 +394,7 @@ async fn update(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<Landed>, No> {
+    use base64::Engine; // WHAT: base64 decoding for the installer. WHY: named first, before the statements that use it
     maintainer(&server, &headers)?; // WHAT: the maintenance key, first. WHY: nothing of the body has been read yet, so a caller without the key costs the server nothing.
     let bytes = read_push(&headers, body).await?; // WHAT: the push, read up to its limit. WHY: a real push is tens of megabytes, and one too big is refused with a plain 413.
     let Ok(push) = serde_json::from_slice::<Push>(&bytes) else {
@@ -401,7 +402,6 @@ async fn update(
     };
     drop(bytes); // WHAT: lets go of the raw body. WHY: the installer is now in `push`, and holding both would double what the push costs in memory.
 
-    use base64::Engine;
     let Ok(installer) = base64::engine::general_purpose::STANDARD.decode(push.installer.as_bytes())
     else {
         return Ok(Json(refused("the installer was not readable")));
@@ -578,25 +578,22 @@ async fn rollback(
             // release is one thing that happened to be built twice, and an
             // office left offering half of it is an office where the Macs and
             // the Windows machines are on different versions of the program.
-            match only.as_deref() {
-                Some(platform) => {
-                    db.execute(
-                        "UPDATE releases SET ready = 0 WHERE version = ?1 AND platform = ?2",
-                        params![version, platform],
-                    )?;
-                    platforms.push(platform.to_string());
-                }
-                None => {
-                    let mut listing = db
-                        .prepare("SELECT platform FROM releases WHERE version = ?1 AND ready = 1")?;
-                    platforms = listing
-                        .query_map(params![version], |r| r.get::<_, String>(0))?
-                        .collect::<Result<Vec<_>, _>>()?;
-                    db.execute(
-                        "UPDATE releases SET ready = 0 WHERE version = ?1",
-                        params![version],
-                    )?;
-                }
+            if let Some(platform) = only.as_deref() { // WHAT: one platform named. WHY: only that one is withdrawn
+                db.execute(
+                    "UPDATE releases SET ready = 0 WHERE version = ?1 AND platform = ?2",
+                    params![version, platform],
+                )?;
+                platforms.push(platform.to_string());
+            } else { // WHAT: none named. WHY: every platform of the version is withdrawn, as above
+                let mut listing = db
+                    .prepare("SELECT platform FROM releases WHERE version = ?1 AND ready = 1")?;
+                platforms = listing
+                    .query_map(params![version], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                db.execute(
+                    "UPDATE releases SET ready = 0 WHERE version = ?1",
+                    params![version],
+                )?;
             }
         }
         Ok(newest.filter(|_| !platforms.is_empty()).map(|v| (v, platforms)))
@@ -778,7 +775,7 @@ mod tests {
         let store = crate::Store::temporary(std::path::Path::new("/tmp/hyperview-fleet-test"))
             .expect("a store");
         let server = Server::new(store, config);
-        let refused = maintainer(&server, &HeaderMap::new()).err().expect("no way in");
+        let refused = maintainer(&server, &HeaderMap::new()).expect_err("no way in"); // WHAT: the refusal. WHY: there is no key, so no way in
         assert_eq!(refused.0, StatusCode::NOT_FOUND);
     }
 

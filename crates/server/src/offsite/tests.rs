@@ -190,7 +190,7 @@ fn the_keep_rule_is_7_4_12_counting_tonight_and_touches_nothing_else() {
     assert!(
         !p.deletes
             .iter()
-            .any(|(_, n)| n == "stranger.bin" || n.ends_with(".json") || *n == day(10)),
+            .any(|(_, n)| n == "stranger.bin" || std::path::Path::new(n).extension().is_some_and(|x| x == "json") || *n == day(10)), // WHAT: none of the three. WHY: a stranger, a sidecar and tonight's are never deleted
         "never a stranger, a sidecar or tonight's"
     ); // WHAT: nothing else. WHY: only our names are pruned.
     let later = |m: u32| format!("view-20261110-01{m:02}00.tar.gz.age"); // WHAT: names minutes after tonight's. WHY: a clock set back an hour, within the day the keep rule believes.
@@ -477,9 +477,9 @@ fn the_drill_restores_into_scratch_checks_everything_and_fails_when_it_should() 
             && list_blobs(&restored.join("files")).unwrap().len() == 2,
         "a full, usable data folder"
     ); // WHAT: the database and both files. WHY: a real restore copies this into place.
-    let s =
-        crate::Store::open(&restored.join("hyperview.sqlite"), &restored.join("files")).unwrap();
-    let n: i64 = s
+    let store = // WHAT: the restored data, opened as the server does. WHY: read below
+        crate::Store::open(&restored.join("hyperview.sqlite"), &restored.join("files")).unwrap(); // WHAT: the restored data, opened as the server does. WHY: read below
+    let structural: i64 = store // WHAT: how many sets are called Structural. WHY: the one record the test made
         .with(|db| {
             Ok(db.query_row(
                 "SELECT count(*) FROM sets WHERE name='Structural'",
@@ -488,7 +488,7 @@ fn the_drill_restores_into_scratch_checks_everything_and_fails_when_it_should() 
             )?)
         })
         .unwrap();
-    assert_eq!(n, 1, "the record is there"); // WHAT: open it as the server does. WHY: the data is really back.
+    assert_eq!(structural, 1, "the record is there"); // WHAT: open it as the server does. WHY: the data is really back.
     assert!(
         report(&w.data).restore_tested.is_some(),
         "restoreTested is set"
@@ -519,8 +519,8 @@ fn the_drill_restores_into_scratch_checks_everything_and_fails_when_it_should() 
         .unwrap();
     let good = std::fs::read(&cat).unwrap();
     let mut bad = good.clone();
-    let n = bad.len() - 3;
-    bad[n] ^= 0xff; // WHAT: the catalog, one byte flipped. WHY: a damaged download.
+    let flipped = bad.len() - 3; // WHAT: a byte near the end. WHY: inside the encrypted body
+    bad[flipped] ^= 0xff; // WHAT: the catalog, one byte flipped. WHY: a damaged download.
     for f in ["daily", "weekly", "monthly"] {
         std::fs::write(w.bucket.join(f).join(cat.file_name().unwrap()), &bad).unwrap();
     } // WHAT: damage every copy. WHY: the drill takes the newest anywhere.
@@ -1062,6 +1062,7 @@ fn plant(w: &World, name: &str, edit: impl FnOnce(&mut serde_json::Value), pad: 
 
 #[test]
 fn a_planted_manifest_or_an_oversized_sidecar_is_refused_before_it_steers_anything() {
+    type Edit = Box<dyn FnOnce(&mut serde_json::Value)>; // WHAT: one change to a manifest. WHY: named, so the list reads plainly.
     let w = world();
     assert_eq!(job(&w).backup().code, 0); // WHAT: a real backup. WHY: plants are made from it.
     let soon = |m: i64| {
@@ -1070,7 +1071,6 @@ fn a_planted_manifest_or_an_oversized_sidecar_is_refused_before_it_steers_anythi
             time::OffsetDateTime::now_utc() + time::Duration::minutes(m),
         )
     }; // WHAT: a name newer than the real ones. WHY: the drill picks the newest.
-    type Edit = Box<dyn FnOnce(&mut serde_json::Value)>; // WHAT: one change to a manifest. WHY: named, so the list reads plainly.
     let cases: Vec<(&str, Edit, usize)> = vec![
         // WHAT: each planted manifest. WHY: each must be refused.
         (

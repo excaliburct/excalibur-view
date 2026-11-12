@@ -177,7 +177,7 @@ pub fn whose(db: &Connection, token: &str, now: &str) -> Result<Option<Who>> {
     let Some((who, expires)) = whose_and_when(db, &hash, now)? else {
         return Ok(None);
     };
-    keep_alive(db, &hash, &expires, now)?;
+    keep_alive(db, &hash, &expires, now); // WHAT: the session lengthened if it is due. WHY: a failure to write never signs anybody out, so there is nothing to pass on
     Ok(Some(who))
 }
 
@@ -224,16 +224,16 @@ fn whose_and_when(db: &Connection, hash: &str, now: &str) -> Result<Option<(Who,
 /// A failure to write is not a failure to authenticate: the person is who
 /// they say they are either way, and a read-only moment (a locked database, a
 /// disk that has filled) should not sign the office out.
-fn keep_alive(db: &Connection, hash: &str, expires: &str, now: &str) -> Result<()> {
+fn keep_alive(db: &Connection, hash: &str, expires: &str, now: &str) { // WHAT: nothing handed back. WHY: it never failed; every trouble is logged and let go, as the doc says
     let (Some(now_at), Some(expires_at)) = (parse_time(now), parse_time(expires)) else {
-        return Ok(());
+        return; // WHAT: a time that can't be read leaves it alone. WHY: as before
     };
     let wanted = now_at + time::Duration::days(SESSION_DAYS);
     if wanted - expires_at < time::Duration::hours(SLIDE_AFTER_HOURS) {
-        return Ok(());
+        return; // WHAT: not due yet. WHY: as before
     }
     let Ok(text) = wanted.format(&time::format_description::well_known::Rfc3339) else {
-        return Ok(());
+        return; // WHAT: a time that can't be written leaves it alone. WHY: as before
     };
     if let Err(e) = db.execute(
         "UPDATE sessions SET expires = ?1 WHERE token = ?2 AND expires < ?1",
@@ -241,7 +241,6 @@ fn keep_alive(db: &Connection, hash: &str, expires: &str, now: &str) -> Result<(
     ) {
         tracing::warn!("a session could not be kept alive: {e}");
     }
-    Ok(())
 }
 
 fn parse_time(text: &str) -> Option<time::OffsetDateTime> {

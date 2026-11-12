@@ -192,7 +192,7 @@ fn owed_by(rule: Rule, seen: &Wrong) -> Option<Duration> {
     let spent = seen.times.checked_sub(rule.free)?;
     let owed = penalty(rule, spent);
     let waited = seen.last.elapsed();
-    (waited < owed).then(|| owed - waited)
+    owed.checked_sub(waited).filter(|left| !left.is_zero()) // WHAT: what is left of the wait, if any. WHY: none once it has all been waited, exactly as before
 }
 
 /// Counts one wrong answer against `who`, making room first when full.

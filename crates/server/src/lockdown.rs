@@ -108,6 +108,7 @@ pub fn lock_parent(parent: &Path) {
 /// service would load as a library and does not ship: any DLL, and the
 /// `.local` redirection folder Windows looks in beside a program.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+#[allow(clippy::case_sensitive_file_extension_comparisons)] // WHAT: `.dll` compared as written. WHY: the name is lower-cased on the line before, so the comparison already ignores case; the lint can't see that
 pub fn planted(name: &str, program: &str) -> bool {
     let lower = name.to_ascii_lowercase(); // WHAT: the name as Windows compares it. WHY: `VERSION.DLL` is `version.dll`.
     lower.ends_with(".dll") || lower == format!("{}.local", program.to_ascii_lowercase())

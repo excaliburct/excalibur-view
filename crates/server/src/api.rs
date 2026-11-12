@@ -14,7 +14,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use hub::update::{Channel, Release, UpdateOffer};
-use hub::*;
+use hub::{ // WHAT: each shape from hub this file uses, by name. WHY: a new name in hub can't quietly shadow one here, as a glob let it
+    ChangeNotice, Chest, Claimed, DrawingSet, Health, Join, MarkupPage, NewMarkup, Problem, Role, Session, Setup, Sheet, // WHAT: the request and answer shapes. WHY: as above
+    SignIn, Takeoff, User, API_ROOT, API_VERSION, // WHAT: and the API's version and root. WHY: as above
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 
@@ -69,10 +72,10 @@ impl Server {
             updates: crate::updates::Watch::default(),
             patience: crate::patience::Patience::default(),
             tunnel: crate::tunnel::Tunnel::default(),
-            manifests: Default::default(),
-            notices: Default::default(),
-            key_refusals_logged: Default::default(), // WHAT: no refusals written yet. WHY: empty on every start, as patience is.
-            secure_port: Default::default(), // WHAT: no HTTPS yet. WHY: set by run::serve once it listens
+            manifests: std::sync::Mutex::default(), // WHAT: no plugin manifests read yet. WHY: each is read once, when first asked for
+            notices: crate::notices::Pending::default(), // WHAT: no notices waiting. WHY: empty on every start
+            key_refusals_logged: std::sync::Mutex::default(), // WHAT: no refusals written yet. WHY: empty on every start, as patience is.
+            secure_port: std::sync::OnceLock::default(), // WHAT: no HTTPS yet. WHY: set by run::serve once it listens
             pin: std::sync::OnceLock::default(), // WHAT: no certificate yet. WHY: set by run::serve with HTTPS
             replays: crate::devices::Replays::default(), // WHAT: nothing seen yet. WHY: empty on every start; a signature older than five minutes is refused by its time anyway
             started: hub::device::unix_now(), // WHAT: now. WHY: nothing signed before this start is taken
@@ -333,7 +336,7 @@ async fn keys_keep_to_their_purpose(
     if refusal_worth_a_line(&server, &id) {
         record(
             &server,
-            crate::audit::Entry::new(crate::audit::action::KEY_REFUSED, &maker) // WHAT: under the email of whoever made the key. WHY: so the line says whose key strayed.
+            &crate::audit::Entry::new(crate::audit::action::KEY_REFUSED, &maker) // WHAT: under the email of whoever made the key. WHY: so the line says whose key strayed.
                 .about(format!("{method} {path}"))
                 .saying(auth::purpose::SYNC.to_string()),
         );
@@ -937,7 +940,7 @@ async fn sign_in(
         if refusal_worth_a_line(&server, &format!("wait:{counted}")) {
             record(
                 &server,
-                crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email)
+                &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                     .saying("too many wrong tries")
                     .from(from.clone()),
             ); // WHAT: written once a minute an address. WHY: every refused try wrote a line, so the limit didn't slow the log
@@ -955,7 +958,7 @@ async fn sign_in(
         // see in the log, and it was the one refusal that went unrecorded.
         record(
             &server,
-            crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email)
+            &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                 .saying("no account with that address")
                 .from(from.clone()),
         );
@@ -973,7 +976,7 @@ async fn sign_in(
     if !auth::password_matches_in_turn(&body.password, &stored).await {
         record(
             &server,
-            crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email) // WHAT: the address as checked. WHY: the raw one could be padded out
+            &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email) // WHAT: the address as checked. WHY: the raw one could be padded out
                 .by(&id)
                 .saying("the password did not match")
                 .from(from.clone()),
@@ -1010,7 +1013,7 @@ async fn sign_in(
 
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::SIGNED_IN, &body.email)
+        &crate::audit::Entry::new(crate::audit::action::SIGNED_IN, &body.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&id)
             .from(seen_from(&headers)),
     );
@@ -1115,7 +1118,7 @@ async fn change_password(
     tracing::info!("{} changed their password", who.email);
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::CHANGED_PASSWORD, &who.email).by(&who.id),
+        &crate::audit::Entry::new(crate::audit::action::CHANGED_PASSWORD, &who.email).by(&who.id), // WHAT: the audit line, lent to the log. WHY: written there, not kept
     );
     Ok(Json(serde_json::json!({ "changed": true })))
 }
@@ -1186,7 +1189,7 @@ async fn change_updates(
     tracing::info!("{} set updates to {channel}", who.email);
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::CHANGED_SETTING, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::CHANGED_SETTING, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about("update channel")
             .saying(channel),
@@ -1691,7 +1694,7 @@ async fn set_file(
     // Reaching a drawing is the line an auditor most wants to see.
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::DOWNLOADED_SET, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::DOWNLOADED_SET, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(set.name.clone())
             .saying(format!("{} sheets", set.sheets)),
@@ -1852,16 +1855,16 @@ async fn add_markups(
         Ok(incoming) => incoming, // WHAT: the batch. WHY: saved below.
         Err(denied) => return denied.into_response(), // WHAT: too big, or not JSON. WHY: said plainly.
     };
-    markups_added(&server, &who, &id, incoming).into_response() // WHAT: the batch saved. WHY: what the route did before, unchanged.
+    markups_added(&server, &who, &id, &incoming).into_response() // WHAT: the batch saved. WHY: what the route did before, unchanged.
 }
 
-fn markups_added(server: &Shared, who: &Who, id: &str, incoming: Vec<NewMarkup>) -> Answer<Json<MarkupPage>> {
+fn markups_added(server: &Shared, who: &Who, id: &str, incoming: &[NewMarkup]) -> Answer<Json<MarkupPage>> { // WHAT: the batch, lent. WHY: only read, never kept
     use base64::Engine;
 
     // Everything is parsed and checked before anything is written, so a batch
     // with one bad markup in it does not leave half of itself in the file.
     let mut ready = Vec::with_capacity(incoming.len());
-    for one in &incoming {
+    for one in incoming { // WHAT: each markup in the batch. WHY: checked before any is written
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(one.dictionary.as_bytes())
             .map_err(|_| Denied::wrong("A markup's dictionary was not valid base64."))?;
@@ -2145,7 +2148,7 @@ async fn takeoff_csv(
     // job, and it was the one export nobody could see had happened.
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::EXPORTED_TAKEOFF, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::EXPORTED_TAKEOFF, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(&id)
             .saying("as a spreadsheet")
@@ -2237,7 +2240,7 @@ async fn make_key(
     tracing::info!("{} made a {purpose} key called {name}", who.email);
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::MADE_KEY, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::MADE_KEY, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(name)
             .saying(purpose.to_string()),
@@ -2307,7 +2310,7 @@ async fn revoke_key(
     }
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::REVOKED_KEY, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::REVOKED_KEY, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(&id),
     );
@@ -2477,9 +2480,9 @@ async fn project_markuplist(
     Path(project): Path<String>,
     Query(everything): Query<Everything>,
 ) -> Answer<Json<serde_json::Value>> {
+    type Listed = (String, String, Option<String>, i64); // WHAT: a set's id, name, folder and revision. WHY: named first, before the statements that use it
     let who = caller(&server, &headers)?;
     may_reach_project(&server, &who, &project)?;
-    type Listed = (String, String, Option<String>, i64);
     let sight = crate::folders::sight(&server, &project, &who)?; // WHAT: which folders this person sees. WHY: a hidden folder's sets are left out of the pull, its stamp included.
     let (sets, stamp): (Vec<Listed>, Option<crate::projects::Stamp>) = server
         .store
@@ -2751,19 +2754,19 @@ async fn add_plugin(
         Ok(body) => body, // WHAT: the plugin file. WHY: checked below.
         Err(denied) => return denied.into_response(), // WHAT: bigger than any upload. WHY: said plainly.
     };
-    plugin_added(&server, who, body).into_response() // WHAT: the plugin checked and kept, as before. WHY: unchanged once let in.
+    plugin_added(&server, &who, &body).into_response() // WHAT: the plugin checked and kept, as before. WHY: unchanged once let in.
 }
 
-fn plugin_added(server: &Shared, who: Who, body: axum::body::Bytes) -> Answer<Json<hub::PluginInfo>> {
+fn plugin_added(server: &Shared, who: &Who, body: &[u8]) -> Answer<Json<hub::PluginInfo>> { // WHAT: who sent it and its bytes, lent. WHY: only read, never kept
     if body.is_empty() {
         return Err(Denied::wrong("No plugin came with that."));
     }
     let mut trusted = crate::plugin_trust();
     trusted.keys.extend(server.config.plugin_keys_for_tests.iter().cloned());
-    let checked = hub::plugin::check(&trusted, &body).map_err(Denied::wrong)?;
+    let checked = hub::plugin::check(&trusted, body).map_err(Denied::wrong)?; // WHAT: the file's signature and shape checked. WHY: only a signed plugin is kept
     let digest = server
         .store
-        .put_blob(&body)
+        .put_blob(body) // WHAT: the file kept by its digest. WHY: served to the seats
         .map_err(|e| Denied::broke("store that plugin", e))?;
     let manifest = plugin_host::manifest_of(&checked.wasm).ok();
     let plugin = hub::PluginInfo {
@@ -3091,7 +3094,7 @@ async fn add_person(
         .map_err(|e| Denied::broke("add that person", e))?;
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::ADDED_PERSON, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::ADDED_PERSON, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(&user.email)
             .saying(auth::role_name(user.role)),
@@ -3172,7 +3175,7 @@ async fn change_role(
 
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::CHANGED_ROLE, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::CHANGED_ROLE, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(&email)
             .saying(format!("{was} to {}", auth::role_name(role))),
@@ -3234,7 +3237,7 @@ async fn remove_person(
 
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::REMOVED_PERSON, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::REMOVED_PERSON, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(&email)
             .saying("their sessions and keys went with them"),
@@ -3271,7 +3274,7 @@ async fn sign_out(State(server): State<Shared>, headers: HeaderMap, _sent: Unuse
         .map_err(|e| Denied::broke("sign you out", e))?;
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::SIGNED_OUT, &who.email).by(&who.id),
+        &crate::audit::Entry::new(crate::audit::action::SIGNED_OUT, &who.email).by(&who.id), // WHAT: the audit line, lent to the log. WHY: written there, not kept
     );
     Ok(Json(serde_json::json!({ "signed_out": true })))
 }
@@ -3307,7 +3310,7 @@ async fn add_license(
     tracing::info!("license {}… for {} added by {}", license.id.chars().take(8).collect::<String>(), license.company, who.email); // WHAT: the id shortened. WHY: the whole id finds the licence file on the feed (audit, 2026-11-11)
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::ADDED_LICENSE, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::ADDED_LICENSE, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(license.id.clone())
             .saying(format!("{} for {}", license.edition.title(), license.company)),
@@ -3404,7 +3407,7 @@ async fn copy_set(
     let copy = made.ok_or_else(|| Denied::missing("drawing set"))?;
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::UPLOADED_SET, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::UPLOADED_SET, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(copy.name.clone())
             .saying("a copy to take off on"),
@@ -3521,8 +3524,8 @@ pub fn address_of(peer: Option<std::net::SocketAddr>, headers: &HeaderMap, proxi
     peer.ip().to_canonical().to_string() // WHAT: the machine that connected, an IPv4 address written as IPv6 as itself. WHY: the only address a caller can't make up, written one way whatever the socket listens on.
 }
 
-pub(crate) fn record(server: &Server, entry: crate::audit::Entry) { // WHAT: crate-wide now. WHY: the folders' and files' routes write the same log.
-    if let Err(e) = server.store.audit(&entry) {
+pub(crate) fn record(server: &Server, entry: &crate::audit::Entry) { // WHAT: crate-wide now. WHY: the folders' and files' routes write the same log.
+    if let Err(e) = server.store.audit(entry) { // WHAT: the line written. WHY: a failure is said, never passed on
         tracing::warn!("the audit log could not be written: {e}");
     }
 }
@@ -3717,7 +3720,7 @@ async fn join(
             // WHAT: counted already. WHY: `begin` counted this try.
             record(
                 &server,
-                crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &invite.email)
+                &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &invite.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                     .saying(if invite.used.is_some() {
                         "that invitation has already been used"
                     } else {
@@ -3753,7 +3756,7 @@ async fn join(
                 // WHAT: counted already. WHY: `begin` counted this try.
                 record(
                     &server,
-                    crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, "")
+                    &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, "") // WHAT: the audit line, lent to the log. WHY: written there, not kept
                         .saying("the join code has run out")
                         .from(from.clone()),
                 );
@@ -3772,7 +3775,7 @@ async fn join(
                 // WHAT: counted already. WHY: `begin` counted this try.
                 record(
                     &server,
-                    crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, "")
+                    &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, "") // WHAT: the audit line, lent to the log. WHY: written there, not kept
                         .saying("the join code did not match")
                         .from(from.clone()),
                 );
@@ -3877,7 +3880,7 @@ async fn join(
         }
         record(
             &server,
-            crate::audit::Entry::new("invitation_used", &email)
+            &crate::audit::Entry::new("invitation_used", &email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                 .by(&id)
                 .saying(format!("invited as {}", auth::role_name(role))),
         );
@@ -3947,7 +3950,7 @@ async fn make_invite(
         .map_err(|e| Denied::broke("write that invitation down", e))?;
     record(
         &server,
-        crate::audit::Entry::new("invitation_made", &who.email)
+        &crate::audit::Entry::new("invitation_made", &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(email.clone())
             .saying(format!("as {}", auth::role_name(asked))),
@@ -4003,7 +4006,7 @@ async fn drop_invite(
         .map_err(|e| Denied::broke("throw that invitation away", e))?;
     record(
         &server,
-        crate::audit::Entry::new("invitation_dropped", &who.email).by(&who.id),
+        &crate::audit::Entry::new("invitation_dropped", &who.email).by(&who.id), // WHAT: the audit line, lent to the log. WHY: written there, not kept
     );
     list_invites(State(server), headers).await
 }
@@ -4218,6 +4221,7 @@ async fn upload_release(
     headers: HeaderMap,
     mut form: Multipart,
 ) -> Answer<Json<Release>> {
+    use sha2::{Digest, Sha256}; // WHAT: the digest the installer is checked against. WHY: named first, before the statements that use it
     administrator(&server, &headers)?;
     let mut manifest: Option<Release> = None;
     let mut installer: Vec<u8> = Vec::new();
@@ -4255,7 +4259,6 @@ async fn upload_release(
     // are trusted, the seats do — but it can check that the file and the
     // manifest describe each other, and refuse a pairing that is already
     // wrong rather than serving it to six machines that will each reject it.
-    use sha2::{Digest, Sha256};
     let digest = crate::store::hex(&Sha256::digest(&installer));
     if digest != release.digest.to_lowercase() {
         return Err(Denied::wrong(format!(
@@ -4462,17 +4465,16 @@ async fn upload_chest(
 /// assistant or integration key; never a sync key, which is for its own list
 /// of routes. The answers are exactly what that person would get from the API:
 /// every tool below takes this Who and applies the same project gate.
-///
-/// # Errors
-///
-/// Refused, with nothing said, when the request carries no assistant or integration key that is still good.
-pub fn mcp_caller(server: &Server, headers: &HeaderMap) -> Result<Who, ()> {
+/// `None`, with nothing said, when the request carries no assistant or
+/// integration key that is still good.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn mcp_caller(server: &Server, headers: &HeaderMap) -> Option<Who> { // WHAT: the person behind an assistant or integration key, or none. WHY: an absent caller is all the endpoint needs to know
     caller_as(
         server,
         headers,
         &[auth::purpose::ASSISTANT, auth::purpose::INTEGRATION],
     )
-    .map_err(|_| ())
+    .ok() // WHAT: the person, or none. WHY: why it was refused is not told to an assistant
 }
 
 /// One channel of a colour, 0 to 1, as the byte `#RRGGBB` writes.
@@ -4680,11 +4682,12 @@ pub fn mcp_takeoff(server: &Server, who: &Who, id: &str) -> Result<String, Strin
             let _ = write!(out, ", count {:.0}", group.count); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         // Absent, never zero. The distinction is the whole argument.
-        match group.weighed {
-            true => { let _ = write!(out, ", {:.0} lb", group.pounds); }, // WHAT: written straight into the text. WHY: no string is made only to be copied in
-            false => out.push_str(", NO unit weight in the tool chest for this shape — \
-                                   it has no weight, which is not a weight of zero"),
-        }
+        if group.weighed { // WHAT: a shape with a unit weight. WHY: its pounds are shown
+            let _ = write!(out, ", {:.0} lb", group.pounds); // WHAT: written straight into the text. WHY: no string is made only to be copied in
+        } else { // WHAT: one without. WHY: said, never shown as zero
+            out.push_str(", NO unit weight in the tool chest for this shape — \
+                                   it has no weight, which is not a weight of zero"); // WHAT: that there is no weight. WHY: absent is never zero
+        } // WHAT: the weight, or that there is none. WHY: absent is never zero
         if group.unscaled > 0 {
             let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
                 " — {} of them left out for want of a scale",
@@ -4693,16 +4696,17 @@ pub fn mcp_takeoff(server: &Server, who: &Who, id: &str) -> Result<String, Strin
         }
         out.push('\n');
     }
-    match summary.pounds > 0.0 {
-        true => { let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
-            "\nTOTAL: {:.0} lb · {:.3} tons\n",
+    if summary.pounds > 0.0 { // WHAT: a takeoff with weight. WHY: the total shown
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "\nTOTAL: {:.0} lb · {:.3} tons", // WHAT: the total, with its line ended by writeln. WHY: the same text as before
             summary.pounds,
             summary.tons()
-        ); },
-        false => out.push_str(
+        );
+    } else { // WHAT: one with none. WHY: said plainly
+        out.push_str( // WHAT: that nothing carries a weight. WHY: as above
             "\nTOTAL: no weight — nothing on this takeoff carries a unit weight.\n",
-        ),
-    }
+        );
+    } // WHAT: the total weight, or that there is none. WHY: the same distinction for the whole
     out.push_str(&mcp_short_by(&rows, &sheets));
     Ok(out)
 }

@@ -112,13 +112,14 @@ fn pick_up_from_the_data_folder(server: &Server) {
     }
     let held = held(server, &trust(server)); // WHAT: the licence in use now. WHY: a file is never allowed to make it worse
     let (mut seen, list_known) = match server.store.setting(FOLDER_FILES_SEEN) {
-        Ok(Some(text)) => match serde_json::from_str::<Vec<String>>(&text) {
-            Ok(seen) => (seen, true), // WHAT: the list as kept. WHY: the usual case
-            Err(_) => {
+        Ok(Some(text)) => { // WHAT: a list kept. WHY: read
+            if let Ok(seen) = serde_json::from_str::<Vec<String>>(&text) { // WHAT: the list, if it reads. WHY: the usual case
+                (seen, true) // WHAT: the list as kept. WHY: the usual case
+            } else { // WHAT: a damaged list. WHY: fails closed
                 tracing::warn!("the list of licence files already used is damaged; no other licence is taken from the data folder this start"); // WHAT: said. WHY: fails closed, never open
                 (Vec::new(), false)
             }
-        },
+        }
         Ok(None) => (Vec::new(), held.is_none()), // WHAT: no list yet. WHY: the first start of this version; with a licence held, every file there is taken as already seen, so an old one can't go over it
         Err(why) => {
             tracing::warn!("could not read the list of licence files already used ({why}); no other licence is taken from the data folder this start"); // WHAT: said. WHY: fails closed
@@ -129,12 +130,13 @@ fn pick_up_from_the_data_folder(server: &Server) {
         .iter()
         .filter(|(_, _, fresh)| folder_file_wanted(held.as_ref(), fresh, seen.contains(&fingerprint(fresh)), list_known))
         .max_by(|a, b| newest_first(&a.2, &b.2).then_with(|| b.0.cmp(&a.0))); // WHAT: the newest of those wanted, and by name when two tie. WHY: one decision, the same at every start
-    match best {
-        Some((path, text, _)) => match install(server, text) {
+    if let Some((path, text, _)) = best { // WHAT: the one file wanted. WHY: installed, and said either way
+        match install(server, text) { // WHAT: the file installed. WHY: said either way
             Ok(license) => tracing::info!("license {}… for {} added from {}", license.id.chars().take(8).collect::<String>(), license.company, path.display()), // WHAT: said in the log, the id shortened. WHY: the whole id finds the licence file on the feed (audit, 2026-11-11)
             Err(why) => tracing::warn!("{} was not used: {why}", path.display()), // WHAT: said in the log. WHY: as before
-        },
-        None => tracing::info!("the licence files in the data folder are already in use, or older than the one this server holds; left alone"), // WHAT: said, nothing changed. WHY: a restart must never take seats or updates away
+        }
+    } else { // WHAT: no file wanted. WHY: said, nothing changed
+        tracing::info!("the licence files in the data folder are already in use, or older than the one this server holds; left alone"); // WHAT: said, nothing changed. WHY: a restart must never take seats or updates away
     }
     let used = best.map(|(path, _, _)| path.clone()); // WHAT: the file put in use, if any. WHY: every other different licence is said plainly below
     for (path, _, fresh) in &found {
@@ -665,6 +667,7 @@ pub fn sharing(server: &Server) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::{Config, Store};
+    use ed25519_dalek::Signer; // WHAT: signing, for the test licences. WHY: named once for the module, not after statements in each test
 
     fn a_server() -> (Server, std::path::PathBuf) {
         let n: u64 = rand::random();
@@ -676,13 +679,13 @@ mod tests {
             Server {
                 store,
                 config,
-                updates: Default::default(),
-                patience: Default::default(),
-                tunnel: Default::default(),
-                manifests: Default::default(),
-                notices: Default::default(),
-                key_refusals_logged: Default::default(), // WHAT: none written. WHY: the new field, empty as on every start.
-                secure_port: Default::default(), // WHAT: no HTTPS. WHY: a test server
+                updates: crate::updates::Watch::default(), // WHAT: no update looked for. WHY: a test server
+                patience: crate::patience::Patience::default(), // WHAT: nobody owes a wait. WHY: a test server
+                tunnel: crate::tunnel::Tunnel::default(), // WHAT: no tunnel. WHY: a test server
+                manifests: std::sync::Mutex::default(), // WHAT: no manifests read. WHY: a test server
+                notices: crate::notices::Pending::default(), // WHAT: no notices waiting. WHY: a test server
+                key_refusals_logged: std::sync::Mutex::default(), // WHAT: none written. WHY: the new field, empty as on every start.
+                secure_port: std::sync::OnceLock::default(), // WHAT: no HTTPS. WHY: a test server
                 pin: std::sync::OnceLock::default(), // WHAT: no certificate. WHY: a test server
                 replays: crate::devices::Replays::default(), // WHAT: nothing seen. WHY: a test server
                 started: 0, // WHAT: the dawn of time. WHY: a test server takes any signature time
@@ -706,7 +709,6 @@ mod tests {
     }
 
     fn a_license(signing: &ed25519_dalek::SigningKey, users: u32, through: &str) -> String {
-        use ed25519_dalek::Signer;
         let mut license = License {
             id: "evl_test".into(),
             company: "Example Builders".into(),
@@ -937,7 +939,6 @@ mod tests {
         let mut license: License = serde_json::from_str(&a_license(signing, users, through)).unwrap(); // WHAT: the usual test licence. WHY: only the id and key name differ
         license.id = id.into(); // WHAT: its id. WHY: a different licence, or a newer copy of one
         license.key = UNIT_KEY.into(); // WHAT: the test key's own name. WHY: the built-in mesafab-2026 would be found first and refuse it
-        use ed25519_dalek::Signer;
         license.signature = crate::store::hex(&signing.sign(&license.signing_payload()).to_bytes()); // WHAT: signed again. WHY: the id is in the signed text
         serde_json::to_string_pretty(&license).unwrap()
     }
@@ -981,7 +982,6 @@ mod tests {
         let mut license: License = serde_json::from_str(&a_license_called(signing, id, users, through)).unwrap(); // WHAT: the usual one. WHY: issued and edition changed below
         license.issued = issued.into(); // WHAT: its issue date. WHY: an older licence never wins over a newer one
         license.edition = edition; // WHAT: office or sealed. WHY: an edition change is never automatic
-        use ed25519_dalek::Signer;
         license.signature = crate::store::hex(&signing.sign(&license.signing_payload()).to_bytes()); // WHAT: signed again. WHY: both are in the signed text
         serde_json::to_string_pretty(&license).unwrap()
     }
@@ -1101,7 +1101,6 @@ mod tests {
         // WHAT: another company's licence, otherwise as good. WHY: audit, 2026-11-11: it swapped this office's licence from the folder
         let mut theirs: License = serde_json::from_str(&a_license_called(&signing, "evl_theirs", 9, "2028-11-01")).unwrap();
         theirs.company = "Some Other Steel, Inc.".into(); // WHAT: another company. WHY: the case
-        use ed25519_dalek::Signer;
         theirs.signature = crate::store::hex(&signing.sign(&theirs.signing_payload()).to_bytes()); // WHAT: signed again. WHY: the company is in the signed text
         assert!(!folder_file_wanted(Some(&held), &read(serde_json::to_string(&theirs).unwrap()), false, true), "another company's licence: no");
     }

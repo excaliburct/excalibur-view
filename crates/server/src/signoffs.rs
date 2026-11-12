@@ -162,14 +162,14 @@ pub async fn ask(
         Ok(asked) => asked, // WHAT: the lines. WHY: checked below.
         Err(denied) => return denied.into_response(), // WHAT: too big or not JSON. WHY: said plainly.
     };
-    asked_for(&server, &who, &set, asked).into_response() // WHAT: saved. WHY: kept apart so it reads as one function.
+    asked_for(&server, &who, &set, &asked).into_response() // WHAT: saved. WHY: kept apart so it reads as one function.
 }
 
 fn asked_for(
     server: &Shared,
     who: &crate::auth::Who,
     set: &str,
-    asked: Vec<Ask>,
+    asked: &[Ask], // WHAT: the lines asked for, lent. WHY: only read, never kept
 ) -> Answer<Json<Vec<SignOff>>> {
     if asked.len() > MOST_ASKED {
         return Err(Denied::wrong(format!(
@@ -177,7 +177,7 @@ fn asked_for(
         ))); // WHAT: refused. WHY: past any real form.
     }
     let mut ready = Vec::with_capacity(asked.len()); // WHAT: every line, checked. WHY: all are checked before any is written.
-    for one in &asked {
+    for one in asked { // WHAT: each line asked for. WHY: all are checked before any is written
         let page = match one.page {
             Some(p) if p >= 10_000 => {
                 return Err(Denied::wrong(
@@ -227,7 +227,7 @@ fn asked_for(
         .map_err(|e| Denied::broke("ask for those sign-offs", e))?;
     record(
         server,
-        crate::audit::Entry::new(crate::audit::action::ASKED_SIGNOFFS, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::ASKED_SIGNOFFS, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(set.to_string())
             .saying(format!("{} line(s)", ready.len())),
@@ -308,7 +308,7 @@ pub async fn sign(
         Ok(s) => s,                                   // WHAT: the signature. WHY: checked below.
         Err(denied) => return denied.into_response(), // WHAT: too big or not JSON. WHY: said plainly.
     };
-    signed(&server, &who, &id, signing).into_response() // WHAT: kept. WHY: apart, so it reads as one function.
+    signed(&server, &who, &id, &signing).into_response() // WHAT: kept. WHY: apart, so it reads as one function.
 }
 
 /// Whether strokes are a signature this keeps: inside the pad, finite, and not absurdly many.
@@ -326,7 +326,7 @@ fn signed(
     server: &Shared,
     who: &crate::auth::Who,
     id: &str,
-    signing: Signing,
+    signing: &Signing, // WHAT: the name and strokes, lent. WHY: only read, never kept
 ) -> Answer<Json<SignOff>> {
     let name = plain("signer's name", &signing.name, 80)?; // WHAT: the name written. WHY: printed on the form.
     if !strokes_ok(&signing.strokes) {
@@ -356,7 +356,7 @@ fn signed(
         (1, Some(line)) => {
             record(
                 server,
-                crate::audit::Entry::new(crate::audit::action::SIGNED_OFF, &who.email)
+                &crate::audit::Entry::new(crate::audit::action::SIGNED_OFF, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                     .by(&who.id)
                     .about(format!("{} · {}", line.set, line.label))
                     .saying(format!("signed as {name}")),
@@ -413,7 +413,7 @@ pub async fn withdraw(
     }
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::WITHDREW_SIGNOFF, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::WITHDREW_SIGNOFF, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(line.id.clone())
             .saying(line.label.clone()),
@@ -448,7 +448,7 @@ pub async fn changes(
         })
         .map_err(|e| Denied::broke("read the sign-offs", e))?;
     let read_to = lines.last().map(|l| l.seq); // WHAT: the last change read. WHY: next time starts after it, reachable or not.
-    let mut reach: std::collections::HashMap<String, bool> = Default::default(); // WHAT: each set's answer, asked once. WHY: a traveler's hundreds of lines share one set.
+    let mut reach: std::collections::HashMap<String, bool> = std::collections::HashMap::new(); // WHAT: each set's answer, asked once. WHY: a traveler's hundreds of lines share one set.
     let mut out = Vec::new(); // WHAT: the lines the caller may see. WHY: given back.
     let mut latest = since.since.max(0); // WHAT: how far this page reaches. WHY: given back.
     for line in lines {
@@ -577,15 +577,15 @@ pub fn png_gray(w: usize, h: usize, pixels: &[u8]) -> Vec<u8> {
     header.extend_from_slice(&u32::try_from(w).unwrap_or(u32::MAX).to_be_bytes()); // WHAT: the width. WHY: PNG writes it in four bytes; a signature is 400 wide
     header.extend_from_slice(&u32::try_from(h).unwrap_or(u32::MAX).to_be_bytes()); // WHAT: the height. WHY: likewise; 140 high
     header.extend_from_slice(&[8, 0, 0, 0, 0]); // WHAT: 8-bit grey, deflate, adaptive filters, no interlace. WHY: the plainest PNG.
-    chunk(&mut out, b"IHDR", &header);
-    chunk(&mut out, b"IDAT", &zlib);
-    chunk(&mut out, b"IEND", &[]);
+    chunk(&mut out, *b"IHDR", &header); // WHAT: the size and kind. WHY: PNG's first chunk
+    chunk(&mut out, *b"IDAT", &zlib); // WHAT: the pixels. WHY: PNG's data chunk
+    chunk(&mut out, *b"IEND", &[]); // WHAT: the end. WHY: PNG's last chunk
     out
 }
 
-fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+fn chunk(out: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) { // WHAT: the chunk's four-letter kind, by value. WHY: four bytes are cheaper copied than pointed at
     out.extend_from_slice(&u32::try_from(data.len()).unwrap_or(u32::MAX).to_be_bytes()); // WHAT: its length. WHY: PNG's chunk layout; a signature's data is far under 4 GB
-    out.extend_from_slice(kind);
+    out.extend_from_slice(&kind); // WHAT: its kind. WHY: PNG's chunk layout
     out.extend_from_slice(data);
     let mut crc_of = kind.to_vec(); // WHAT: the kind and data. WHY: the CRC covers both.
     crc_of.extend_from_slice(data);

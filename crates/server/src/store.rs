@@ -954,6 +954,12 @@ pub mod tempdir {
         }
     }
 
+    impl Default for Dir { // WHAT: a default scratch directory. WHY: the lint asks for one beside `new`
+        fn default() -> Dir { // WHAT: the same as `new`. WHY: one way to make one
+            Dir::new() // WHAT: a fresh scratch directory. WHY: the same as `new`, for anything that asks for a default
+        }
+    }
+
     impl Drop for Dir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
