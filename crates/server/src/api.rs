@@ -383,6 +383,25 @@ pub const SMALL_BODY: usize = 1024 * 1024; // WHAT: 1 MiB. WHY: far more than an
 /// once the caller has been let in (see [`body_once_let_in`]).
 pub const MIDDLING_BODY: usize = 64 * 1024 * 1024; // WHAT: 64 MiB. WHY: a whole set's markups or text comes in well under it; it is read only after the gate, never for a stranger.
 
+/// Reads a small body whole before any door looks at the request: one that
+/// says it is no bigger than [`REFUSAL_READS_UP_TO`]. A door that refuses
+/// before its route reads the body then answers a request already read, so
+/// the answer is never lost to a reset on a Mac. Bigger bodies (uploads) are
+/// left to their routes, read only after the gate, as before.
+pub(crate) async fn small_bodies_read_first(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let declared = request.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<usize>().ok()); // WHAT: the length the request says its body has. WHY: only a small one is read here
+    let Some(length) = declared.filter(|n| *n > 0 && *n <= REFUSAL_READS_UP_TO) else {
+        return next.run(request).await; // WHAT: no body, a big one, or one of unsaid length. WHY: left to the route, as before
+    };
+    let (parts, body) = request.into_parts(); // WHAT: the request and its body apart. WHY: the body is read now
+    let Ok(bytes) = axum::body::to_bytes(body, length).await else {
+        let mut refused = Denied::wrong("The request's body didn't arrive whole.").into_response(); // WHAT: 400. WHY: it was shorter or longer than it said, or stopped arriving (the idle limit)
+        refused.headers_mut().insert(header::CONNECTION, header::HeaderValue::from_static("close")); // WHAT: the connection ends here. WHY: what is left of it can't be trusted
+        return refused;
+    };
+    next.run(axum::extract::Request::from_parts(parts, Body::from(bytes))).await // WHAT: the request, its body already read. WHY: every door and route reads it as before
+}
+
 /// A refusal for a caller whose body has not been read: a little of it is
 /// read and thrown away first, as `keys_keep_to_their_purpose` does, and the
 /// connection is closed after the answer when there was more than that.
