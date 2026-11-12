@@ -213,11 +213,17 @@ pub trait Launcher {
     fn wait(&mut self);
 }
 
-/// Runs the cell until the restart rule gives up: started, waited for, and
-/// started again 5 s after each stop. `sleep` and `now` are the clock, so a
-/// test runs it in no time.
-pub fn supervise(launcher: &mut dyn Launcher, watch: &Watch, sleep: &dyn Fn(Duration), now: &dyn Fn() -> Instant) {
+/// How long the supervisor rests after giving up before it tries again.
+pub const GIVE_UP_REST: Duration = Duration::from_secs(10 * 60); // WHAT: ten minutes. WHY: review: a cell given up on recovers by itself, shown as not answering meanwhile
+
+/// Runs the cell: started, waited for, and started again 5 s after each
+/// stop; after five restarts in ten minutes it is shown as not answering,
+/// rested ten minutes, and tried again, `rounds` times in all (a real server
+/// passes `usize::MAX`). `sleep` and `now` are the clock, so a test runs it
+/// in no time. A pipe someone else holds stops it for good, as an alarm.
+pub fn supervise(launcher: &mut dyn Launcher, watch: &Watch, sleep: &dyn Fn(Duration), now: &dyn Fn() -> Instant, rounds: usize) {
     let mut restarts = Restarts::default(); // WHAT: none yet. WHY: counted from the first stop
+    let mut round = 1; // WHAT: the first round. WHY: counted against `rounds`
     loop {
         watch.set(State::Starting); // WHAT: starting. WHY: shown until it says hello
         match launcher.start() {
@@ -235,9 +241,14 @@ pub fn supervise(launcher: &mut dyn Launcher, watch: &Watch, sleep: &dyn Fn(Dura
                 sleep(wait); // WHAT: 5 s. WHY: §6a
             }
             Next::GiveUp => {
-                tracing::error!("the Citadel cell stopped {MOST_RESTARTS} times in ten minutes; it is not being started again until the Office Server restarts"); // WHAT: written in the log. WHY: §6a
+                tracing::error!("ALARM: the Citadel cell stopped {MOST_RESTARTS} times in ten minutes; it is tried again in ten minutes"); // WHAT: written in the log. WHY: §6a
                 watch.set(State::NotAnswering); // WHAT: shown on /api/v1/office. WHY: §6a
-                return;
+                if round >= rounds {
+                    return; // WHAT: the rounds asked for are done. WHY: a test's end; a real server never gets here
+                }
+                round += 1; // WHAT: the next round. WHY: counted
+                sleep(GIVE_UP_REST); // WHAT: ten minutes' rest. WHY: whatever stopped it may have passed
+                restarts = Restarts::default(); // WHAT: a fresh count. WHY: a new round of five
             }
         }
     }
@@ -322,19 +333,29 @@ pub fn serve_lines(reader: &mut dyn BufRead, writer: &mut dyn Write, office: &dy
 pub struct Answering<'a> {
     pub server: &'a crate::api::Server, // WHAT: the server. WHY: its device list, its name and its licence
     pub migrate_open: std::sync::atomic::AtomicBool, // WHAT: whether this connection may migrate. WHY: only after its hello, and only until a migrate has succeeded
+    reader: Option<std::sync::Mutex<rusqlite::Connection>>, // WHAT: this connection's own read-only handle on the database. WHY: review: a device check never waits on the server's one shared connection, so it answers well inside the cell's 2 s
 }
 
 impl<'a> Answering<'a> {
     /// The answers for a new connection from the cell.
     #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn new(server: &'a crate::api::Server) -> Answering<'a> {
-        Answering { server, migrate_open: std::sync::atomic::AtomicBool::new(false) } // WHAT: closed until the first hello ever opens it. WHY: security review M1
+        let reader = rusqlite::Connection::open_with_flags(server.config.database(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)
+            .ok()
+            .inspect(|c| {
+                let _ = c.busy_timeout(Duration::from_millis(500)); // WHAT: at most half a second waiting on a writer. WHY: well inside the cell's 2 s
+            })
+            .map(std::sync::Mutex::new); // WHAT: a read-only handle of its own. WHY: the server's shared connection may be busy with a big write
+        Answering { server, migrate_open: std::sync::atomic::AtomicBool::new(false), reader } // WHAT: closed until a hello opens it. WHY: security review M1
     }
 }
 
 impl Office for Answering<'_> {
     fn device(&self, id: &str) -> Value {
-        crate::devices::for_the_cell(&self.server.store, id) // WHAT: the device's state, and its key when approved. WHY: §6a
+        match self.reader.as_ref().and_then(|r| r.lock().ok()) {
+            Some(db) => crate::devices::for_the_cell_from(&db, id), // WHAT: from this connection's own read-only handle. WHY: never behind the server's shared connection
+            None => crate::devices::for_the_cell(&self.server.store, id), // WHAT: the shared one, when no handle of its own could be opened. WHY: still answered, failing closed
+        }
     }
 
     fn hello(&self, version: &str) -> Value {
@@ -581,7 +602,7 @@ mod tests {
         let watch = Watch::default();
         let mut cell = Squatted { starts: 0 };
         let start = Instant::now();
-        supervise(&mut cell, &watch, &|_| {}, &|| start);
+        supervise(&mut cell, &watch, &|_| {}, &|| start, 3);
         assert_eq!(cell.starts, 1, "never tried again on a name someone else holds");
         assert_eq!(watch.get(), Some(State::PipeTaken));
         assert_eq!(watch.seen().map(|s| s.state()), Some("pipe-taken"));
@@ -593,9 +614,10 @@ mod tests {
         let mut cell = Stopping { starts: 0 };
         let slept = RefCell::new(Vec::new());
         let start = Instant::now();
-        supervise(&mut cell, &watch, &|d| slept.borrow_mut().push(d), &|| start);
-        assert_eq!(cell.starts, 1 + MOST_RESTARTS, "the first start and five restarts");
-        assert!(slept.borrow().iter().all(|d| *d == RESTART_AFTER));
+        supervise(&mut cell, &watch, &|d| slept.borrow_mut().push(d), &|| start, 2);
+        assert_eq!(cell.starts, 2 * (1 + MOST_RESTARTS), "the first start and five restarts, then again after a rest");
+        assert_eq!(slept.borrow().iter().filter(|d| **d == GIVE_UP_REST).count(), 1, "rested ten minutes between the rounds");
+        assert!(slept.borrow().iter().all(|d| *d == RESTART_AFTER || *d == GIVE_UP_REST));
         assert_eq!(watch.get(), Some(State::NotAnswering));
         assert_eq!(watch.seen().map(|s| s.state()), Some("not-answering"));
     }

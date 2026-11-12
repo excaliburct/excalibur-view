@@ -449,6 +449,8 @@ pub struct Me {
     pub approved_by: Option<String>, // WHAT: who approved it. WHY: shown
     #[serde(default)]
     pub approved_at: Option<String>, // WHAT: when, RFC 3339. WHY: shown
+    #[serde(default)]
+    pub claimable: bool, // WHAT: whether the office has no admin computer yet and claiming is open. WHY: an app offers "Make this computer the admin" only then
 }
 
 /// One device, as an admin's Computers list shows it.

@@ -747,3 +747,14 @@ fn client_review_a_new_server_is_asked_about_even_when_only_this_app_knew_the_ol
     }
     hub::secure::open_with(&format!("http://127.0.0.1:{}", office.port), &book, hub::secure::Also { confirmed: Some(&office.pin), ..Default::default() }).expect("once confirmed by its pin");
 }
+
+#[test]
+fn cell_review_me_says_whether_the_office_can_still_be_claimed() {
+    let office = start();
+    let paired = vec![hyperview_server::devices::Paired { public_key: key(130).public_key_text(), name: "Old".into(), machine: "PC".into(), paired_at: String::new(), paired_by: String::new() }];
+    hyperview_server::devices::from_citadel(&office.store(), &paired).unwrap(); // WHAT: a computer carried over from Citadel. WHY: it asks how it stands while the office has no admin
+    let old = signer(130);
+    assert!(office.client(&old).device_me().unwrap().claimable, "no admin yet, the window open");
+    first_admin(&office);
+    assert!(!office.client(&old).device_me().unwrap().claimable, "an admin now");
+}

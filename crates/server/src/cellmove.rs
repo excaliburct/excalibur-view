@@ -6,8 +6,8 @@
 //! administrators and that service. The cell runs under a restricted token
 //! and can't read it, so the Office Server does the move for it:
 //!
-//! 1. the 1.0 service is stopped and disabled (never deleted), so it lets go
-//!    of port 47110 and its files;
+//! 1. the 1.0 service is stopped and uninstalled, so it lets go of port
+//!    47110 and its files, and can never start again;
 //! 2. `Citadel Server.exe --move-from "<old folder>" --data "<cell data>"` is
 //!    run once, with the Office Server's own rights (the system), with a time
 //!    limit;
@@ -20,9 +20,11 @@
 //! `hyperview-server --retry-citadel-move` clears a failure so the next start
 //! tries once more.
 //!
-//! The program's exit codes are provisional until the .NET side reports its
-//! own: 0 moved (the first number in its output is the count of jobs), 3
-//! nothing to move, anything else a failure.
+//! The program prints one JSON line, `{"result","exit","files","reason",
+//! "kept_as"}`, and exits with the same code. Only exit 0 with `moved`,
+//! `nothing` or `already` is a success; `usage` (2), `refused` (3, the trust
+//! check), `unreadable` (4, never "nothing"), `failed` (5), any other code, a
+//! missing or unreadable line, or a timeout all hold the cell.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -35,18 +37,32 @@ pub const SETTING: &str = "citadel_move"; // WHAT: the setting's name. WHY: read
 /// The longest the move may take.
 pub const TIME_LIMIT: Duration = Duration::from_secs(30 * 60); // WHAT: half an hour. WHY: an office's whole estimating history, copied once; past it, something is stuck
 
-/// The 1.0 service's name.
-pub const OLD_SERVICE: &str = "CitadelServer"; // WHAT: `NT SERVICE\CitadelServer`'s service. WHY: the one holding port 47110 and the old folder
+/// The names the 1.0 service may have: its display name, and the name its
+/// SID (`NT SERVICE\CitadelServer`) is made from.
+pub const OLD_SERVICES: &[&str] = &["Citadel Server", "CitadelServer"]; // WHAT: both spellings, tried in turn. WHY: the one holding port 47110 and the old folder
 
-/// The exit code the move program gives when there is nothing to move.
-pub const NOTHING_CODE: i32 = 3; // WHAT: provisional. WHY: to be confirmed by the .NET side's report
+/// The move program's one line, as it prints it.
+#[derive(Deserialize, Debug, Default)]
+struct Said {
+    #[serde(default)]
+    result: String, // WHAT: moved, nothing, already, usage, refused, unreadable or failed. WHY: decided with the exit code
+    #[serde(default)]
+    exit: Option<i32>, // WHAT: the code it says it exits with. WHY: must agree with the real one
+    #[serde(default)]
+    files: Option<u64>, // WHAT: how many files it moved. WHY: "moved N files"
+    #[serde(default)]
+    reason: Option<String>, // WHAT: why it failed, when it did. WHY: shown in the alarm
+    #[serde(default)]
+    kept_as: Option<String>, // WHAT: where the old folder was kept, renamed. WHY: said, so nobody hunts for it
+}
 
 /// What came of the move, as kept in the store.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Moved {
-    Moved { jobs: u64 }, // WHAT: moved, with how many jobs. WHY: "moved N jobs"
+    Moved { files: u64, kept_as: Option<String> }, // WHAT: moved, with how many files, and where the old folder was kept. WHY: "moved N files"
     Nothing, // WHAT: nothing to move. WHY: a fresh office, or no 1.0 data
+    Already, // WHAT: the move program says it moved this folder before. WHY: never moved twice
     Failed { reason: String }, // WHAT: failed, and why. WHY: the cell isn't started; an admin is told
 }
 
@@ -55,8 +71,10 @@ impl Moved {
     #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn words(&self) -> String {
         match self {
-            Moved::Moved { jobs } => format!("moved {jobs} jobs"), // WHAT: the count. WHY: the person checks it against the old server
+            Moved::Moved { files, kept_as: Some(kept) } => format!("moved {files} files; the old folder is kept as {kept}"), // WHAT: the count, and where the old folder went. WHY: the person checks it, and knows where the original is
+            Moved::Moved { files, kept_as: None } => format!("moved {files} files"), // WHAT: the count. WHY: the person checks it against the old server
             Moved::Nothing => "nothing to move".to_string(), // WHAT: said. WHY: plain
+            Moved::Already => "moved before".to_string(), // WHAT: said. WHY: plain
             Moved::Failed { reason } => format!("move failed: {reason}. The old data is untouched and the cell was not started; run hyperview-server --retry-citadel-move, then restart the Office Server"), // WHAT: the alarm, with what to do. WHY: a cell started empty would make a new certificate
         }
     }
@@ -86,12 +104,12 @@ fn record(store: &crate::Store, moved: &Moved) {
 pub trait OldService {
     /// Whether it is installed.
     fn present(&self) -> bool;
-    /// Stops it and disables it, never deleting it.
+    /// Stops it and uninstalls it.
     ///
     /// # Errors
     ///
     /// Why it couldn't.
-    fn stop_and_disable(&self) -> Result<(), String>;
+    fn stop_and_remove(&self) -> Result<(), String>;
 }
 
 /// Running the move program.
@@ -111,19 +129,30 @@ pub fn arguments(old: &Path, data: &Path) -> Vec<String> {
     vec!["--move-from".to_string(), old.display().to_string(), "--data".to_string(), data.display().to_string()] // WHAT: the two folders. WHY: the one-shot move
 }
 
-/// What an exit code and output mean (provisional, see the module's note).
+/// What the move program's exit code and its one JSON line mean. Only exit
+/// 0, said as 0, with `moved`, `nothing` or `already`, is a success.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
-pub fn reading(code: Option<i32>, said: &str) -> Moved {
-    let last = said.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().chars().take(200).collect::<String>(); // WHAT: its last line, at most 200 characters. WHY: the reason a person reads
-    match code {
-        Some(0) => Moved::Moved { jobs: said.split(|c: char| !c.is_ascii_digit()).find(|n| !n.is_empty()).and_then(|n| n.parse().ok()).unwrap_or(0) }, // WHAT: moved, the first number its count. WHY: "moved N jobs"
-        Some(NOTHING_CODE) => Moved::Nothing, // WHAT: nothing there. WHY: said so
-        Some(other) => Moved::Failed { reason: if last.is_empty() { format!("the move program stopped with code {other}") } else { format!("{last} (code {other})") } }, // WHAT: its words and code. WHY: what went wrong, plainly
-        None => Moved::Failed { reason: "the move took longer than half an hour and was stopped".to_string() }, // WHAT: timed out. WHY: said
+pub fn reading(code: Option<i32>, out: &str) -> Moved {
+    let Some(code) = code else {
+        return Moved::Failed { reason: "the move took longer than half an hour and was stopped".to_string() }; // WHAT: timed out. WHY: never a success
+    };
+    let said = out.lines().rev().map(str::trim).find(|l| l.starts_with('{')).and_then(|l| serde_json::from_str::<Said>(l).ok()); // WHAT: its JSON line, read. WHY: decided with the code
+    let Some(said) = said else {
+        return Moved::Failed { reason: format!("the move program gave no answer it could read (code {code})") }; // WHAT: no line, or one that doesn't read. WHY: never taken as a success
+    };
+    if code == 0 && said.exit == Some(0) {
+        match said.result.as_str() {
+            "moved" => return Moved::Moved { files: said.files.unwrap_or(0), kept_as: said.kept_as.map(|k| k.chars().take(200).collect()) }, // WHAT: moved, its file count. WHY: read from `files`, never the first number in the output
+            "nothing" => return Moved::Nothing, // WHAT: no old folder. WHY: a fresh office
+            "already" => return Moved::Already, // WHAT: marked before. WHY: never run again
+            _ => {} // WHAT: any other word with code 0. WHY: never a success
+        }
     }
+    let why = said.reason.filter(|r| !r.trim().is_empty()).unwrap_or_else(|| if said.result.is_empty() { "no reason given".to_string() } else { said.result.clone() }); // WHAT: its reason, or its result word. WHY: what the person reads
+    Moved::Failed { reason: format!("{} ({}, code {code})", why.chars().take(200).collect::<String>(), if said.result.is_empty() { "unknown" } else { said.result.as_str() }) } // WHAT: refused, unreadable, failed, usage, or anything else. WHY: the cell never starts over data that didn't move
 }
 
-/// Before the cell's first start: stops and disables the 1.0 service, and
+/// Before the cell's first start: stops and uninstalls the 1.0 service, and
 /// moves its data in once. Whether the cell may start.
 ///
 /// Runs only when nothing is recorded yet; after a success or "nothing to
@@ -134,8 +163,8 @@ pub fn before_first_start(store: &crate::Store, old: &dyn OldService, mover: &dy
         return done.lets_the_cell_start(); // WHAT: decided before. WHY: never run again after a success; a failure holds the cell until retried
     }
     if old.present() {
-        match old.stop_and_disable() {
-            Ok(()) => tracing::warn!("Citadel Server 1.0's service was stopped and disabled (not deleted); the Office Server's Citadel cell takes over"), // WHAT: written in the log. WHY: step 1
+        match old.stop_and_remove() {
+            Ok(()) => tracing::warn!("Citadel Server 1.0's service was stopped and uninstalled; the Office Server's Citadel cell takes over"), // WHAT: written in the log. WHY: step 1
             Err(why) => {
                 let failed = Moved::Failed { reason: format!("Citadel Server 1.0's service couldn't be stopped ({why})") }; // WHAT: failed. WHY: it holds the port and the files
                 record(store, &failed);
@@ -143,8 +172,8 @@ pub fn before_first_start(store: &crate::Store, old: &dyn OldService, mover: &dy
             }
         }
     }
-    if !old_folder.is_dir() {
-        record(store, &Moved::Nothing); // WHAT: no 1.0 data here. WHY: a fresh office
+    if std::fs::symlink_metadata(old_folder).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+        record(store, &Moved::Nothing); // WHAT: no 1.0 folder at all. WHY: a fresh office; anything else there, even unreadable, is the move program's to judge
         return true;
     }
     let outcome = match mover.run(program, &arguments(old_folder, data), TIME_LIMIT) {
@@ -237,7 +266,7 @@ mod tests {
         fn present(&self) -> bool {
             self.there
         }
-        fn stop_and_disable(&self) -> Result<(), String> {
+        fn stop_and_remove(&self) -> Result<(), String> {
             self.stops.set(self.stops.get() + 1);
             if self.fails { Err("access denied".into()) } else { Ok(()) }
         }
@@ -266,26 +295,43 @@ mod tests {
         path
     }
 
+    /// The one line the move program prints for `result`.
+    fn line(result: &str, exit: i32, extra: &str) -> String {
+        format!("{{\"result\":\"{result}\",\"exit\":{exit}{extra}}}") // WHAT: its JSON line. WHY: as the .NET side prints it
+    }
+
+    /// Runs the move for one fake outcome on a fresh store: whether the cell
+    /// may start, and what was recorded.
     #[cfg(unix)]
-    #[test]
-    fn each_outcome_of_the_move_program_is_kept_and_shown() {
+    fn outcome(said: &str, code: Option<i32>) -> (bool, Moved) {
         let (store, dir) = store();
         let old = dir.join("Citadel Server");
-        std::fs::create_dir_all(&old).unwrap();
-        let service = Service { there: true, stops: Cell::new(0), fails: false };
-        let program = fake(&dir, "Moved 12 jobs into the cell", Some(0));
-        assert!(before_first_start(&store, &service, &Run, &program, &old, &dir.join("cell")), "moved: the cell starts");
-        assert_eq!(recorded(&store), Some(Moved::Moved { jobs: 12 }));
-        assert_eq!(service.stops.get(), 1, "the 1.0 service was stopped and disabled first");
-        assert!(std::fs::read_to_string(dir.join("args")).unwrap().contains("--move-from"), "run with --move-from");
-        assert_eq!(recorded(&store).unwrap().words(), "moved 12 jobs");
+        std::fs::create_dir_all(&old).unwrap(); // WHAT: a 1.0 folder. WHY: so the program is run
+        let program = fake(&dir, said, code);
+        let service = Service { there: false, stops: Cell::new(0), fails: false };
+        let starts = before_first_start(&store, &service, &Run, &program, &old, &dir.join("cell"));
+        (starts, recorded(&store).expect("recorded"))
+    }
 
-        let (store, dir) = super::tests::store();
-        let old = dir.join("Citadel Server");
-        std::fs::create_dir_all(&old).unwrap();
-        let nothing = fake(&dir, "nothing to move", Some(NOTHING_CODE));
-        assert!(before_first_start(&store, &Service { there: false, stops: Cell::new(0), fails: false }, &Run, &nothing, &old, &dir.join("cell")));
-        assert_eq!(recorded(&store).unwrap().words(), "nothing to move");
+    #[cfg(unix)]
+    #[test]
+    fn only_moved_nothing_and_already_start_the_cell() {
+        let (starts, moved) = outcome(&line("moved", 0, ",\"files\":12,\"kept_as\":\"Citadel Server.moved\""), Some(0));
+        assert!(starts, "moved");
+        assert_eq!(moved, Moved::Moved { files: 12, kept_as: Some("Citadel Server.moved".into()) }, "the count is read from files, never the first number");
+        assert!(outcome(&line("nothing", 0, ""), Some(0)).0, "nothing");
+        assert_eq!(outcome(&line("already", 0, ""), Some(0)).1, Moved::Already);
+        for (result, exit) in [("usage", 2), ("refused", 3), ("unreadable", 4), ("failed", 5), ("odd", 9)] {
+            let (starts, moved) = outcome(&line(result, exit, ",\"reason\":\"the folder is not a 1.0 folder\""), Some(exit));
+            assert!(!starts, "{result}: the cell never starts");
+            assert!(moved.words().starts_with("move failed: the folder is not a 1.0 folder") && moved.words().contains(result), "{}", moved.words());
+        }
+        let (starts, moved) = outcome("Moved everything", Some(0));
+        assert!(!starts, "a line that isn't JSON is never a success: {}", moved.words());
+        let (starts, _) = outcome(&line("moved", 3, ""), Some(0));
+        assert!(!starts, "the line and the code must agree");
+        let (starts, _) = outcome(&line("refused", 3, ""), Some(3));
+        assert!(!starts, "refused, the .NET side's 3");
     }
 
     #[cfg(unix)]
@@ -295,19 +341,21 @@ mod tests {
         let old = dir.join("Citadel Server");
         std::fs::create_dir_all(&old).unwrap();
         let service = Service { there: true, stops: Cell::new(0), fails: false };
-        let failing = fake(&dir, "The old folder cannot be read", Some(1));
+        let failing = fake(&dir, &line("failed", 5, ",\"reason\":\"a file could not be copied\""), Some(5));
         assert!(!before_first_start(&store, &service, &Run, &failing, &old, &dir.join("cell")), "the cell never starts over data that didn't move");
         let words = recorded(&store).unwrap().words();
-        assert!(words.starts_with("move failed: The old folder cannot be read (code 1)") && words.contains("untouched"), "{words}");
-        let good = fake(&dir, "Moved 4 jobs", Some(0));
+        assert!(words.starts_with("move failed: a file could not be copied (failed, code 5)") && words.contains("untouched"), "{words}");
+        assert_eq!(service.stops.get(), 1, "the 1.0 service was stopped and uninstalled first");
+        assert!(std::fs::read_to_string(dir.join("args")).unwrap().contains("--move-from"), "run with --move-from");
+        let good = fake(&dir, &line("moved", 0, ",\"files\":4"), Some(0));
         assert!(!before_first_start(&store, &service, &Run, &good, &old, &dir.join("cell")), "not tried again on its own");
         assert_eq!(service.stops.get(), 1);
         retry(&store).unwrap();
         assert!(before_first_start(&store, &service, &Run, &good, &old, &dir.join("cell")), "once retried, it runs");
-        assert_eq!(recorded(&store), Some(Moved::Moved { jobs: 4 }));
+        assert_eq!(recorded(&store), Some(Moved::Moved { files: 4, kept_as: None }));
         assert!(retry(&store).is_err(), "a success is never cleared");
         assert!(before_first_start(&store, &service, &Run, &failing, &old, &dir.join("cell")), "and the move never runs again after a success");
-        assert_eq!(recorded(&store), Some(Moved::Moved { jobs: 4 }));
+        assert_eq!(recorded(&store), Some(Moved::Moved { files: 4, kept_as: None }));
     }
 
     #[cfg(unix)]

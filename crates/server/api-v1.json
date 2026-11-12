@@ -101,6 +101,7 @@
     "DeviceMe.admin": "boolean",
     "DeviceMe.approved_at": "string",
     "DeviceMe.approved_by": "string",
+    "DeviceMe.claimable": "boolean",
     "DeviceMe.state": "string",
     "DrawingSet.already_here": "boolean",
     "DrawingSet.bytes": "integer",

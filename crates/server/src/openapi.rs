@@ -112,6 +112,7 @@ fn device_schemas() -> Value {
             ("admin", "boolean", ""),
             ("approved_by", "string", ""),
             ("approved_at", "string", "RFC 3339."),
+            ("claimable", "boolean", "True while the office has no admin computer and claiming is open: an app may offer to make this computer the admin."),
         ]),
         "DeviceInfo": object(&[
             ("id", "string", ""), ("app", "string", ""), ("app_version", "string", ""), ("machine", "string", ""), ("os_user", "string", ""),

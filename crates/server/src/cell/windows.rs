@@ -66,7 +66,7 @@ pub fn start(server: Shared) {
         }
         let mut launcher = Cell { server: server.clone(), program, line: String::new(), args, pipe: format!(r"\\.\pipe\{}", super::pipe_name(&install)), sid, process: None, serving: None, next: None };
         launcher.line = super::command_line(&launcher.program, &launcher.args); // WHAT: the command line. WHY: written once
-        super::supervise(&mut launcher, &server.cell, &std::thread::sleep, &Instant::now); // WHAT: run and restarted. WHY: §6a
+        super::supervise(&mut launcher, &server.cell, &std::thread::sleep, &Instant::now, usize::MAX); // WHAT: run and restarted. WHY: §6a
     });
     if let Err(e) = spawned {
         tracing::error!("the Citadel cell's supervisor could not start: {e}"); // WHAT: said. WHY: the part then reports what its port shows
@@ -281,20 +281,24 @@ fn restricted_process(program: &Path, line: &str, sid: &str) -> std::io::Result<
 /// Citadel Server 1.0's Windows service, through the service manager.
 struct OldCitadel;
 
+impl OldCitadel {
+    /// The 1.0 service, opened with `access`, under whichever of its names it
+    /// has.
+    fn open(access: windows_service::service::ServiceAccess) -> Option<windows_service::service::Service> {
+        use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?; // WHAT: the service manager. WHY: as the system
+        crate::cellmove::OLD_SERVICES.iter().find_map(|name| manager.open_service(name, access).ok()) // WHAT: the first name that opens. WHY: its display name or its SID's name
+    }
+}
+
 impl crate::cellmove::OldService for OldCitadel {
     fn present(&self) -> bool {
-        use windows_service::service::ServiceAccess;
-        use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
-        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
-            .and_then(|manager| manager.open_service(crate::cellmove::OLD_SERVICE, ServiceAccess::QUERY_STATUS))
-            .is_ok() // WHAT: whether it opens. WHY: installed or not
+        Self::open(windows_service::service::ServiceAccess::QUERY_STATUS).is_some() // WHAT: whether it opens. WHY: installed or not
     }
 
-    fn stop_and_disable(&self) -> Result<(), String> {
+    fn stop_and_remove(&self) -> Result<(), String> {
         use windows_service::service::{ServiceAccess, ServiceState};
-        use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
-        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).map_err(|e| e.to_string())?; // WHAT: the service manager. WHY: as the system
-        let service = manager.open_service(crate::cellmove::OLD_SERVICE, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP).map_err(|e| e.to_string())?; // WHAT: the 1.0 service. WHY: to stop it
+        let service = Self::open(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE).ok_or("it couldn't be opened to stop it")?; // WHAT: the 1.0 service. WHY: to stop and uninstall it
         let _ = service.stop(); // WHAT: asked to stop. WHY: it holds port 47110 and its files
         let deadline = Instant::now() + std::time::Duration::from_secs(60); // WHAT: a minute. WHY: a service shutting down cleanly
         loop {
@@ -304,9 +308,6 @@ impl crate::cellmove::OldService for OldCitadel {
                 _ => std::thread::sleep(std::time::Duration::from_millis(300)), // WHAT: waited. WHY: asked again shortly
             }
         }
-        use std::os::windows::process::CommandExt; // WHAT: Windows-only process options. WHY: no console window
-        let system = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from); // WHAT: Windows' folder. WHY: sc.exe by its full path
-        let disabled = std::process::Command::new(system.join("System32").join("sc.exe")).args(["config", crate::cellmove::OLD_SERVICE, "start=", "disabled"]).creation_flags(CREATE_NO_WINDOW).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status(); // WHAT: set to never start, never deleted. WHY: it can't take the port back at the next boot, and can still be looked at
-        if matches!(disabled, Ok(status) if status.success()) { Ok(()) } else { Err("it stopped, but couldn't be disabled".into()) } // WHAT: done, or why not. WHY: a 1.0 service that starts at the next boot would fight the cell for its port
+        service.delete().map_err(|e| format!("it stopped, but couldn't be uninstalled ({e})")) // WHAT: uninstalled. WHY: the .NET side's move runs only once it is gone, so it can never take the port back
     }
 }

@@ -825,8 +825,10 @@ pub(crate) fn joined(server: &Server, ask: &Ask, from: &str, by: &str) -> Answer
 // ---- how a device stands --------------------------------------------------------
 
 /// `GET /api/v1/devices/me` (§3), signed by the device in any state.
-pub(crate) async fn me(Extension(device): Extension<Device>) -> Json<wire::Me> {
-    Json(wire::Me { state: device.state.clone(), admin: device.admin && device.state == state::APPROVED, approved_by: device.approved_by.clone(), approved_at: device.approved_at.clone() }) // WHAT: its state, and only an approved device is an admin. WHY: the waiting screen reads it
+pub(crate) async fn me(State(server): State<Shared>, Extension(device): Extension<Device>) -> Json<wire::Me> {
+    let until = server.store.setting(settings::CLAIM_UNTIL).ok().flatten(); // WHAT: the claiming window. WHY: read for `claimable`
+    let claimable = server.store.with(|db| Ok(claimable(db, until.as_deref(), time::OffsetDateTime::now_utc())?)).unwrap_or(false); // WHAT: no admin computer for every app yet, and the window open. WHY: the cell review: an app offers "Make this computer the admin" only then; a database failure says no
+    Json(wire::Me { state: device.state.clone(), admin: device.admin && device.state == state::APPROVED, approved_by: device.approved_by.clone(), approved_at: device.approved_at.clone(), claimable }) // WHAT: its state, and only an approved device is an admin. WHY: the waiting screen reads it
 }
 
 // ---- what an admin does -----------------------------------------------------------
@@ -995,10 +997,15 @@ pub fn store_identity(store: &crate::Store, cert: &str) -> anyhow::Result<()> {
 
 /// The answer the cell is given about one device (§6a).
 pub fn for_the_cell(store: &crate::Store, id: &str) -> serde_json::Value {
+    store.with(|db| Ok(for_the_cell_from(db, id))).unwrap_or_else(|_| serde_json::json!({ "state": "unknown" })) // WHAT: through the shared connection. WHY: tests and a fallback; failing closed
+}
+
+/// [`for_the_cell`], read through `db`.
+pub fn for_the_cell_from(db: &Connection, id: &str) -> serde_json::Value {
     if !wire::is_device_id(id) {
         return serde_json::json!({ "state": "unknown" }); // WHAT: not an id. WHY: never looked up
     }
-    match store.with(|db| Ok(find(db, id)?)) {
+    match find(db, id) {
         Ok(Some(device)) if device.state == state::APPROVED => serde_json::json!({
             "state": "approved",
             "public_key": wire::public_key_text(&device.public_key),

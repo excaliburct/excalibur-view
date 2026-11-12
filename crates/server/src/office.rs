@@ -28,7 +28,7 @@ pub struct Part {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>, // WHAT: the part's running version, when it runs. WHY: Fleet compares it with the shelf
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>, // WHAT: a sentence about the part, when there is one: for Citadel, how its 1.0 data moved in. WHY: "moved N jobs", "nothing to move" or "move failed: ..." shown to an admin and to Fleet
+    pub note: Option<String>, // WHAT: a sentence about the part, when there is one: for Citadel, how its 1.0 data moved in. WHY: "moved N files", "nothing to move" or "move failed: ..." shown to an admin and to Fleet
 }
 
 /// The parts whose code this build carries. A part is added here in the same
@@ -75,7 +75,7 @@ pub fn with_move(mut parts: Vec<Part>, moved: Option<&crate::cellmove::Moved>) -
             part.state = "move-failed"; // WHAT: the alarm. WHY: the cell was not started, and an admin must act
             part.version = None; // WHAT: nothing runs. WHY: never a version for a cell that isn't running
         }
-        part.note = Some(moved.words()); // WHAT: "moved N jobs", "nothing to move" or "move failed: ...". WHY: shown on /api/v1/office
+        part.note = Some(moved.words()); // WHAT: "moved N files", "nothing to move" or "move failed: ...". WHY: shown on /api/v1/office
     }
     parts
 }
@@ -193,8 +193,8 @@ mod tests {
         use crate::cellmove::Moved;
         let on = [Module::View, Module::Citadel];
         let running = crate::citadel::Seen::Running { version: "1.1.0".into() };
-        let moved = with_move(parts_of(&on, IN_THIS_BUILD, Some(&running)), Some(&Moved::Moved { jobs: 12 }));
-        assert_eq!(state_of(&moved, "citadel").note.as_deref(), Some("moved 12 jobs"));
+        let moved = with_move(parts_of(&on, IN_THIS_BUILD, Some(&running)), Some(&Moved::Moved { files: 12, kept_as: None }));
+        assert_eq!(state_of(&moved, "citadel").note.as_deref(), Some("moved 12 files"));
         assert_eq!(state_of(&moved, "citadel").state, "running");
         let failed = with_move(parts_of(&on, IN_THIS_BUILD, Some(&running)), Some(&Moved::Failed { reason: "no access".into() }));
         assert_eq!(state_of(&failed, "citadel").state, "move-failed", "an alarm, never running");
