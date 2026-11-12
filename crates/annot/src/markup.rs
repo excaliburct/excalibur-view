@@ -277,9 +277,10 @@ impl Markup {
 
     /// How far a text box's words turn counter-clockwise on the page: 0, 90, 180 or 270 (`/Rotate`, as Acrobat and
     /// Revu write it). Anything else reads as a quarter turn.
+    #[must_use] // WHAT: the turn is the point of asking. WHY: dropping it is always a mistake
     pub fn turn(&self) -> i32 {
-        let raw = self.dict.get("Rotate").and_then(|o| o.as_i64()).unwrap_or(0); // WHAT: the key, or none. WHY: most markups have none
-        (raw.rem_euclid(360) / 90 * 90) as i32 // WHAT: a quarter turn, 0 to 270. WHY: -90 and 450 mean 270 and 90; a PDF turns only in quarters
+        let raw = self.dict.get("Rotate").and_then(Object::as_i64).unwrap_or(0); // WHAT: the key, or none. WHY: most markups have none
+        i32::try_from(raw.rem_euclid(360) / 90 * 90).unwrap_or(0) // WHAT: a quarter turn, 0 to 270, which always fits. WHY: -90 and 450 mean 270 and 90; a PDF turns only in quarters
     }
 
     /// Gives a text box on a turned sheet the sheet's turn, so its words read upright where the sheet is shown upright.
