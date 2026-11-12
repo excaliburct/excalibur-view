@@ -89,7 +89,7 @@ fn start() -> Running {
 }
 
 /// One JSON-RPC call, with a token or without one.
-fn rpc(server: &Running, token: Option<&str>, method: &str, params: Value) -> Value {
+fn rpc(server: &Running, token: Option<&str>, method: &str, params: &Value) -> Value { // WHAT: the call's params, lent. WHY: only written into the request
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
     let mut request = ureq::post(&format!("{}/mcp", server.base))
         .set("Content-Type", "application/json");
@@ -205,7 +205,7 @@ fn set_scale(server: &Running, set: &str, page: usize, scale: Option<&str>) {
     let changed = db
         .execute(
             "UPDATE sheets SET scale = ?1 WHERE set_id = ?2 AND page = ?3",
-            params![scale, set, page as i64],
+            params![scale, set, i64::try_from(page).unwrap()], // WHAT: the scale, set and page. WHY: the page as SQLite keeps it
         )
         .unwrap();
     // SQLite will happily read a mistyped column name as a string literal and
@@ -241,7 +241,7 @@ fn a_job(server: &Running) -> (String, String) {
 #[test]
 fn it_introduces_itself_the_way_an_mcp_client_expects() {
     let server = start();
-    let answer = rpc(&server, None, "initialize", json!({}));
+    let answer = rpc(&server, None, "initialize", &json!({})); // WHAT: the call, lent. WHY: only written into the request
     assert_eq!(answer["jsonrpc"], "2.0");
     let result = &answer["result"];
     assert!(result["protocolVersion"].is_string());
@@ -259,7 +259,7 @@ fn it_introduces_itself_the_way_an_mcp_client_expects() {
 fn the_tools_are_all_read_only() {
     // The contract. There is no door here a language model can click through.
     let server = start();
-    let tools = rpc(&server, None, "tools/list", json!({}));
+    let tools = rpc(&server, None, "tools/list", &json!({})); // WHAT: the call, lent. WHY: only written into the request
     let list = tools["result"]["tools"].as_array().expect("a list of tools");
     assert!(list.len() >= 6, "{list:?}");
     for tool in list {
@@ -278,7 +278,7 @@ fn the_tools_are_all_read_only() {
 #[test]
 fn a_method_this_server_does_not_have_is_refused_politely() {
     let server = start();
-    let answer = rpc(&server, None, "resources/list", json!({}));
+    let answer = rpc(&server, None, "resources/list", &json!({})); // WHAT: the call, lent. WHY: only written into the request
     assert_eq!(answer["error"]["code"], -32601);
     assert!(answer["result"].is_null());
 }
@@ -295,7 +295,7 @@ fn nobody_gets_the_quantities_without_a_token() {
         &server,
         None,
         "tools/call",
-        json!({ "name": "takeoff", "arguments": { "set": set } }),
+        &json!({ "name": "takeoff", "arguments": { "set": set } }), // WHAT: the call, lent. WHY: only written into the request
     );
     assert_eq!(answer["error"]["code"], -32001);
     let message = answer["error"]["message"].as_str().unwrap_or_default();
@@ -310,7 +310,7 @@ fn a_bad_token_is_no_better_than_none() {
         &server,
         Some("not-a-real-token"),
         "tools/call",
-        json!({ "name": "takeoff", "arguments": { "set": set } }),
+        &json!({ "name": "takeoff", "arguments": { "set": set } }), // WHAT: the call, lent. WHY: only written into the request
     );
     assert_eq!(answer["error"]["code"], -32001);
 }
@@ -325,7 +325,7 @@ fn the_takeoff_comes_back_as_something_worth_reading_aloud() {
         &server,
         Some(&token),
         "tools/call",
-        json!({ "name": "takeoff", "arguments": { "set": set } }),
+        &json!({ "name": "takeoff", "arguments": { "set": set } }), // WHAT: the call, lent. WHY: only written into the request
     );
     let (text, error) = said(&answer);
     assert!(!error, "{text}");
@@ -347,7 +347,7 @@ fn a_takeoff_that_is_short_says_so_in_words() {
         &server,
         Some(&token),
         "tools/call",
-        json!({ "name": "takeoff", "arguments": { "set": set } }),
+        &json!({ "name": "takeoff", "arguments": { "set": set } }), // WHAT: the call, lent. WHY: only written into the request
     );
     let (text, _) = said(&answer);
     assert!(text.contains("SHORT:"), "{text}");
@@ -382,7 +382,7 @@ fn a_shape_with_no_unit_weight_never_comes_back_as_zero() {
         &server,
         Some(&token),
         "tools/call",
-        json!({ "name": "takeoff", "arguments": { "set": set.id } }),
+        &json!({ "name": "takeoff", "arguments": { "set": set.id } }), // WHAT: the call, lent. WHY: only written into the request
     );
     let (text, _) = said(&answer);
     assert!(text.contains("NO unit weight"), "{text}");
@@ -398,7 +398,7 @@ fn the_cut_list_refuses_to_pick_a_stock_length() {
         &server,
         Some(&token),
         "tools/call",
-        json!({ "name": "shop_list", "arguments": { "set": set } }),
+        &json!({ "name": "shop_list", "arguments": { "set": set } }), // WHAT: the call, lent. WHY: only written into the request
     );
     let (text, error) = said(&answer);
     assert!(!error, "{text}");
@@ -418,7 +418,7 @@ fn a_stock_length_that_was_given_gets_nested() {
         &server,
         Some(&token),
         "tools/call",
-        json!({ "name": "shop_list",
+        &json!({ "name": "shop_list", // WHAT: the call, lent. WHY: only written into the request
                 "arguments": { "set": set, "stock_length_feet": 40.0 } }),
     );
     let (text, _) = said(&answer);
@@ -436,7 +436,7 @@ fn the_double_check_says_plainly_that_it_changed_nothing() {
         &server,
         Some(&token),
         "tools/call",
-        json!({ "name": "counted_twice", "arguments": { "set": set } }),
+        &json!({ "name": "counted_twice", "arguments": { "set": set } }), // WHAT: the call, lent. WHY: only written into the request
     );
     let (text, _) = said(&answer);
     assert!(text.contains("NOTHING HAS BEEN CHANGED"), "{text}");
@@ -451,7 +451,7 @@ fn the_sheets_answer_names_the_ones_with_no_scale() {
         &server,
         Some(&token),
         "tools/call",
-        json!({ "name": "sheets", "arguments": { "set": set } }),
+        &json!({ "name": "sheets", "arguments": { "set": set } }), // WHAT: the call, lent. WHY: only written into the request
     );
     let (text, _) = said(&answer);
     assert!(text.contains("NO SCALE SET"), "sheet two has none: {text}");
@@ -466,7 +466,7 @@ fn asking_about_a_set_that_is_not_here_is_a_tool_error_not_a_crash() {
         &server,
         Some(&token),
         "tools/call",
-        json!({ "name": "takeoff", "arguments": { "set": "set_nonsense" } }),
+        &json!({ "name": "takeoff", "arguments": { "set": "set_nonsense" } }), // WHAT: the call, lent. WHY: only written into the request
     );
     let (text, error) = said(&answer);
     assert!(error, "{text}");
@@ -481,7 +481,7 @@ fn a_tool_that_does_not_exist_is_refused() {
         &server,
         Some(&token),
         "tools/call",
-        json!({ "name": "delete_everything", "arguments": {} }),
+        &json!({ "name": "delete_everything", "arguments": {} }), // WHAT: the call, lent. WHY: only written into the request
     );
     assert_eq!(answer["error"]["code"], -32602);
 }

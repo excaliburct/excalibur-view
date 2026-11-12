@@ -64,6 +64,7 @@ pub enum State {
 }
 
 impl State {
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn sharing(&self) -> bool {
         !matches!(self, State::Unlicensed | State::Beyond(_))
     }
@@ -111,13 +112,14 @@ fn pick_up_from_the_data_folder(server: &Server) {
     }
     let held = held(server, &trust(server)); // WHAT: the licence in use now. WHY: a file is never allowed to make it worse
     let (mut seen, list_known) = match server.store.setting(FOLDER_FILES_SEEN) {
-        Ok(Some(text)) => match serde_json::from_str::<Vec<String>>(&text) {
-            Ok(seen) => (seen, true), // WHAT: the list as kept. WHY: the usual case
-            Err(_) => {
+        Ok(Some(text)) => { // WHAT: a list kept. WHY: read
+            if let Ok(seen) = serde_json::from_str::<Vec<String>>(&text) { // WHAT: the list, if it reads. WHY: the usual case
+                (seen, true) // WHAT: the list as kept. WHY: the usual case
+            } else { // WHAT: a damaged list. WHY: fails closed
                 tracing::warn!("the list of licence files already used is damaged; no other licence is taken from the data folder this start"); // WHAT: said. WHY: fails closed, never open
                 (Vec::new(), false)
             }
-        },
+        }
         Ok(None) => (Vec::new(), held.is_none()), // WHAT: no list yet. WHY: the first start of this version; with a licence held, every file there is taken as already seen, so an old one can't go over it
         Err(why) => {
             tracing::warn!("could not read the list of licence files already used ({why}); no other licence is taken from the data folder this start"); // WHAT: said. WHY: fails closed
@@ -128,12 +130,13 @@ fn pick_up_from_the_data_folder(server: &Server) {
         .iter()
         .filter(|(_, _, fresh)| folder_file_wanted(held.as_ref(), fresh, seen.contains(&fingerprint(fresh)), list_known))
         .max_by(|a, b| newest_first(&a.2, &b.2).then_with(|| b.0.cmp(&a.0))); // WHAT: the newest of those wanted, and by name when two tie. WHY: one decision, the same at every start
-    match best {
-        Some((path, text, _)) => match install(server, text) {
+    if let Some((path, text, _)) = best { // WHAT: the one file wanted. WHY: installed, and said either way
+        match install(server, text) { // WHAT: the file installed. WHY: said either way
             Ok(license) => tracing::info!("license {}… for {} added from {}", license.id.chars().take(8).collect::<String>(), license.company, path.display()), // WHAT: said in the log, the id shortened. WHY: the whole id finds the licence file on the feed (audit, 2026-11-11)
             Err(why) => tracing::warn!("{} was not used: {why}", path.display()), // WHAT: said in the log. WHY: as before
-        },
-        None => tracing::info!("the licence files in the data folder are already in use, or older than the one this server holds; left alone"), // WHAT: said, nothing changed. WHY: a restart must never take seats or updates away
+        }
+    } else { // WHAT: no file wanted. WHY: said, nothing changed
+        tracing::info!("the licence files in the data folder are already in use, or older than the one this server holds; left alone"); // WHAT: said, nothing changed. WHY: a restart must never take seats or updates away
     }
     let used = best.map(|(path, _, _)| path.clone()); // WHAT: the file put in use, if any. WHY: every other different licence is said plainly below
     for (path, _, fresh) in &found {
@@ -167,6 +170,7 @@ fn pick_up_from_the_data_folder(server: &Server) {
 /// the list of what was seen can be trusted, in the same edition, and issued
 /// no earlier than the one held; so a file can never undo a later licence,
 /// and a change of edition is always somebody's own decision, made by hand.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn folder_file_wanted(held: Option<&License>, fresh: &License, seen_before: bool, list_known: bool) -> bool {
     match held {
         None => true, // WHAT: no licence in use. WHY: what a file in the data folder is for
@@ -202,7 +206,7 @@ fn fingerprint(license: &License) -> String {
     let mut hasher = Sha256::new();
     hasher.update(license.signing_payload()); // WHAT: what was signed. WHY: the licence itself, not how the file happens to be spaced
     hasher.update(license.signature.to_ascii_lowercase().as_bytes()); // WHAT: and its signature. WHY: the same signed licence, saved again with a BOM or CRLF, is the same
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    crate::store::hex(&hasher.finalize()) // WHAT: the digest as lower-case hex. WHY: the one hex writer the server has
 }
 
 /// Tells the `sealed` module what this server's license says, so everything
@@ -210,7 +214,7 @@ fn fingerprint(license: &License) -> String {
 /// Called as the server opens and again whenever a license is installed.
 pub fn settle_sealed(server: &Server) {
     let edition = held(server, &trust(server)).map(|l| l.edition);
-    hub::sealed::license_says(edition.map(|e| e.name()));
+    hub::sealed::license_says(edition.map(hub::license::Edition::name)); // WHAT: the held licence's edition, by name. WHY: decides whether the server is sealed
 }
 
 pub fn begin_at(server: &Server, now: &str, founding_before: &str) {
@@ -236,6 +240,10 @@ pub fn begin_at(server: &Server, now: &str, founding_before: &str) {
 
 /// Checks a license file and keeps it. The error is a sentence for whoever
 /// chose the file.
+///
+/// # Errors
+///
+/// A sentence saying why, when the file isn't a good license for this server or can't be kept.
 pub fn install(server: &Server, text: &str) -> Result<License, String> {
     install_with(server, text, &trust(server))
 }
@@ -288,11 +296,12 @@ pub fn renewal_url(server: &Server) -> Option<String> {
 /// The name a license is published under: the id put through SHA-256, so the
 /// address cannot be worked out from a company's name and the list of
 /// customers is not something anybody can walk.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn name_for(id: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(id.trim().as_bytes());
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    crate::store::hex(&hasher.finalize()) // WHAT: the digest as lower-case hex. WHY: the one hex writer the server has
 }
 
 /// Whether `fresh` is worth installing over `held`.
@@ -302,6 +311,7 @@ pub fn name_for(id: &str) -> String {
 /// forward, would cut a shop off in the middle of a bid because a file was
 /// stale — so it is refused, and a genuine reduction is installed by hand
 /// like everything else that ought to be somebody's decision.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn is_a_renewal(held: &License, fresh: &License) -> bool {
     if fresh.id != held.id || fresh.company != held.company {
         return false;
@@ -408,7 +418,7 @@ fn latest_seen(server: &Server, now: &str) -> String {
     };
     let seen = server.store.setting(SEEN).ok().flatten().and_then(|s| time::OffsetDateTime::parse(&s, &Rfc3339).ok()); // WHAT: the latest kept. WHY: compared below
     let believable = time::OffsetDateTime::parse(&format!("{BUILT}T00:00:00Z"), &Rfc3339).map_or(true, |built| at <= built + time::Duration::days(730)); // WHAT: no later than two years after this program was built. WHY: a clock set years ahead by mistake (a dead battery) must not end a trial for good
-    if believable && seen.map_or(true, |seen| at > seen + time::Duration::hours(1)) {
+    if believable && seen.is_none_or(|seen| at > seen + time::Duration::hours(1)) { // WHAT: a believable time, and the first or more than an hour past the latest. WHY: only then is it kept as the latest seen
         let _ = server.store.set_setting(SEEN, now); // WHAT: kept. WHY: the next look compares with it
     }
     match seen {
@@ -425,7 +435,7 @@ fn days_left(began: &str, now: &str) -> u32 {
         time::OffsetDateTime::parse(began, &Rfc3339),
         time::OffsetDateTime::parse(now, &Rfc3339),
     ) else {
-        return TRIAL_DAYS as u32;
+        return u32::try_from(TRIAL_DAYS).unwrap_or(u32::MAX); // WHAT: the full trial. WHY: a clock that can't be read never ends it early; thirty always fits
     };
     let ends = began + time::Duration::days(TRIAL_DAYS);
     if now >= ends {
@@ -433,14 +443,14 @@ fn days_left(began: &str, now: &str) -> u32 {
     }
     let left = (ends - now).whole_seconds();
     let days = (left + 86_399) / 86_400;
-    days.clamp(1, TRIAL_DAYS) as u32
+    u32::try_from(days.clamp(1, TRIAL_DAYS)).unwrap_or(1) // WHAT: the days left, one at least. WHY: held between one and the trial just above, so it always fits; the fallback is never reached
 }
 
 fn people(server: &Server) -> u32 {
     server
         .store
         .with(|db| Ok(db.query_row("SELECT count(*) FROM people", [], |r| r.get::<_, i64>(0))?))
-        .unwrap_or(0) as u32
+        .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX)) // WHAT: the people counted, nought when the count can't be read. WHY: as before; a count past four billion is held at the most, so it never wraps round to look like room on the license
 }
 
 /// Where the office stands, as the program shows it. Administrators see the
@@ -462,8 +472,8 @@ fn days_until(day: &str, now: &str) -> Option<i64> {
         return None;
     }
     let number = |range: std::ops::Range<usize>| day[range].parse::<i32>().ok();
-    let month = time::Month::try_from(number(5..7)? as u8).ok()?;
-    let end = time::Date::from_calendar_date(number(0..4)?, month, number(8..10)? as u8).ok()?;
+    let month = time::Month::try_from(u8::try_from(number(5..7)?).ok()?).ok()?; // WHAT: the month. WHY: two digits, checked by is_date, so it always fits a byte
+    let end = time::Date::from_calendar_date(number(0..4)?, month, u8::try_from(number(8..10)?).ok()?).ok()?; // WHAT: the last day. WHY: likewise; a 32nd day is still refused by the date itself
     let now = time::OffsetDateTime::parse(now, &Rfc3339).ok()?.date();
     Some((end - now).whole_days())
 }
@@ -491,6 +501,7 @@ fn renewal_note(license: &License, now: &str) -> Option<String> {
     }
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn standing_of(state: &State, users: u32, administrator: bool, company: Option<String>, now: &str) -> Standing {
     let buy_url = BUY_URL.to_string();
     match state {
@@ -609,6 +620,10 @@ fn covered_by(state: &State, published: &str) -> bool {
 }
 
 /// Whether there is room on the license for one more person.
+///
+/// # Errors
+///
+/// A sentence saying why, when the license has no room or can't be read.
 pub fn room_for_another(server: &Server) -> Result<(), String> {
     room_in(&state(server), people(server))
 }
@@ -627,6 +642,10 @@ fn room_in(state: &State, people: u32) -> Result<(), String> {
 }
 
 /// Whether new work can be shared through the server right now.
+///
+/// # Errors
+///
+/// A sentence saying why, when the license does not allow sharing now.
 pub fn sharing(server: &Server) -> Result<(), String> {
     match state(server) {
         State::Unlicensed => Err("This office's Excalibur View Office trial has ended, so sharing new work \
@@ -648,6 +667,7 @@ pub fn sharing(server: &Server) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::{Config, Store};
+    use ed25519_dalek::Signer; // WHAT: signing, for the test licences. WHY: named once for the module, not after statements in each test
 
     fn a_server() -> (Server, std::path::PathBuf) {
         let n: u64 = rand::random();
@@ -659,13 +679,13 @@ mod tests {
             Server {
                 store,
                 config,
-                updates: Default::default(),
-                patience: Default::default(),
-                tunnel: Default::default(),
-                manifests: Default::default(),
-                notices: Default::default(),
-                key_refusals_logged: Default::default(), // WHAT: none written. WHY: the new field, empty as on every start.
-                secure_port: Default::default(), // WHAT: no HTTPS. WHY: a test server
+                updates: crate::updates::Watch::default(), // WHAT: no update looked for. WHY: a test server
+                patience: crate::patience::Patience::default(), // WHAT: nobody owes a wait. WHY: a test server
+                tunnel: crate::tunnel::Tunnel::default(), // WHAT: no tunnel. WHY: a test server
+                manifests: std::sync::Mutex::default(), // WHAT: no manifests read. WHY: a test server
+                notices: crate::notices::Pending::default(), // WHAT: no notices waiting. WHY: a test server
+                key_refusals_logged: std::sync::Mutex::default(), // WHAT: none written. WHY: the new field, empty as on every start.
+                secure_port: std::sync::OnceLock::default(), // WHAT: no HTTPS. WHY: a test server
                 pin: std::sync::OnceLock::default(), // WHAT: no certificate. WHY: a test server
                 replays: crate::devices::Replays::default(), // WHAT: nothing seen. WHY: a test server
                 started: 0, // WHAT: the dawn of time. WHY: a test server takes any signature time
@@ -689,7 +709,6 @@ mod tests {
     }
 
     fn a_license(signing: &ed25519_dalek::SigningKey, users: u32, through: &str) -> String {
-        use ed25519_dalek::Signer;
         let mut license = License {
             id: "evl_test".into(),
             company: "Example Builders".into(),
@@ -703,7 +722,7 @@ mod tests {
             signature: String::new(),
         };
         license.signature =
-            signing.sign(&license.signing_payload()).to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+            crate::store::hex(&signing.sign(&license.signing_payload()).to_bytes()); // WHAT: signed with the test key, as hex. WHY: a licence the test server accepts
         serde_json::to_string(&license).unwrap()
     }
 
@@ -920,8 +939,7 @@ mod tests {
         let mut license: License = serde_json::from_str(&a_license(signing, users, through)).unwrap(); // WHAT: the usual test licence. WHY: only the id and key name differ
         license.id = id.into(); // WHAT: its id. WHY: a different licence, or a newer copy of one
         license.key = UNIT_KEY.into(); // WHAT: the test key's own name. WHY: the built-in mesafab-2026 would be found first and refuse it
-        use ed25519_dalek::Signer;
-        license.signature = signing.sign(&license.signing_payload()).to_bytes().iter().map(|b| format!("{b:02x}")).collect(); // WHAT: signed again. WHY: the id is in the signed text
+        license.signature = crate::store::hex(&signing.sign(&license.signing_payload()).to_bytes()); // WHAT: signed again. WHY: the id is in the signed text
         serde_json::to_string_pretty(&license).unwrap()
     }
 
@@ -964,8 +982,7 @@ mod tests {
         let mut license: License = serde_json::from_str(&a_license_called(signing, id, users, through)).unwrap(); // WHAT: the usual one. WHY: issued and edition changed below
         license.issued = issued.into(); // WHAT: its issue date. WHY: an older licence never wins over a newer one
         license.edition = edition; // WHAT: office or sealed. WHY: an edition change is never automatic
-        use ed25519_dalek::Signer;
-        license.signature = signing.sign(&license.signing_payload()).to_bytes().iter().map(|b| format!("{b:02x}")).collect(); // WHAT: signed again. WHY: both are in the signed text
+        license.signature = crate::store::hex(&signing.sign(&license.signing_payload()).to_bytes()); // WHAT: signed again. WHY: both are in the signed text
         serde_json::to_string_pretty(&license).unwrap()
     }
 
@@ -1036,7 +1053,7 @@ mod tests {
         let (signing, _) = issuer();
         let trusted = Trusted { keys: vec![(UNIT_KEY.into(), signing.verifying_key().to_bytes())] };
         let read = |text: String| License::read(&text, &trusted).unwrap();
-        let parts = |l: License, p: &[&str]| License { modules: p.iter().map(|m| m.to_string()).collect(), ..l }; // WHAT: the same licence with these parts. WHY: the rule reads only the fields, not the signature
+        let parts = |l: License, p: &[&str]| License { modules: p.iter().map(ToString::to_string).collect(), ..l }; // WHAT: the same licence with these parts. WHY: the rule reads only the fields, not the signature
         let held = parts(read(a_license_with(&signing, "evl_a", 6, "2027-11-01", "2026-10-01", Edition::Office)), &["cad"]); // WHAT: an office with CAD. WHY: the part that must not go
         let newer = read(a_license_with(&signing, "evl_b", 9, "2028-11-01", "2026-11-01", Edition::Office));
         assert!(!folder_file_wanted(Some(&held), &parts(newer.clone(), &[]), false, true), "another licence without CAD: by hand only");
@@ -1084,8 +1101,7 @@ mod tests {
         // WHAT: another company's licence, otherwise as good. WHY: audit, 2026-11-11: it swapped this office's licence from the folder
         let mut theirs: License = serde_json::from_str(&a_license_called(&signing, "evl_theirs", 9, "2028-11-01")).unwrap();
         theirs.company = "Some Other Steel, Inc.".into(); // WHAT: another company. WHY: the case
-        use ed25519_dalek::Signer;
-        theirs.signature = signing.sign(&theirs.signing_payload()).to_bytes().iter().map(|b| format!("{b:02x}")).collect(); // WHAT: signed again. WHY: the company is in the signed text
+        theirs.signature = crate::store::hex(&signing.sign(&theirs.signing_payload()).to_bytes()); // WHAT: signed again. WHY: the company is in the signed text
         assert!(!folder_file_wanted(Some(&held), &read(serde_json::to_string(&theirs).unwrap()), false, true), "another company's licence: no");
     }
 
@@ -1169,7 +1185,7 @@ mod renewal_tests {
     }
 
     fn with_parts(users: u32, through: &str, parts: &[&str]) -> License {
-        License { modules: parts.iter().map(|p| p.to_string()).collect(), ..a_license(users, through) } // WHAT: a licence with Office Server parts. WHY: the parts line in renewals
+        License { modules: parts.iter().map(ToString::to_string).collect(), ..a_license(users, through) } // WHAT: a licence with Office Server parts. WHY: the parts line in renewals
     }
 
     /// More seats bought through the shop come back signed without the parts

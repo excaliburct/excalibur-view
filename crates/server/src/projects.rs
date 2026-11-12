@@ -57,6 +57,10 @@ const PROJECT_COLUMNS: &str = "p.id, p.number, p.name, p.created,
 /// with `/` (a `\` is taken as one): each folder's name trimmed, none empty,
 /// none `.` or `..`, nothing that is not printable. Empty is none: the
 /// project's own, as before places. `what` names it in the refusal.
+///
+/// # Errors
+///
+/// A sentence naming `what`, when a folder's name is refused.
 pub fn folders(text: &str, what: &str) -> Result<Option<String>, String> {
     let text = text.trim();
     if text.is_empty() {
@@ -86,7 +90,7 @@ fn project_from_row(r: &rusqlite::Row) -> rusqlite::Result<Project> {
         number: r.get(1)?,
         name: r.get(2)?,
         created: r.get(3)?,
-        sets: r.get::<_, i64>(4)? as usize,
+        sets: crate::store::int::index(r.get(4)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
         reference: r.get(5)?,
         archived: r.get(6)?,
         place: r.get(7)?,
@@ -114,6 +118,10 @@ fn by_reference(db: &Connection, reference: &str) -> rusqlite::Result<Option<Pro
 // ---- the routes -----------------------------------------------------------
 
 /// `GET /projects` — the jobs, archived ones left off unless `?all=1`.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn list(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -156,6 +164,10 @@ pub async fn list(
 /// `POST /projects` — a new job, or, when it carries a reference that already
 /// has one, that one: brought back if it had been archived, and renamed if the
 /// other program has renamed it.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn create(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -230,6 +242,10 @@ pub async fn create(
 }
 
 /// `GET /projects/{id}`.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn one(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -264,6 +280,10 @@ pub async fn one(
 }
 
 /// `GET /projects/:id/people` — who is on it. Empty means everybody.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn who_is_on(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -296,6 +316,10 @@ pub struct WhoOnProject {
 ///
 /// Administrators only. Deciding who sees which job is the sort of thing that
 /// should not be doable by whoever happens to be on the job already.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn change_who_is_on(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -349,6 +373,10 @@ pub struct Placing {
 /// `POST /projects/{id}/place` — moves it in the Studio's list: a bid won
 /// goes to `Active Jobs`, a lost one to `Lost Bids/2026`. Its drawings,
 /// markups and takeoff are as they were.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn place(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -385,6 +413,10 @@ fn yes() -> bool {
 }
 
 /// `POST /projects/{id}/archive` — `{"archived": false}` brings it back.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn archive(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -429,6 +461,10 @@ pub struct Stamp {
 }
 
 /// `GET /projects/{id}/stamp`.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn stamp(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -448,6 +484,7 @@ pub async fn stamp(
 /// The stamp of what `sight` sees of a project: a set in a folder hidden from
 /// it changes nothing and counts for nothing.
 pub(crate) fn stamp_seen(db: &Connection, id: &str, sight: &crate::folders::Sight) -> anyhow::Result<Option<Stamp>> {
+    use sha2::Digest; // WHAT: hashing, for the stamp. WHY: named first, before the statements that use it
     let Some(project) = read_project(db, id)? else {
         return Ok(None);
     };
@@ -472,7 +509,6 @@ pub(crate) fn stamp_seen(db: &Connection, id: &str, sight: &crate::folders::Sigh
         markups += here; // WHAT: added. WHY: the project's total.
         carried += brought; // WHAT: added. WHY: likewise.
     }
-    use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
     for (set, revision, _) in &current {
         hasher.update(format!("{set}:{revision};").as_bytes());
@@ -483,8 +519,8 @@ pub(crate) fn stamp_seen(db: &Connection, id: &str, sight: &crate::folders::Sigh
         stamp,
         sets: current.len(),
         superseded: sets.len() - current.len(),
-        markups: markups as usize,
-        carried_forward: carried as usize,
+        markups: crate::store::int::index(markups), // WHAT: the count, as a length. WHY: count(*) is never negative
+        carried_forward: crate::store::int::index(carried), // WHAT: likewise. WHY: likewise
         archived: project.archived,
     }))
 }
@@ -511,6 +547,7 @@ pub(crate) fn same_drawing(
 
 /// Whether two folders are the same folder: case and spacing aside, as a
 /// share's folders are; none is only none.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn same_folder(a: Option<&str>, b: Option<&str>) -> bool {
     fn plain(f: &str) -> Vec<String> {
         f.split('/')
@@ -526,6 +563,7 @@ pub fn same_folder(a: Option<&str>, b: Option<&str>) -> bool {
 
 /// How two names for a drawing are compared: case, spacing and a trailing
 /// `.pdf` do not make it a different drawing.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn same_name(a: &str, b: &str) -> bool {
     fn plain(n: &str) -> String {
         let n = n.trim().to_lowercase();
@@ -595,12 +633,12 @@ pub(crate) fn carry_forward(
     to: &str,
     to_sheets: &[Sheet],
 ) -> anyhow::Result<(usize, Option<String>)> {
+    type Old = (String, i64, String, String, String, String, String, Vec<u8>); // WHAT: one markup's row, as read. WHY: named first, before the statements that use it
     let from_sheets = sheets_for(db, from)?;
     let mut statement = db.prepare(
         "SELECT id, page, subject, kind, caption, author, colour, dictionary
          FROM markups WHERE set_id = ?1 AND removed = 0 ORDER BY revision, id",
     )?;
-    type Old = (String, i64, String, String, String, String, String, Vec<u8>);
     let old: Vec<Old> = statement
         .query_map(params![from], |r| {
             Ok((
@@ -636,7 +674,7 @@ pub(crate) fn carry_forward(
     let mut carried = 0usize;
     let mut left: Vec<usize> = Vec::new();
     for (id, page, subject, kind, caption, author, colour, dictionary) in old {
-        let page_index = page as usize;
+        let page_index = crate::store::int::index(page); // WHAT: the page as an index. WHY: written from one
         let paper_matches = match (from_sheets.get(page_index), to_sheets.get(page_index)) {
             (Some(a), Some(b)) => same_paper(a, b),
             _ => false,
@@ -665,7 +703,7 @@ pub(crate) fn carry_forward(
                 colour,
                 when,
                 bytes,
-                revision as i64,
+                crate::store::int::signed(revision), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                 id
             ],
         )?;

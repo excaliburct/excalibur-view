@@ -43,6 +43,7 @@ pub struct SheetScale {
 /// Everything that works out a quantity on this server goes through here, so
 /// the takeoff, the cut list and the double-count check are all looking at the
 /// same measurements rather than three separate attempts at them.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn measured(
     markups: &[Stored],
     sheets: &[SheetScale],
@@ -63,14 +64,14 @@ pub fn measured(
         );
         let sheet = sheets
             .get(stored.page)
-            .map(|s| s.number.clone())
-            .unwrap_or_else(|| format!("Sheet {}", stored.page + 1));
+            .map_or_else(|| format!("Sheet {}", stored.page + 1), |s| s.number.clone()); // WHAT: the sheet's number, else its place. WHY: every row names its sheet
         rows.push((stored.id.clone(), row, sheet));
     }
     rows
 }
 
 /// Just the measurements, for the things that only want those.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn rows_of(markups: &[Stored], sheets: &[SheetScale]) -> Vec<Row> {
     measured(markups, sheets)
         .into_iter()
@@ -79,6 +80,10 @@ pub fn rows_of(markups: &[Stored], sheets: &[SheetScale]) -> Vec<Row> {
 }
 
 /// Measures everything and totals it.
+///
+/// # Errors
+///
+/// Fails when a markup can't be measured.
 pub fn takeoff(set: &str, revision: u64, markups: &[Stored], sheets: &[SheetScale]) -> Result<Takeoff> {
     let rows = measured(markups, sheets);
 
@@ -100,9 +105,9 @@ pub fn takeoff(set: &str, revision: u64, markups: &[Stored], sheets: &[SheetScal
             // Every measured field is absent, not zero, when there is no
             // scale. A zero in a JSON document is a measurement; a null is an
             // admission.
-            length_feet: row.scaled.then(|| row.length).flatten(),
-            area_square_feet: row.scaled.then(|| row.area).flatten(),
-            volume_cubic_feet: row.scaled.then(|| row.volume).flatten(),
+            length_feet: row.scaled.then_some(row.length).flatten(), // WHAT: the length, only with a scale. WHY: a null is an admission, a zero a measurement
+            area_square_feet: row.scaled.then_some(row.area).flatten(), // WHAT: the area, likewise. WHY: the same
+            volume_cubic_feet: row.scaled.then_some(row.volume).flatten(), // WHAT: the volume, likewise. WHY: the same
             pounds: row.pounds(WEIGHTS),
         })
         .collect();
@@ -110,8 +115,7 @@ pub fn takeoff(set: &str, revision: u64, markups: &[Stored], sheets: &[SheetScal
     let name_of = |page: usize| {
         sheets
             .get(page)
-            .map(|s| s.number.clone())
-            .unwrap_or_else(|| format!("Sheet {}", page + 1))
+            .map_or_else(|| format!("Sheet {}", page + 1), |s| s.number.clone()) // WHAT: the sheet's number, else its place. WHY: every row names its sheet
     };
 
     let groups = summary
@@ -145,6 +149,7 @@ pub fn takeoff(set: &str, revision: u64, markups: &[Stored], sheets: &[SheetScal
 }
 
 /// Parses a stored annotation dictionary back into a markup.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn read_markup(bytes: &[u8]) -> Option<Markup> {
     let mut reader = pdf::Reader::new(bytes); // WHAT: a reader over the markup's bytes. WHY: asked afterwards whether it went too deep.
     let object = reader.object().ok()?;
@@ -157,6 +162,7 @@ pub fn read_markup(bytes: &[u8]) -> Option<Markup> {
 
 /// Serialises a markup for storage: the dictionary exactly as it would be
 /// written into the drawing.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn write_markup(markup: &Markup) -> Vec<u8> {
     let mut out = Vec::new();
     pdf::write::write_object(&pdf::Object::Dict(markup.dict.clone()), &mut out);
@@ -164,6 +170,7 @@ pub fn write_markup(markup: &Markup) -> Vec<u8> {
 }
 
 /// The CSV a spreadsheet wants, from the same rows.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn to_csv(markups: &[Stored], sheets: &[SheetScale], columns: &[Column]) -> String {
     let mut rows = Vec::new();
     for stored in markups {
@@ -181,8 +188,7 @@ pub fn to_csv(markups: &[Stored], sheets: &[SheetScale], columns: &[Column]) -> 
     let name_of = |page: usize| {
         sheets
             .get(page)
-            .map(|s| s.number.clone())
-            .unwrap_or_else(|| format!("Sheet {}", page + 1))
+            .map_or_else(|| format!("Sheet {}", page + 1), |s| s.number.clone()) // WHAT: the sheet's number, else its place. WHY: every row names its sheet
     };
     let mut out = takeoff::summary::to_csv_with(&rows, columns, WEIGHTS, &name_of);
     let summary = takeoff::summarise(&rows, WEIGHTS);

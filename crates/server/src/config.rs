@@ -126,6 +126,7 @@ impl Default for Config {
 /// a different "start in". When the program's own folder cannot be written
 /// to, which is the ordinary case for `/usr/local/bin`, it falls back to the
 /// working directory and says so by simply using it.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn beside_the_program() -> PathBuf {
     let here = std::env::current_exe()
         .ok()
@@ -143,6 +144,7 @@ pub fn beside_the_program() -> PathBuf {
 impl Config {
     /// Reads the environment. Everything has a working default, so the first
     /// run needs no configuration at all.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn from_environment() -> Config {
         let mut config = Config::default();
         if let Ok(name) = std::env::var("HYPERVIEW_NAME") {
@@ -192,22 +194,29 @@ impl Config {
         config
     }
 
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn database(&self) -> PathBuf {
         self.data.join("hyperview.sqlite")
     }
 
     /// Drawings and chests, kept by the digest of their contents so the same
     /// file uploaded twice is stored once.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn blobs(&self) -> PathBuf {
         self.data.join("files")
     }
 
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn releases(&self) -> PathBuf {
         self.data.join("releases")
     }
 }
 
 /// `HYPERVIEW_HTTPS_ONLY` read: `on` or `off` in any case, unset meaning off; anything else is `Err` with the value.
+///
+/// # Errors
+///
+/// The value itself, when it is neither `on` nor `off`.
 pub fn https_only_from(value: Option<&str>) -> Result<bool, String> {
     match value.map(|v| v.trim().to_ascii_lowercase()) {
         None => Ok(false), // WHAT: not set. WHY: off, as every server before 0.7.0
@@ -233,7 +242,7 @@ mod tests {
         // No browser may call it until somebody says which one, because the
         // clients are desktop programs and a wide-open origin list on a server
         // holding a company's drawings is nobody's idea of a default.
-        assert!(config.allow_origins.is_empty());
+        assert_eq!(config.allow_origins, Vec::<String>::new()); // WHAT: no browser origin allowed. WHY: a failure shows which one was
         // And no maintenance channel until somebody sets a key for one.
         assert!(config.maintenance_key.is_none());
     }

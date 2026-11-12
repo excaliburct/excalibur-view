@@ -62,6 +62,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// when it takes a release, and every seat checks it again before it runs one.
 /// An empty list refuses everything, which is how a build ships until a key is
 /// compiled into it.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn trusted() -> hub::update::Trusted {
     hub::update::Trusted::pinned(KEYS)
 }
@@ -72,6 +73,7 @@ pub fn trusted() -> hub::update::Trusted {
 /// Kept apart from [`trusted`] on purpose. A licence key lives where it can
 /// sign at three in the morning without anybody, and that is only safe because
 /// nothing but a licence is ever checked against it.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn license_trust() -> hub::update::Trusted {
     let mut trust = hub::update::Trusted::pinned(KEYS);
     trust.keys.extend(hub::update::Trusted::pinned(LICENSE_KEYS).keys);
@@ -81,6 +83,7 @@ pub fn license_trust() -> hub::update::Trusted {
 /// The keys a plugin may be signed with: every release key, and the keys made
 /// for plugins alone. The same pair a seat checks against, so a plugin the
 /// server takes is one every seat will load.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn plugin_trust() -> hub::update::Trusted {
     plugin_trust_from(KEYS, PLUGIN_KEYS)
 }

@@ -754,8 +754,7 @@ fn let_in(route: &Route, knock: Knock) -> bool {
             Knock::Estimator | Knock::Admin | Knock::Integration | Knock::DemotedProgram
         ), // WHAT: anybody who may change drawings. WHY: a viewer reads only.
         Door::Person => matches!(knock, Knock::Viewer | Knock::Estimator | Knock::Admin), // WHAT: a person signed in. WHY: a key can't make keys, change a password or sign out.
-        Door::Admin => knock == Knock::Admin, // WHAT: an administrator with a password. WHY: no key runs the server.
-        Door::Folders => knock == Knock::Admin, // WHAT: an administrator; the sync key is let in by the list above. WHY: who sees a folder is theirs to say.
+        Door::Admin | Door::Folders => knock == Knock::Admin, // WHAT: an administrator with a password; for folders the sync key is let in by the list above. WHY: no key runs the server, and who sees a folder is theirs to say.
         Door::Device => false, // WHAT: nobody here holds a device key. WHY: a session or a key never stands in for one
     }
 }
@@ -1085,6 +1084,7 @@ fn things(office: &Office) -> Things {
 
 /// The path and body for one route, made fresh: a person to remove, a key
 /// to take back, an invitation to drop.
+#[allow(clippy::too_many_lines)] // WHAT: the body each route is knocked with, one arm per route. WHY: a table; split, a route would have to be looked for in two places
 fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Body) {
     let fresh_person = || {
         let id = format!("usr_probe_{n}"); // WHAT: a throwaway person. WHY: a removal or role change must not touch the people knocking.
@@ -1140,7 +1140,7 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
         ("POST", "/join") => Body::Json(
             json!({"code": things.join, "name": "Joiner", "email": format!("{unique}@example.com"), "password": PASSWORD}),
         ),
-        ("POST", "/admin/joining") => Body::Json(json!({})),
+        ("POST", "/admin/joining" | "/sets/{id}/copy") => Body::Json(json!({})), // WHAT: an empty object. WHY: both routes take one with nothing in it
         ("POST", "/admin/invites") => {
             Body::Json(json!({"email": format!("{unique}@example.com"), "role": "viewer"}))
         }
@@ -1152,7 +1152,7 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
             Body::Json(json!({"token": "short", "hostname": "drawings.example.com"}))
         }
         ("POST", "/projects") => Body::Json(json!({"number": unique, "name": "Probe"})),
-        ("POST", "/projects/{id}/people") => Body::Json(json!({"person": VIEWER, "on": false})),
+        ("POST", "/projects/{id}/people" | "/groups/{id}/people") => Body::Json(json!({"person": VIEWER, "on": false})), // WHAT: the viewer taken off. WHY: both routes take a person and on or off
         ("POST", "/projects/{id}/archive") => Body::Json(json!({"archived": false})),
         ("POST", "/projects/{id}/place") => Body::Json(json!({"place": ""})),
         ("POST", "/sets") => form(
@@ -1160,12 +1160,11 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
             Some(("S-101.pdf", &a_drawing())),
         ),
         ("POST", "/sets/{id}/markups") => Body::Json(json!([])),
-        ("POST", "/sets/{id}/copy") => Body::Json(json!({})),
         ("POST", "/people") => Body::Json(
             json!({"name": "New", "email": format!("{unique}@example.com"), "password": PASSWORD, "role": "viewer"}),
         ),
         ("POST", "/people/{id}/role") => Body::Json(json!({"role": "estimator"})),
-        ("POST", "/chests") => form(&[], None),
+        ("POST", "/chests" | "/admin/releases") => form(&[], None), // WHAT: an empty form. WHY: both routes take a multipart form
         ("POST", "/plugins") => {
             Body::Raw("application/octet-stream".into(), b"not a plugin".to_vec())
         }
@@ -1173,10 +1172,8 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
         ("POST", "/notices") => Body::Json(json!({"url": "http://127.0.0.1:9/hook"})),
         ("POST", "/license") => Body::Json(json!({"license": "not a license"})),
         ("POST", "/admin/pin") => Body::Json(json!({"version": ""})),
-        ("POST", "/admin/releases") => form(&[], None),
         ("POST", "/admin/releases/{version}/ready") => Body::Json(json!({"ready": false})),
         ("POST", "/groups") => Body::Json(json!({"name": "Field"})),
-        ("POST", "/groups/{id}/people") => Body::Json(json!({"person": VIEWER, "on": false})),
         ("POST", "/projects/{id}/folders") => Body::Json(json!({"folders": ["Probe"]})),
         ("POST", "/files") => form(
             &[("project", &things.project)],
@@ -1188,7 +1185,7 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
         ("POST", "/signoffs/{id}/sign") => {
             Body::Json(json!({"name": "Knock", "strokes": [[[1.0, 1.0], [9.0, 9.0]]]}))
         }
-        ("POST", "/files/{id}/folder") | ("POST", "/sets/{id}/folder") => {
+        ("POST", "/files/{id}/folder" | "/sets/{id}/folder") => { // WHAT: a folder to move to. WHY: both routes take one
             Body::Json(json!({"folder": null}))
         }
         ("POST", "/cad/drawings") | ("PUT", "/cad/drawings/{id}/file") => Body::Raw("application/octet-stream".into(), b"a drawing".to_vec()), // WHAT: a drawing's bytes. WHY: what CAD sends
@@ -1197,7 +1194,7 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
         ("POST", "/archetype/jobs/{id}/checkin") => Body::Json(json!({"base_revision": 0, "files": [], "machine": "PROBE"})),
         ("POST", "/archetype/files/missing") => Body::Json(json!({"digests": []})),
         ("PUT", "/archetype/files/{digest}") => Body::Raw("application/octet-stream".into(), b"x".to_vec()),
-        ("POST", _) | ("DELETE", _) => Body::Raw("application/json".into(), Vec::new()), // WHAT: nothing in the body. WHY: the routes that take none.
+        ("POST" | "DELETE", _) => Body::Raw("application/json".into(), Vec::new()), // WHAT: nothing in the body. WHY: the routes that take none.
         _ => Body::None,
     };
     (format!("/api/v1{path}"), body)
@@ -1224,16 +1221,16 @@ fn every_route_lets_in_exactly_the_callers_its_door_is_for() {
     );
 
     // WHAT: the sync column is the server's own list. WHY: two lists that disagree are a door left open.
-    let sync_here: BTreeSet<String> = TABLE
+    let sync_in_table: BTreeSet<String> = TABLE // WHAT: the routes the table lets a sync key through. WHY: compared with the server's own list
         .iter()
         .filter(|r| r.sync)
         .map(|r| format!("{} {}", r.method, r.path.replace("{id}", ":id")))
         .collect();
-    let sync_there: BTreeSet<String> = api::SYNC_ROUTES
+    let sync_in_server: BTreeSet<String> = api::SYNC_ROUTES // WHAT: the server's own list of them. WHY: likewise
         .iter()
         .map(|(m, p)| format!("{m} {p}"))
         .collect();
-    assert_eq!(sync_here, sync_there, "the sync key's list");
+    assert_eq!(sync_in_table, sync_in_server, "the sync key's list"); // WHAT: the two lists agree. WHY: two lists that disagree are a door left open
 
     let mut wrong = Vec::new(); // WHAT: every door that let in the wrong caller or shut out the right one. WHY: all reported at once.
     let mut fell_over = Vec::new(); // WHAT: every answer of 500 or more. WHY: a broken door is a finding too.

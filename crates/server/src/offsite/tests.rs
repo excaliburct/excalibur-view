@@ -190,7 +190,7 @@ fn the_keep_rule_is_7_4_12_counting_tonight_and_touches_nothing_else() {
     assert!(
         !p.deletes
             .iter()
-            .any(|(_, n)| n == "stranger.bin" || n.ends_with(".json") || *n == day(10)),
+            .any(|(_, n)| n == "stranger.bin" || std::path::Path::new(n).extension().is_some_and(|x| x == "json") || *n == day(10)), // WHAT: none of the three. WHY: a stranger, a sidecar and tonight's are never deleted
         "never a stranger, a sidecar or tonight's"
     ); // WHAT: nothing else. WHY: only our names are pruned.
     let later = |m: u32| format!("view-20261110-01{m:02}00.tar.gz.age"); // WHAT: names minutes after tonight's. WHY: a clock set back an hour, within the day the keep rule believes.
@@ -266,7 +266,7 @@ fn tar_of(entries: &[(&[u8; 100], u8, &[u8])]) -> Vec<u8> {
         h[156] = *kind;
         h[257..263].copy_from_slice(b"ustar\0");
         h[148..156].copy_from_slice(b"        ");
-        let s: u32 = h.iter().map(|&b| b as u32).sum();
+        let s: u32 = h.iter().map(|&b| u32::from(b)).sum(); // WHAT: the header's checksum, each byte widened. WHY: as ustar sums it
         h[148..156].copy_from_slice(format!("{s:06o}\0 ").as_bytes());
         out.extend_from_slice(&h);
         out.extend_from_slice(body);
@@ -413,7 +413,7 @@ fn a_good_night_sends_only_encrypted_bytes_reads_them_back_and_marks_it() {
     ); // WHAT: two objects. WHY: one per file.
     for f in files_in(&w.bucket) {
         let b = std::fs::read(&f).unwrap();
-        let side = f.extension().map(|x| x == "json").unwrap_or(false); // WHAT: every object. WHY: nothing may leave in the clear.
+        let side = f.extension().is_some_and(|x| x == "json"); // WHAT: every object. WHY: nothing may leave in the clear.
         if !side {
             assert!(
                 b.starts_with(b"FAKEAGE1"),
@@ -464,6 +464,7 @@ fn a_good_night_sends_only_encrypted_bytes_reads_them_back_and_marks_it() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // WHAT: one test, read top to bottom. WHY: a scenario split into pieces reads worse than one that is long
 fn the_drill_restores_into_scratch_checks_everything_and_fails_when_it_should() {
     let w = world();
     assert_eq!(job(&w).backup().code, 0); // WHAT: a backup to drill. WHY: the setup.
@@ -477,9 +478,9 @@ fn the_drill_restores_into_scratch_checks_everything_and_fails_when_it_should() 
             && list_blobs(&restored.join("files")).unwrap().len() == 2,
         "a full, usable data folder"
     ); // WHAT: the database and both files. WHY: a real restore copies this into place.
-    let s =
-        crate::Store::open(&restored.join("hyperview.sqlite"), &restored.join("files")).unwrap();
-    let n: i64 = s
+    let store = // WHAT: the restored data, opened as the server does. WHY: read below
+        crate::Store::open(&restored.join("hyperview.sqlite"), &restored.join("files")).unwrap(); // WHAT: the restored data, opened as the server does. WHY: read below
+    let structural: i64 = store // WHAT: how many sets are called Structural. WHY: the one record the test made
         .with(|db| {
             Ok(db.query_row(
                 "SELECT count(*) FROM sets WHERE name='Structural'",
@@ -488,7 +489,7 @@ fn the_drill_restores_into_scratch_checks_everything_and_fails_when_it_should() 
             )?)
         })
         .unwrap();
-    assert_eq!(n, 1, "the record is there"); // WHAT: open it as the server does. WHY: the data is really back.
+    assert_eq!(structural, 1, "the record is there"); // WHAT: open it as the server does. WHY: the data is really back.
     assert!(
         report(&w.data).restore_tested.is_some(),
         "restoreTested is set"
@@ -519,8 +520,8 @@ fn the_drill_restores_into_scratch_checks_everything_and_fails_when_it_should() 
         .unwrap();
     let good = std::fs::read(&cat).unwrap();
     let mut bad = good.clone();
-    let n = bad.len() - 3;
-    bad[n] ^= 0xff; // WHAT: the catalog, one byte flipped. WHY: a damaged download.
+    let flipped = bad.len() - 3; // WHAT: a byte near the end. WHY: inside the encrypted body
+    bad[flipped] ^= 0xff; // WHAT: the catalog, one byte flipped. WHY: a damaged download.
     for f in ["daily", "weekly", "monthly"] {
         std::fs::write(w.bucket.join(f).join(cat.file_name().unwrap()), &bad).unwrap();
     } // WHAT: damage every copy. WHY: the drill takes the newest anywhere.
@@ -664,7 +665,7 @@ fn a_damaged_file_on_disk_is_never_sent_as_good_and_is_said() {
     );
     assert!(std::fs::read_to_string(w.work.join("view/offsite.log"))
         .unwrap()
-        .contains(&format!("{:.12} on disk doesn't match", d))); // WHAT: not sent, and said. WHY: never damaged bytes as good ones.
+        .contains(&format!("{d:.12} on disk doesn't match"))); // WHAT: not sent, and said. WHY: never damaged bytes as good ones.
 }
 
 #[test]
@@ -916,7 +917,7 @@ fn the_command_refuses_what_it_doesnt_know_and_says_when_it_isnt_set_up() {
         data: w.data.clone(),
         ..crate::Config::default()
     };
-    let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>(); // WHAT: a server with no off-site settings. WHY: the command reads the server's settings.
+    let a = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>(); // WHAT: a server with no off-site settings. WHY: the command reads the server's settings.
     assert_eq!(
         main_from_args(&VIEW, &cfg, "9.9.9", &a(&["--offsite-backup"])),
         4,
@@ -1062,6 +1063,7 @@ fn plant(w: &World, name: &str, edit: impl FnOnce(&mut serde_json::Value), pad: 
 
 #[test]
 fn a_planted_manifest_or_an_oversized_sidecar_is_refused_before_it_steers_anything() {
+    type Edit = Box<dyn FnOnce(&mut serde_json::Value)>; // WHAT: one change to a manifest. WHY: named, so the list reads plainly.
     let w = world();
     assert_eq!(job(&w).backup().code, 0); // WHAT: a real backup. WHY: plants are made from it.
     let soon = |m: i64| {
@@ -1070,7 +1072,6 @@ fn a_planted_manifest_or_an_oversized_sidecar_is_refused_before_it_steers_anythi
             time::OffsetDateTime::now_utc() + time::Duration::minutes(m),
         )
     }; // WHAT: a name newer than the real ones. WHY: the drill picks the newest.
-    type Edit = Box<dyn FnOnce(&mut serde_json::Value)>; // WHAT: one change to a manifest. WHY: named, so the list reads plainly.
     let cases: Vec<(&str, Edit, usize)> = vec![
         // WHAT: each planted manifest. WHY: each must be refused.
         (
@@ -1105,7 +1106,7 @@ fn a_planted_manifest_or_an_oversized_sidecar_is_refused_before_it_steers_anythi
         ),
     ];
     for (i, (why, edit, pad)) in cases.into_iter().enumerate() {
-        let n = soon(10 + i as i64);
+        let n = soon(10 + i64::try_from(i).unwrap()); // WHAT: a minute apart for each case. WHY: each planted name is its own
         plant(&w, &n, edit, pad);
         let e = drill(&w, &w.id, &format!("s-plant{i}")).run();
         assert_eq!(e.code, 2, "{why}: {e:?}");
@@ -1225,7 +1226,7 @@ fn a_run_by_hand_to_another_target_marks_nothing() {
         marks(
             Some(&folder.to_string_lossy()),
             None,
-            Some(&format!("{}/../bucket", wk)),
+            Some(&format!("{wk}/../bucket")), // WHAT: the same bucket by a longer path. WHY: the case
             None
         ),
         "a folder target is the same place by any path"
@@ -1400,6 +1401,7 @@ fn a_folder_the_link_check_cannot_read_is_a_refusal() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // WHAT: one test, read top to bottom. WHY: a scenario split into pieces reads worse than one that is long
 fn a_work_folder_others_could_change_is_refused() {
     #[cfg(windows)]
     {
@@ -1450,7 +1452,7 @@ fn a_work_folder_others_could_change_is_refused() {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
             std::thread::sleep(WAIT); // WHAT: open one to other accounts. WHY: each is checked.
             let e = job(&w).backup();
-            let d = drill(&w, &w.id, &format!("s-open-{}", mode)).run();
+            let d = drill(&w, &w.id, &format!("s-open-{mode}")).run(); // WHAT: a drill under this mode. WHY: it refuses too
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(was)).unwrap(); // WHAT: a backup and a drill, then put back. WHY: both refuse.
             assert_eq!(e.code, 2, "{what}: {e:?}");
             assert!(
@@ -1670,7 +1672,7 @@ fn with_real_age_the_backup_cannot_be_read_without_the_private_key() {
     assert_eq!(e.code, 0, "{e:?}"); // WHAT: a real backup. WHY: the baseline.
     let objects: Vec<_> = files_in(&w.bucket)
         .into_iter()
-        .filter(|p| p.extension().map(|x| x == "age").unwrap_or(false))
+        .filter(|p| p.extension().is_some_and(|x| x == "age")) // WHAT: the encrypted ones. WHY: tampered with below
         .collect();
     assert!(objects.len() >= 3); // WHAT: the encrypted objects. WHY: catalog copies and files.
     for o in &objects {
@@ -1784,7 +1786,7 @@ fn a_target_that_cant_be_read_or_has_a_broken_marker_is_never_adopted() {
     assert_eq!(e.code, 2, "{e:?}");
     assert!(e.why.contains("owner-view.json"), "{}", e.why);
     assert!(!w.bucket.join("daily").exists(), "nothing sent"); // WHAT: refused first. WHY: the guard runs before the upload
-    std::fs::write(w.bucket.join("owner-view.json"), vec![b' '; (OWNER_CAP + 1) as usize]).unwrap(); // WHAT: a giant one. WHY: refused unfetched
+    std::fs::write(w.bucket.join("owner-view.json"), vec![b' '; usize::try_from(OWNER_CAP + 1).unwrap()]).unwrap(); // WHAT: a giant one. WHY: refused unfetched
     let e = job(&w).backup();
     assert_eq!(e.code, 2, "{e:?}");
     assert!(e.why.contains("over the"), "{}", e.why);

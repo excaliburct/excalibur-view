@@ -59,6 +59,7 @@ pub const KEY_HEADER: &str = "x-av-update-key";
 /// Where the digest of a Fleet key an administrator turned on is kept.
 pub const FLEET_KEY: &str = "fleet_key_digest";
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn key_digest(key: &str) -> String {
     use sha2::{Digest, Sha256};
     crate::store::hex(&Sha256::digest(key.trim().as_bytes()))
@@ -66,6 +67,10 @@ pub fn key_digest(key: &str) -> String {
 
 /// Lets the Fleet in with a new key, or shuts the door. Returns the key, once:
 /// it is not kept anywhere it can be read back.
+///
+/// # Errors
+///
+/// Fails when the setting can't be written.
 pub fn set_fleet_access(server: &Server, on: bool) -> anyhow::Result<Option<String>> {
     if !on {
         server.store.set_setting(FLEET_KEY, "")?;
@@ -91,7 +96,7 @@ pub fn fleet_is_on(server: &Server) -> bool {
 // ---- what it says about itself --------------------------------------------
 
 #[derive(Serialize)]
-struct Version {
+struct Running { // WHAT: what the server says it is running. WHY: named for what it holds, so its `version` field doesn't repeat the type's name; the wire names are the fields' and are unchanged
     /// What is *running*, always. Not what is staged, not what is on offer to
     /// the seats — the Fleet asserts a rollout worked by reading this back, so
     /// a hopeful answer here would turn a failed update into a green board.
@@ -227,8 +232,8 @@ pub fn router(server: Shared) -> Router {
         .with_state(server)
 }
 
-async fn version(State(server): State<Shared>) -> Json<Version> {
-    Json(Version {
+async fn version(State(server): State<Shared>) -> Json<Running> { // WHAT: the running version, as JSON. WHY: the Fleet reads it back
+    Json(Running { // WHAT: the answer. WHY: the same fields as before
         version: VERSION.to_string(),
         wave: match crate::updates::office_channel(&server) {
             hub::update::Channel::Preview => "early".into(),
@@ -273,8 +278,7 @@ async fn ops(State(server): State<Shared>, headers: HeaderMap) -> Result<Json<Op
         },
         service_log_bytes: log_file(&server.config.data)
             .and_then(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len())
-            .unwrap_or(0),
+            .map_or(0, |m| m.len()), // WHAT: the service log's size, nought when there is none. WHY: shown on the board
         route_failures: Vec::new(),
         parts: crate::office::parts(&server), // WHAT: each part, read now. WHY: the board shows what runs, never what was hoped
         drawings,
@@ -308,7 +312,7 @@ async fn logtail(
             lines: vec!["This server is not writing to a log file.".into()],
         }));
     };
-    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let bytes = std::fs::metadata(&path).map_or(0, |m| m.len()); // WHAT: the log's size, nought when it can't be read. WHY: the tail is read from near its end
     // Only the tail is read. A crash loop can make this file enormous, and
     // reading all of it to show the last two hundred lines is how asking a
     // sick machine a question makes it sicker.
@@ -390,6 +394,7 @@ async fn update(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<Landed>, No> {
+    use base64::Engine; // WHAT: base64 decoding for the installer. WHY: named first, before the statements that use it
     maintainer(&server, &headers)?; // WHAT: the maintenance key, first. WHY: nothing of the body has been read yet, so a caller without the key costs the server nothing.
     let bytes = read_push(&headers, body).await?; // WHAT: the push, read up to its limit. WHY: a real push is tens of megabytes, and one too big is refused with a plain 413.
     let Ok(push) = serde_json::from_slice::<Push>(&bytes) else {
@@ -397,7 +402,6 @@ async fn update(
     };
     drop(bytes); // WHAT: lets go of the raw body. WHY: the installer is now in `push`, and holding both would double what the push costs in memory.
 
-    use base64::Engine;
     let Ok(installer) = base64::engine::general_purpose::STANDARD.decode(push.installer.as_bytes())
     else {
         return Ok(Json(refused("the installer was not readable")));
@@ -435,12 +439,12 @@ async fn update(
                 push.release.platform,
                 push.release.published,
                 push.release.notes,
-                push.release.bytes as i64,
+                crate::store::int::signed(push.release.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                 digest,
                 push.release.signature,
                 push.release.key,
-                push.release.minimum_api_version as i64,
-                if push.ready { 1 } else { 0 }
+                i64::from(push.release.minimum_api_version), // WHAT: widened, never cut. WHY: every one of these fits a 64-bit number
+                i32::from(push.ready) // WHAT: ready as 1 or 0. WHY: SQLite has no true or false
             ],
         )?;
         Ok(())
@@ -490,7 +494,7 @@ async fn read_push(headers: &HeaderMap, mut body: Body) -> Result<Vec<u8>, No> {
         read_past(&mut body, budget).await; // WHAT: reads that much into nothing. WHY: so a caller still sending is listening when the 413 comes.
         return Err(No(StatusCode::PAYLOAD_TOO_LARGE, TOO_BIG)); // WHAT: refused for its size. WHY: a clear answer that says what is wrong.
     }
-    let mut kept = Vec::with_capacity(declared.unwrap_or(0) as usize); // WHAT: room for what it says it is sending. WHY: under the limit, by the check above, so one allocation instead of many.
+    let mut kept = Vec::with_capacity(usize::try_from(declared.unwrap_or(0)).unwrap_or(0)); // WHAT: room for what it says it is sending. WHY: under the limit, by the check above, so one allocation instead of many.
     while let Some(chunk) = next_chunk(&mut body).await {
         let Ok(chunk) = chunk else {
             return Err(No(StatusCode::BAD_REQUEST, "the push did not arrive whole")); // WHAT: a body that broke off. WHY: half an installer is never taken.
@@ -574,25 +578,22 @@ async fn rollback(
             // release is one thing that happened to be built twice, and an
             // office left offering half of it is an office where the Macs and
             // the Windows machines are on different versions of the program.
-            match only.as_deref() {
-                Some(platform) => {
-                    db.execute(
-                        "UPDATE releases SET ready = 0 WHERE version = ?1 AND platform = ?2",
-                        params![version, platform],
-                    )?;
-                    platforms.push(platform.to_string());
-                }
-                None => {
-                    let mut listing = db
-                        .prepare("SELECT platform FROM releases WHERE version = ?1 AND ready = 1")?;
-                    platforms = listing
-                        .query_map(params![version], |r| r.get::<_, String>(0))?
-                        .collect::<Result<Vec<_>, _>>()?;
-                    db.execute(
-                        "UPDATE releases SET ready = 0 WHERE version = ?1",
-                        params![version],
-                    )?;
-                }
+            if let Some(platform) = only.as_deref() { // WHAT: one platform named. WHY: only that one is withdrawn
+                db.execute(
+                    "UPDATE releases SET ready = 0 WHERE version = ?1 AND platform = ?2",
+                    params![version, platform],
+                )?;
+                platforms.push(platform.to_string());
+            } else { // WHAT: none named. WHY: every platform of the version is withdrawn, as above
+                let mut listing = db
+                    .prepare("SELECT platform FROM releases WHERE version = ?1 AND ready = 1")?;
+                platforms = listing
+                    .query_map(params![version], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                db.execute(
+                    "UPDATE releases SET ready = 0 WHERE version = ?1",
+                    params![version],
+                )?;
             }
         }
         Ok(newest.filter(|_| !platforms.is_empty()).map(|v| (v, platforms)))
@@ -665,7 +666,7 @@ fn folder_size(path: &std::path::Path) -> u64 {
             .flatten()
             .map(|e| match e.file_type() {
                 Ok(t) if t.is_dir() => walk(&e.path(), depth + 1),
-                Ok(_) => e.metadata().map(|m| m.len()).unwrap_or(0),
+                Ok(_) => e.metadata().map_or(0, |m| m.len()), // WHAT: a file's size, nought when it can't be read. WHY: added up for the folder
                 Err(_) => 0,
             })
             .sum()
@@ -735,7 +736,7 @@ fn last_lines(path: &std::path::Path, n: usize) -> Vec<String> {
     let Ok(mut file) = std::fs::File::open(path) else {
         return Vec::new();
     };
-    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let size = file.metadata().map_or(0, |m| m.len()); // WHAT: the log's size, nought when it can't be read. WHY: the tail starts this far from its end
     let from = size.saturating_sub(want);
     if file.seek(SeekFrom::Start(from)).is_err() {
         return Vec::new();
@@ -745,7 +746,7 @@ fn last_lines(path: &std::path::Path, n: usize) -> Vec<String> {
         // A log with something that is not text in it should still answer.
         return vec!["(the log could not be read as text)".into()];
     }
-    let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+    let mut lines: Vec<String> = text.lines().map(ToString::to_string).collect(); // WHAT: the tail's lines. WHY: each kept as its own string
     // The first line is probably half a line, unless we started at the top.
     if from > 0 && !lines.is_empty() {
         lines.remove(0);
@@ -761,6 +762,7 @@ pub type Shelf = Arc<Server>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _; // WHAT: writeln! into a String. WHY: the test log is written straight in
 
     #[test]
     fn a_server_with_no_maintenance_key_has_no_maintenance_channel() {
@@ -773,7 +775,7 @@ mod tests {
         let store = crate::Store::temporary(std::path::Path::new("/tmp/hyperview-fleet-test"))
             .expect("a store");
         let server = Server::new(store, config);
-        let refused = maintainer(&server, &HeaderMap::new()).err().expect("no way in");
+        let refused = maintainer(&server, &HeaderMap::new()).expect_err("no way in"); // WHAT: the refusal. WHY: there is no key, so no way in
         assert_eq!(refused.0, StatusCode::NOT_FOUND);
     }
 
@@ -855,7 +857,7 @@ mod tests {
         let path = std::env::temp_dir().join("hyperview-tail-test.log");
         let mut text = String::new();
         for i in 0..1000 {
-            text.push_str(&format!("line {i}\n"));
+            let _ = writeln!(text, "line {i}"); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         std::fs::write(&path, text).expect("a log");
         let lines = last_lines(&path, 10);
@@ -923,8 +925,7 @@ mod tests {
             .build()
             .unwrap()
             .block_on(rollback(State(Arc::clone(server)), headers.clone(), body.to_string()))
-            .map(|Json(landed)| landed)
-            .unwrap_or_else(|_| panic!("the channel should have answered"))
+            .map_or_else(|_| panic!("the channel should have answered"), |Json(landed)| landed) // WHAT: what the withdrawal landed, or a stop. WHY: the channel must answer
     }
 
     /// The seats pick what to install by version number. If a withdrawal
@@ -985,14 +986,14 @@ mod tests {
         let landed = withdraw(&server, &headers, "not json at all");
 
         assert_eq!(landed.written.len(), 2, "{:?}", landed.written);
-        assert!(offered(&server).is_empty());
+        assert_eq!(offered(&server), Vec::<(String, String)>::new()); // WHAT: nothing left on offer. WHY: a failure shows what still is
     }
 
     #[test]
     fn withdrawing_when_nothing_is_on_offer_says_so_and_is_not_a_failure() {
         let (server, headers) = a_maintained_server("hyperview-fleet-rollback5");
         let landed = withdraw(&server, &headers, "");
-        assert!(landed.written.is_empty());
+        assert_eq!(landed.written, Vec::<String>::new()); // WHAT: nothing written. WHY: a failure shows what was
         assert!(landed.skipped.is_empty(), "not a failure: {:?}", landed.skipped);
         assert!(landed.message.contains("nothing to withdraw"), "{}", landed.message);
     }

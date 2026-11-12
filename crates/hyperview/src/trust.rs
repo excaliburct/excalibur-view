@@ -59,7 +59,7 @@ pub const LICENSE_KEYS: &[(&str, &str)] = &[
 /// plugins signed again.
 ///
 /// Plugins already signed with a key from [`KEYS`] keep loading. A partner
-/// who writes plugins, like FabWire, can be given a key of their own here.
+/// who writes plugins, like `FabWire`, can be given a key of their own here.
 ///
 /// Make one with `publish.py make-key`, on the PC that will sign with it, and
 /// paste the line it prints below.

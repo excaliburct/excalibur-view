@@ -45,6 +45,7 @@ const MOST_FOLDERS: usize = 10_000; // WHAT: ten thousand. WHY: more than any jo
 
 /// The folder as compared: each folder's name in lower case with its spacing
 /// tidied, joined with `/`. The same rule `projects::same_folder` uses.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn key_of(path: &str) -> String {
     path.split('/') // WHAT: each folder's name. WHY: compared one at a time.
         .map(|p| {
@@ -59,6 +60,7 @@ pub fn key_of(path: &str) -> String {
 
 /// A folder and every folder it is in, the outermost first:
 /// `a`, `a/b`, `a/b/c`.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn and_above(path: &str) -> Vec<String> {
     let parts: Vec<&str> = path.split('/').collect(); // WHAT: its folders. WHY: each prefix is a folder above it.
     (1..=parts.len()).map(|n| parts[..n].join("/")).collect() // WHAT: every prefix. WHY: the rules above apply to it.
@@ -66,6 +68,7 @@ pub fn and_above(path: &str) -> Vec<String> {
 
 /// Whether this person is the office: an administrator or an estimator, who
 /// see every folder whatever its rule.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn is_office(who: &Who) -> bool {
     who.role != Role::Viewer // WHAT: anybody but a viewer. WHY: the rule as defined: the office is administrators and estimators.
 }
@@ -108,6 +111,7 @@ pub struct Sight {
 
 impl Sight {
     /// Everything: the office's sight.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn everything() -> Sight {
         Sight {
             everything: true,
@@ -117,12 +121,14 @@ impl Sight {
     }
 
     /// Whether this is the office's sight.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn is_everything(&self) -> bool {
         self.everything // WHAT: the flag. WHY: a listing can skip filtering.
     }
 
     /// Who sees `folder`, its parents' rules counted. No folder is the
     /// project's own, which everybody on the project sees.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn rule(&self, folder: Option<&str>) -> See {
         let mut rule = See::Everyone; // WHAT: the default. WHY: a folder with no rule anywhere above it is everybody's, as every folder was before.
         if let Some(folder) = folder {
@@ -136,6 +142,7 @@ impl Sight {
     }
 
     /// Whether this person sees what is in `folder`.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn sees(&self, folder: Option<&str>) -> bool {
         if self.everything {
             return true; // WHAT: the office. WHY: sees every folder.
@@ -162,6 +169,10 @@ pub(crate) fn everybodys(db: &Connection, project: &str, folder: &str) -> rusqli
 }
 
 /// What `who` may see of `project`'s folders, read fresh from the database.
+///
+/// # Errors
+///
+/// Fails when the database can't be read.
 pub fn sight_of(db: &Connection, project: &str, who: &Who) -> rusqlite::Result<Sight> {
     if is_office(who) {
         return Ok(Sight {
@@ -186,6 +197,10 @@ pub fn sight_of(db: &Connection, project: &str, who: &Who) -> rusqlite::Result<S
 
 /// The same, through the server's store, refused as a server error when the
 /// database can't be read: never read as "may see".
+///
+/// # Errors
+///
+/// A server error when the database can't be read.
 pub fn sight(server: &Server, project: &str, who: &Who) -> Answer<Sight> {
     if is_office(who) {
         return Ok(Sight::everything()); // WHAT: the office. WHY: no database read for the common case.
@@ -198,6 +213,10 @@ pub fn sight(server: &Server, project: &str, who: &Who) -> Answer<Sight> {
 
 /// The gate for anything kept in a folder: the project's own gate, then the
 /// folder's. Refused as `what` not found, exactly as one that isn't there.
+///
+/// # Errors
+///
+/// Not found when the project or folder is hidden from `who`, or a server error when the database can't be read.
 pub fn may_see_folder(
     server: &Server,
     who: &Who,
@@ -215,6 +234,10 @@ pub fn may_see_folder(
 /// How many current drawing sets of a project this sight sees: the count a
 /// project shows, so a hidden folder's sets aren't counted for somebody who
 /// can't see them.
+///
+/// # Errors
+///
+/// Fails when the database can't be read.
 pub fn current_sets_seen(db: &Connection, project: &str, sight: &Sight) -> rusqlite::Result<usize> {
     let mut statement =
         db.prepare("SELECT folder FROM sets WHERE project = ?1 AND superseded_by IS NULL")?; // WHAT: each current set's folder. WHY: counted by who sees it.
@@ -247,29 +270,28 @@ pub(crate) fn make_folder(
                 |r| r.get(0),
             )
             .optional()?; // WHAT: the folder's row, and its rule. WHY: made only where missing.
-        match there {
-            Some(see) => ruled_above |= see.is_some(), // WHAT: there already. WHY: never changed by being named again.
-            None => {
-                let office = by_program && !ruled_above; // WHAT: a program's new folder with no rule above it. WHY: safe by default for a mirror of the whole job.
-                let see = office.then(|| stored(&See::Office)); // WHAT: the office's, or none to take the parent's. WHY: as just said.
-                db.execute(
-                    "INSERT INTO folders (project, key, path, see, set_in, set_by, set_at, made, made_by)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    params![
-                        project,
-                        key,
-                        above,
-                        see,
-                        office.then_some("program"),
-                        office.then(|| who.name.clone()),
-                        office.then(now),
-                        now(),
-                        who.name
-                    ],
-                )?; // WHAT: the folder written down. WHY: so an empty one shows, and so it can carry a rule.
-                ruled_above |= office; // WHAT: this one now has a rule. WHY: the folders under it take it.
-                made += 1; // WHAT: counted. WHY: said in the answer.
-            }
+        if let Some(see) = there { // WHAT: the folder is there already. WHY: never changed by being named again
+            ruled_above |= see.is_some(); // WHAT: its rule, if it has one, counts for the folders under it. WHY: as before
+        } else { // WHAT: not there yet. WHY: made below
+            let office = by_program && !ruled_above; // WHAT: a program's new folder with no rule above it. WHY: safe by default for a mirror of the whole job.
+            let see = office.then(|| stored(&See::Office)); // WHAT: the office's, or none to take the parent's. WHY: as just said.
+            db.execute(
+                "INSERT INTO folders (project, key, path, see, set_in, set_by, set_at, made, made_by)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    project,
+                    key,
+                    above,
+                    see,
+                    office.then_some("program"),
+                    office.then(|| who.name.clone()),
+                    office.then(now),
+                    now(),
+                    who.name
+                ],
+            )?; // WHAT: the folder written down. WHY: so an empty one shows, and so it can carry a rule.
+            ruled_above |= office; // WHAT: this one now has a rule. WHY: the folders under it take it.
+            made += 1; // WHAT: counted. WHY: said in the answer.
         }
     }
     Ok(made)
@@ -277,6 +299,10 @@ pub(crate) fn make_folder(
 
 /// Every folder of a project this sight sees: those written down, those a
 /// current set or file is in, and every folder above them, each once.
+///
+/// # Errors
+///
+/// Fails when the database can't be read.
 pub fn listing(db: &Connection, project: &str, sight: &Sight) -> rusqlite::Result<Vec<FolderInfo>> {
     struct Row {
         path: String,           // WHAT: as first written. WHY: shown so.
@@ -316,9 +342,9 @@ pub fn listing(db: &Connection, project: &str, sight: &Sight) -> rusqlite::Resul
         let (folder, file) = row?; // WHAT: one thing's folder, and whether it is a file. WHY: counted in the right column.
         let count = counts.entry(key_of(&folder)).or_default(); // WHAT: its folder's counts. WHY: added to.
         if file == 1 {
-            count.1 += 1
+            count.1 += 1; // WHAT: one more file. WHY: shown
         } else {
-            count.0 += 1
+            count.0 += 1; // WHAT: one more set. WHY: shown
         } // WHAT: one more file or set. WHY: shown.
         held.push(folder); // WHAT: kept. WHY: listed with the folders above it.
     }
@@ -418,6 +444,10 @@ fn group_named(db: &Connection, name: &str, by: &str) -> rusqlite::Result<(Strin
 }
 
 /// `GET /groups`: every group and who is in it. Administrators only.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn groups(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<Vec<Group>>> {
     administrator(&server, &headers)?; // WHAT: an administrator signed in. WHY: who is in which group decides who sees which folder.
     server
@@ -445,6 +475,10 @@ fn group_name(name: &str) -> Answer<String> {
 
 /// `POST /groups` `{"name": "Shop"}`: a group, made if it isn't there, and
 /// the one there if it is. Administrators only.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn make_group(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -463,7 +497,7 @@ pub async fn make_group(
     if made {
         record(
             &server,
-            crate::audit::Entry::new(crate::audit::action::MADE_GROUP, &who.email)
+            &crate::audit::Entry::new(crate::audit::action::MADE_GROUP, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                 .by(&who.id)
                 .about(name),
         ); // WHAT: written down. WHY: groups decide who sees folders.
@@ -484,6 +518,10 @@ fn yes() -> bool {
 
 /// `POST /groups/{id}/people` `{"person": "usr_…", "on": true}`: somebody put
 /// in a group or taken out. Administrators only. Counts on their next request.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn change_group(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -518,7 +556,7 @@ pub async fn change_group(
         .ok_or_else(|| Denied::missing("group"))?; // WHAT: the group as it is now. WHY: the answer.
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::CHANGED_GROUP, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::CHANGED_GROUP, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(group.name.clone())
             .saying(format!(
@@ -533,6 +571,10 @@ pub async fn change_group(
 
 /// `GET /projects/{id}/folders`: every folder of the project the caller may
 /// see, the empty ones too, each with who sees it.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn folders_of(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -629,6 +671,7 @@ fn folders_gate(server: &Shared, headers: &HeaderMap, project: &str) -> Answer<W
     Ok(who) // WHAT: let in. WHY: every check above passed.
 }
 
+#[allow(clippy::too_many_lines)] // WHAT: one request's folders made and rules set, in one transaction. WHY: the steps share the transaction and its tallies; split, they would be passed between functions for nothing
 fn folders_made(
     server: &Shared,
     who: &Who,
@@ -638,7 +681,7 @@ fn folders_made(
     let by_program = who.is_key(auth::purpose::SYNC); // WHAT: a program keeping its projects in step. WHY: its new folders are the office's until it says.
     let asked = asked(body)?; // WHAT: the folders asked for. WHY: all checked before anything is written.
     let set_in = if by_program { "program" } else { "view" }; // WHAT: where the rule was set. WHY: a rule changed in the Studio is kept until the program sets that folder again.
-    let (made, changed, groups_made, changes) = server
+    let (made, changed, groups_made, what_changed) = server // WHAT: what the request made and changed. WHY: said in the answer and the audit log
         .store
         .with(|db| {
             let tx = db.unchecked_transaction()?; // WHAT: one step. WHY: half a tree of folders is never visible.
@@ -646,7 +689,7 @@ fn folders_made(
             let mut made = 0usize; // WHAT: folders made. WHY: said in the answer.
             let mut changed = 0usize; // WHAT: rules changed. WHY: said in the answer.
             let mut groups_made: Vec<String> = Vec::new(); // WHAT: groups made empty. WHY: the answer says so, for an administrator to fill.
-            let mut changes: Vec<String> = Vec::new(); // WHAT: the folders whose rule changed. WHY: for the audit line.
+            let mut what_changed: Vec<String> = Vec::new(); // WHAT: the folders whose rule changed. WHY: for the audit line.
             for one in &asked {
                 made += make_folder(db, project, &one.path, who, by_program)?; // WHAT: the folder and those above it. WHY: an empty folder shows.
                 let Some(see) = &one.see else { continue }; // WHAT: no rule said. WHY: left as it is.
@@ -669,11 +712,11 @@ fn folders_made(
                         params![stored(see), set_in, who.name, now(), project, key],
                     )?; // WHAT: the new rule, and who set it where. WHY: shown in the Studio, and kept until changed.
                     changed += 1; // WHAT: counted. WHY: said.
-                    changes.push(format!("{}: {}", one.path, see.words())); // WHAT: what changed. WHY: the audit line.
+                    what_changed.push(format!("{}: {}", one.path, see.words())); // WHAT: what changed. WHY: the audit line.
                 }
             }
             tx.commit()?; // WHAT: all of it at once. WHY: as above.
-            Ok((made, changed, groups_made, changes))
+            Ok((made, changed, groups_made, what_changed)) // WHAT: all four. WHY: as above
         })
         .map_err(|e| Denied::broke("make those folders", e))?;
     let (listed, rules) = server
@@ -714,16 +757,16 @@ fn folders_made(
     for name in &groups_made {
         record(
             server,
-            crate::audit::Entry::new(crate::audit::action::MADE_GROUP, &who.email)
+            &crate::audit::Entry::new(crate::audit::action::MADE_GROUP, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                 .by(&who.id)
                 .about(name.clone()),
         ); // WHAT: each group the request made, written down. WHY: groups decide who sees folders, however they were made.
     }
-    let total = changes.len(); // WHAT: how many rules changed. WHY: every line says it, so none can be missed.
-    for (n, part) in changes.chunks(20).enumerate() {
+    let total = what_changed.len(); // WHAT: how many rules changed. WHY: every line says it, so none can be missed.
+    for (n, part) in what_changed.chunks(20).enumerate() { // WHAT: the changed folders, twenty a line. WHY: below
         record(
             server,
-            crate::audit::Entry::new(crate::audit::action::CHANGED_FOLDER, &who.email)
+            &crate::audit::Entry::new(crate::audit::action::CHANGED_FOLDER, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                 .by(&who.id)
                 .about(project)
                 .saying(format!(
@@ -756,7 +799,7 @@ fn file_from_row(r: &rusqlite::Row) -> rusqlite::Result<ProjectFile> {
         folder: r.get(2)?,
         name: r.get(3)?,
         digest: r.get(4)?,
-        bytes: r.get::<_, i64>(5)? as u64,
+        bytes: crate::store::int::unsigned(r.get(5)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
         modified: r.get(6)?,
         uploaded: r.get(7)?,
         uploaded_by: r.get(8)?,
@@ -820,6 +863,11 @@ fn saved_at(sent: &str) -> Answer<Option<String>> {
 /// the project answer with that file (`already_here`); the same name in the
 /// same folder is the file saved again, and replaces it in place, the one
 /// before kept as its history (`replaces`).
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
+#[allow(clippy::too_many_lines)] // WHAT: one request's checks in one function. WHY: they run in this order and each leans on the one before; split, the gate a reviewer must read in order would be scattered
 pub async fn upload_file(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -924,7 +972,7 @@ pub async fn upload_file(
             db.execute(
                 "INSERT INTO files (id, project, folder, name, digest, bytes, modified, uploaded, uploaded_by, replaces)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![file.id, file.project, file.folder, file.name, file.digest, file.bytes as i64, file.modified, file.uploaded, file.uploaded_by, file.replaces],
+                params![file.id, file.project, file.folder, file.name, file.digest, crate::store::int::signed(file.bytes), file.modified, file.uploaded, file.uploaded_by, file.replaces], // WHAT: the file's row, its size written as SQLite keeps it. WHY: read back the same by int::unsigned
             )?; // WHAT: kept. WHY: listed in its folder.
             if let Some(before) = &before {
                 db.execute("UPDATE files SET replaced_by = ?1 WHERE id = ?2", params![file.id, before.id])?; // WHAT: the old one marked. WHY: kept, but no longer the current one.
@@ -936,7 +984,7 @@ pub async fn upload_file(
     if !file.already_here {
         record(
             &server,
-            crate::audit::Entry::new(crate::audit::action::UPLOADED_FILE, &who.email)
+            &crate::audit::Entry::new(crate::audit::action::UPLOADED_FILE, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                 .by(&who.id)
                 .about(file.name.clone())
                 .saying(file.folder.clone().unwrap_or_default()),
@@ -947,6 +995,10 @@ pub async fn upload_file(
 
 /// `GET /projects/{id}/files`: the project's current files the caller may
 /// see; `?all=1` adds the ones replaced since.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn files_of(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -974,6 +1026,10 @@ pub async fn files_of(
 }
 
 /// `GET /files/{id}/file`: the file's bytes, as they were sent.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn file_bytes(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -983,7 +1039,7 @@ pub async fn file_bytes(
     let file = may_reach_file(&server, &who, &id)?; // WHAT: the file, if theirs to see. WHY: not found otherwise.
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::DOWNLOADED_FILE, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::DOWNLOADED_FILE, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(file.name.clone()),
     ); // WHAT: written down. WHY: reaching a file is the line an auditor wants.
@@ -1026,6 +1082,10 @@ pub struct Moving {
 
 /// `POST /files/{id}/folder` `{"folder": "…"}`: a file moved to another
 /// folder of its project, with the files it replaced.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn move_file(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -1073,7 +1133,7 @@ pub async fn move_file(
         .ok_or_else(|| Denied::missing("file"))?;
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::MOVED, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::MOVED, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(moved.name.clone())
             .saying(moved.folder.clone().unwrap_or_default()),
@@ -1084,6 +1144,10 @@ pub async fn move_file(
 /// `POST /sets/{id}/folder` `{"folder": "…"}`: a drawing set moved to another
 /// folder of its project, with every issue of it before and after. Its
 /// markups are untouched.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn move_set(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -1151,7 +1215,7 @@ pub async fn move_set(
         .ok_or_else(|| Denied::missing("drawing set"))?;
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::MOVED, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::MOVED, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(moved.name.clone())
             .saying(moved.folder.clone().unwrap_or_default()),

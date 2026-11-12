@@ -140,8 +140,7 @@ fn split(version: &str) -> (u16, u16, u16) {
 fn today() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs().cast_signed()); // WHAT: the seconds since 1970, signed for the day sums below, nought for a clock before it. WHY: exactly what `as i64` gave; a clock past the year 292 billion is not a concern
     // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
     let z = secs.div_euclid(86_400) + 719_468;
     let era = z.div_euclid(146_097);
@@ -151,6 +150,6 @@ fn today() -> String {
     let mp = (5 * doy + 2) / 153;
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
+    let year = yoe + era * 400 + i64::from(month <= 2); // WHAT: the year, one more for January and February. WHY: the civil year starts in March in this algorithm
     format!("{year:04}-{month:02}-{day:02}")
 }

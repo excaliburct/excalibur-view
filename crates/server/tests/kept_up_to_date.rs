@@ -403,7 +403,7 @@ fn a_new_join_code_stops_the_old_one_working() {
     let admin = sam(&office);
     let first = admin.change_joining(Some("code"), None, true).unwrap().code;
     let second = admin.change_joining(None, None, true).unwrap().code;
-    assert!(!first.is_empty());
+    assert_ne!(first, ""); // WHAT: a code was made. WHY: a failure shows what came back
     assert_ne!(first, second);
 
     let mut late = Client::new(&office.base);
@@ -481,11 +481,13 @@ fn an_administrator_lets_the_fleet_watch_and_can_shut_it_out_again() {
         ureq::get(&format!("{}/api/admin/ops", office.base))
             .set("x-av-update-key", key)
             .call()
-            .map(|r| r.status())
-            .unwrap_or_else(|e| match e {
-                ureq::Error::Status(code, _) => code,
-                _ => 0,
-            })
+            .map_or_else( // WHAT: a refusal's status or a success's. WHY: one number either way
+                |e| match e { // WHAT: a refusal. WHY: read for its status
+                    ureq::Error::Status(code, _) => code, // WHAT: the status a refusal carried. WHY: the door's answer
+                    ureq::Error::Transport(_) => 0, // WHAT: nought when nothing answered. WHY: no door at all
+                },
+                |r| r.status(), // WHAT: a success's status. WHY: likewise
+            ) // WHAT: the status, whether the door let it in or refused it. WHY: each case below checks it
     };
     // Until somebody asks, there is no door at all.
     assert_eq!(ops("anything"), 404);
@@ -654,7 +656,7 @@ fn a_project_with_no_sets_has_an_empty_markup_list_not_an_error() {
         .unwrap()
         .into_json()
         .unwrap();
-    assert_eq!(answer["results"].as_array().map(|a| a.len()), Some(0), "{answer}");
+    assert_eq!(answer["results"].as_array().map(Vec::len), Some(0), "{answer}"); // WHAT: nothing found. WHY: the set doesn't exist
     assert!(admin.markup_list("no-such-set").is_err());
 }
 
@@ -703,7 +705,7 @@ fn an_administrator_hands_a_signed_plugin_to_every_seat_and_can_take_it_back() {
     assert_eq!(listed[0].version, "1.1.0");
 
     admin.remove_plugin("shop-estimating").unwrap();
-    assert!(seat.plugins().unwrap().is_empty());
+    assert_eq!(seat.plugins().unwrap(), Vec::<hub::PluginInfo>::new()); // WHAT: the plugin gone for the seat too. WHY: a failure shows what is still listed
 }
 
 #[test]
@@ -717,7 +719,7 @@ fn a_server_will_not_hand_out_a_plugin_nobody_trusted_signed() {
     assert!(refused.contains("not signed"), "{refused}");
     // Nor a file that is not a plugin at all.
     assert!(admin.upload_plugin(b"MZ a program").is_err());
-    assert!(admin.plugins().unwrap().is_empty());
+    assert_eq!(admin.plugins().unwrap(), Vec::<hub::PluginInfo>::new()); // WHAT: nothing was added. WHY: a failure shows what was
 }
 
 /// A real plugin, small enough to write by hand: one command, "hello", that
@@ -747,7 +749,7 @@ fn a_working_plugin() -> Vec<u8> {
         m = escape(manifest),
         a = escape(answer),
         ml = manifest.len(),
-        packed = (2048i64 << 32) | answer.len() as i64,
+        packed = (2048i64 << 32) | i64::try_from(answer.len()).unwrap(), // WHAT: the answer's place and length in one number. WHY: how the plugin hands it back
     );
     wat::parse_str(text).unwrap()
 }
@@ -796,7 +798,7 @@ fn a_plugin_that_isnt_really_one_says_so_rather_than_running() {
     assert!(listed[0].manifest.is_none());
     let input = plugin_api::Input { command: "hello".into(), ..Default::default() };
     match admin.run_plugin("shop-estimating", &input).unwrap() {
-        plugin_api::Answer::Failed(why) => assert!(!why.is_empty()),
+        plugin_api::Answer::Failed(why) => assert_ne!(why, ""), // WHAT: it says why. WHY: a failure shows what came back
         plugin_api::Answer::Done(_) => panic!("that was never a plugin"),
     }
 }
@@ -896,7 +898,7 @@ fn a_release_from_before_there_were_two_platforms_still_reaches_the_windows_seat
     // `apps` absent, `app` alone — exactly what 0.6.3 and everything before it
     // was published as.
     let old_shape = a_release_named(&key, "9.4.0", false, "Hyperview.exe", "Hyperview-Server.exe");
-    assert!(old_shape.published.apps.is_empty());
+    assert_eq!(old_shape.published.apps, Vec::<hub::update::Release>::new()); // WHAT: no apps list, as the old feeds were. WHY: a failure shows what is in it
     let feed = a_feed(&office.runtime, vec![old_shape]);
 
     assert_eq!(

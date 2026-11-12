@@ -4,6 +4,7 @@
 //! the two agree, so the published description of this server cannot drift
 //! away from what it actually does.
 
+use std::fmt::Write as _; // WHAT: write! into a String. WHY: text is written straight in, with no string made only to be copied
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -13,13 +14,16 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use hub::update::{Channel, Release, UpdateOffer};
-use hub::*;
+use hub::{ // WHAT: each shape from hub this file uses, by name. WHY: a new name in hub can't quietly shadow one here, as a glob let it
+    ChangeNotice, Chest, Claimed, DrawingSet, Health, Join, MarkupPage, NewMarkup, Problem, Role, Session, Setup, Sheet, // WHAT: the request and answer shapes. WHY: as above
+    SignIn, Takeoff, User, API_ROOT, API_VERSION, // WHAT: and the API's version and root. WHY: as above
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 
 use crate::auth::{self, Who};
 use crate::quantities::{self, SheetScale, Stored};
-use crate::store::{is_digest, Store};
+use crate::store::{int, is_digest, Store}; // WHAT: the store, its digest check and its whole-number conversions. WHY: SQLite keeps every integer signed
 use crate::{Config, VERSION};
 
 /// What a client sent with a request whose handler has no use for it. Reading
@@ -68,10 +72,10 @@ impl Server {
             updates: crate::updates::Watch::default(),
             patience: crate::patience::Patience::default(),
             tunnel: crate::tunnel::Tunnel::default(),
-            manifests: Default::default(),
-            notices: Default::default(),
-            key_refusals_logged: Default::default(), // WHAT: no refusals written yet. WHY: empty on every start, as patience is.
-            secure_port: Default::default(), // WHAT: no HTTPS yet. WHY: set by run::serve once it listens
+            manifests: std::sync::Mutex::default(), // WHAT: no plugin manifests read yet. WHY: each is read once, when first asked for
+            notices: crate::notices::Pending::default(), // WHAT: no notices waiting. WHY: empty on every start
+            key_refusals_logged: std::sync::Mutex::default(), // WHAT: no refusals written yet. WHY: empty on every start, as patience is.
+            secure_port: std::sync::OnceLock::default(), // WHAT: no HTTPS yet. WHY: set by run::serve once it listens
             pin: std::sync::OnceLock::default(), // WHAT: no certificate yet. WHY: set by run::serve with HTTPS
             replays: crate::devices::Replays::default(), // WHAT: nothing seen yet. WHY: empty on every start; a signature older than five minutes is refused by its time anyway
             started: hub::device::unix_now(), // WHAT: now. WHY: nothing signed before this start is taken
@@ -332,7 +336,7 @@ async fn keys_keep_to_their_purpose(
     if refusal_worth_a_line(&server, &id) {
         record(
             &server,
-            crate::audit::Entry::new(crate::audit::action::KEY_REFUSED, &maker) // WHAT: under the email of whoever made the key. WHY: so the line says whose key strayed.
+            &crate::audit::Entry::new(crate::audit::action::KEY_REFUSED, &maker) // WHAT: under the email of whoever made the key. WHY: so the line says whose key strayed.
                 .about(format!("{method} {path}"))
                 .saying(auth::purpose::SYNC.to_string()),
         );
@@ -437,12 +441,14 @@ pub(crate) fn refusal_worth_a_line(server: &Server, id: &str) -> bool { // WHAT:
     true
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn now() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn fresh_id(prefix: &str) -> String {
     let mut bytes = [0u8; 12];
     rand::Rng::fill(&mut rand::thread_rng(), &mut bytes);
@@ -451,8 +457,9 @@ pub fn fresh_id(prefix: &str) -> String {
 
 // ---- the routes -----------------------------------------------------------
 
+#[allow(clippy::too_many_lines)] // WHAT: the route table in one function. WHY: one line per route; split, a route would have to be looked for in two places
 pub fn router(server: Shared) -> Router {
-    let limit = server.config.largest_upload as usize; // WHAT: the largest drawing or file the office takes. WHY: only the routes that take a whole file are given it.
+    let limit = usize::try_from(server.config.largest_upload).unwrap_or(usize::MAX); // WHAT: the largest drawing or file the office takes. WHY: only the routes that take a whole file are given it.
     let uploads = DefaultBodyLimit::max(limit); // WHAT: the upload limit, as a layer. WHY: put on each upload route below, and nowhere else.
     let api = Router::new()
         .route("/health", get(health))
@@ -889,6 +896,7 @@ fn how_joining(server: &Server) -> (String, String, String) {
 
 // ---- signing in -----------------------------------------------------------
 
+#[allow(clippy::too_many_lines)] // WHAT: one request's checks in one function. WHY: they run in this order and each leans on the one before; split, the gate a reviewer must read in order would be scattered
 async fn sign_in(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -934,7 +942,7 @@ async fn sign_in(
         if refusal_worth_a_line(&server, &format!("wait:{counted}")) {
             record(
                 &server,
-                crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email)
+                &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                     .saying("too many wrong tries")
                     .from(from.clone()),
             ); // WHAT: written once a minute an address. WHY: every refused try wrote a line, so the limit didn't slow the log
@@ -952,7 +960,7 @@ async fn sign_in(
         // see in the log, and it was the one refusal that went unrecorded.
         record(
             &server,
-            crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email)
+            &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                 .saying("no account with that address")
                 .from(from.clone()),
         );
@@ -970,7 +978,7 @@ async fn sign_in(
     if !auth::password_matches_in_turn(&body.password, &stored).await {
         record(
             &server,
-            crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email) // WHAT: the address as checked. WHY: the raw one could be padded out
+            &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email) // WHAT: the address as checked. WHY: the raw one could be padded out
                 .by(&id)
                 .saying("the password did not match")
                 .from(from.clone()),
@@ -1007,7 +1015,7 @@ async fn sign_in(
 
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::SIGNED_IN, &body.email)
+        &crate::audit::Entry::new(crate::audit::action::SIGNED_IN, &body.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&id)
             .from(seen_from(&headers)),
     );
@@ -1069,7 +1077,7 @@ async fn change_password(
     check_password(&body.new)?; // WHAT: the new password's length checked first. WHY: a short one is refused without counting as a guess at the current one.
     if let Err(owed) = server.patience.begin_keeping(crate::patience::SIGNING_IN, &[email.as_str(), from.as_str()], &[email.as_str()]) {
         // WHAT: too many wrong current passwords lately: refused before the password is checked; otherwise this try is counted until it proves right. WHY: the same limit as sign-in, so this door is no faster for guessing, even in a burst.
-        return Err(Denied(StatusCode::TOO_MANY_REQUESTS, Problem::new("too_many", &crate::patience::refusal(owed))));
+        return Err(Denied(StatusCode::TOO_MANY_REQUESTS, Problem::new("too_many", crate::patience::refusal(owed)))); // WHAT: refused, saying how long to wait. WHY: the sentence is handed over as it is made
     }
     let stored: String = server
         .store
@@ -1112,7 +1120,7 @@ async fn change_password(
     tracing::info!("{} changed their password", who.email);
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::CHANGED_PASSWORD, &who.email).by(&who.id),
+        &crate::audit::Entry::new(crate::audit::action::CHANGED_PASSWORD, &who.email).by(&who.id), // WHAT: the audit line, lent to the log. WHY: written there, not kept
     );
     Ok(Json(serde_json::json!({ "changed": true })))
 }
@@ -1183,7 +1191,7 @@ async fn change_updates(
     tracing::info!("{} set updates to {channel}", who.email);
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::CHANGED_SETTING, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::CHANGED_SETTING, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about("update channel")
             .saying(channel),
@@ -1241,9 +1249,9 @@ async fn change_remote(
             "This server is sealed, so it makes no outward connections at all \u{2014} including this one. That is what the Sealed edition is.",
         ));
     }
-    let token = crate::tunnel::a_token(&body.token).map_err(|e| Denied::wrong(e))?;
+    let token = crate::tunnel::a_token(&body.token).map_err(Denied::wrong)?; // WHAT: the token, or a bad request saying why. WHY: checked before it is kept
     let hostname =
-        crate::tunnel::a_hostname(&body.hostname).map_err(|e| Denied::wrong(e))?;
+        crate::tunnel::a_hostname(&body.hostname).map_err(Denied::wrong)?; // WHAT: the hostname, likewise. WHY: the same
     crate::tunnel::remember(&server.store, &token, &hostname)
         .map_err(|e| Denied::broke("keep the tunnel settings", e))?;
     // Whatever was running before belongs to the old token.
@@ -1313,11 +1321,11 @@ pub(crate) fn set_from_row(r: &rusqlite::Row) -> rusqlite::Result<DrawingSet> {
         name: r.get(2)?,
         filename: r.get(3)?,
         digest: r.get(4)?,
-        bytes: r.get::<_, i64>(5)? as u64,
-        sheets: r.get::<_, i64>(6)? as usize,
+        bytes: int::unsigned(r.get(5)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
+        sheets: int::index(r.get(6)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
         uploaded: r.get(7)?,
         uploaded_by: r.get(8)?,
-        revision: r.get::<_, i64>(9)? as u64,
+        revision: int::unsigned(r.get(9)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
         supersedes: r.get(10)?,
         superseded_by: r.get(11)?,
         already_here: false,
@@ -1458,6 +1466,7 @@ async fn one_set(
     found.map(Json).ok_or_else(|| Denied::missing("drawing set"))
 }
 
+#[allow(clippy::too_many_lines)] // WHAT: one request's checks in one function. WHY: they run in this order and each leans on the one before; split, the gate a reviewer must read in order would be scattered
 async fn upload_set(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -1598,8 +1607,8 @@ async fn upload_set(
                     set.name,
                     set.filename,
                     set.digest,
-                    set.bytes as i64,
-                    set.sheets as i64,
+                    int::signed(set.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
+                    int::of_index(set.sheets), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     set.uploaded,
                     set.uploaded_by,
                     set.supersedes,
@@ -1612,12 +1621,12 @@ async fn upload_set(
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         set.id,
-                        sheet.page as i64,
+                        int::of_index(sheet.page), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                         sheet.number,
                         sheet.title,
                         sheet.width,
                         sheet.height,
-                        sheet.rotation as i64,
+                        i64::from(sheet.rotation), // WHAT: widened, never cut. WHY: every one of these fits a 64-bit number
                         sheet.scale
                     ],
                 )?;
@@ -1633,7 +1642,7 @@ async fn upload_set(
                     set.carried_forward = carried;
                     set.carry_note = note;
                     if carried > 0 {
-                        set.revision = read_set(db, &set.id)?.map(|s| s.revision).unwrap_or(0);
+                        set.revision = read_set(db, &set.id)?.map_or(0, |s| s.revision); // WHAT: the set's revision after the carry, nought when it can't be read. WHY: the answer shows the markups' revision
                     }
                 }
             }
@@ -1688,7 +1697,7 @@ async fn set_file(
     // Reaching a drawing is the line an auditor most wants to see.
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::DOWNLOADED_SET, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::DOWNLOADED_SET, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(set.name.clone())
             .saying(format!("{} sheets", set.sheets)),
@@ -1739,12 +1748,12 @@ pub(crate) fn sheets_for(db: &Connection, set: &str) -> rusqlite::Result<Vec<She
     let rows: Vec<Sheet> = statement
         .query_map(params![set], |r| {
             Ok(Sheet {
-                page: r.get::<_, i64>(0)? as usize,
+                page: int::index(r.get(0)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                 number: r.get(1)?,
                 title: r.get(2)?,
                 width: r.get(3)?,
                 height: r.get(4)?,
-                rotation: r.get::<_, i64>(5)? as i32,
+                rotation: r.get::<_, i32>(5)?, // WHAT: read as the 32-bit number it was written from. WHY: SQLite refuses to hand back one that doesn't fit, where the cast cut it short
                 scale: r.get(6)?,
             })
         })?
@@ -1791,11 +1800,11 @@ fn markups_since(db: &Connection, set: &str, since: u64) -> rusqlite::Result<Vec
          FROM markups WHERE set_id = ?1 AND revision > ?2 ORDER BY revision, id",
     )?;
     let rows: Vec<hub::Markup> = statement
-        .query_map(params![set, since as i64], |r| {
+        .query_map(params![set, int::signed(since)], |r| { // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
             let bytes: Vec<u8> = r.get(8)?;
             Ok(hub::Markup {
                 id: r.get(0)?,
-                page: r.get::<_, i64>(1)? as usize,
+                page: int::index(r.get(1)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                 subject: r.get(2)?,
                 kind: r.get(3)?,
                 caption: r.get(4)?,
@@ -1803,7 +1812,7 @@ fn markups_since(db: &Connection, set: &str, since: u64) -> rusqlite::Result<Vec
                 colour: r.get(6)?,
                 created: r.get(7)?,
                 dictionary: base64::engine::general_purpose::STANDARD.encode(&bytes),
-                revision: r.get::<_, i64>(9)? as u64,
+                revision: int::unsigned(r.get(9)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                 removed: r.get::<_, i64>(10)? != 0,
             })
         })?
@@ -1840,7 +1849,7 @@ async fn add_markups(
     Path(id): Path<String>,
     body: Body,
 ) -> Response {
-    let gate = writer(&server, &headers).and_then(|who| may_reach_set(&server, &who, &id).map(|_| who)); // WHAT: who may mark this set up, asked before the body is read. WHY: a stranger's batch is never read.
+    let gate = writer(&server, &headers).and_then(|who| may_reach_set(&server, &who, &id).map(|()| who)); // WHAT: who may mark this set up, asked before the body is read. WHY: a stranger's batch is never read.
     let who = match gate {
         Ok(who) => who, // WHAT: let in. WHY: their batch is read next.
         Err(denied) => return turned_away(body, denied).await, // WHAT: refused, with the body read no further than a little. WHY: as above.
@@ -1849,16 +1858,16 @@ async fn add_markups(
         Ok(incoming) => incoming, // WHAT: the batch. WHY: saved below.
         Err(denied) => return denied.into_response(), // WHAT: too big, or not JSON. WHY: said plainly.
     };
-    markups_added(&server, &who, &id, incoming).into_response() // WHAT: the batch saved. WHY: what the route did before, unchanged.
+    markups_added(&server, &who, &id, &incoming).into_response() // WHAT: the batch saved. WHY: what the route did before, unchanged.
 }
 
-fn markups_added(server: &Shared, who: &Who, id: &str, incoming: Vec<NewMarkup>) -> Answer<Json<MarkupPage>> {
+fn markups_added(server: &Shared, who: &Who, id: &str, incoming: &[NewMarkup]) -> Answer<Json<MarkupPage>> { // WHAT: the batch, lent. WHY: only read, never kept
     use base64::Engine;
 
     // Everything is parsed and checked before anything is written, so a batch
     // with one bad markup in it does not leave half of itself in the file.
     let mut ready = Vec::with_capacity(incoming.len());
-    for one in &incoming {
+    for one in incoming { // WHAT: each markup in the batch. WHY: checked before any is written
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(one.dictionary.as_bytes())
             .map_err(|_| Denied::wrong("A markup's dictionary was not valid base64."))?;
@@ -1887,7 +1896,7 @@ fn markups_added(server: &Shared, who: &Who, id: &str, incoming: Vec<NewMarkup>)
                     db.execute(
                         "UPDATE markups SET removed = 1, revision = ?1
                          WHERE id = ?2 AND set_id = ?3",
-                        params![revision as i64, old, id],
+                        params![int::signed(revision), old, id], // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     )?;
                 }
                 let scale = sheets
@@ -1909,20 +1918,20 @@ fn markups_added(server: &Shared, who: &Who, id: &str, incoming: Vec<NewMarkup>)
                     params![
                         fresh_id("mk"),
                         id,
-                        one.page as i64,
+                        int::of_index(one.page), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                         markup.subject(),
                         markup.kind().name(),
                         caption,
                         who.name,
                         format!(
                             "#{:02X}{:02X}{:02X}",
-                            (colour[0] * 255.0) as u8,
-                            (colour[1] * 255.0) as u8,
-                            (colour[2] * 255.0) as u8
+                            colour_byte(colour[0]), // WHAT: red as a byte. WHY: the stored colour is #RRGGBB
+                            colour_byte(colour[1]), // WHAT: green as a byte. WHY: likewise
+                            colour_byte(colour[2]) // WHAT: blue as a byte. WHY: likewise
                         ),
                         now_text,
                         bytes,
-                        revision as i64
+                        int::signed(revision) // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     ],
                 )?;
             }
@@ -2080,7 +2089,7 @@ fn gather(server: &Server, id: &str) -> Answer<(u64, Vec<Stored>, Vec<SheetScale
                 .query_map(params![id], |r| {
                     Ok(Stored {
                         id: r.get(0)?,
-                        page: r.get::<_, i64>(1)? as usize,
+                        page: int::index(r.get(1)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                         dictionary: r.get(2)?,
                         author: r.get(3)?,
                     })
@@ -2142,7 +2151,7 @@ async fn takeoff_csv(
     // job, and it was the one export nobody could see had happened.
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::EXPORTED_TAKEOFF, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::EXPORTED_TAKEOFF, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(&id)
             .saying("as a spreadsheet")
@@ -2234,7 +2243,7 @@ async fn make_key(
     tracing::info!("{} made a {purpose} key called {name}", who.email);
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::MADE_KEY, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::MADE_KEY, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(name)
             .saying(purpose.to_string()),
@@ -2304,7 +2313,7 @@ async fn revoke_key(
     }
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::REVOKED_KEY, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::REVOKED_KEY, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(&id),
     );
@@ -2412,8 +2421,8 @@ fn markuplist_of(server: &Server, id: &str, user: &[takeoff::user::UserColumn]) 
             };
             let carried_forward = carried.contains(markup);
             let needs_check = row.status == crate::projects::CARRIED;
-            brought += carried_forward as usize;
-            unchecked += needs_check as usize;
+            brought += usize::from(carried_forward); // WHAT: one more when this markup was carried forward. WHY: the count the reply gives
+            unchecked += usize::from(needs_check); // WHAT: one more when it still needs checking. WHY: likewise
             entry["MarkupId"] = serde_json::json!(markup);
             entry["Hyperview"] = serde_json::json!({
                 "MarkupId": markup,
@@ -2474,9 +2483,9 @@ async fn project_markuplist(
     Path(project): Path<String>,
     Query(everything): Query<Everything>,
 ) -> Answer<Json<serde_json::Value>> {
+    type Listed = (String, String, Option<String>, i64); // WHAT: a set's id, name, folder and revision. WHY: named first, before the statements that use it
     let who = caller(&server, &headers)?;
     may_reach_project(&server, &who, &project)?;
-    type Listed = (String, String, Option<String>, i64);
     let sight = crate::folders::sight(&server, &project, &who)?; // WHAT: which folders this person sees. WHY: a hidden folder's sets are left out of the pull, its stamp included.
     let (sets, stamp): (Vec<Listed>, Option<crate::projects::Stamp>) = server
         .store
@@ -2540,9 +2549,9 @@ async fn chests(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json
                         name: r.get(1)?,
                         filename: r.get(2)?,
                         digest: r.get(3)?,
-                        bytes: r.get::<_, i64>(4)? as u64,
-                        tools: r.get::<_, i64>(5)? as usize,
-                        sets: r.get::<_, i64>(6)? as usize,
+                        bytes: int::unsigned(r.get(4)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
+                        tools: int::index(r.get(5)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
+                        sets: int::index(r.get(6)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                         uploaded: r.get(7)?,
                         shared: r.get::<_, i64>(8)? != 0,
                     })
@@ -2606,7 +2615,7 @@ async fn plugins(State(server): State<Shared>, headers: HeaderMap) -> Answer<Jso
                         name: r.get(1)?,
                         version: r.get(2)?,
                         digest: r.get(3)?,
-                        bytes: r.get::<_, i64>(4)? as u64,
+                        bytes: int::unsigned(r.get(4)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                         uploaded: r.get(5)?,
                         uploaded_by: r.get(6)?,
                         key: r.get(7)?,
@@ -2618,7 +2627,7 @@ async fn plugins(State(server): State<Shared>, headers: HeaderMap) -> Answer<Jso
         })
         .map_err(|e| Denied::broke("list the plugins", e))?;
     let mut list = list;
-    for plugin in list.iter_mut() {
+    for plugin in &mut list { // WHAT: each plugin listed. WHY: its manifest is filled in
         plugin.manifest = manifest_of(&server, &plugin.digest).await;
     }
     Ok(Json(list))
@@ -2738,29 +2747,29 @@ async fn add_plugin(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let gate = administrator(&server, &headers).and_then(|who| sharing(&server).map(|_| who)); // WHAT: an administrator, while sharing is allowed, asked first. WHY: a plugin file is read only for them.
+    let gate = administrator(&server, &headers).and_then(|who| sharing(&server).map(|()| who)); // WHAT: an administrator, while sharing is allowed, asked first. WHY: a plugin file is read only for them.
     let who = match gate {
         Ok(who) => who, // WHAT: let in. WHY: the file is read next.
         Err(denied) => return turned_away(body, denied).await, // WHAT: refused before the file is read. WHY: as above.
     };
     let _turn = big_turn().await; // WHAT: one of four big reads at a time. WHY: a plugin file can be as large as any upload (audit, 2026-11-11)
-    let body = match body_once_let_in(body, server.config.largest_upload as usize).await {
+    let body = match body_once_let_in(body, usize::try_from(server.config.largest_upload).unwrap_or(usize::MAX)).await {
         Ok(body) => body, // WHAT: the plugin file. WHY: checked below.
         Err(denied) => return denied.into_response(), // WHAT: bigger than any upload. WHY: said plainly.
     };
-    plugin_added(&server, who, body).into_response() // WHAT: the plugin checked and kept, as before. WHY: unchanged once let in.
+    plugin_added(&server, &who, &body).into_response() // WHAT: the plugin checked and kept, as before. WHY: unchanged once let in.
 }
 
-fn plugin_added(server: &Shared, who: Who, body: axum::body::Bytes) -> Answer<Json<hub::PluginInfo>> {
+fn plugin_added(server: &Shared, who: &Who, body: &[u8]) -> Answer<Json<hub::PluginInfo>> { // WHAT: who sent it and its bytes, lent. WHY: only read, never kept
     if body.is_empty() {
         return Err(Denied::wrong("No plugin came with that."));
     }
     let mut trusted = crate::plugin_trust();
     trusted.keys.extend(server.config.plugin_keys_for_tests.iter().cloned());
-    let checked = hub::plugin::check(&trusted, &body).map_err(Denied::wrong)?;
+    let checked = hub::plugin::check(&trusted, body).map_err(Denied::wrong)?; // WHAT: the file's signature and shape checked. WHY: only a signed plugin is kept
     let digest = server
         .store
-        .put_blob(&body)
+        .put_blob(body) // WHAT: the file kept by its digest. WHY: served to the seats
         .map_err(|e| Denied::broke("store that plugin", e))?;
     let manifest = plugin_host::manifest_of(&checked.wasm).ok();
     let plugin = hub::PluginInfo {
@@ -2789,7 +2798,7 @@ fn plugin_added(server: &Shared, who: Who, body: axum::body::Bytes) -> Answer<Js
                     plugin.name,
                     plugin.version,
                     plugin.digest,
-                    plugin.bytes as i64,
+                    int::signed(plugin.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     plugin.key,
                     plugin.uploaded,
                     plugin.uploaded_by
@@ -2909,11 +2918,11 @@ async fn update_latest(
                         published: r.get(3)?,
                         notes: r.get(4)?,
                         download: String::new(),
-                        bytes: r.get::<_, i64>(5)? as u64,
+                        bytes: int::unsigned(r.get(5)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                         digest: r.get(6)?,
                         signature: r.get(7)?,
                         key: r.get(8)?,
-                        minimum_api_version: r.get::<_, i64>(9)? as u32,
+                        minimum_api_version: r.get::<_, u32>(9)?, // WHAT: read as the 32-bit number it was written from. WHY: SQLite refuses to hand back one that doesn't fit, where the cast cut it short
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -2940,8 +2949,7 @@ async fn update_latest(
     });
     let required = release
         .as_ref()
-        .map(|r| r.minimum_api_version > API_VERSION)
-        .unwrap_or(false);
+        .is_some_and(|r| r.minimum_api_version > API_VERSION); // WHAT: whether the newest release needs a newer API than this server's. WHY: then the seat must update before it connects
 
     Ok(Json(UpdateOffer {
         release,
@@ -2951,6 +2959,7 @@ async fn update_latest(
     }))
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn channel_name(channel: Channel) -> &'static str {
     match channel {
         Channel::Stable => "stable",
@@ -3088,7 +3097,7 @@ async fn add_person(
         .map_err(|e| Denied::broke("add that person", e))?;
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::ADDED_PERSON, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::ADDED_PERSON, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(&user.email)
             .saying(auth::role_name(user.role)),
@@ -3169,7 +3178,7 @@ async fn change_role(
 
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::CHANGED_ROLE, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::CHANGED_ROLE, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(&email)
             .saying(format!("{was} to {}", auth::role_name(role))),
@@ -3231,7 +3240,7 @@ async fn remove_person(
 
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::REMOVED_PERSON, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::REMOVED_PERSON, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(&email)
             .saying("their sessions and keys went with them"),
@@ -3268,7 +3277,7 @@ async fn sign_out(State(server): State<Shared>, headers: HeaderMap, _sent: Unuse
         .map_err(|e| Denied::broke("sign you out", e))?;
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::SIGNED_OUT, &who.email).by(&who.id),
+        &crate::audit::Entry::new(crate::audit::action::SIGNED_OUT, &who.email).by(&who.id), // WHAT: the audit line, lent to the log. WHY: written there, not kept
     );
     Ok(Json(serde_json::json!({ "signed_out": true })))
 }
@@ -3304,7 +3313,7 @@ async fn add_license(
     tracing::info!("license {}… for {} added by {}", license.id.chars().take(8).collect::<String>(), license.company, who.email); // WHAT: the id shortened. WHY: the whole id finds the licence file on the feed (audit, 2026-11-11)
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::ADDED_LICENSE, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::ADDED_LICENSE, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(license.id.clone())
             .saying(format!("{} for {}", license.edition.title(), license.company)),
@@ -3377,8 +3386,8 @@ async fn copy_set(
                     copy.name,
                     copy.filename,
                     copy.digest,
-                    copy.bytes as i64,
-                    copy.sheets as i64,
+                    int::signed(copy.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
+                    int::of_index(copy.sheets), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     copy.uploaded,
                     copy.uploaded_by,
                     copy.folder,
@@ -3401,7 +3410,7 @@ async fn copy_set(
     let copy = made.ok_or_else(|| Denied::missing("drawing set"))?;
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::UPLOADED_SET, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::UPLOADED_SET, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(copy.name.clone())
             .saying("a copy to take off on"),
@@ -3496,6 +3505,7 @@ fn behind_proxy() -> bool {
 /// The address a request came from: the socket's, or, from a proxy on this
 /// machine, the address the proxy says it is passing on. Empty when the
 /// server was not told the socket (only ever in a test).
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn address_of(peer: Option<std::net::SocketAddr>, headers: &HeaderMap, proxied: bool) -> String {
     let Some(peer) = peer else {
         return String::new(); // WHAT: nothing known. WHY: as before, such a request is not counted with the others.
@@ -3517,8 +3527,8 @@ pub fn address_of(peer: Option<std::net::SocketAddr>, headers: &HeaderMap, proxi
     peer.ip().to_canonical().to_string() // WHAT: the machine that connected, an IPv4 address written as IPv6 as itself. WHY: the only address a caller can't make up, written one way whatever the socket listens on.
 }
 
-pub(crate) fn record(server: &Server, entry: crate::audit::Entry) { // WHAT: crate-wide now. WHY: the folders' and files' routes write the same log.
-    if let Err(e) = server.store.audit(&entry) {
+pub(crate) fn record(server: &Server, entry: &crate::audit::Entry) { // WHAT: crate-wide now. WHY: the folders' and files' routes write the same log.
+    if let Err(e) = server.store.audit(entry) { // WHAT: the line written. WHY: a failure is said, never passed on
         tracing::warn!("the audit log could not be written: {e}");
     }
 }
@@ -3676,6 +3686,7 @@ struct JoinBody {
     device: Option<hub::device::Ask>, // WHAT: the computer's request to be let in. WHY: a good code or invitation from outside admits the computer too
 }
 
+#[allow(clippy::too_many_lines)] // WHAT: one request's checks in one function. WHY: they run in this order and each leans on the one before; split, the gate a reviewer must read in order would be scattered
 async fn join(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -3695,7 +3706,7 @@ async fn join(
     if let Err(owed) = server.patience.begin(crate::patience::JOINING, &[counted.as_str()]) {
         return Err(Denied(
             StatusCode::TOO_MANY_REQUESTS,
-            Problem::new("too_many", &crate::patience::refusal(owed)),
+            Problem::new("too_many", crate::patience::refusal(owed)), // WHAT: refused, saying how long to wait. WHY: the sentence is handed over as it is made
         ));
     }
 
@@ -3713,7 +3724,7 @@ async fn join(
             // WHAT: counted already. WHY: `begin` counted this try.
             record(
                 &server,
-                crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &invite.email)
+                &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &invite.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                     .saying(if invite.used.is_some() {
                         "that invitation has already been used"
                     } else {
@@ -3749,7 +3760,7 @@ async fn join(
                 // WHAT: counted already. WHY: `begin` counted this try.
                 record(
                     &server,
-                    crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, "")
+                    &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, "") // WHAT: the audit line, lent to the log. WHY: written there, not kept
                         .saying("the join code has run out")
                         .from(from.clone()),
                 );
@@ -3768,7 +3779,7 @@ async fn join(
                 // WHAT: counted already. WHY: `begin` counted this try.
                 record(
                     &server,
-                    crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, "")
+                    &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, "") // WHAT: the audit line, lent to the log. WHY: written there, not kept
                         .saying("the join code did not match")
                         .from(from.clone()),
                 );
@@ -3873,7 +3884,7 @@ async fn join(
         }
         record(
             &server,
-            crate::audit::Entry::new("invitation_used", &email)
+            &crate::audit::Entry::new("invitation_used", &email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                 .by(&id)
                 .saying(format!("invited as {}", auth::role_name(role))),
         );
@@ -3943,7 +3954,7 @@ async fn make_invite(
         .map_err(|e| Denied::broke("write that invitation down", e))?;
     record(
         &server,
-        crate::audit::Entry::new("invitation_made", &who.email)
+        &crate::audit::Entry::new("invitation_made", &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(email.clone())
             .saying(format!("as {}", auth::role_name(asked))),
@@ -3999,7 +4010,7 @@ async fn drop_invite(
         .map_err(|e| Denied::broke("throw that invitation away", e))?;
     record(
         &server,
-        crate::audit::Entry::new("invitation_dropped", &who.email).by(&who.id),
+        &crate::audit::Entry::new("invitation_dropped", &who.email).by(&who.id), // WHAT: the audit line, lent to the log. WHY: written there, not kept
     );
     list_invites(State(server), headers).await
 }
@@ -4214,6 +4225,7 @@ async fn upload_release(
     headers: HeaderMap,
     mut form: Multipart,
 ) -> Answer<Json<Release>> {
+    use sha2::{Digest, Sha256}; // WHAT: the digest the installer is checked against. WHY: named first, before the statements that use it
     administrator(&server, &headers)?;
     let mut manifest: Option<Release> = None;
     let mut installer: Vec<u8> = Vec::new();
@@ -4251,7 +4263,6 @@ async fn upload_release(
     // are trusted, the seats do — but it can check that the file and the
     // manifest describe each other, and refuse a pairing that is already
     // wrong rather than serving it to six machines that will each reject it.
-    use sha2::{Digest, Sha256};
     let digest = crate::store::hex(&Sha256::digest(&installer));
     if digest != release.digest.to_lowercase() {
         return Err(Denied::wrong(format!(
@@ -4294,11 +4305,11 @@ async fn upload_release(
                     release.platform,
                     release.published,
                     release.notes,
-                    release.bytes as i64,
+                    int::signed(release.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     release.digest.to_lowercase(),
                     release.signature,
                     release.key,
-                    release.minimum_api_version as i64
+                    i64::from(release.minimum_api_version) // WHAT: widened, never cut. WHY: every one of these fits a 64-bit number
                 ],
             )?;
             Ok(())
@@ -4341,7 +4352,7 @@ async fn release_ready(
         .with(|db| {
             Ok(db.execute(
                 "UPDATE releases SET ready = ?1 WHERE version = ?2 AND platform = ?3",
-                params![body.ready as i64, version, platform],
+                params![i64::from(body.ready), version, platform], // WHAT: ready as 1 or 0. WHY: SQLite has no true or false
             )?)
         })
         .map_err(|e| Denied::broke("change that release", e))?;
@@ -4409,7 +4420,7 @@ async fn upload_chest(
     let chest = Chest {
         id: fresh_id("cst"),
         name: if name.trim().is_empty() {
-            profile.map(|p| p.name).unwrap_or_else(|| filename.clone())
+            profile.map_or_else(|| filename.clone(), |p| p.name) // WHAT: the chest's own name, else its file's. WHY: a chest is never nameless
         } else {
             name.trim().to_string()
         },
@@ -4432,9 +4443,9 @@ async fn upload_chest(
                     chest.name,
                     chest.filename,
                     chest.digest,
-                    chest.bytes as i64,
-                    chest.tools as i64,
-                    chest.sets as i64,
+                    int::signed(chest.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
+                    int::of_index(chest.tools), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
+                    int::of_index(chest.sets), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     chest.uploaded
                 ],
             )?;
@@ -4458,13 +4469,22 @@ async fn upload_chest(
 /// assistant or integration key; never a sync key, which is for its own list
 /// of routes. The answers are exactly what that person would get from the API:
 /// every tool below takes this Who and applies the same project gate.
-pub fn mcp_caller(server: &Server, headers: &HeaderMap) -> Result<Who, ()> {
+/// `None`, with nothing said, when the request carries no assistant or
+/// integration key that is still good.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn mcp_caller(server: &Server, headers: &HeaderMap) -> Option<Who> { // WHAT: the person behind an assistant or integration key, or none. WHY: an absent caller is all the endpoint needs to know
     caller_as(
         server,
         headers,
         &[auth::purpose::ASSISTANT, auth::purpose::INTEGRATION],
     )
-    .map_err(|_| ())
+    .ok() // WHAT: the person, or none. WHY: why it was refused is not told to an assistant
+}
+
+/// One channel of a colour, 0 to 1, as the byte `#RRGGBB` writes.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // WHAT: a fraction scaled to a byte by a float-to-int cast. WHY: Rust's cast saturates, so 0..1 lands in 0..255 and anything outside is held at the ends; no conversion without a cast exists for a float
+fn colour_byte(channel: f32) -> u8 {
+    (channel * 255.0) as u8 // WHAT: the byte, cut toward zero as before. WHY: the same colour text the markups have always been stored with
 }
 
 fn broke(what: &str, e: impl std::fmt::Display) -> String {
@@ -4485,6 +4505,9 @@ fn mcp_may_read_set(server: &Server, who: &Who, id: &str) -> Result<(), String> 
     may_reach_set(server, who, id).map_err(|_| format!("There is no drawing set called {id} on this server.")) // WHAT: the REST routes' own gate. WHY: one rule for both doors; a refusal reads as "not here".
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_projects(server: &Server, who: &Who) -> Result<String, String> {
     let everything = who.role == hub::Role::Admin; // WHAT: whether this person sees every job. WHY: the same administrator rule as the project list.
     let list: Vec<(String, String, String, i64, Option<String>)> = server
@@ -4502,7 +4525,7 @@ pub fn mcp_projects(server: &Server, who: &Who) -> Result<String, String> {
             if !crate::folders::is_office(who) {
                 for row in &mut rows {
                     let sight = crate::folders::sight_of(db, &row.0, who)?; // WHAT: what this person sees of the job. WHY: its count of sets is only theirs.
-                    row.3 = crate::folders::current_sets_seen(db, &row.0, &sight)? as i64; // WHAT: the sets they can read. WHY: a hidden folder is not even counted for an assistant.
+                    row.3 = int::of_index(crate::folders::current_sets_seen(db, &row.0, &sight)?); // WHAT: the sets they can read. WHY: a hidden folder is not even counted for an assistant.
                 }
             }
             Ok(rows)
@@ -4517,9 +4540,9 @@ pub fn mcp_projects(server: &Server, who: &Who) -> Result<String, String> {
             Some(when) => format!("  (archived {})", when.get(..10).unwrap_or(&when)),
             None => String::new(),
         };
-        out.push_str(&format!(
-            "  {number}  {name}  —  {sets} current drawing set(s){put_away}   [id {id}]\n"
-        ));
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "  {number}  {name}  —  {sets} current drawing set(s){put_away}   [id {id}]" // WHAT: one job's line. WHY: what the assistant reads
+        );
     }
     Ok(out)
 }
@@ -4528,6 +4551,10 @@ pub fn mcp_projects(server: &Server, who: &Who) -> Result<String, String> {
 /// drawing replaced is marked so, because its quantities are not the job's
 /// any more; so is takeoff carried forward onto a new issue and not yet
 /// checked.
+///
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_sets(server: &Server, who: &Who, project: Option<&str>) -> Result<String, String> {
     type Row = (String, String, String, i64, i64, Option<String>, Option<String>, i64);
     let everything = who.role == hub::Role::Admin; // WHAT: whether this person sees every job. WHY: the same administrator rule as everywhere else.
@@ -4584,17 +4611,17 @@ pub fn mcp_sets(server: &Server, who: &Who, project: Option<&str>) -> Result<Str
         }
         let mut notes = String::new();
         if let (Some(newer), Some(newer_name)) = (&newer, &newer_name) {
-            notes.push_str(&format!("  — superseded by {newer_name} [id {newer}]"));
+            let _ = write!(notes, "  — superseded by {newer_name} [id {newer}]"); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         if carried > 0 {
-            notes.push_str(&format!(
+            let _ = write!(notes, // WHAT: written straight into the text. WHY: no string is made only to be copied in
                 "  — {carried} markup(s) carried forward from the issue before, marked \"{}\" until somebody checks them",
                 crate::projects::CARRIED
-            ));
+            );
         }
-        out.push_str(&format!(
-            "  {name}  —  {sheets} sheets, revision {revision}, uploaded {uploaded}   [id {id}]{notes}\n"
-        ));
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "  {name}  —  {sheets} sheets, revision {revision}, uploaded {uploaded}   [id {id}]{notes}" // WHAT: one set's line. WHY: likewise
+        );
     }
     Ok(out)
 }
@@ -4624,8 +4651,7 @@ fn mcp_short_by(rows: &[takeoff::Row], sheets: &[quantities::SheetScale]) -> Str
         .map(|page| {
             sheets
                 .get(*page)
-                .map(|s| s.number.clone())
-                .unwrap_or_else(|| format!("sheet {}", page + 1))
+                .map_or_else(|| format!("sheet {}", page + 1), |s| s.number.clone()) // WHAT: the sheet's number, else its place. WHY: every page has a name to show
         })
         .collect();
     format!(
@@ -4637,6 +4663,9 @@ fn mcp_short_by(rows: &[takeoff::Row], sheets: &[quantities::SheetScale]) -> Str
     )
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_takeoff(server: &Server, who: &Who, id: &str) -> Result<String, String> {
     let (rows, sheets) = mcp_gather(server, who, id)?; // WHAT: the set's measurements, if this person may read it. WHY: the gate lives in mcp_gather.
     if rows.is_empty() {
@@ -4645,45 +4674,50 @@ pub fn mcp_takeoff(server: &Server, who: &Who, id: &str) -> Result<String, Strin
     let summary = takeoff::summarise(&rows, quantities::WEIGHTS);
     let mut out = format!("Takeoff for {id} — {} markup(s).\n\n", summary.picks);
     for group in &summary.groups {
-        out.push_str(&format!("  {}  ({})\n", group.subject, group.kind.name()));
-        out.push_str(&format!("      {} markup(s)", group.picks));
+        let _ = writeln!(out, "  {}  ({})", group.subject, group.kind.name()); // WHAT: written straight into the text. WHY: no string is made only to be copied in
+        let _ = write!(out, "      {} markup(s)", group.picks); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         if group.length > 0.0 {
-            out.push_str(&format!(", {:.2} ft", group.length));
+            let _ = write!(out, ", {:.2} ft", group.length); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         if group.area > 0.0 {
-            out.push_str(&format!(", {:.2} sq ft", group.area));
+            let _ = write!(out, ", {:.2} sq ft", group.area); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         if group.count > 0.0 && group.kind == annot::Kind::Count {
-            out.push_str(&format!(", count {:.0}", group.count));
+            let _ = write!(out, ", count {:.0}", group.count); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         // Absent, never zero. The distinction is the whole argument.
-        match group.weighed {
-            true => out.push_str(&format!(", {:.0} lb", group.pounds)),
-            false => out.push_str(", NO unit weight in the tool chest for this shape — \
-                                   it has no weight, which is not a weight of zero"),
-        }
+        if group.weighed { // WHAT: a shape with a unit weight. WHY: its pounds are shown
+            let _ = write!(out, ", {:.0} lb", group.pounds); // WHAT: written straight into the text. WHY: no string is made only to be copied in
+        } else { // WHAT: one without. WHY: said, never shown as zero
+            out.push_str(", NO unit weight in the tool chest for this shape — \
+                                   it has no weight, which is not a weight of zero"); // WHAT: that there is no weight. WHY: absent is never zero
+        } // WHAT: the weight, or that there is none. WHY: absent is never zero
         if group.unscaled > 0 {
-            out.push_str(&format!(
+            let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
                 " — {} of them left out for want of a scale",
                 group.unscaled
-            ));
+            );
         }
         out.push('\n');
     }
-    match summary.pounds > 0.0 {
-        true => out.push_str(&format!(
-            "\nTOTAL: {:.0} lb · {:.3} tons\n",
+    if summary.pounds > 0.0 { // WHAT: a takeoff with weight. WHY: the total shown
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "\nTOTAL: {:.0} lb · {:.3} tons", // WHAT: the total, with its line ended by writeln. WHY: the same text as before
             summary.pounds,
             summary.tons()
-        )),
-        false => out.push_str(
+        );
+    } else { // WHAT: one with none. WHY: said plainly
+        out.push_str( // WHAT: that nothing carries a weight. WHY: as above
             "\nTOTAL: no weight — nothing on this takeoff carries a unit weight.\n",
-        ),
-    }
+        );
+    } // WHAT: the total weight, or that there is none. WHY: the same distinction for the whole
     out.push_str(&mcp_short_by(&rows, &sheets));
     Ok(out)
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_shop_list(
     server: &Server,
     who: &Who,
@@ -4704,19 +4738,19 @@ pub fn mcp_shop_list(
     }
     let mut out = format!("Cut list for {id} — lengths in feet, every one rounded UP.\n\n");
     for shape in &list.shapes {
-        out.push_str(&format!("  {}\n", shape.name));
+        let _ = writeln!(out, "  {}", shape.name); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         for cut in &shape.cuts {
-            out.push_str(&format!(
+            let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
                 "      {:.3} ft  × {}",
                 cut.length, cut.count
-            ));
+            );
             if !cut.places.is_empty() {
-                out.push_str(&format!("   at {}", cut.places.join(", ")));
+                let _ = write!(out, "   at {}", cut.places.join(", ")); // WHAT: written straight into the text. WHY: no string is made only to be copied in
             }
             out.push('\n');
         }
-        out.push_str(&format!(
-            "      {} piece(s), {:.2} ft, {}\n",
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "      {} piece(s), {:.2} ft, {}", // WHAT: one cut's line. WHY: likewise
             shape.pieces,
             shape.total_length,
             match shape.pounds {
@@ -4724,43 +4758,43 @@ pub fn mcp_shop_list(
                 None => "NO unit weight in the tool chest — no weight, not a weight of zero"
                     .to_string(),
             }
-        ));
+        );
     }
-    out.push_str(&format!(
+    let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
         "\n{} piece(s) altogether · {}\n",
         list.pieces,
         list.weight_says()
-    ));
+    );
 
     match stock_feet {
         Some(stock) if stock > 0.0 => {
-            out.push_str(&format!("\nWHAT TO BUY, in {stock} ft stock:\n"));
+            let _ = write!(out, "\nWHAT TO BUY, in {stock} ft stock:\n"); // WHAT: written straight into the text. WHY: no string is made only to be copied in
             for nest in takeoff::shoplist::nest_all(&list, stock, takeoff::shoplist::INCH / 8.0)
             {
-                out.push_str(&format!(
-                    "  {}: {} stick(s), {:.0}% of the steel ends up in the building\n",
+                let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+                    "  {}: {} stick(s), {:.0}% of the steel ends up in the building", // WHAT: one shape's nest. WHY: likewise
                     nest.shape,
                     nest.sticks_to_buy(),
                     nest.yield_of() * 100.0
-                ));
+                );
                 if nest.unnested > 0 {
-                    out.push_str(&format!(
-                        "      {} piece(s) were NOT nested: a shape with more than {} pieces, or one past the first {} pieces of the whole list, is not nested one by one, so none of them is on a stick\n",
+                    let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+                        "      {} piece(s) were NOT nested: a shape with more than {} pieces, or one past the first {} pieces of the whole list, is not nested one by one, so none of them is on a stick", // WHAT: the pieces left unnested. WHY: likewise
                         nest.unnested,
                         takeoff::shoplist::MOST_NESTED,
                         takeoff::shoplist::MOST_NESTED_IN_ALL
-                    )); // WHAT: said plainly. WHY: an answer with no sticks must not read as nothing to buy.
+                    ); // WHAT: said plainly. WHY: an answer with no sticks must not read as nothing to buy.
                 } else if !nest.is_whole() {
-                    out.push_str(&format!(
+                    let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
                         "      {} piece(s) WILL NOT come out of {stock} ft stock and are on \
-                         no stick: {}\n",
+                         no stick: {}", // WHAT: the pieces too long for the stock. WHY: likewise
                         nest.too_long.len(),
                         nest.too_long
                             .iter()
                             .map(|p| format!("{p:.2} ft"))
                             .collect::<Vec<_>>()
                             .join(", ")
-                    ));
+                    );
                 }
             }
         }
@@ -4774,12 +4808,15 @@ pub fn mcp_shop_list(
 
     let missing = list.what_is_missing();
     if !missing.is_empty() {
-        out.push_str(&format!("\n{missing}\n"));
+        let _ = write!(out, "\n{missing}\n"); // WHAT: written straight into the text. WHY: no string is made only to be copied in
     }
     out.push_str(&mcp_short_by(&rows, &sheets));
     Ok(out)
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_doubles(server: &Server, who: &Who, id: &str) -> Result<String, String> {
     let (rows, sheets) = mcp_gather(server, who, id)?; // WHAT: the set's measurements, if this person may read it. WHY: the gate lives in mcp_gather.
     let found = takeoff::doubles::find(&rows, takeoff::doubles::HowClose::default());
@@ -4793,8 +4830,7 @@ pub fn mcp_doubles(server: &Server, who: &Who, id: &str) -> Result<String, Strin
     let name_of = |page: usize| {
         sheets
             .get(page)
-            .map(|s| s.number.clone())
-            .unwrap_or_else(|| format!("sheet {}", page + 1))
+            .map_or_else(|| format!("sheet {}", page + 1), |s| s.number.clone()) // WHAT: the sheet's number, else its place. WHY: every page has a name to show
     };
     let mut out = format!(
         "{} pair(s) on {id} sit in the same place measuring the same thing. \
@@ -4803,17 +4839,17 @@ pub fn mcp_doubles(server: &Server, who: &Who, id: &str) -> Result<String, Strin
         found.pairs.len()
     );
     for pair in &found.pairs {
-        out.push_str(&format!(
+        let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
             "  {}  {}  ({})\n      {}\n",
             name_of(pair.page),
             pair.subject,
             pair.sure.name(),
             pair.why
-        ));
+        );
     }
     let worth = found.what_it_is_worth(quantities::WEIGHTS, &rows);
     if !worth.is_empty() {
-        out.push_str(&format!("\n{worth}\n"));
+        let _ = write!(out, "\n{worth}\n"); // WHAT: written straight into the text. WHY: no string is made only to be copied in
     }
     out.push_str(
         "\nWhether any of these is really a double is for the estimator to decide. A \
@@ -4823,6 +4859,9 @@ pub fn mcp_doubles(server: &Server, who: &Who, id: &str) -> Result<String, Strin
     Ok(out)
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_revision(server: &Server, who: &Who, was_bid: &str, arrived: &str) -> Result<String, String> {
     let (before, _) = mcp_gather(server, who, was_bid)?; // WHAT: the set that was bid, if this person may read it. WHY: both sides are gated.
     let (after, _) = mcp_gather(server, who, arrived)?; // WHAT: the set that arrived, likewise. WHY: comparing against a set you may not see would leak it.
@@ -4832,8 +4871,8 @@ pub fn mcp_revision(server: &Server, who: &Who, was_bid: &str, arrived: &str) ->
         revision.headline()
     );
     for line in revision.changes() {
-        out.push_str(&format!(
-            "  {}  ({})  {} → {} {}  [{}]\n",
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "  {}  ({})  {} → {} {}  [{}]", // WHAT: one change's line. WHY: likewise
             line.subject,
             line.what.name(),
             format_args!("{:.2}", line.quantity.0),
@@ -4845,15 +4884,18 @@ pub fn mcp_revision(server: &Server, who: &Who, was_bid: &str, arrived: &str) ->
                          can be worked out"
                     .to_string(),
             }
-        ));
+        );
     }
     let missing = revision.what_is_missing();
     if !missing.is_empty() {
-        out.push_str(&format!("\n{missing}\n"));
+        let _ = write!(out, "\n{missing}\n"); // WHAT: written straight into the text. WHY: no string is made only to be copied in
     }
     Ok(out)
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_sheets(server: &Server, who: &Who, id: &str) -> Result<String, String> {
     mcp_may_read_set(server, who, id)?; // WHAT: the project gate. WHY: the sheet list of a set is part of the set.
     let (_, _, sheets) =
@@ -4868,23 +4910,23 @@ pub fn mcp_sheets(server: &Server, who: &Who, id: &str) -> Result<String, String
         .collect();
     let mut out = format!("{} sheet(s) in {id}:\n", sheets.len());
     for sheet in &sheets {
-        out.push_str(&format!(
-            "  {}  —  {}\n",
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "  {}  —  {}", // WHAT: one sheet's line. WHY: likewise
             sheet.number,
             match &sheet.scale {
                 Some(scale) => scale.ratio.clone(),
                 None => "NO SCALE SET".to_string(),
             }
-        ));
+        );
     }
     if !without.is_empty() {
-        out.push_str(&format!(
+        let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
             "\n{} sheet(s) have no scale: {}. Any measurement on those is left out of \
              every total — never counted as zero. A takeoff of this set is short by \
              whatever is on them.\n",
             without.len(),
             without.join(", ")
-        ));
+        );
     }
     Ok(out)
 }

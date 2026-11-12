@@ -586,7 +586,7 @@ fn is_live_key(server: &Server, headers: &HeaderMap) -> bool {
 async fn refused(server: &Server, headers: &HeaderMap, why: Refusal, body: Body) -> Response {
     let from = api::seen_from(headers); // WHAT: where it came from. WHY: one machine or forty
     if api::refusal_worth_a_line(server, &format!("device {from}")) {
-        api::record(server, Entry::new(action::REFUSED_REQUEST, "").saying(format!("{why:?}")).from(from)); // WHAT: one line. WHY: an admin can see a computer being turned away
+        api::record(server, &Entry::new(action::REFUSED_REQUEST, "").saying(format!("{why:?}")).from(from)); // WHAT: one line. WHY: an admin can see a computer being turned away
     }
     let answer = if why == Refusal::BeforeStart { clock_behind() } else { unknown() }; // WHAT: the clock's own words, or §4's one answer. WHY: a computer whose clock runs slow is told what to do, not that it is a stranger
     api::turned_away(body, answer).await // WHAT: 401, with a little of the body read. WHY: as every refusal
@@ -801,7 +801,7 @@ fn write_down(server: &Server, ask: &Ask, id: &str, from: &str, outcome: &Outcom
     } else {
         entry = entry.saying(format!("approved by {}", outcome.approved_by)); // WHAT: who let it in. WHY: said
     }
-    api::record(server, entry); // WHAT: written. WHY: §3
+    api::record(server, &entry); // WHAT: written. WHY: §3
 }
 
 /// The proof of a join's computer, checked before the account is made.
@@ -944,7 +944,7 @@ fn changed(server: &Server, admin: &Device, id: &str, what: Change, headers: &He
         Change::Admin { on: true } => (action::MADE_ADMIN, "an admin"),
         Change::Admin { on: false } => (action::UNMADE_ADMIN, "not an admin"),
     }; // WHAT: the log's words. WHY: plain
-    api::record(server, Entry::new(action, &by).about(format!("{} on {} ({})", target.label(), wire::app_title(&target.app), target.id)).saying(state_now).from(api::seen_from(headers))); // WHAT: written. WHY: §3: every call is in the audit log
+    api::record(server, &Entry::new(action, &by).about(format!("{} on {} ({})", target.label(), wire::app_title(&target.app), target.id)).saying(state_now).from(api::seen_from(headers))); // WHAT: written. WHY: §3: every call is in the audit log
     Ok(Json(serde_json::json!({ "id": target.id, "done": state_now }))) // WHAT: what was done. WHY: the app refreshes its list
 }
 

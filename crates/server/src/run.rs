@@ -28,6 +28,7 @@ impl Serving {
     /// The address to hand to somebody at another desk. Never `0.0.0.0`, which
     /// means "every address on this machine" to the machine and nothing at all
     /// to anybody typing it.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn url(&self) -> String {
         if self.address.ip().is_unspecified() {
             match local_address() {
@@ -45,6 +46,10 @@ impl Serving {
 /// `ready` is called once, as soon as it is listening, with where it landed.
 /// That is how the program that started it knows what address to show somebody
 /// without guessing or racing it.
+///
+/// # Errors
+///
+/// Fails when the address can't be listened on or serving stops with an error.
 pub async fn serve(
     config: Config,
     stop: impl std::future::Future<Output = ()> + Send + 'static,
@@ -106,9 +111,7 @@ pub async fn serve(
         .name("hyperview-announce".into())
         .spawn(move || {
             hub::discover::answer_for(|asker| {
-                let host = hub::discover::facing(asker.ip())
-                    .map(|ip| ip.to_string())
-                    .unwrap_or_else(|| "localhost".into());
+                let host = hub::discover::facing(asker.ip()).map_or_else(|| "localhost".into(), |ip| ip.to_string()); // WHAT: the address this computer faces the asker on, else localhost. WHY: the answer it is told to use
                 hub::discover::Answer {
                     name: api::installation_name(&announcing),
                     url: format!("http://{host}:{port}"),
@@ -119,7 +122,7 @@ pub async fn serve(
                     ready: !announcing.store.is_empty().unwrap_or(false),
                     id: id.clone(),
                 }
-            })
+            });
         })
         .ok();
 
@@ -192,6 +195,7 @@ fn secure_settings(data: &std::path::Path, at: SocketAddr) -> Result<(Arc<rustls
 /// This machine's address on the network it is actually on. Asked of the
 /// operating system rather than guessed from a list of interfaces, because a
 /// shop machine has four of those and only one of them is the answer.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn local_address() -> Option<std::net::IpAddr> {
     // Nothing is sent: connecting a UDP socket only picks a route.
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
@@ -217,8 +221,8 @@ pub async fn on_a_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = interrupt => {},
-        _ = terminate => {},
+        () = interrupt => {}, // WHAT: Ctrl+C. WHY: stops the server
+        () = terminate => {}, // WHAT: the service being stopped. WHY: likewise
     }
     tracing::info!("stopping");
 }
@@ -226,6 +230,10 @@ pub async fn on_a_signal() {
 /// Makes the first account when a server is started with nothing on it and
 /// nobody is going to be sitting in front of the program to set it up — the
 /// headless case, where somebody installed this on a Linux box.
+///
+/// # Errors
+///
+/// Fails when the database can't be read or written.
 pub fn first_administrator(store: &Store) -> Result<String> {
     let password = crate::auth::readable_secret();
     let hashed = crate::auth::hash_password(&password)?;

@@ -41,7 +41,7 @@ fn signed(signing: &SigningKey, id: &str, edition: Edition, users: u32, through:
         key: KEY_NAME.into(),                // WHAT: the key's name. WHY: the server looks it up by name.
         signature: String::new(),            // WHAT: none yet. WHY: signed just below.
     };
-    license.signature = signing.sign(&license.signing_payload()).to_bytes().iter().map(|b| format!("{b:02x}")).collect(); // WHAT: the signature over the signed text. WHY: what every server checks.
+    license.signature = hyperview_server::store::hex(&signing.sign(&license.signing_payload()).to_bytes()); // WHAT: the signature over the signed text. WHY: what every server checks.
     serde_json::to_string_pretty(&license).unwrap() // WHAT: as the file is written. WHY: the server is handed the file's text.
 }
 

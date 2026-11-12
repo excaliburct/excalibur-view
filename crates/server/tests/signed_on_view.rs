@@ -233,7 +233,7 @@ impl Office {
     }
 
     /// One assistant tool's answer, asked with `token`.
-    fn tool(&self, token: &str, name: &str, arguments: Value) -> String {
+    fn tool(&self, token: &str, name: &str, arguments: &Value) -> String { // WHAT: the tool's arguments, lent. WHY: only written into the request
         let (status, said) = self.ask(token, "POST", "/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": arguments } }))); // WHAT: a tool call. WHY: how an assistant asks.
         assert_eq!(status, 200, "{said}"); // WHAT: the endpoint answered. WHY: refusals come back inside.
         said.pointer("/result/content/0/text")

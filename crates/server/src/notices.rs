@@ -1,7 +1,7 @@
 //! Change notices: the office server tells another program when a drawing
 //! set's takeoff changes, instead of that program asking over and over.
 //!
-//! An administrator gives an address (FabWire's, say) under Studio, or with
+//! An administrator gives an address (`FabWire`'s, say) under Studio, or with
 //! `POST /notices`, and is shown a secret, once. Each notice is a small JSON
 //! body saying which set changed, in which project, under which of the other
 //! program's references, and at what revision. It is signed with that secret
@@ -36,6 +36,10 @@ pub const GATHER: Duration = Duration::from_secs(2);
 const AGAIN_AFTER: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(30)];
 
 /// An address a notice may be sent to: http or https, and not absurdly long.
+///
+/// # Errors
+///
+/// A sentence saying why the address is refused.
 pub fn acceptable(url: &str) -> Result<(), String> {
     let url = url.trim();
     let scheme_ok = url.starts_with("https://") || url.starts_with("http://");
@@ -48,7 +52,7 @@ pub fn acceptable(url: &str) -> Result<(), String> {
         return Err("A notice address carries no name or password before its host.".into()); // WHAT: user:password@ refused. WHY: a secret has no place in an address kept and shown in the Studio, and the form hides where it really goes.
     }
     let host = authority.trim_start_matches('[').split(']').next().unwrap_or_default(); // WHAT: an IPv6 host without its brackets. WHY: parsed as an address below.
-    let host = if authority.starts_with('[') { host } else { authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority) }; // WHAT: the host without its port. WHY: the same.
+    let host = if authority.starts_with('[') { host } else { authority.rsplit_once(':').map_or(authority, |(h, _)| h) }; // WHAT: the host without its port. WHY: the same.
     let read_as = match url::Url::parse(url).ok().and_then(|u| u.host().map(|h| h.to_owned())) {
         Some(url::Host::Ipv4(v4)) => Some(std::net::IpAddr::V4(v4)), // WHAT: the host as the address library reads it. WHY: `2852039166`, `0xa9fea9fe` and `169.254.43518` are all 169.254.169.254 to it, and to the connection.
         Some(url::Host::Ipv6(v6)) => Some(std::net::IpAddr::V6(v6)), // WHAT: likewise for IPv6. WHY: the same.
@@ -74,9 +78,9 @@ fn only_allowed(netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
 }
 
 /// Addresses a notice is never sent to: link-local (169.254.0.0/16, where a
-/// cloud machine answers with its own credentials, and fe80::/10), the
+/// cloud machine answers with its own credentials, and `fe80::/10`), the
 /// "any" address, multicast and broadcast. The office's own network and this
-/// machine stay allowed: that is where FabWire lives.
+/// machine stay allowed: that is where `FabWire` lives.
 fn never_a_notice(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => v4.is_link_local() || v4.is_unspecified() || v4.is_multicast() || v4.is_broadcast(), // WHAT: the IPv4 ones. WHY: as above.
@@ -88,6 +92,7 @@ fn never_a_notice(ip: std::net::IpAddr) -> bool {
 }
 
 /// A new secret: 32 random bytes, as hex.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn secret() -> String {
     let mut bytes = [0u8; 32];
     rand::Rng::fill(&mut rand::thread_rng(), &mut bytes);
@@ -95,6 +100,7 @@ pub fn secret() -> String {
 }
 
 /// HMAC-SHA256, the way every webhook receiver already knows how to check.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn sign(secret: &str, body: &[u8]) -> String {
     const BLOCK: usize = 64;
     let mut key = secret.as_bytes().to_vec();
@@ -121,7 +127,7 @@ pub fn changed(server: &Shared, set: &str) {
         .unwrap_or_default();
     for (id, url, secret) in targets {
         let key = (id.clone(), set.to_string());
-        let fresh = server.notices.0.lock().map(|mut p| p.insert(key.clone())).unwrap_or(false);
+        let fresh = server.notices.0.lock().is_ok_and(|mut p| p.insert(key.clone())); // WHAT: whether this notice is new, false when the lock is poisoned. WHY: one notice per set at a time, as before
         if !fresh {
             continue;
         }
@@ -141,6 +147,10 @@ pub fn changed(server: &Shared, set: &str) {
 
 /// Sends a notice straight away, to see whether the other program is
 /// listening. Returns how it went.
+///
+/// # Errors
+///
+/// A sentence saying why, when there is no such notice or it could not be sent.
 pub fn test(server: &Shared, id: &str) -> Result<String, String> {
     let found: Option<(String, String)> = server
         .store

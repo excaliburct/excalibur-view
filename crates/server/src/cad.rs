@@ -470,7 +470,7 @@ pub fn move_from(from: &Path, database: &Path, blobs: &Path) -> Result<Moved, St
     let old_uri = url_of(&old_db).ok_or_else(|| format!("{} can't be opened as a database.", old_db.display()))?; // WHAT: its address with immutable=1. WHY: opened without writing even SQLite's side files, so the old folder stays exactly as it was
     let old = Connection::open_with_flags(&old_uri, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI).map_err(|e| format!("reading {}: {e}", old_db.display()))?; // WHAT: read only. WHY: the old server's drawings are never changed by the move
     old.execute_batch("BEGIN").map_err(|e| format!("reading {}: {e}", old_db.display()))?; // WHAT: one snapshot for both reads. WHY: drawings and versions from the same moment
-    let mut new = Store::open(database, blobs).map_err(|e| format!("opening this server's CAD drawings: {e}"))?;
+    let new = Store::open(database, blobs).map_err(|e| format!("opening this server's CAD drawings: {e}"))?; // WHAT: this server's CAD store, opened. WHY: only read through, so it need not be mutable
     let here: i64 = new.db.query_row("SELECT COUNT(*) FROM cad_drawings", [], |r| r.get(0)).map_err(|e| e.to_string())?;
     if here > 0 {
         return Err("This server already has CAD drawings; a move only goes into an empty one, so nothing here is overwritten.".into()); // WHAT: refused. WHY: two offices' drawings never mix, and nothing is overwritten

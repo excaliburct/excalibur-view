@@ -8,6 +8,7 @@
 
 use serde_json::{json, Value};
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn document(name: &str) -> Value {
     json!({
         "openapi": "3.1.0",
@@ -125,6 +126,7 @@ fn device_schemas() -> Value {
 }
 
 /// The routes for groups, folders and files that aren't drawings.
+#[allow(clippy::too_many_lines)] // WHAT: a part of the API's description, written as data. WHY: a document, not logic; it reads top to bottom as the routes do
 fn folder_paths() -> Value {
     json!({
         "/groups": {
@@ -341,6 +343,7 @@ Weights come from the unit weight carried by the tool that drew the markup, out 
 of the tool chest the estimator was using. They are that company's numbers. \
 This server does not look anything up in a section table.";
 
+#[allow(clippy::too_many_lines)] // WHAT: the routes' descriptions, written as data. WHY: a document, not logic; it reads top to bottom as the routes do
 fn paths() -> Value {
     json!({
         "/health": {
@@ -1120,6 +1123,7 @@ fn query_param(name: &str, description: &str) -> Value {
             "description": description, "schema": { "type": "string" } })
 }
 
+#[allow(clippy::too_many_lines)] // WHAT: the shapes' descriptions, written as data. WHY: a document, not logic; one entry per shape
 fn schemas() -> Value {
     json!({
         "Problem": object(&[

@@ -87,7 +87,7 @@ pub struct Patience {
 
 impl std::fmt::Debug for Patience {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let held = self.wrong.lock().map(|w| w.len()).unwrap_or(0);
+        let held = self.wrong.lock().map_or(0, |w| w.len()); // WHAT: how many are watched, nought when the lock is poisoned. WHY: a look at the box never stops on it
         write!(f, "Patience({held} watched)")
     }
 }
@@ -122,6 +122,10 @@ impl Patience {
     /// allowed. Done under one lock, each try sees every try before it.
     ///
     /// [`right`]: Patience::right
+    ///
+    /// # Errors
+    ///
+    /// The wait still owed, when any of `who` owes one; the try is then not counted.
     pub fn begin(&self, rule: Rule, who: &[&str]) -> Result<(), Duration> {
         self.begin_keeping(rule, who, &[]) // WHAT: nothing in `who` is a real account. WHY: every count may be forgotten to make room.
     }
@@ -133,6 +137,10 @@ impl Patience {
     /// filled the ledger five fresh guesses at it every time.
     ///
     /// [`begin`]: Patience::begin
+    ///
+    /// # Errors
+    ///
+    /// The wait still owed, as [`begin`].
     pub fn begin_keeping(&self, rule: Rule, who: &[&str], keep: &[&str]) -> Result<(), Duration> {
         let Ok(mut held) = self.wrong.lock() else {
             return Ok(()); // WHAT: a poisoned lock lets the try through uncounted. WHY: the same as `wait_for` did; a panic elsewhere must not lock the whole office out.
@@ -172,7 +180,7 @@ impl Patience {
 
     /// How many are being watched. For the tests and for a look at the box.
     pub fn watching(&self) -> usize {
-        self.wrong.lock().map(|w| w.len()).unwrap_or(0)
+        self.wrong.lock().map_or(0, |w| w.len()) // WHAT: how many are watched, nought when the lock is poisoned. WHY: likewise
     }
 }
 
@@ -184,7 +192,7 @@ fn owed_by(rule: Rule, seen: &Wrong) -> Option<Duration> {
     let spent = seen.times.checked_sub(rule.free)?;
     let owed = penalty(rule, spent);
     let waited = seen.last.elapsed();
-    (waited < owed).then(|| owed - waited)
+    owed.checked_sub(waited).filter(|left| !left.is_zero()) // WHAT: what is left of the wait, if any. WHY: none once it has all been waited, exactly as before
 }
 
 /// Counts one wrong answer against `who`, making room first when full.
@@ -232,6 +240,7 @@ fn forget_the_least_guessed_at(held: &mut HashMap<String, Wrong>) {
 /// IPv6 address is its /64: one home, office or cloud machine is handed a
 /// whole /64 and can take a new address from it for every request, so
 /// counting the address alone let it make a new one per guess.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn counted_as(address: &str) -> String {
     match address.parse::<std::net::IpAddr>().map(|ip| ip.to_canonical()) {
         Ok(std::net::IpAddr::V6(v6)) => {
@@ -245,6 +254,7 @@ pub fn counted_as(address: &str) -> String {
 
 /// What to tell somebody who has to wait. Never says how many tries are left
 /// or what the limit is; that is a hint about the thing being guarded.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn refusal(owed: Duration) -> String {
     let seconds = owed.as_secs().max(1);
     let how_long = if seconds < 90 {
@@ -383,7 +393,7 @@ mod tests {
     #[test]
     fn a_flood_of_made_up_names_does_not_push_out_the_account_being_guessed_at() {
         let p = Patience::default(); // WHAT: a ledger. WHY: filled below.
-        for _ in 0..(QUICK.free + 1) {
+        for _ in 0..=QUICK.free { // WHAT: one more try than is free. WHY: until it owes a wait
             let _ = p.begin(QUICK, &["the-victim"]); // WHAT: wrong tries at one account. WHY: until it owes a wait.
         }
         assert!(p.wait_for(QUICK, "the-victim").is_some(), "the account owes a wait");
@@ -397,7 +407,7 @@ mod tests {
     #[test]
     fn an_account_being_guessed_at_outlives_a_flood_of_names_guessed_at_more_often() {
         let p = Patience::default(); // WHAT: a ledger. WHY: filled below.
-        for _ in 0..(QUICK.free + 1) {
+        for _ in 0..=QUICK.free { // WHAT: one more try than is free. WHY: likewise
             let _ = p.begin_keeping(QUICK, &["the-victim@example.com"], &["the-victim@example.com"]); // WHAT: wrong tries at a real account. WHY: until it owes a wait.
         }
         assert!(p.wait_for(QUICK, "the-victim@example.com").is_some(), "the account owes a wait");
