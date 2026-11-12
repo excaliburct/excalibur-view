@@ -42,7 +42,7 @@ pub const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS cad_drawings (
     id INTEGER PRIMARY KEY, folder TEXT NOT NULL, name TEXT NOT NULL,
     locked_by TEXT, locked_at INTEGER, archived INTEGER NOT NULL DEFAULT 0,
-    created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
+    created_by TEXT NOT NULL, created_at INTEGER NOT NULL, locked_id TEXT);
 CREATE UNIQUE INDEX IF NOT EXISTS cad_drawing_place ON cad_drawings(folder, name) WHERE archived = 0;
 CREATE TABLE IF NOT EXISTS cad_versions (
     drawing INTEGER NOT NULL REFERENCES cad_drawings(id), version INTEGER NOT NULL,
@@ -52,6 +52,26 @@ CREATE TABLE IF NOT EXISTS cad_versions (
 CREATE TABLE IF NOT EXISTS cad_log (
     at INTEGER NOT NULL, who TEXT NOT NULL, what TEXT NOT NULL, detail TEXT NOT NULL);
 "; // WHAT: CAD's own tables, without its people and sign-ins, named cad_. WHY: the Office Server's accounts are used instead, and the names never meet View's
+
+/// Brings CAD's tables made by an earlier build up to this one: `locked_id`, the account holding a check-out.
+///
+/// # Errors
+///
+/// When the database can't be read or changed.
+pub fn upgrade(db: &Connection) -> rusqlite::Result<()> {
+    let has: bool = db.query_row("SELECT COUNT(*) FROM pragma_table_info('cad_drawings') WHERE name = 'locked_id'", [], |r| r.get::<_, i64>(0))? > 0; // WHAT: whether the column is there. WHY: tables made before it have none
+    if !has {
+        db.execute_batch("ALTER TABLE cad_drawings ADD COLUMN locked_id TEXT;")?; // WHAT: the column, empty. WHY: a check-out made before it is held by no account, so only an administrator can release it
+    }
+    Ok(())
+}
+
+/// Who is acting on a drawing: the account, which holds a check-out, and the email shown beside it.
+#[derive(Clone, Copy, Debug)]
+pub struct Hand<'a> {
+    pub account: &'a str, // WHAT: the account's id. WHY: a check-out belongs to the account; an email can be changed or handed to a new account (audit L5)
+    pub email: &'a str,   // WHAT: the account's email. WHY: shown to others as who has it, and kept in the history
+}
 
 pub struct Store {
     db: Connection,
@@ -124,11 +144,22 @@ impl Store {
         db.busy_timeout(std::time::Duration::from_secs(10))?; // WHAT: waits for another request's write. WHY: each request opens its own connection
         db.execute_batch("PRAGMA foreign_keys = ON;")?; // WHAT: versions belong to drawings. WHY: a version for no drawing is refused
         db.execute_batch(SCHEMA)?; // WHAT: CAD's tables, if not made yet. WHY: the server makes them as it opens; a test's own database too
+        upgrade(&db)?; // WHAT: an earlier build's tables brought up to date. WHY: the check-out's account column
         Ok(Store { db, blobs: blobs.to_path_buf() })
     }
 
     pub fn log(&self, who: &str, what: &str, detail: &str) {
         let _ = self.db.execute("INSERT INTO cad_log (at, who, what, detail) VALUES (?1, ?2, ?3, ?4)", params![now(), who, what, detail]); // WHAT: one line of what was done. WHY: who checked out, saved, forced or archived what
+    }
+
+    /// Whether `who`'s account holds the drawing's check-out. A check-out with no account (made before accounts were
+    /// kept) is nobody's: only an administrator's forced release frees it.
+    fn holds(&self, id: i64, who: Hand) -> bool {
+        self.db
+            .query_row("SELECT locked_id FROM cad_drawings WHERE id = ?1", [id], |r| r.get::<_, Option<String>>(0))
+            .ok()
+            .flatten()
+            .is_some_and(|account| account == who.account) // WHAT: the same account, compared exactly. WHY: an email shared, changed or reused never passes for the account
     }
 
     /// A drawing's bytes, kept once by their hash.
@@ -246,18 +277,18 @@ impl Store {
     /// # Errors
     ///
     /// Refused, in words a person can act on, when it can't be done.
-    pub fn lock(&self, id: i64, who: &str) -> Result<(), Refused> {
+    pub fn lock(&self, id: i64, who: Hand) -> Result<(), Refused> {
         let d = self.drawing(id).ok_or(Refused::NotFound)?;
-        match (&d.locked_by, d.locked_at) {
-            (Some(by), Some(at)) if by != who => Err(Refused::Locked(by.clone(), at)),
-            (Some(_), _) => Ok(()),
-            _ => {
-                let n = self.db.execute("UPDATE cad_drawings SET locked_by = ?2, locked_at = ?3 WHERE id = ?1 AND locked_by IS NULL", params![id, who, now()]).unwrap_or(0); // WHAT: only if still free. WHY: two people asking at once can't both get it
+        match &d.locked_by {
+            Some(_) if self.holds(id, who) => Ok(()), // WHAT: this account has it already. WHY: asking again changes nothing
+            Some(by) => Err(Refused::Locked(by.clone(), d.locked_at.unwrap_or(0))), // WHAT: someone else's, even under the same email. WHY: a check-out is the account's (audit L5)
+            None => {
+                let n = self.db.execute("UPDATE cad_drawings SET locked_by = ?2, locked_at = ?3, locked_id = ?4 WHERE id = ?1 AND locked_by IS NULL", params![id, who.email, now(), who.account]).unwrap_or(0); // WHAT: only if still free, held by the account. WHY: two people asking at once can't both get it
                 if n == 0 {
                     let d = self.drawing(id).ok_or(Refused::NotFound)?;
                     return Err(Refused::Locked(d.locked_by.unwrap_or_default(), d.locked_at.unwrap_or(0)));
                 }
-                self.log(who, "check-out", &id.to_string());
+                self.log(who.email, "check-out", &id.to_string());
                 Ok(())
             }
         }
@@ -268,13 +299,14 @@ impl Store {
     /// # Errors
     ///
     /// Refused, in words a person can act on, when it can't be done.
-    pub fn unlock(&self, id: i64, who: &str, force: bool) -> Result<(), Refused> {
+    pub fn unlock(&self, id: i64, who: Hand, force: bool) -> Result<(), Refused> {
         let d = self.drawing(id).ok_or(Refused::NotFound)?;
+        let mine = self.holds(id, who); // WHAT: this account's check-out. WHY: decides a check-in from a forced release
         match &d.locked_by {
             None => Ok(()),
-            Some(by) if by == who || force => {
-                self.db.execute("UPDATE cad_drawings SET locked_by = NULL, locked_at = NULL WHERE id = ?1", [id]).map_err(|e| Refused::Bad(e.to_string()))?;
-                self.log(who, if by == who { "check-in" } else { "force-release" }, &format!("{id} (had: {by})")); // WHAT: a forced release is named as one. WHY: whoever had it can see who took it back
+            Some(by) if mine || force => {
+                self.db.execute("UPDATE cad_drawings SET locked_by = NULL, locked_at = NULL, locked_id = NULL WHERE id = ?1", [id]).map_err(|e| Refused::Bad(e.to_string()))?;
+                self.log(who.email, if mine { "check-in" } else { "force-release" }, &format!("{id} (had: {by})")); // WHAT: a forced release is named as one. WHY: whoever had it can see who took it back
                 Ok(())
             }
             Some(by) => Err(Refused::Locked(by.clone(), d.locked_at.unwrap_or(0))),
@@ -287,17 +319,17 @@ impl Store {
     /// # Errors
     ///
     /// Refused, in words a person can act on, when it can't be done.
-    pub fn save(&mut self, id: i64, base: i64, bytes: &[u8], who: &str, note: &str) -> Result<i64, Refused> {
+    pub fn save(&mut self, id: i64, base: i64, bytes: &[u8], who: Hand, note: &str) -> Result<i64, Refused> {
         if bytes.len() > MOST_BYTES {
             return Err(Refused::Bad("That drawing is too big.".into()));
         }
         let d = self.drawing(id).ok_or(Refused::NotFound)?; // WHAT: the drawing, looked at before anything is stored. WHY: a save to a drawing that isn't there, or isn't checked out to this person, left its file behind for good (audit, 2026-11-11); the same checks run again inside the lock
-        if d.locked_by.as_deref() != Some(who) {
+        if !self.holds(id, who) {
             return match d.locked_by {
                 Some(by) => Err(Refused::Locked(by, d.locked_at.unwrap_or(0))),
                 None => Err(Refused::NotYours),
             };
-        }
+        } // WHAT: only the account holding it saves. WHY: the same email on another account is someone else (audit L5)
         let sha = self.put_blob(bytes).map_err(|e| Refused::Bad(format!("Couldn't store it: {e}")))?; // WHAT: the bytes kept first. WHY: the slow part, outside the write lock
         self.db.execute_batch("BEGIN IMMEDIATE").map_err(|e| Refused::Bad(e.to_string()))?; // WHAT: the check and the write as one. WHY: a check-out forced back and taken by someone else in between can't let this save land
         let saved = self.save_checked(id, base, &sha, bytes.len() as i64, who, note);
@@ -313,23 +345,23 @@ impl Store {
     }
 
     /// [`save`]'s checks and write, inside its transaction.
-    fn save_checked(&self, id: i64, base: i64, sha: &str, size: i64, who: &str, note: &str) -> Result<i64, Refused> {
+    fn save_checked(&self, id: i64, base: i64, sha: &str, size: i64, who: Hand, note: &str) -> Result<i64, Refused> {
         let d = self.drawing(id).ok_or(Refused::NotFound)?;
-        if d.locked_by.as_deref() != Some(who) {
+        if !self.holds(id, who) {
             return match d.locked_by {
                 Some(by) => Err(Refused::Locked(by, d.locked_at.unwrap_or(0))),
                 None => Err(Refused::NotYours),
             };
-        }
+        } // WHAT: only the account holding it saves. WHY: the same email on another account is someone else (audit L5)
         if base != d.version {
             return Err(Refused::Stale(d.version)); // WHAT: saved by someone else since it was opened. WHY: never overwrites their work
         }
         let next = d.version + 1;
         let note: String = note.chars().filter(|c| !c.is_control()).take(500).collect(); // WHAT: the note, cleaned and capped. WHY: it is shown in a list
         self.db
-            .execute("INSERT INTO cad_versions (drawing, version, sha256, size, saved_by, saved_at, note) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![id, next, sha, size, who, now(), note])
+            .execute("INSERT INTO cad_versions (drawing, version, sha256, size, saved_by, saved_at, note) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![id, next, sha, size, who.email, now(), note])
             .map_err(|_| Refused::Stale(d.version))?; // WHAT: the version number taken by a save at the same moment. WHY: one of the two is refused, never both written
-        self.log(who, "save", &format!("{id} v{next}"));
+        self.log(who.email, "save", &format!("{id} v{next}"));
         Ok(next)
     }
 
@@ -350,7 +382,7 @@ impl Store {
     /// # Errors
     ///
     /// Refused, in words a person can act on, when it can't be done.
-    pub fn restore(&mut self, id: i64, version: i64, who: &str) -> Result<i64, Refused> {
+    pub fn restore(&mut self, id: i64, version: i64, who: Hand) -> Result<i64, Refused> {
         let (_, bytes) = self.file(id, Some(version))?;
         let base = self.drawing(id).ok_or(Refused::NotFound)?.version;
         self.save(id, base, &bytes, who, &format!("Restored version {version}"))
@@ -362,7 +394,7 @@ impl Store {
     ///
     /// Refused, in words a person can act on, when it can't be done.
     pub fn archive(&self, id: i64, who: &str) -> Result<(), Refused> {
-        let n = self.db.execute("UPDATE cad_drawings SET archived = 1, locked_by = NULL, locked_at = NULL WHERE id = ?1 AND archived = 0", [id]).unwrap_or(0);
+        let n = self.db.execute("UPDATE cad_drawings SET archived = 1, locked_by = NULL, locked_at = NULL, locked_id = NULL WHERE id = ?1 AND archived = 0", [id]).unwrap_or(0);
         if n == 0 {
             return Err(Refused::NotFound);
         }
@@ -616,7 +648,7 @@ pub(crate) async fn save(State(server): State<Shared>, headers: HeaderMap, UrlPa
     let body = drawing_bytes(body).await?;
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known
     blocking(&server, move |s| {
-        s.save(id, saving.base.ok_or_else(|| Refused::Bad("Say which version this was opened from (base).".into()))?, &body, &who.email, &saving.note)?;
+        s.save(id, saving.base.ok_or_else(|| Refused::Bad("Say which version this was opened from (base).".into()))?, &body, Hand { account: &who.id, email: &who.email }, &saving.note)?;
         s.drawing(id).ok_or(Refused::NotFound)
     })
     .await
@@ -628,7 +660,7 @@ pub(crate) async fn lock(State(server): State<Shared>, headers: HeaderMap, UrlPa
     let who = crate::api::writer(&server, &headers)?; // WHAT: checking out is the start of a change. WHY: a viewer can't hold a drawing others need
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known
     blocking(&server, move |s| {
-        s.lock(id, &who.email)?;
+        s.lock(id, Hand { account: &who.id, email: &who.email })?;
         s.drawing(id).ok_or(Refused::NotFound)
     })
     .await
@@ -652,7 +684,7 @@ pub(crate) async fn unlock(State(server): State<Shared>, headers: HeaderMap, Url
     let release = asked?;
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known
     blocking(&server, move |s| {
-        s.unlock(id, &who.email, release.force)?;
+        s.unlock(id, Hand { account: &who.id, email: &who.email }, release.force)?;
         s.drawing(id).ok_or(Refused::NotFound)
     })
     .await
@@ -677,7 +709,7 @@ pub(crate) async fn restore(State(server): State<Shared>, headers: HeaderMap, Ur
     let restoring: Restoring = values(&uri)?;
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known
     blocking(&server, move |s| {
-        s.restore(id, restoring.version.ok_or_else(|| Refused::Bad("Say which version to bring back.".into()))?, &who.email)?;
+        s.restore(id, restoring.version.ok_or_else(|| Refused::Bad("Say which version to bring back.".into()))?, Hand { account: &who.id, email: &who.email })?;
         s.drawing(id).ok_or(Refused::NotFound)
     })
     .await
@@ -714,25 +746,68 @@ mod tests {
         Store::open(&db, &blobs).unwrap()
     }
 
+    const SAM: Hand = Hand { account: "acct_sam", email: "sam@example.com" }; // WHAT: one account. WHY: the person with the drawing out
+    const PAT: Hand = Hand { account: "acct_pat", email: "pat@example.com" }; // WHAT: another. WHY: the person refused
+
     #[test]
     fn one_person_has_a_drawing_out_and_a_save_on_an_old_copy_is_refused() {
         let mut s = a_store();
         let id = s.create("Jobs/2640", "Base plate.excad", b"v1", "sam@example.com").unwrap();
         assert_eq!(s.create("Jobs/2640", "Base plate.excad", b"again", "sam@example.com"), Err(Refused::Exists));
-        assert_eq!(s.save(id, 1, b"v2", "sam@example.com", ""), Err(Refused::NotYours), "out first");
-        s.lock(id, "sam@example.com").unwrap();
-        assert!(matches!(s.lock(id, "pat@example.com"), Err(Refused::Locked(by, _)) if by == "sam@example.com"), "one person at a time");
-        assert_eq!(s.save(id, 1, b"v2", "sam@example.com", "first change"), Ok(2));
-        assert_eq!(s.save(id, 1, b"v2b", "sam@example.com", ""), Err(Refused::Stale(2)), "an old copy never overwrites a newer one");
+        assert_eq!(s.save(id, 1, b"v2", SAM, ""), Err(Refused::NotYours), "out first");
+        s.lock(id, SAM).unwrap();
+        assert!(matches!(s.lock(id, PAT), Err(Refused::Locked(by, _)) if by == "sam@example.com"), "one person at a time");
+        assert_eq!(s.save(id, 1, b"v2", SAM, "first change"), Ok(2));
+        assert_eq!(s.save(id, 1, b"v2b", SAM, ""), Err(Refused::Stale(2)), "an old copy never overwrites a newer one");
         assert_eq!(s.file(id, None).unwrap(), (2, b"v2".to_vec()));
         assert_eq!(s.file(id, Some(1)).unwrap(), (1, b"v1".to_vec()), "every version kept");
-        assert_eq!(s.unlock(id, "pat@example.com", false).map_err(|e| matches!(e, Refused::Locked(..))), Err(true), "not theirs to check in");
-        s.unlock(id, "pat@example.com", true).unwrap(); // WHAT: forced. WHY: the route allows it to administrators only
-        assert_eq!(s.save(id, 2, b"v3", "sam@example.com", ""), Err(Refused::NotYours), "a save after the drawing was taken back never lands");
-        assert_eq!(s.restore(id, 1, "pat@example.com"), Err(Refused::NotYours), "restoring is a save, so it needs the drawing out");
+        assert_eq!(s.unlock(id, PAT, false).map_err(|e| matches!(e, Refused::Locked(..))), Err(true), "not theirs to check in");
+        s.unlock(id, PAT, true).unwrap(); // WHAT: forced. WHY: the route allows it to administrators only
+        assert_eq!(s.save(id, 2, b"v3", SAM, ""), Err(Refused::NotYours), "a save after the drawing was taken back never lands");
+        assert_eq!(s.restore(id, 1, PAT), Err(Refused::NotYours), "restoring is a save, so it needs the drawing out");
         s.archive(id, "admin@example.com").unwrap();
         assert!(s.drawing(id).is_none() && s.drawings().is_empty(), "archived is hidden");
         assert_eq!(s.counts(), (0, 2, 0), "and its versions kept");
+    }
+
+    #[test]
+    fn a_check_out_belongs_to_the_account_not_the_email() {
+        let mut s = a_store();
+        let id = s.create("", "Stair.excad", b"v1", "sam@example.com").unwrap();
+        s.lock(id, SAM).unwrap();
+        let reused = Hand { account: "acct_new", email: "sam@example.com" }; // WHAT: a new account given Sam's old email. WHY: Sam left, and the address went to someone else (audit L5)
+        assert!(matches!(s.lock(id, reused), Err(Refused::Locked(..))), "the same email on another account doesn't hold it");
+        assert!(matches!(s.save(id, 1, b"v2", reused, ""), Err(Refused::Locked(..))), "and can't save over it");
+        assert!(matches!(s.unlock(id, reused, false), Err(Refused::Locked(..))), "or check it in");
+        let renamed = Hand { account: "acct_sam", email: "samuel@example.com" }; // WHAT: Sam's own account, its email changed. WHY: still Sam
+        assert_eq!(s.save(id, 1, b"v2", renamed, ""), Ok(2), "the account still holds it after an email change");
+        s.unlock(id, renamed, false).unwrap();
+        assert_eq!(s.drawing(id).unwrap().locked_by, None, "checked back in by its account");
+    }
+
+    #[test]
+    fn a_check_out_made_before_accounts_were_kept_is_freed_only_by_force() {
+        let (db, blobs) = a_server_folder();
+        let mut s = Store::open(&db, &blobs).unwrap();
+        let id = s.create("", "Old.excad", b"v1", "sam@example.com").unwrap();
+        s.db.execute("UPDATE cad_drawings SET locked_by = 'sam@example.com', locked_at = 1, locked_id = NULL WHERE id = ?1", [id]).unwrap(); // WHAT: a check-out with no account. WHY: as an earlier build of the cad part left it
+        assert!(matches!(s.save(id, 1, b"v2", SAM, ""), Err(Refused::Locked(..))), "an email alone holds nothing");
+        assert!(matches!(s.unlock(id, SAM, false), Err(Refused::Locked(..))), "so not even its email checks it in");
+        s.unlock(id, PAT, true).unwrap(); // WHAT: an administrator frees it. WHY: the one way out
+        s.lock(id, SAM).unwrap();
+        assert_eq!(s.save(id, 1, b"v2", SAM, ""), Ok(2), "then it is checked out properly");
+    }
+
+    #[test]
+    fn tables_made_before_the_account_column_are_brought_up_to_date() {
+        let (db, blobs) = a_server_folder();
+        let old = Connection::open(&db).unwrap();
+        old.execute_batch(&SCHEMA.replace(", locked_id TEXT", "")).unwrap(); // WHAT: CAD's tables as an earlier build made them. WHY: no locked_id column
+        drop(old);
+        let s = Store::open(&db, &blobs).unwrap();
+        let id = s.db.query_row("SELECT COUNT(*) FROM pragma_table_info('cad_drawings') WHERE name = 'locked_id'", [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(id, 1, "the column is added");
+        upgrade(&s.db).unwrap(); // WHAT: again. WHY: running it twice changes nothing
     }
 
     #[test]

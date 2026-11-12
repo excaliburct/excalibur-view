@@ -1344,6 +1344,10 @@ pub struct Manifest {
     pub blobs: Vec<(String, u64)>, // WHAT: every drawing file: digest and size. WHY: the drill checks each is in the bucket.
     #[serde(rename = "missingOnDisk")]
     pub missing_on_disk: Vec<String>, // WHAT: files the database names that weren't on this disk. WHY: damage found by the backup is said, never hidden.
+    #[serde(default)]
+    pub installation: Option<String>, // WHAT: the office whose data this is (its installation id). WHY: a drill says whose backup it restored; catalogs made before 2026-11-11 have none (audit M2)
+    #[serde(default)]
+    pub company: Option<String>, // WHAT: the company name the office was set up with, if any. WHY: inside the encrypted catalog only, so a person restoring sees whose it is in words
 }
 
 /// Beside the catalog, unencrypted: sizes and fingerprints only, never a name or a record.
@@ -1386,6 +1390,152 @@ pub const BACKUP_MARKER: &str = "offsite-backup.json"; // WHAT: written after a 
 pub const FAILED_MARKER: &str = "offsite-failed.json"; // WHAT: written after a failed night, removed after a good one. WHY: the ops report's lastFailed.
 const BUSY: &str = "another off-site backup is still running"; // WHAT: the lock's refusal. WHY: a run already going is not a failed night.
 pub const DRILL_MARKER: &str = "offsite-drill.json"; // WHAT: written after a passed drill. WHY: the ops report's restoreTested.
+
+// ---------------------------------------------------------------- whose target it is
+
+const OWNER_FORMAT: &str = "excalibur-offsite-owner-1"; // WHAT: the owner marker's format. WHY: a later format is refused, not misread.
+const OWNER_CAP: u64 = 4 * 1024; // WHAT: the largest owner marker read. WHY: a real one is about 150 bytes.
+
+/// At the top of a target, one per product (`owner-view.json`): which office's backups the target holds. Unencrypted,
+/// and holds no name or record, only the office's installation id. Two offices pointed at one NAS share or bucket
+/// folder would each prune the other's catalogs as their own; this marker makes the second one refuse (audit M2).
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct Owner {
+    pub format: String, // WHAT: OWNER_FORMAT. WHY: as above.
+    pub product: String, // WHAT: "view". WHY: one bucket may hold several products' folders, each with its own owner.
+    pub installation: String, // WHAT: the office's installation id. WHY: the one thing compared.
+    pub since: String, // WHAT: when the target was first used. WHY: a person reading it knows how long it has been this office's.
+}
+
+/// The owner marker's object name for a product.
+fn owner_key(product: &str) -> String {
+    format!("owner-{product}.json") // WHAT: at the top of the target. WHY: beside daily/, weekly/, monthly/ and blobs/, never inside them.
+}
+
+/// An installation id as the server makes them: a short word, `_`, hex. Anything else is refused.
+fn is_installation(s: &str) -> bool {
+    (1..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') // WHAT: plain characters, short. WHY: it is printed in the log and compared; a planted marker can't carry anything else.
+}
+
+/// The office's installation id from a database (the backup's consistent copy). The server makes it as it first starts.
+pub fn installation_of(db: &Path) -> Result<String> {
+    use rusqlite::OptionalExtension; // WHAT: a row that may be missing. WHY: a database the server never ran on has none.
+    let c = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?; // WHAT: read-only. WHY: the copy is never changed.
+    let id: Option<String> = c
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [crate::api::settings::INSTALLATION],
+            |r| r.get(0),
+        )
+        .optional()?; // WHAT: the server's own name for itself. WHY: the same id the office answers to on the network.
+    match id.map(|s| s.trim().to_string()) {
+        Some(s) if is_installation(&s) => Ok(s),
+        Some(_) => bail!("this office's installation id isn't one the server makes"),
+        None => bail!("this data has no installation id yet: start the server once, then back up"),
+    } // WHAT: the id, or why not. WHY: a backup with no office to name would adopt any target.
+}
+
+/// The company name the office was set up with, from a database copy, or `None`. Never fails a backup.
+fn company_of(db: &Path) -> Option<String> {
+    use rusqlite::OptionalExtension; // WHAT: a row that may be missing. WHY: an office not set up yet has none.
+    let c = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?; // WHAT: read-only. WHY: the copy is never changed.
+    c.query_row("SELECT value FROM settings WHERE key = ?1", [crate::api::settings::COMPANY], |r| r.get::<_, String>(0))
+        .optional()
+        .ok()
+        .flatten()
+        .map(|s| s.chars().filter(|c| !c.is_control()).take(200).collect()) // WHAT: printable, at most 200 characters. WHY: shown in the drill's log line
+}
+
+impl Target {
+    /// The objects at the top of the target: name and size. Folders are left out.
+    fn top(&self) -> Result<Vec<(String, u64)>> {
+        match self {
+            Target::Folder(root) => {
+                if !root.exists() {
+                    return Ok(Vec::new());
+                } // WHAT: none yet. WHY: the first night makes the folder.
+                let mut out = Vec::new();
+                for e in std::fs::read_dir(root)? {
+                    let e = e?;
+                    let m = e.metadata()?;
+                    if m.is_file() {
+                        out.push((e.file_name().to_string_lossy().into_owned(), m.len()));
+                    }
+                } // WHAT: each file. WHY: the owner marker is one.
+                Ok(out)
+            }
+            Target::Rclone { remote, .. } => {
+                #[derive(Deserialize)]
+                struct Item {
+                    #[serde(rename = "Name")]
+                    name: String,
+                    #[serde(rename = "Size")]
+                    size: i64,
+                } // WHAT: rclone's listing. WHY: the two fields used.
+                let text = self.rclone(&["lsjson", remote, "--files-only"])?; // WHAT: the top level only (lsjson doesn't recurse by default). WHY: the marker sits there.
+                let items: Vec<Item> =
+                    serde_json::from_str(if text.trim().is_empty() { "[]" } else { &text })?;
+                Ok(items.into_iter().map(|i| (i.name, i.size.max(0) as u64)).collect())
+            }
+        }
+    }
+
+    /// The product's owner marker, read and checked, or `None` when the target has none. A listing that fails is an
+    /// error, never "none": a target that can't be read must not be adopted. The error carries the exit code: 3 the
+    /// target couldn't be reached, 2 its marker is refused.
+    pub fn owner(&self, product: &str, scratch: &Path) -> std::result::Result<Option<Owner>, Exit> {
+        let key = owner_key(product); // WHAT: its name. WHY: looked for at the top.
+        let top = self.top().map_err(|e| refuse(3, format!("listing {} failed: {e:#}", self.words())))?; // WHAT: the top level. WHY: an unreadable target is a failed night, not a new target
+        let Some((_, size)) = top.into_iter().find(|(n, _)| *n == key) else {
+            return Ok(None);
+        }; // WHAT: not there. WHY: a new target, adopted by the caller.
+        if size > OWNER_CAP {
+            return Err(refuse(2, format!("{key} is listed at {size} bytes, over the {OWNER_CAP} an owner marker can be; not fetched")));
+        } // WHAT: refuse a giant unfetched. WHY: it would fill the disk.
+        let local = scratch.join(".owner.json"); // WHAT: where it lands. WHY: in the job's own folder.
+        let _ = std::fs::remove_file(&local); // WHAT: no leftover. WHY: a copy fails on some systems over a file.
+        self.get(&key, &local).map_err(|e| refuse(3, format!("fetching {key} failed: {e:#}")))?; // WHAT: fetch it. WHY: read below.
+        let bytes = read_capped(&local, OWNER_CAP); // WHAT: read it, within the cap. WHY: the listing could have lied.
+        let _ = std::fs::remove_file(&local); // WHAT: tidy. WHY: kept nowhere.
+        let bytes = bytes.map_err(|e| refuse(2, format!("{key}: {e:#}")))?;
+        let o: Owner = serde_json::from_slice(&bytes).map_err(|e| refuse(2, format!("{key} doesn't read: {e}")))?; // WHAT: parse. WHY: a broken marker is a refusal, never a new target.
+        if o.format != OWNER_FORMAT || o.product != product || !is_installation(&o.installation) {
+            return Err(refuse(2, format!("{key} is not one this program writes")));
+        } // WHAT: exactly as written. WHY: a planted marker can't say something else.
+        Ok(Some(o))
+    }
+
+    /// Makes sure the target is this office's: adopts a target with no owner, refuses one owned by another office.
+    /// Returns what to log.
+    pub fn claim(&self, product: &str, installation: &str, scratch: &Path) -> std::result::Result<String, Exit> {
+        if let Some(o) = self.owner(product, scratch)? {
+            if o.installation == installation {
+                return Ok(format!("target belongs to this office ({installation})"));
+            } // WHAT: ours. WHY: the usual night.
+            return Err(refuse(2, format!("{} belongs to another office (installation {}, since {}), not this one ({installation}). Two offices must never share a backup folder: each prunes the other's backups as its own. Give this office its own folder or bucket path (README.md, Off-site backups)", self.words(), o.installation, o.since)));
+        } // WHAT: another office's. WHY: refused before anything is sent or pruned.
+        let o = Owner {
+            format: OWNER_FORMAT.into(),
+            product: product.into(),
+            installation: installation.into(),
+            since: time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
+        }; // WHAT: the marker. WHY: this office takes the new target.
+        let local = scratch.join(".owner-new.json"); // WHAT: written here first. WHY: sent like any object.
+        let bytes = serde_json::to_vec_pretty(&o).map_err(|e| refuse(2, e))?;
+        write_atomic(&local, &bytes).map_err(|e| refuse(2, format!("{e:#}")))?;
+        let sent = self.put(&local, &owner_key(product)); // WHAT: send it. WHY: never over one that's there (a folder target refuses).
+        let _ = std::fs::remove_file(&local);
+        sent.map_err(|e| refuse(3, format!("writing the owner marker failed: {e:#}")))?;
+        match self.owner(product, scratch)? {
+            Some(back) if back.installation == installation => {
+                Ok(format!("target was new: it now belongs to this office ({installation})"))
+            }
+            _ => Err(refuse(2, format!("{} did not keep this office's owner marker; not backing up", self.words()))),
+        } // WHAT: read it back. WHY: two offices starting the same night: only the one whose marker stuck goes on.
+    }
+}
 
 /// What the ops report says about off-site backups: each field `None` when unknown, never a guess.
 #[derive(Serialize, Default, Clone, Debug, PartialEq)]
@@ -1631,6 +1781,11 @@ impl Job<'_> {
                 .collect::<Vec<_>>()
                 .join(", ")
         )); // WHAT: the counts. WHY: the log shows what was backed up.
+        let installation = installation_of(&copy).map_err(|e| refuse(2, format!("{e:#}")))?; // WHAT: whose data this is. WHY: the target is checked against it next.
+        let claimed = self
+            .target
+            .claim(self.product.id, &installation, &own)?; // WHAT: the target is this office's, or is made so. WHY: before anything is sent or pruned (audit M2).
+        self.log(&claimed); // WHAT: say whose it is. WHY: the log shows the check ran.
 
         // 2. the drawing files: the ones on disk, each sent once
         let mut on_disk = list_blobs(&self.data.join(self.product.blobs))
@@ -1799,6 +1954,8 @@ impl Job<'_> {
             salt: salt.clone(),
             blobs: on_disk.iter().map(|(d, (_, s))| (d.clone(), *s)).collect(),
             missing_on_disk,
+            installation: Some(installation.clone()),
+            company: company_of(&copy),
         }; // WHAT: the manifest. WHY: what the drill checks against.
         let mj = serde_json::to_vec_pretty(&manifest).map_err(|e| refuse(2, e))?; // WHAT: as JSON. WHY: packed first.
         let spool = own.join("spool");
@@ -2273,6 +2430,9 @@ fn valid_manifest(product: &Product, man: &Manifest) -> Result<()> {
             d
         );
     } // WHAT: the same. WHY: compared with the database.
+    if man.installation.as_deref().is_some_and(|i| !is_installation(i)) {
+        bail!("its office's installation id isn't one the server makes");
+    } // WHAT: plain characters. WHY: printed in the drill's summary.
     Ok(())
 }
 
@@ -2544,6 +2704,19 @@ impl Drill<'_> {
                 "the manifest is for another product, format or catalog",
             ));
         } // WHAT: the right one. WHY: never check against the wrong manifest.
+        let owner = j
+            .target
+            .owner(j.product.id, &dl)?; // WHAT: whose target this is. WHY: compared with whose catalog it is.
+        if let (Some(o), Some(i)) = (&owner, &man.installation) {
+            if o.installation != *i {
+                return Err(refuse(2, format!("{name} was made by office {i}, but this target belongs to office {}; it was put here by someone else, and is not restored", o.installation)));
+            }
+        } // WHAT: a catalog from another office in this office's target. WHY: never restored as this office's data (audit M2).
+        let office = match (&man.installation, &man.company) {
+            (Some(i), Some(c)) if !c.is_empty() => format!("{c}, office {i}"),
+            (Some(i), _) => format!("office {i}"),
+            (None, _) => "an office not named (made before catalogs named their office)".to_string(),
+        }; // WHAT: whose backup this is, in words. WHY: the summary says what was restored and whose it was.
         let db = restored.join(j.product.database); // WHAT: the restored database. WHY: checked next.
         if sha256_file(&db).map_err(|e| refuse(2, e))? != man.database_sha256 {
             return Err(refuse(
@@ -2680,7 +2853,7 @@ impl Drill<'_> {
                 "no records yet; the server opened the data".to_string()
             } // WHAT: an empty server. WHY: still proves it opens.
         };
-        Ok(format!("{name}: counts match ({}), {} of {} files fetched and fingerprint-checked{}, every file present in the target, {opened}", counts.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "), want.len(), man.blobs.len(), if self.full { " (full restore)" } else { "" }))
+        Ok(format!("{name} ({office}): counts match ({}), {} of {} files fetched and fingerprint-checked{}, every file present in the target, {opened}", counts.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "), want.len(), man.blobs.len(), if self.full { " (full restore)" } else { "" }))
         // WHAT: the summary. WHY: the log and the marker say what was proven.
     }
 }
