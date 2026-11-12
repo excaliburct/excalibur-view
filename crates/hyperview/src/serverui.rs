@@ -2831,6 +2831,15 @@ pub fn waiting_sentence(c: &hub::device::Info) -> String {
     format!("{who} ({}, signed in to Windows as {}) wants to use {}. Asked {}{from}.", c.machine, c.os_user, hub::device::app_title(&c.app), ago(&c.asked))
 }
 
+/// What the Computers list says beside "Let it use every app".
+pub const CARRIED_OVER_NOTE: &str = "carried over from Citadel, check before widening"; // WHAT: the words. WHY: a computer the Citadel cell carried over was approved by Citadel's pairing, not by an admin here, so it is checked before it is let into every app
+
+/// The note for a computer carried over from Citadel, or none for any other.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn carried_over_note(c: &hub::device::Info) -> Option<&'static str> { // WHAT: the note for one computer. WHY: kept apart from the drawing so it can be tested
+    (c.scope == "citadel").then_some(CARRIED_OVER_NOTE) // WHAT: the note, for a Citadel-scoped computer only. WHY: the server says "citadel" for those and "all" for the rest
+}
+
 /// Studio → Office → Computers: who is waiting, with Approve, Approve as
 /// admin and Refuse; who is in, with Remove and Make or Unmake admin. Shown
 /// only on an admin's computer.
@@ -2872,8 +2881,11 @@ fn computers_section(ui: &mut egui::Ui, theme: ui::chrome::Theme, office: &mut O
             let name = format!("{who} ({})", c.machine); // WHAT: "Dana (DANA-LAPTOP)". WHY: what an admin recognises
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{name}, {}{}{}  ({})", hub::device::app_title(&c.app), if c.admin { ", admin" } else { "" }, if c.scope == "citadel" { ", LatCon Estimating only" } else { "" }, hub::device::short_id(&c.id))).size(11.0)); // WHAT: who, the app, whether an admin, whether for the estimating program only, and its code. WHY: one line each
-                if c.scope == "citadel" && ui.small_button("Let it use every app").on_hover_text("It came over from the old Citadel Server, approved for estimating only.").clicked() {
-                    actions.computer = Some((c.id.clone(), ComputerChange::Approve, name.clone())); // WHAT: approved for every app. WHY: security review M1: an admin widens it
+                if let Some(note) = carried_over_note(c) { // WHAT: a computer carried over from Citadel. WHY: only it has the button and the note
+                    if ui.small_button("Let it use every app").on_hover_text("It came over from the old Citadel Server, approved for estimating only.").clicked() { // WHAT: the button that widens it. WHY: as before, now inside the Citadel case
+                        actions.computer = Some((c.id.clone(), ComputerChange::Approve, name.clone())); // WHAT: approved for every app. WHY: security review M1: an admin widens it
+                    }
+                    ui.label(RichText::new(note).color(theme.warn).size(10.5)); // WHAT: "carried over from Citadel, check before widening", beside the button. WHY: an admin knows to check it is one of the office's own before letting it into every app
                 }
                 if ui.small_button("Remove").on_hover_text("This computer has to ask again to come back.").clicked() {
                     actions.computer = Some((c.id.clone(), ComputerChange::Remove, name.clone())); // WHAT: taken off. WHY: §3
@@ -3504,6 +3516,56 @@ mod tests {
         write(&dir, "huge.evlicense", &"x".repeat(9 * 1024));
         assert!(licenses_in(&[(dir.clone(), "E:".into())]).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One computer on the list, approved, with the scope the server gave it.
+    fn a_computer(id: &str, scope: &str) -> hub::device::Info { // WHAT: a made-up computer. WHY: the list the test draws
+        hub::device::Info { // WHAT: its fields. WHY: only those the list shows
+            id: id.repeat(64 / id.len()), // WHAT: a 64-digit id. WHY: the shape the server's ids have
+            app: "view".into(), // WHAT: Excalibur View. WHY: any app
+            machine: "SHOP-PC".into(), // WHAT: the computer's name. WHY: shown
+            os_user: "dana".into(), // WHAT: the Windows user. WHY: shown
+            state: "approved".into(), // WHAT: let in. WHY: the list the button is on
+            scope: scope.into(), // WHAT: "citadel" or "all". WHY: the case
+            ..hub::device::Info::default() // WHAT: the rest left empty. WHY: not shown on this list
+        }
+    }
+
+    /// Every piece of text one pass of the Computers section drew.
+    fn texts_drawn(computers: Vec<hub::device::Info>) -> Vec<String> { // WHAT: the section drawn once, its text read back. WHY: what an admin would see
+        fn collect(shape: &egui::Shape, into: &mut Vec<String>) { // WHAT: the text in one shape. WHY: shapes nest
+            match shape { // WHAT: by kind. WHY: only text is wanted
+                egui::Shape::Text(text) => into.push(text.galley.text().to_string()), // WHAT: a piece of text. WHY: what an admin reads
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, into)), // WHAT: shapes inside shapes. WHY: a layout nests them
+                _ => {} // WHAT: anything else. WHY: not text
+            }
+        }
+        let ctx = egui::Context::default(); // WHAT: a window with nothing in it. WHY: the section is drawn as the program draws it
+        let mut office = OfficePanel { computers: Some(computers), ..OfficePanel::default() }; // WHAT: an admin's panel with this list. WHY: the section draws only for an admin
+        let mut actions = PanelActions::default(); // WHAT: nothing pressed. WHY: nothing is clicked
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0))), ..Default::default() }; // WHAT: a wide window. WHY: one row fits on one line
+        let theme = ui::chrome::Theme::dark(); // WHAT: the dark look. WHY: any look draws the same words
+        let output = ctx.run(input, |ctx| { // WHAT: one pass. WHY: enough to lay out and paint the list
+            egui::CentralPanel::default().show(ctx, |panel| computers_section(panel, theme, &mut office, &mut actions)); // WHAT: the section, drawn once. WHY: the shapes it makes are read below
+        });
+        let mut texts = Vec::new(); // WHAT: what was drawn. WHY: searched by the test
+        for clipped in &output.shapes { // WHAT: each shape painted. WHY: in the order it was drawn
+            collect(&clipped.shape, &mut texts); // WHAT: each shape's text. WHY: the same
+        }
+        texts // WHAT: what was drawn, in order. WHY: the test looks for the note after the button
+    }
+
+    #[test]
+    fn a_computer_carried_over_from_citadel_says_so_beside_let_it_use_every_app() { // WHAT: the test. WHY: the note shows beside the button for a Citadel computer only
+        assert_eq!(carried_over_note(&a_computer("c", "citadel")), Some("carried over from Citadel, check before widening")); // WHAT: the note, in these words. WHY: what the admin is to read
+        assert_eq!(carried_over_note(&a_computer("a", "all")), None); // WHAT: none for a computer approved for every app. WHY: nothing to check
+        assert_eq!(carried_over_note(&a_computer("b", "")), None); // WHAT: none from an older server that sends no scope. WHY: only "citadel" is carried over
+        let waiting = hub::device::Info { state: "waiting".into(), ..a_computer("w", "all") }; // WHAT: someone waiting too. WHY: the section opens by itself only then, as it does for an admin who has someone to approve
+        let drawn = texts_drawn(vec![waiting.clone(), a_computer("c", "citadel")]); // WHAT: the list with a Citadel computer on it. WHY: the case
+        let button = drawn.iter().position(|t| t == "Let it use every app").expect("the button is drawn"); // WHAT: the button. WHY: the note goes beside it
+        assert_eq!(drawn.get(button + 1).map(String::as_str), Some(CARRIED_OVER_NOTE), "the note comes right after the button: {drawn:?}"); // WHAT: the note, next. WHY: beside the button it is about
+        let plain = texts_drawn(vec![waiting, a_computer("a", "all")]); // WHAT: the list with only ordinary computers. WHY: the other case
+        assert!(!plain.iter().any(|t| t == CARRIED_OVER_NOTE || t == "Let it use every app"), "no note or button: {plain:?}"); // WHAT: neither shown. WHY: nothing was carried over
     }
 }
 
