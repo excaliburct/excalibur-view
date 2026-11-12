@@ -87,6 +87,18 @@ pub fn fingerprint(cert_pem: &str) -> Result<String, String> {
 /// The first byte of every TLS connection: a handshake record.
 const TLS_HANDSHAKE: u8 = 0x16; // WHAT: TLS's record type for a handshake. WHY: no HTTP request starts with it, so one port serves both
 
+/// Who may use plain HTTP on the shared port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Plain {
+    /// Every computer: seats from before 0.7.0 speak only plain HTTP. The default.
+    Everyone,
+    /// This machine alone (the tunnel connector, a script on the server). `HYPERVIEW_HTTPS_ONLY=on`, audit M5.
+    ThisMachineOnly,
+}
+
+/// What a computer that may not use plain HTTP is told before its connection closes.
+const USE_HTTPS: &[u8] = b"HTTP/1.1 426 Upgrade Required\r\nUpgrade: TLS/1.3\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 83\r\n\r\nThis Office Server takes HTTPS only. Update Excalibur on this computer to connect.\n"; // WHAT: a short refusal in plain words. WHY: a seat left on an old version says why it can't connect, instead of a bare dropped connection
+
 /// How long a stopping server lets open requests finish.
 const DRAIN: Duration = Duration::from_secs(10); // WHAT: ten seconds. WHY: a save in flight lands; a held-open socket doesn't keep the service from stopping
 
@@ -102,6 +114,7 @@ pub async fn serve(
     config: Arc<rustls::ServerConfig>,
     router: axum::Router,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    plain: Plain,
 ) {
     let acceptor = tokio_rustls::TlsAcceptor::from(config); // WHAT: the TLS side of each connection. WHY: rustls, as everywhere else
     let mut open = tokio::task::JoinSet::new(); // WHAT: the connections being served. WHY: any still open after the drain are ended with the set
@@ -150,13 +163,35 @@ pub async fn serve(
                     return; // WHAT: a failed or stalled handshake. WHY: dropped, its slot given back
                 };
                 answer(tls, peer, router, watcher).await; // WHAT: HTTPS. WHY: sign-ins and drawings encrypted
+            } else if plain == Plain::Everyone || here {
+                answer(tcp, peer, router, watcher).await; // WHAT: plain HTTP. WHY: a seat that hasn't moved yet, or an older one; or this machine itself
             } else {
-                answer(tcp, peer, router, watcher).await; // WHAT: plain HTTP. WHY: a seat that hasn't moved yet, or an older one
+                refuse_plain(tcp).await; // WHAT: plain HTTP from another computer, with HTTPS-only on. WHY: nothing it sends is read; it is told to use HTTPS (audit M5)
             }
         });
     }
     let _ = tokio::time::timeout(DRAIN, polite.shutdown()).await; // WHAT: every connection told to close once its request is done, given up to ten seconds. WHY: a save in flight when the service stops for an update lands, and idle seats don't hold the stop up
     open.abort_all(); // WHAT: any still open, ended. WHY: the service stops on time
+}
+
+/// Tells a plain-HTTP connection to use HTTPS, and closes it. Nothing it sent is read.
+async fn refuse_plain(tcp: tokio::net::TcpStream) {
+    let _ = tokio::time::timeout(HANDSHAKE, async {
+        let mut rest = USE_HTTPS; // WHAT: what is still to send. WHY: a socket may take it in pieces
+        while !rest.is_empty() {
+            if tcp.writable().await.is_err() {
+                return; // WHAT: the socket broke. WHY: nothing more to say
+            }
+            match tcp.try_write(rest) {
+                Ok(0) => return, // WHAT: closed by the other side. WHY: done
+                Ok(n) => rest = &rest[n..], // WHAT: that much sent. WHY: the rest next
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {} // WHAT: not ready after all. WHY: wait again
+                Err(_) => return, // WHAT: any other error. WHY: nothing more to say
+            }
+        } // WHAT: the 426 and why. WHY: an old seat shows a reason
+    })
+    .await; // WHAT: at most ten seconds. WHY: a reader that never reads doesn't hold its slot
+    drop(tcp); // WHAT: closed from this side. WHY: nothing it sent is read
 }
 
 /// One connection's requests answered by `router`, over whatever it is.

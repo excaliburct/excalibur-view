@@ -46,6 +46,13 @@ like this machine, so one stranger's wrong guesses can hold up everyone else's s
 server never believes a forwarded address unless a proxy is expected, so a program on the server can't claim a new
 address with each guess.
 
+**HTTPS only, once every seat has moved.** The API's port answers HTTPS and plain HTTP together, so seats from
+before 0.7.0 keep working through an update. Once every computer in the office runs 0.7.0 or newer, set
+`HYPERVIEW_HTTPS_ONLY=on` on the service and restart it. Plain HTTP from any other computer is then refused before it
+is read, with a short "426, HTTPS only" answer saying to update Excalibur. This machine itself (the tunnel connector, a
+script on the server) may still use plain HTTP, because that never leaves the box. The server will not start with
+any value but `on` or `off`, or with the switch on while `HYPERVIEW_TLS=off`.
+
 ## How existing installs move over
 
 Every separate server is **moved in, then retired**. Nothing is retired until the move has been checked.

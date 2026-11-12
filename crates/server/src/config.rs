@@ -20,6 +20,10 @@ pub struct Config {
     /// own certificate. Off means plain HTTP only, which is how a test or a
     /// server embedded in something else starts.
     pub tls: bool, // WHAT: HTTPS on the API's port; HYPERVIEW_TLS=off turns it off. WHY: sign-ins and drawings encrypted, the seats pinning the certificate, with no new port to open
+    /// Whether plain HTTP from other computers is refused (`HYPERVIEW_HTTPS_ONLY=on`), once every seat in the office
+    /// has moved to HTTPS. This machine itself (the tunnel connector) may still use plain HTTP: it never leaves the box.
+    /// `Err` holds a value that isn't `on` or `off`, so the server refuses to start rather than guess.
+    pub https_only: Result<bool, String>, // WHAT: the switch, or the value that didn't read. WHY: a security switch typed wrong must not quietly stay off (audit M5)
     /// Everything the server keeps: the database and the drawings.
     pub data: PathBuf,
     /// Largest drawing set it will accept, in bytes.
@@ -90,6 +94,7 @@ impl Default for Config {
             name: "Excalibur View".into(),
             listen: SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
             tls: false, // WHAT: off by default. WHY: only a server started for real turns it on (from_environment)
+            https_only: Ok(false), // WHAT: plain HTTP still answered. WHY: seats older than 0.7.0 speak only plain HTTP; the office turns this on once they've all moved
             data: beside_the_program(),
             // Sixty drawing sets the size of a stamped structural package.
             largest_upload: 512 * 1024 * 1024,
@@ -155,6 +160,7 @@ impl Config {
             }
         }
         config.tls = std::env::var("HYPERVIEW_TLS").map_or(true, |v| v.trim() != "off"); // WHAT: on, unless HYPERVIEW_TLS=off. WHY: every real server encrypts; off is the way out if something on a machine can't take it
+        config.https_only = https_only_from(non_empty("HYPERVIEW_HTTPS_ONLY").as_deref()); // WHAT: the HTTPS-only switch. WHY: read here, refused at start if it doesn't read
         if let Ok(data) = std::env::var("HYPERVIEW_DATA") {
             config.data = PathBuf::from(data);
         }
@@ -198,6 +204,16 @@ impl Config {
 
     pub fn releases(&self) -> PathBuf {
         self.data.join("releases")
+    }
+}
+
+/// `HYPERVIEW_HTTPS_ONLY` read: `on` or `off` in any case, unset meaning off; anything else is `Err` with the value.
+pub fn https_only_from(value: Option<&str>) -> Result<bool, String> {
+    match value.map(|v| v.trim().to_ascii_lowercase()) {
+        None => Ok(false), // WHAT: not set. WHY: off, as every server before 0.7.0
+        Some(v) if v == "on" => Ok(true),
+        Some(v) if v == "off" => Ok(false),
+        Some(v) => Err(v), // WHAT: "yes", "true", a typo. WHY: refused at start; a switch that guards connections is never guessed
     }
 }
 

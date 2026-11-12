@@ -832,8 +832,8 @@ fn draw_ending(c: &mut Content, kind: &str, at: [f64; 2], dir: [f64; 2], size: f
         "Slash" => {
             let h = size * 0.35;
             let d = [
-                (dir[0] + side[0]) * 0.7071,
-                (dir[1] + side[1]) * 0.7071,
+                (dir[0] + side[0]) * std::f64::consts::FRAC_1_SQRT_2, // WHAT: 1/sqrt(2), exactly. WHY: the constant clippy asks for; 0.7071 stopped the strict lint from reaching most of the program
+                (dir[1] + side[1]) * std::f64::consts::FRAC_1_SQRT_2,
             ];
             c.move_to([at[0] + d[0] * h, at[1] + d[1] * h])
                 .line_to([at[0] - d[0] * h, at[1] - d[1] * h])
