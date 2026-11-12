@@ -21,8 +21,10 @@
 /// right way round: a program that installs anything when it has been told to
 /// trust nothing is worse than one that installs nothing.
 pub const KEYS: &[(&str, &str)] = &[
-    // Made on the release PC on 2026-09-21. The private half is there and
-    // nowhere else.
+    // Made on the release PC on 2026-09-21. The private half is there, as a
+    // key file, and nowhere else; when it is moved onto a YubiKey, releases are
+    // signed there with this same key (release_now.py --prepare / --finish) and
+    // the file is retired. Either way this public half is the one checked.
     ("mesafab-2026", "14d93acf4729859a3a7b01f458e118173a7a1859305193e84c3bd7513eb72790"),
 ];
 

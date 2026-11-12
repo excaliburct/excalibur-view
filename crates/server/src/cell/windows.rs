@@ -46,9 +46,24 @@ pub fn start(server: Shared) {
     let program_data = std::env::var_os("ProgramData").map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from); // WHAT: ProgramData. WHY: the cell's data lives there
     let data = super::data_folder(&program_data); // WHAT: `ProgramData\Excalibur Office\citadel`. WHY: §6
     let (program, args) = super::command(&folder, &install, &data); // WHAT: what to start. WHY: §6a
+    let pin = crate::cellbundle::pinned(); // WHAT: the cell this build was made with. WHY: only that program is ever run
+    if let Ok(pin) = &pin {
+        match crate::cellbundle::swap_staged(&folder, pin) {
+            Ok(true) => tracing::warn!("the Citadel cell {} that came with this update was checked and put in place", pin.version), // WHAT: said. WHY: the cell updates with the server
+            Ok(false) => {} // WHAT: nothing waiting. WHY: the ordinary start
+            Err(why) => tracing::error!("ALARM: {why}"), // WHAT: the alarm. WHY: the cell before keeps running, but an admin should know
+        }
+    }
     if !super::should_start(&crate::office::licensed(&server), program.is_file()) {
         return; // WHAT: no licence for it, or no program. WHY: §6: the cell runs only then
     }
+    let pin = match pin.and_then(|pin| crate::cellbundle::check_program(&program, &pin).map(|()| pin)) {
+        Ok(pin) => pin, // WHAT: the pinned program is there. WHY: it may run
+        Err(why) => {
+            tracing::error!("ALARM: the Citadel cell was not started: {why}"); // WHAT: the alarm. WHY: risk 8: never run a cell that didn't come from the signed bundle
+            return;
+        }
+    };
     let spawned = std::thread::Builder::new().name("citadel-cell".into()).spawn(move || {
         let sid = super::cell_sid(&install); // WHAT: the cell's own SID. WHY: the pipe, its data and its program grant it
         if let Some(office) = data.parent() {
@@ -57,6 +72,10 @@ pub fn start(server: Shared) {
         }
         let _ = std::fs::create_dir_all(&data); // WHAT: the cell's data folder. WHY: made once
         let old = crate::cellmove::old_folder(&program_data); // WHAT: Citadel Server 1.0's folder. WHY: moved in before the cell's first start
+        if let Err(why) = crate::cellbundle::check_program(&program, &pin) {
+            tracing::error!("ALARM: the Citadel move was not run: {why}"); // WHAT: checked again just before it runs as the system. WHY: risk 8
+            return;
+        }
         if !crate::cellmove::before_first_start(&server.store, &OldCitadel, &crate::cellmove::Run, &program, &old, &data) {
             return; // WHAT: the move failed: the cell is not started. WHY: a cell started empty would make a new certificate; /api/v1/office shows the alarm
         }
@@ -64,7 +83,8 @@ pub fn start(server: Shared) {
         if let Some(own) = program.parent() {
             icacls(&super::program_steps(own, &sid)); // WHAT: the cell may read and run its program. WHY: the service's folder is locked to the system and administrators
         }
-        let mut launcher = Cell { server: server.clone(), program, line: String::new(), args, pipe: format!(r"\\.\pipe\{}", super::pipe_name(&install)), sid, process: None, serving: None, next: None };
+        crate::winsvc::cell_firewall(&program); // WHAT: TCP 47110 open for the cell's program, when it isn't yet. WHY: critical 2: an office installed before the rule existed gets it here
+        let mut launcher = Cell { server: server.clone(), program, line: String::new(), args, pipe: format!(r"\\.\pipe\{}", super::pipe_name(&install)), sid, process: None, serving: None, next: None, pin, data };
         launcher.line = super::command_line(&launcher.program, &launcher.args); // WHAT: the command line. WHY: written once
         super::supervise(&mut launcher, &server.cell, &std::thread::sleep, &Instant::now, usize::MAX); // WHAT: run and restarted. WHY: §6a
     });
@@ -97,10 +117,14 @@ struct Cell {
     process: Option<Raw>, // WHAT: the running cell. WHY: waited for
     serving: Option<std::thread::JoinHandle<std::fs::File>>, // WHAT: the thread answering its pipe, which hands the pipe back when done. WHY: the old instance is held until the next exists
     next: Option<std::fs::File>, // WHAT: the next pipe instance, made before the old one closed. WHY: security review L4: the name is never free during the restart wait
+    pin: crate::cellbundle::Pin, // WHAT: the cell this build was made with. WHY: checked before every start
+    data: PathBuf, // WHAT: the cell's data folder. WHY: its settings get the Office Server's maintenance key before every start
 }
 
 impl super::Launcher for Cell {
     fn start(&mut self) -> std::io::Result<()> {
+        crate::cellbundle::check_program(&self.program, &self.pin).map_err(std::io::Error::other)?; // WHAT: the pinned program, or not started. WHY: risk 8: checked before every start, a restart too
+        super::give_the_cell_the_office_key(&self.data, self.server.config.maintenance_key.as_deref())?; // WHAT: only the Office Server's maintenance key opens the cell's admin routes. WHY: a key set on 1.0 moved in with its settings
         let pipe = match self.next.take() {
             Some(pipe) => pipe, // WHAT: the instance made while the last one was still held. WHY: the name was never free
             None => make_pipe(&self.pipe, &self.sid, true)?, // WHAT: the first instance, made only if nobody made it first. WHY: a name somebody else holds is an alarm (AddrInUse), not a restart
@@ -291,23 +315,61 @@ impl OldCitadel {
     }
 }
 
+impl OldCitadel {
+    /// Runs `sc.exe config <name> start= <how>` on whichever name the 1.0
+    /// service has; whether it worked.
+    fn start_type(how: &str) -> bool {
+        crate::cellmove::OLD_SERVICES.iter().any(|name| crate::winsvc::system_tool("sc.exe", &["config".into(), (*name).into(), "start=".into(), how.into()])) // WHAT: its start type changed. WHY: disabled for the move, automatic again after a failure
+    }
+}
+
 impl crate::cellmove::OldService for OldCitadel {
-    fn present(&self) -> bool {
-        Self::open(windows_service::service::ServiceAccess::QUERY_STATUS).is_some() // WHAT: whether it opens. WHY: installed or not
+    fn found(&self) -> Option<String> {
+        let service = Self::open(windows_service::service::ServiceAccess::QUERY_CONFIG)?; // WHAT: the 1.0 service, if installed. WHY: its program's path is recorded
+        let config = service.query_config().ok()?; // WHAT: its configuration. WHY: the path
+        Some(config.executable_path.display().to_string()) // WHAT: its program, as the service manager has it. WHY: recorded as "1.0 service found at <path>"
     }
 
-    fn stop_and_remove(&self) -> Result<(), String> {
+    fn stop_and_disable(&self) -> Result<(), String> {
         use windows_service::service::{ServiceAccess, ServiceState};
-        let service = Self::open(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE).ok_or("it couldn't be opened to stop it")?; // WHAT: the 1.0 service. WHY: to stop and uninstall it
+        let Some(service) = Self::open(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP) else {
+            return Ok(()); // WHAT: no longer installed. WHY: nothing running holds the port or the files
+        };
+        if !Self::start_type("disabled") {
+            return Err("it couldn't be disabled".into()); // WHAT: refused. WHY: it could start again in the middle of the move
+        }
         let _ = service.stop(); // WHAT: asked to stop. WHY: it holds port 47110 and its files
         let deadline = Instant::now() + std::time::Duration::from_secs(60); // WHAT: a minute. WHY: a service shutting down cleanly
         loop {
             match service.query_status().map(|s| s.current_state) {
-                Ok(ServiceState::Stopped) => break, // WHAT: stopped. WHY: done
+                Ok(ServiceState::Stopped) => return Ok(()), // WHAT: stopped and disabled, still installed. WHY: critical 1: never uninstalled before the move
                 _ if Instant::now() >= deadline => return Err("it didn't stop within a minute".into()), // WHAT: refused. WHY: the move never runs beside it
                 _ => std::thread::sleep(std::time::Duration::from_millis(300)), // WHAT: waited. WHY: asked again shortly
             }
         }
-        service.delete().map_err(|e| format!("it stopped, but couldn't be uninstalled ({e})")) // WHAT: uninstalled. WHY: the .NET side's move runs only once it is gone, so it can never take the port back
+    }
+
+    fn restore(&self) -> Result<(), String> {
+        use windows_service::service::ServiceAccess;
+        let service = Self::open(ServiceAccess::QUERY_STATUS | ServiceAccess::START).ok_or("it is no longer installed")?; // WHAT: the 1.0 service. WHY: started again
+        if !Self::start_type("auto") {
+            return Err("it couldn't be set to start with Windows again".into()); // WHAT: said. WHY: someone must act
+        }
+        service.start::<&str>(&[]).map_err(|e| format!("it couldn't be started ({e})")) // WHAT: running again. WHY: critical 1: the office keeps estimating after a failed move
+    }
+
+    fn remove(&self) -> Result<String, String> {
+        use windows_service::service::ServiceAccess;
+        let mut said = Vec::new(); // WHAT: what was done. WHY: said in the log and on /office
+        if let Some(service) = Self::open(ServiceAccess::QUERY_STATUS | ServiceAccess::DELETE) {
+            service.delete().map_err(|e| format!("it couldn't be uninstalled ({e})"))?; // WHAT: uninstalled. WHY: step 5, only after the data moved
+            said.push("Citadel Server 1.0's service was uninstalled"); // WHAT: noted. WHY: said
+        }
+        for (tool, args) in super::old_leftover_steps() {
+            if crate::winsvc::system_tool(tool, &args) {
+                said.push(if tool == "schtasks.exe" { "its 03:30 update task was removed" } else { "its firewall rule was removed" }); // WHAT: noted. WHY: said
+            }
+        }
+        Ok(if said.is_empty() { "nothing of Citadel Server 1.0 was left to remove".to_string() } else { said.join(", ") }) // WHAT: what was done, in words. WHY: high 5
     }
 }

@@ -1283,12 +1283,12 @@ pub(crate) mod fake {
 // ---------------------------------------------------------------- the archive: plain tar, written and read by hand
 
 /// Writes a plain ustar archive: regular files only, short plain names.
-struct TarOut<'a> {
-    w: &'a mut dyn Write,
+pub(crate) struct TarOut<'a> {
+    pub(crate) w: &'a mut dyn Write,
 } // WHAT: the stream it writes into. WHY: gzip, then age.
 
 impl TarOut<'_> {
-    fn file(&mut self, name: &str, size: u64, body: &mut dyn Read) -> Result<()> {
+    pub(crate) fn file(&mut self, name: &str, size: u64, body: &mut dyn Read) -> Result<()> {
         if name.len() > 99 || !key_ok(name) {
             bail!("an archive name must be short and plain: {name}");
         } // WHAT: the names we write. WHY: the reader refuses anything else.
@@ -1317,7 +1317,7 @@ impl TarOut<'_> {
         self.w.write_all(&vec![0u8; pad])?; // WHAT: pad to a block. WHY: ustar's rule.
         Ok(())
     }
-    fn end(&mut self) -> Result<()> {
+    pub(crate) fn end(&mut self) -> Result<()> {
         self.w.write_all(&[0u8; 1024])?;
         Ok(())
     } // WHAT: two empty blocks. WHY: the end marker.
@@ -1326,6 +1326,13 @@ impl TarOut<'_> {
 /// Reads an archive into a folder. Refuses anything that isn't a short plain file name: a damaged or planted
 /// archive can never write outside `into`.
 fn untar(r: &mut dyn Read, into: &Path, limit: u64, expect: &[(&str, u64)]) -> Result<Vec<String>> {
+    untar_with(r, into, limit, &|name| expect.iter().find(|(n, _)| *n == name).map(|&(_, cap)| cap)) // WHAT: the names expected, each with its cap. WHY: the catalog's fixed list
+}
+
+/// [`untar`], with the names allowed and each one's cap decided by `cap`
+/// (`None` refuses the name). The Citadel cell's bundle names its files by
+/// their fingerprints, which aren't known before it is read.
+pub(crate) fn untar_with(r: &mut dyn Read, into: &Path, limit: u64, cap: &dyn Fn(&str) -> Option<u64>) -> Result<Vec<String>> {
     let mut names = Vec::new(); // WHAT: what came out. WHY: the caller checks it.
     let mut total = 0u64; // WHAT: bytes so far. WHY: a planted archive can't fill the disk.
     loop {
@@ -1358,7 +1365,7 @@ fn untar(r: &mut dyn Read, into: &Path, limit: u64, expect: &[(&str, u64)]) -> R
         let size = field(124, 136)
             .and_then(|t| u64::from_str_radix(&t, 8).ok())
             .ok_or_else(|| anyhow!("a damaged size in the archive"))?; // WHAT: its size. WHY: how much to read.
-        let Some(&(_, cap)) = expect.iter().find(|(n, _)| *n == name) else {
+        let Some(cap) = cap(&name) else {
             bail!("the archive holds {name:?}, which this program never restores; refusing it");
         }; // WHAT: only the names expected. WHY: nothing else is ever written.
         if size > cap {
@@ -1412,6 +1419,36 @@ pub struct Manifest {
     pub installation: Option<String>, // WHAT: the office whose data this is (its installation id). WHY: a drill says whose backup it restored; catalogs made before 2026-11-11 have none (audit M2)
     #[serde(default)]
     pub company: Option<String>, // WHAT: the company name the office was set up with, if any. WHY: inside the encrypted catalog only, so a person restoring sees whose it is in words
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citadel: Option<CitadelCopy>, // WHAT: the Citadel cell's newest own backup, packed beside the database. WHY: the cell's data folder was covered by no backup but its own on the same disk
+}
+
+/// The Citadel cell's own newest backup, as packed into the catalog.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CitadelCopy {
+    pub name: String, // WHAT: the backup's file name in the cell's Backups folder. WHY: what a restore puts back
+    pub sha256: String, // WHAT: its fingerprint. WHY: the drill checks the bytes
+    pub bytes: u64, // WHAT: its size. WHY: likewise
+}
+
+/// The name the cell's backup has inside a catalog.
+pub const CITADEL_IN_CATALOG: &str = "citadel-backup.zip"; // WHAT: a plain name. WHY: the archive takes plain names only
+
+/// The newest finished backup Citadel made in its `Backups` folder: its
+/// path, name and size. Citadel writes each one under a temporary name and
+/// renames it when whole, so a `.zip` there is whole.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn newest_citadel_backup(folder: &Path) -> Option<(PathBuf, String, u64)> {
+    std::fs::read_dir(folder)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let meta = std::fs::symlink_metadata(e.path()).ok()?; // WHAT: the entry, never followed. WHY: a link is never packed
+            let name = e.file_name().to_string_lossy().into_owned(); // WHAT: its name. WHY: kept in the manifest
+            (meta.file_type().is_file() && name.to_ascii_lowercase().ends_with(".zip")).then(|| (meta.modified().ok(), e.path(), name, meta.len())) // WHAT: a finished zip. WHY: Citadel's backups
+        })
+        .max_by_key(|(when, ..)| *when) // WHAT: the newest. WHY: last night's
+        .map(|(_, path, name, len)| (path, name, len))
 }
 
 /// Beside the catalog, unencrypted: sizes and fingerprints only, never a name or a record.
@@ -1693,6 +1730,7 @@ pub struct Job<'a> {
     pub cipher: Cipher, // WHAT: age. WHY: the lock.
     pub version: String, // WHAT: this server's version. WHY: in the manifest.
     pub mark: bool, // WHAT: whether a good run and a passed drill are marked. WHY: only for the server's own target; a hand run elsewhere moves nothing.
+    pub citadel: Option<PathBuf>, // WHAT: the Citadel cell's Backups folder, when there is a cell. WHY: its newest own backup goes off-site with the database
 }
 
 /// A run's end: an exit code and its reason. 0 good · 5 good, with a weekly/monthly or prune warning · 2 refused
@@ -2030,7 +2068,16 @@ impl Job<'_> {
             missing_on_disk,
             installation: Some(installation.clone()),
             company: company_of(&copy),
+            citadel: None,
         }; // WHAT: the manifest. WHY: what the drill checks against.
+        let cell_backup = self.citadel.as_deref().and_then(newest_citadel_backup); // WHAT: the cell's newest own backup, if there is a cell. WHY: covered off-site too
+        let mut manifest = manifest; // WHAT: filled in below. WHY: only when the cell has a backup
+        if let Some((path, name, bytes)) = &cell_backup {
+            manifest.citadel = Some(CitadelCopy { name: name.clone(), sha256: sha256_file(path).map_err(|e| refuse(2, e))?, bytes: *bytes }); // WHAT: named and fingerprinted. WHY: the drill checks it
+            self.log(&format!("the Citadel cell's backup {name} ({:.1} MB) goes with tonight's catalog", megabytes(*bytes))); // WHAT: said. WHY: the log reads like a story
+        } else if self.citadel.is_some() {
+            self.log("the Citadel cell has no backup of its own yet, so none goes with tonight's catalog"); // WHAT: said. WHY: never silent about a gap
+        }
         let mj = serde_json::to_vec_pretty(&manifest).map_err(|e| refuse(2, e))?; // WHAT: as JSON. WHY: packed first.
         let spool = own.join("spool");
         let part = spool.join(format!("{name}.part"));
@@ -2046,6 +2093,9 @@ impl Job<'_> {
                     db_len,
                     &mut std::fs::File::open(&copy)?,
                 )?;
+                if let (Some((path, _, _)), Some(cell)) = (&cell_backup, &manifest.citadel) {
+                    t.file(CITADEL_IN_CATALOG, cell.bytes, &mut std::fs::File::open(path)?)?; // WHAT: the cell's backup, encrypted with the rest. WHY: off this machine with the database
+                }
                 t.end()?;
             }
             gz.finish()?;
@@ -2530,6 +2580,9 @@ fn valid_manifest(product: &Product, man: &Manifest) -> Result<()> {
     if man.installation.as_deref().is_some_and(|i| !is_installation(i)) {
         bail!("its office's installation id isn't one the server makes");
     } // WHAT: plain characters. WHY: printed in the drill's summary.
+    if man.citadel.as_ref().is_some_and(|c| !is_digest(&c.sha256) || c.name.len() > 200 || c.name.contains(['/', '\\'])) {
+        bail!("its Citadel backup's name or fingerprint isn't one this program writes");
+    } // WHAT: a plain name and a real fingerprint. WHY: printed and compared
     Ok(())
 }
 
@@ -2768,11 +2821,13 @@ impl Drill<'_> {
             &[
                 ("manifest.json", MANIFEST_CAP),
                 (j.product.database, 64 << 30),
+                (CITADEL_IN_CATALOG, 16 << 30),
             ],
         )
         .map_err(|e| refuse(2, format!("unpacking failed: {e:#}")))?;
         let _ = std::fs::remove_file(&tgz); // WHAT: unpack safely, then drop the plaintext tarball. WHY: only our names, never outside.
-        if names.len() != 2
+        let cell_copy = names.iter().any(|n| n == CITADEL_IN_CATALOG); // WHAT: whether the cell's backup came. WHY: checked against the manifest below
+        if names.len() != 2 + usize::from(cell_copy)
             || !names.iter().any(|n| n == "manifest.json")
             || !names.iter().any(|n| n == j.product.database)
         {
@@ -2812,6 +2867,16 @@ impl Drill<'_> {
             (Some(i), _) => format!("office {i}"),
             (None, _) => "an office not named (made before catalogs named their office)".to_string(),
         }; // WHAT: whose backup this is, in words. WHY: the summary says what was restored and whose it was.
+        match (&man.citadel, cell_copy) {
+            (Some(cell), true) => {
+                let got = restored.join(CITADEL_IN_CATALOG); // WHAT: the cell's backup, restored. WHY: checked
+                if sha256_file(&got).map_err(|e| refuse(2, e))? != cell.sha256 {
+                    return Err(refuse(2, "the restored Citadel backup's fingerprint differs from the manifest"));
+                } // WHAT: compared. WHY: the bytes are the ones backed up
+            }
+            (None, false) => {} // WHAT: no cell in this office, or a catalog from before. WHY: nothing to check
+            _ => return Err(refuse(2, "the catalog and its manifest disagree about the Citadel backup")), // WHAT: refused. WHY: one without the other is not what this program writes
+        }
         let db = restored.join(j.product.database); // WHAT: the restored database. WHY: checked next.
         if sha256_file(&db).map_err(|e| refuse(2, e))? != man.database_sha256 {
             return Err(refuse(
@@ -3023,6 +3088,7 @@ pub fn job_from(
         cipher: Cipher::Age(age),
         version: version.to_string(),
         mark: true,
+        citadel: citadel_backups(), // WHAT: the cell's Backups folder, when there is one. WHY: the cell's data goes off-site too
     })) // WHAT: the job, marking. WHY: the same for the night, the command and the drill; the command clears `mark` for another target.
 }
 
@@ -3364,4 +3430,14 @@ mod cad_part {
         assert!(super::view_references(&db).unwrap().contains(&"d".repeat(64)), "an Archetype job's file is carried");
         assert!(super::VIEW.counts.contains(&"arch_jobs") && super::VIEW.counts.contains(&"arch_checkins"), "and the drill counts Archetype's jobs");
     }
+}
+
+/// The Citadel cell's `Backups` folder, on Windows when it exists.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn citadel_backups() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None; // WHAT: no cell. WHY: the cell is a Windows program
+    }
+    let program_data = std::env::var_os("ProgramData").map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from); // WHAT: ProgramData. WHY: the cell's data is there
+    Some(crate::cell::data_folder(&program_data).join("Backups")).filter(|f| f.is_dir()) // WHAT: `Excalibur Office\citadel\Backups`. WHY: Citadel's own daily backups (FolderStorage.BackupsFolderName)
 }

@@ -106,6 +106,14 @@ fn main() {
             }
         }
         "--reopen-claim" | "--make-admin" | "--reset-admins" | "--retry-citadel-move" => device_console(&first, Some(given.get(2..).map(|rest| rest.join(" ")).unwrap_or_default().as_str()).filter(|code| !code.is_empty())), // WHAT: the device list's console commands. WHY: §3 and the security review's M3; on the server itself
+        #[cfg(windows)]
+        "--roll-back" => match hyperview_server::winsvc::roll_back() { // WHAT: the version before the last update put back, server and cell together. WHY: critical 4: the documented rollback, for real
+            Ok(said) => println!("  {said}"), // WHAT: what was done. WHY: a person reads it
+            Err(why) => {
+                eprintln!("  {why}"); // WHAT: why not. WHY: said plainly
+                std::process::exit(1);
+            }
+        },
         "--console" | "--serve" => console(),
         #[cfg(windows)]
         "" => front_door(),
@@ -176,9 +184,9 @@ async fn serve() -> Result<()> {
         )
     })?;
 
-    // Nobody is made an administrator here by default. The first person to
-    // open Hyperview and find this server sets it up with their own details
-    // and gets the join code for everybody else. A headless box that will
+    // Nobody is made an administrator here by default. The first computer on
+    // the office network to ask, within a day of the first start, becomes the
+    // admin computer, and its person sets the office up from it. A headless box that will
     // never have a person near a copy of Hyperview can still ask for the old
     // behaviour: HYPERVIEW_FIRST_ADMIN=1 prints a password once.
     if std::env::var("HYPERVIEW_FIRST_ADMIN").is_ok() {
@@ -314,9 +322,11 @@ fn elevate_and_report() {
             println!("  and every copy of Excalibur View in the office up to date. You can");
             println!("  close this window.");
             println!();
-            println!("  Next: open Excalibur View on your own computer. It finds this server by");
-            println!("  itself and asks you to set it up. You become its administrator and");
-            println!("  get a join code for everybody else.");
+            println!("  Next, within a day: open Excalibur View on your own computer, on this"); // WHAT: what to do now. WHY: high 6: the join code is gone; the first computer to ask is the admin
+            println!("  office network. It finds this server by itself, and the first computer"); // WHAT: likewise. WHY: the 24-hour claiming window
+            println!("  to ask becomes the office's admin computer; you set the office up from"); // WHAT: likewise. WHY: codeless linking
+            println!("  it. Every other computer then asks to be let in, and you approve it"); // WHAT: likewise. WHY: devices are approved, never joined by code
+            println!("  from yours, under Computers."); // WHAT: where. WHY: the admin's list
             println!();
         }
         _ => {

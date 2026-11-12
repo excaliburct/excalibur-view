@@ -255,7 +255,9 @@ pub fn check_with(server: &Server, feed: &Feed, trusted: &hub::update::Trusted) 
     let mut not_covered = None;
     if server.config.replace_self {
         if let Some(release) = found.published.server_for(SERVER_PLATFORM) {
-            if newer(&release.version, VERSION) {
+            if newer(&release.version, VERSION) && crate::kept::held_back(&server.store, &release.version) {
+                tracing::info!("version {} is not taken: this office was rolled back from it, and waits for a newer one", release.version); // WHAT: said. WHY: a rollback holds
+            } else if newer(&release.version, VERSION) {
                 // The server is what Office buys. The desktop app below is free
                 // and is offered whatever the license says.
                 if crate::license::covers(server, &release.published) {
@@ -369,8 +371,33 @@ fn replace_self(
 ) -> Result<(), String> {
     let bytes = download(release, found, feed, trusted)?;
     let program = std::env::current_exe().map_err(|e| e.to_string())?;
+    if let Some(home) = program.parent() {
+        stage_cell(release, found, feed, trusted, home)?; // WHAT: the release's cell, checked and waiting, before the server is swapped. WHY: critical 3: the cell updates with the server, under the same signature
+    }
     hub::update::swap_in(&program, &bytes)
         .map_err(|e| format!("could not put version {} in place: {e}", release.version))
+}
+
+/// The cell part of the release the server is updating to, downloaded,
+/// checked against the release signature and unpacked into `citadel.new`
+/// beside the server; the new server checks it against its own pin and puts
+/// it in place before the cell starts. A release without a cell part is
+/// refused when a cell is installed here, so an update never leaves an
+/// office's estimating without its cell.
+///
+/// # Errors
+///
+/// When the cell part is missing but needed, or doesn't check out.
+pub fn stage_cell(release: &Release, found: &Found, feed: &Feed, trusted: &hub::update::Trusted, home: &std::path::Path) -> Result<(), String> {
+    let part = found.published.services().into_iter().find(|r| r.platform == hub::feed::CITADEL_PLATFORM && r.version == release.version); // WHAT: the cell part of the same release. WHY: the cell and the server are one version
+    let Some(part) = part else {
+        if home.join(crate::cellbundle::FOLDER).exists() {
+            return Err(format!("version {} has no Citadel cell part, and this server runs the cell; the server was not updated", release.version)); // WHAT: refused. WHY: never update the server and strand its cell
+        }
+        return Ok(()); // WHAT: no cell here, none in the release. WHY: an office without Citadel
+    };
+    let bytes = download(part, found, feed, trusted)?; // WHAT: downloaded and checked against the signature. WHY: the same key as the server
+    crate::cellbundle::stage_bundle(&bytes, home).map_err(|e| format!("version {}'s Citadel cell: {e}", release.version)) // WHAT: unpacked into citadel.new. WHY: put in place at the next start, before the cell runs
 }
 
 fn already_have(server: &Server, release: &Release) -> bool {

@@ -114,6 +114,7 @@ fn job(w: &World) -> Job<'static> {
         cipher: Cipher::Fake,
         version: "9.9.9".into(),
         mark: true,
+        citadel: None, // WHAT: no cell. WHY: the catalog is the database's alone, as before
     }
 } // WHAT: a job against the folder target. WHY: the stand-in cipher runs anywhere.
 fn drill(w: &World, id: &Path, scratch: &str) -> Drill<'static> {
@@ -1834,4 +1835,26 @@ fn the_drill_says_whose_backup_it_restored_and_refuses_another_offices_catalog()
     std::fs::remove_dir_all(w.root.join("s3")).ok();
     let e = drill(&w, &w.id, "s3").run();
     assert_eq!(e.code, 0, "an old catalog still drills: {e:?}");
+}
+
+#[test]
+fn the_citadel_cell_s_newest_backup_goes_off_site_and_the_drill_checks_it() {
+    let w = world(); // WHAT: an office with a backup target. WHY: the setup
+    let cell = w.root.join("citadel-backups"); // WHAT: the cell's Backups folder. WHY: Citadel's own daily backups
+    std::fs::create_dir_all(&cell).unwrap(); // WHAT: made. WHY: the backups go in it
+    put(cell.join("Backup 2026-11-11.zip"), b"older backup").unwrap(); // WHAT: an older one. WHY: only the newest goes
+    std::thread::sleep(std::time::Duration::from_millis(1100)); // WHAT: a second apart. WHY: the newest is told by its time
+    put(cell.join("Backup 2026-11-12.zip"), b"last night's estimating data").unwrap(); // WHAT: last night's. WHY: the one that goes
+    put(cell.join("Backup 2026-11-12.zip.tmp"), b"half").unwrap(); // WHAT: one still being written. WHY: never packed
+    let with_cell = Job { citadel: Some(cell.clone()), ..job(&w) }; // WHAT: the job with the cell's folder. WHY: as on LatCon's server
+    assert_eq!(with_cell.backup().code, 0); // WHAT: tonight's backup. WHY: the cell's copy goes with it
+    let log = std::fs::read_to_string(w.work.join("view/offsite.log")).unwrap(); // WHAT: the job's log. WHY: it says what went
+    assert!(log.contains("Backup 2026-11-12.zip"), "the newest backup went: {log}"); // WHAT: said. WHY: never silent
+    let mut d = drill(&w, &w.id, "scratch-cell"); // WHAT: a full drill. WHY: the restore is proven
+    d.job = Job { citadel: Some(cell), ..job(&w) }; // WHAT: the same job. WHY: drilled as made
+    d.keep = true; // WHAT: the restored folder kept. WHY: read below
+    let e = d.run(); // WHAT: the drill. WHY: it checks the cell's copy too
+    assert_eq!(e.code, 0, "{e:?}"); // WHAT: passed. WHY: the fingerprint matched
+    let restored = w.root.join("scratch-cell/restored"); // WHAT: the restored folder. WHY: read below
+    assert_eq!(std::fs::read(restored.join(CITADEL_IN_CATALOG)).unwrap_or_else(|e| panic!("{e}: {:?}", files_in(&w.root.join("scratch-cell")))), b"last night's estimating data", "the cell's backup comes back"); // WHAT: restored. WHY: the cell's data is covered off-site
 }

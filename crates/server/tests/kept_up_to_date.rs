@@ -909,3 +909,45 @@ fn a_release_from_before_there_were_two_platforms_still_reaches_the_windows_seat
     let offer = seat.update_offer("0.4.1", Channel::Stable, APP_PLATFORM).unwrap();
     assert_eq!(offer.release.expect("still offered").version, "9.4.0");
 }
+
+/// A release carrying the server and its Citadel cell part, signed alike.
+fn a_release_with_its_cell(key: &SigningKey, version: &str, cell: &[u8], cell_signed: bool) -> Listed {
+    let mut listed = a_release(key, version, false); // WHAT: the viewer and the server. WHY: as every release
+    let part = hyperview_server::cellbundle::pack(&[(hyperview_server::cellbundle::PROGRAM, cell)]).unwrap(); // WHAT: the cell part, as the publishing script packs it. WHY: what the server unpacks
+    let mut signed = sign(key, version, Channel::Stable, hub::feed::CITADEL_PLATFORM, "ExcaliburOffice-Citadel.tar.gz", &part); // WHAT: signed with the release key. WHY: the same signature as the server
+    if !cell_signed {
+        signed.digest = hex(&Sha256::digest(b"something else")); // WHAT: a digest that isn't the part's. WHY: the refusal case
+    }
+    listed.published.servers = vec![listed.published.server.clone().unwrap(), signed]; // WHAT: both servers' entries. WHY: a server that knows the cell reads `servers`
+    listed.files.push(("ExcaliburOffice-Citadel.tar.gz".to_string(), part)); // WHAT: the part's file. WHY: downloaded by its name
+    listed
+}
+
+#[test]
+fn a_server_update_brings_its_cell_checked_and_waiting_and_never_strands_a_running_one() {
+    let runtime = tokio::runtime::Runtime::new().unwrap(); // WHAT: the stand-in feed's runtime. WHY: it serves over a socket
+    let (key, trusted) = publisher(); // WHAT: the test's publisher. WHY: trusted by the server
+    let scratch = Scratch::new(); // WHAT: a fresh folder. WHY: the service's folder
+    let home = scratch.0.join("home"); // WHAT: the service's folder. WHY: the cell beside the server
+    std::fs::create_dir_all(&home).unwrap(); // WHAT: made. WHY: the cell goes in it
+
+    let plain = Feed::new(&a_feed(&runtime, vec![a_release(&key, "9.0.0", false)])); // WHAT: a release with no cell part. WHY: an office without Citadel
+    let found = plain.newest(Channel::Stable).unwrap().unwrap(); // WHAT: its newest. WHY: what the server updates to
+    let server = found.published.server_for(SERVER_PLATFORM).unwrap().clone(); // WHAT: the server's entry. WHY: the version
+    assert!(hyperview_server::updates::stage_cell(&server, &found, &plain, &trusted, &home).is_ok(), "no cell here and none in the release: the update goes ahead"); // WHAT: allowed. WHY: nothing to strand
+    std::fs::create_dir_all(home.join("citadel")).unwrap(); // WHAT: a cell installed here. WHY: LatCon's server
+    assert!(hyperview_server::updates::stage_cell(&server, &found, &plain, &trusted, &home).unwrap_err().contains("runs the cell"), "a release without the cell never updates a server that runs one"); // WHAT: refused. WHY: never strand the cell
+
+    let with = Feed::new(&a_feed(&runtime, vec![a_release_with_its_cell(&key, "9.0.1", b"cell 9.0.1", true)])); // WHAT: a release with its cell. WHY: the ordinary update
+    let found = with.newest(Channel::Stable).unwrap().unwrap(); // WHAT: its newest. WHY: updated to
+    let server = found.published.server_for(SERVER_PLATFORM).unwrap().clone(); // WHAT: the server's entry. WHY: the version
+    hyperview_server::updates::stage_cell(&server, &found, &with, &trusted, &home).unwrap(); // WHAT: staged. WHY: put in place at the next start
+    assert_eq!(std::fs::read(home.join("citadel.new").join("Citadel Server.exe")).unwrap(), b"cell 9.0.1", "the cell waits beside the server"); // WHAT: unpacked. WHY: the new server checks and swaps it
+
+    std::fs::remove_dir_all(home.join("citadel.new")).unwrap(); // WHAT: cleared. WHY: the refusal case next
+    let forged = Feed::new(&a_feed(&runtime, vec![a_release_with_its_cell(&key, "9.0.2", b"cell 9.0.2", false)])); // WHAT: a cell part that isn't what was signed. WHY: the refusal
+    let found = forged.newest(Channel::Stable).unwrap().unwrap(); // WHAT: its newest. WHY: updated to
+    let server = found.published.server_for(SERVER_PLATFORM).unwrap().clone(); // WHAT: the server's entry. WHY: the version
+    assert!(hyperview_server::updates::stage_cell(&server, &found, &forged, &trusted, &home).is_err(), "a cell part that doesn't match its signature is refused"); // WHAT: refused. WHY: the same signature as the server
+    assert!(!home.join("citadel.new").exists(), "and nothing waits"); // WHAT: nothing staged. WHY: never a cell that didn't check out
+}

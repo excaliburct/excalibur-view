@@ -52,6 +52,12 @@ pub const SERVER_PLATFORM: &str = if cfg!(target_os = "windows") {
     "linux-x64-server"
 };
 
+/// What the Office Server's Citadel cell is published as, beside the
+/// server in the same release and signed with the same key. Its own platform
+/// string, so a signature over the cell can never pass for one over the
+/// server, and a server older than the cell never mistakes it for itself.
+pub const CITADEL_PLATFORM: &str = "windows-x64-citadel"; // WHAT: the cell's part. WHY: only Windows runs the cell
+
 /// Every platform a viewer is published for. The publisher's tools walk this;
 /// a running program only ever cares about its own, which is [`APP_PLATFORM`].
 pub const PLATFORMS: [&str; 3] = ["windows-x64", "macos-universal", "linux-x64"];

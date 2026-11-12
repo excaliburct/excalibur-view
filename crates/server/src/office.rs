@@ -62,7 +62,13 @@ pub fn parts(server: &Server) -> Vec<Part> {
     } else {
         Some(crate::citadel::Seen::NotFound) // WHAT: no cell here (no program, or not Windows). WHY: the cell is the only way Citadel runs; something else on 47110 is never reported as Citadel
     };
-    with_move(parts_of(&licensed(server), IN_THIS_BUILD, citadel.as_ref()), crate::cellmove::recorded(&server.store).as_ref()) // WHAT: every part, Citadel's with how its old data moved in. WHY: shown on /api/v1/office
+    let mut parts = with_move(parts_of(&licensed(server), IN_THIS_BUILD, citadel.as_ref()), crate::cellmove::recorded(&server.store).as_ref()); // WHAT: every part, Citadel's with how its old data moved in. WHY: shown on /api/v1/office
+    if let Some(left) = crate::cellmove::leftovers(&server.store) {
+        for part in parts.iter_mut().filter(|p| p.name == Module::Citadel.name() && p.licensed) {
+            part.note = Some(part.note.take().map_or_else(|| left.clone(), |said| format!("{said}. {left}"))); // WHAT: what was done with 1.0's leftovers, after the move's words. WHY: the 1.0 program folder and old data folder are left, and an admin is told so
+        }
+    }
+    parts
 }
 
 /// `parts` with Citadel's move added: its words as the note, and, after a
