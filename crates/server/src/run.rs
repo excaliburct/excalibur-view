@@ -79,11 +79,7 @@ pub async fn serve(
         None
     };
     let server = Arc::new(Server::new(store, config));
-    if let Some((_, pin)) = &secure {
-        let _ = server.secure_port.set(address.port()); // WHAT: HTTPS answers on the API's own port. WHY: /health offers it; a seat moves there
-        let _ = server.pin.set(pin.clone()); // WHAT: the certificate's pin. WHY: device requests are bound to it (crate::devices)
-    }
-    let secure = secure.map(|(settings, _)| settings); // WHAT: the TLS settings alone. WHY: served with below
+    let secure = secure.map(|(settings, pin)| secured(&server, address.port(), pin, settings)); // WHAT: the port and pin noted, the TLS settings kept. WHY: served with below
     let claimed = !server.store.is_empty().unwrap_or(false);
     let name = api::installation_name(&server);
 
@@ -173,6 +169,14 @@ pub async fn serve(
         .context("serving")?;
     tracing::info!("stopped cleanly");
     Ok(())
+}
+
+/// Notes that HTTPS answers on `port` with the certificate whose pin is
+/// `pin`, and hands back the TLS settings to serve with.
+fn secured(server: &Server, port: u16, pin: String, settings: Arc<rustls::ServerConfig>) -> Arc<rustls::ServerConfig> {
+    let _ = server.secure_port.set(port); // WHAT: HTTPS answers on the API's own port. WHY: /health offers it; a seat moves there
+    let _ = server.pin.set(pin); // WHAT: the certificate's pin. WHY: device requests are bound to it (`crate::devices`)
+    settings
 }
 
 /// The TLS settings, with the certificate made the first time. Its pin goes
