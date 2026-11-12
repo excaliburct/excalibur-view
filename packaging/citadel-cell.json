@@ -1,9 +1,11 @@
 {
   "_readme": "The Citadel cell this Office Server build carries, pinned. tools/citadel_cell.py fetches 'source.url', checks it against 'source.sha256', takes out every file in 'files', checks each against its SHA-256, and makes the signed release's cell bundle from them. The server is built with this file inside it and runs a cell program only when its SHA-256 is the one here. An empty 'files' means this build carries no cell: the cell never starts and the release has no cell part. Fill in all four at once, in one commit, from a LatCon Estimating release that has been tested end to end.",
-  "version": "",
+  "version": "1.1.0",
   "source": {
-    "url": "",
-    "sha256": ""
+    "url": "https://github.com/excaliburct/LatconEstimating/releases/download/citadel-server-1.1.0-cell/CitadelServer-1.1.0-win-x64-cell.zip",
+    "sha256": "493a5bb91bcdee72676382c5c983c3ebdee59596622903936f3e87d59b7c6032"
   },
-  "files": {}
+  "files": {
+    "Citadel Server.exe": "11310a586f8745bee4608e53bc48abfa9a81029d3353d2123a5b0b53e605ee8b"
+  }
 }

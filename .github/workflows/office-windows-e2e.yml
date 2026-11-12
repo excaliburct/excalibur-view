@@ -1,0 +1,160 @@
+# WHAT: the Office Server's install day at LatCon, end to end on a real Windows machine (deploy/windows-test/office-e2e.ps1):
+#       Citadel Server 1.0.1 as on the USB stick with a paired PC, the Office Server installed from its USB kit with the pinned
+#       Citadel cell and a test licence, the move at first start, two computers linked, an update, a rollback, a failed move.
+# WHY:  the Linux build server can't run Windows services, the firewall, job objects or a restricted token, so the cell's
+#       install, move and update had only run against fakes. Called from LatCon Estimating's repository, which holds Citadel
+#       Server's source and the pinned cell; no repository secret is used, and every key is a test key made in the job.
+name: Office Server end to end on Windows   # WHAT: the name on the Actions page. WHY: says what it is.
+
+on:
+  workflow_call:                 # WHAT: run only when another workflow calls it. WHY: it needs LatCon Estimating's source and release, which only that repository's own token can read.
+    inputs:
+      view_ref:                  # WHAT: the View commit or branch to test. WHY: the Office Server built from it.
+        type: string
+        required: true
+      latcon_ref:                # WHAT: the LatCon Estimating commit whose client code links the computers. WHY: the program the office runs.
+        type: string
+        required: true
+
+permissions: {}   # WHAT: no access by default. WHY: the job asks for only what it needs.
+
+jobs:
+  windows:
+    name: The Office Server at LatCon, end to end   # WHAT: the job's name. WHY: shown on the run page.
+    runs-on: windows-latest                         # WHAT: a fresh Windows machine. WHY: what LatCon's server runs.
+    timeout-minutes: 150                            # WHAT: a limit. WHY: a stuck service never holds a runner for hours.
+    permissions:
+      contents: read                                # WHAT: read the code and the releases. WHY: Citadel 1.0.1's source and the pinned cell.
+    defaults:
+      run:
+        shell: pwsh                                 # WHAT: PowerShell 7 for every step. WHY: the scripts are PowerShell.
+    env:
+      DOTNET_NOLOGO: "1"                            # WHAT: no .NET banner. WHY: a shorter log.
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"              # WHAT: no telemetry. WHY: nothing about the build leaves the runner.
+      CARGO_TERM_COLOR: always                      # WHAT: colour in cargo's log. WHY: easier to read.
+      USB_SERVER_COMMIT: 84c83062a9f15db5e4b3faad9e141379b5e23e24   # WHAT: Citadel Server 1.0.1 as built for the USB of November 6. WHY: LatCon's own Windows test builds it from this commit.
+      PUBLISH: -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=None -nologo   # WHAT: how Citadel Server's one-file exe is published. WHY: the USB build's switches.
+      CELL_TAG: citadel-server-1.1.0-cell           # WHAT: the release holding the pinned cell's zip. WHY: packaging/citadel-cell.json names it.
+    steps:
+      - name: Get View
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # WHAT: v4.4.0, 2026-07-20. WHY: pinned by commit, as View's other workflows.
+        with:
+          repository: excaliburct/excalibur-view   # WHAT: View. WHY: the Office Server's source.
+          ref: ${{ inputs.view_ref }}             # WHAT: the commit asked for. WHY: as the input says.
+          path: view                              # WHAT: its own folder. WHY: LatCon's beside it.
+          persist-credentials: false              # WHAT: the token isn't left in the checkout. WHY: no later step can push with it.
+
+      - name: Get LatCon Estimating
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # WHAT: v4.4.0, 2026-07-20. WHY: as above.
+        with:
+          repository: excaliburct/LatconEstimating  # WHAT: LatCon Estimating. WHY: Citadel 1.0.1's source and the client code.
+          ref: ${{ inputs.latcon_ref }}             # WHAT: the commit asked for. WHY: as the input says.
+          path: latcon                              # WHAT: its own folder. WHY: beside View.
+          fetch-depth: 0                            # WHAT: the whole history. WHY: 1.0.1 is built from its own commit.
+          persist-credentials: false                # WHAT: as above. WHY: as above.
+
+      - name: The scripts parse
+        run: |
+          foreach ($file in @('view/deploy/windows-test/office-e2e.ps1', 'view/deploy/windows-test/make-test-key.ps1')) {   # WHAT: both scripts. WHY: a typo found now, not after the builds.
+            $errors = $null                                                                                                   # WHAT: filled by the parser. WHY: checked below.
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file).Path, [ref]$null, [ref]$errors)   # WHAT: parsed, not run. WHY: as above.
+            if ($errors) { $errors | ForEach-Object { Write-Host "$file $($_.Extent.StartLineNumber): $($_.Message)" }; throw "$file doesn't parse." }   # WHAT: stop. WHY: said plainly.
+          }
+
+      - name: The .NET SDK from LatCon's global.json
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0 (2026-07-16)
+        with:
+          global-json-file: latcon/global.json   # WHAT: the SDK LatCon names. WHY: the same .NET 10 its builds use.
+
+      - name: publish.py's one library
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: "cryptography==46.0.5"   # WHAT: Ed25519 for publish.py, pinned. WHY: the test key, the licence and the releases are signed with it.
+          if ($LASTEXITCODE -ne 0) { throw 'cryptography did not install.' }                              # WHAT: stop. WHY: said plainly.
+
+      - name: Citadel Server 1.0.1 as on the USB stick
+        run: |
+          git -C latcon worktree add --detach "$env:RUNNER_TEMP\src-1.0.1" $env:USB_SERVER_COMMIT   # WHAT: the USB's commit. WHY: built from its own source.
+          if ($LASTEXITCODE -ne 0) { throw "The USB's commit isn't there." }                           # WHAT: stop. WHY: no 1.0.1, no move.
+          dotnet publish "$env:RUNNER_TEMP\src-1.0.1\src\Citadel.Server" $env:PUBLISH.Split(' ') -o "$env:RUNNER_TEMP\build-1.0.1"   # WHAT: the one-file exe. WHY: the program IT installed.
+          if ($LASTEXITCODE -ne 0) { throw '1.0.1 did not build.' }                                     # WHAT: stop. WHY: said plainly.
+
+      - name: LatCon's PC and the two computers
+        run: |
+          dotnet build latcon/tests/Citadel.Client.Tests/Citadel.Client.Tests.csproj -c Release -nologo   # WHAT: LatCon's live tests. WHY: the PC paired with 1.0.1.
+          if ($LASTEXITCODE -ne 0) { throw "LatCon's client tests did not build." }                       # WHAT: stop. WHY: said plainly.
+          dotnet build view/deploy/windows-test/office-device -c Release -nologo "-p:LatconRepo=$env:GITHUB_WORKSPACE\latcon" -o "$env:RUNNER_TEMP\office-device"   # WHAT: the two computers. WHY: (d).
+          if ($LASTEXITCODE -ne 0) { throw 'office-device did not build.' }                              # WHAT: stop. WHY: said plainly.
+
+      - name: The pinned Citadel cell, the USB kit's folder and the release part
+        env:
+          GH_TOKEN: ${{ github.token }}   # WHAT: the calling repository's read token. WHY: the cell's zip is a release asset there.
+        run: |
+          gh release download $env:CELL_TAG --repo excaliburct/LatconEstimating --pattern '*.zip' --dir "$env:RUNNER_TEMP\cell-zip"   # WHAT: the pinned zip. WHY: checked against the pin next.
+          if ($LASTEXITCODE -ne 0) { throw "The cell's zip couldn't be downloaded." }                                               # WHAT: stop. WHY: said plainly.
+          $zip = (Get-ChildItem "$env:RUNNER_TEMP\cell-zip\*.zip" | Select-Object -First 1).FullName                                  # WHAT: its path. WHY: below.
+          python view/tools/citadel_cell.py kit --out "$env:RUNNER_TEMP\kit" --from-zip $zip                                         # WHAT: the USB kit's citadel\ folder. WHY: install takes it.
+          if ($LASTEXITCODE -ne 0) { throw 'citadel_cell.py kit failed.' }                                                          # WHAT: stop. WHY: said plainly.
+          python view/tools/citadel_cell.py bundle --out "$env:RUNNER_TEMP\ExcaliburOffice-Citadel.tar.gz" --from-zip $zip          # WHAT: the release's cell part. WHY: each test update carries it.
+          if ($LASTEXITCODE -ne 0) { throw 'citadel_cell.py bundle failed.' }                                                       # WHAT: stop. WHY: said plainly.
+
+      - name: A test release key, built into this checkout only
+        run: ./view/deploy/windows-test/make-test-key.ps1 -View "$env:GITHUB_WORKSPACE\view" -Keys "$env:RUNNER_TEMP\test-keys"   # WHAT: the only key the test servers trust. WHY: never a real key.
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # WHAT: the stable branch, 2026-10-16. WHY: pinned by commit, as View's other workflows.
+        with:
+          toolchain: stable  # WHAT: stable Rust. WHY: as View's builds.
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # WHAT: v2.9.3, 2026-10-20. WHY: pinned by commit, as View's other workflows.
+        with:
+          workspaces: view -> target   # WHAT: View's build folder. WHY: the checkout isn't at the top.
+          cache-on-failure: true       # WHAT: kept even when the test fails. WHY: the next try doesn't build everything again.
+
+      - name: The PDF engine
+        shell: bash
+        working-directory: view
+        run: |
+          set -euo pipefail
+          build="$(grep '^BUILD=' third_party/pdfium/embedded/VERSION | cut -d= -f2)"                                        # WHAT: the pinned PDFium. WHY: as View's Windows build.
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F$build/pdfium-win-x64.tgz" -o pdfium.tgz   # WHAT: fetched. WHY: as above.
+          mkdir -p unpacked && tar -xzf pdfium.tgz -C unpacked                                                              # WHAT: unpacked. WHY: the DLL is inside.
+          cp "$(find unpacked -name 'pdfium.dll' | head -1)" third_party/pdfium/embedded/pdfium.dll                         # WHAT: in place. WHY: the build embeds it.
+
+      - name: The Office Server, three versions
+        id: servers
+        working-directory: view
+        run: |
+          $first = [version](Select-String -Path Cargo.toml -Pattern '^version = "([0-9.]+)"' | Select-Object -First 1).Matches.Groups[1].Value   # WHAT: this build's version. WHY: the install.
+          $versions = @("$first", "$($first.Major).$($first.Minor).$($first.Build + 1)", "$($first.Major).$($first.Minor).$($first.Build + 2)")    # WHAT: it and the next two. WHY: an update and a newer one.
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\servers" | Out-Null                                                          # WHAT: where they go. WHY: the script takes them.
+          foreach ($v in $versions) {
+            $toml = Get-Content -Raw crates/server/Cargo.toml                                                                                      # WHAT: the server's manifest. WHY: its version only is changed.
+            [System.IO.File]::WriteAllText("$PWD\crates\server\Cargo.toml", ($toml -replace '(?m)^version(\.workspace = true| = "[0-9.]+")', "version = `"$v`""))   # WHAT: this version, in this checkout only. WHY: the build mark and /health say it.
+            cargo build --release -p hyperview-server                                                                                              # WHAT: built. WHY: only the server's own crate is built again for the next two.
+            if ($LASTEXITCODE -ne 0) { throw "The Office Server $v did not build." }                                                               # WHAT: stop. WHY: said plainly.
+            Copy-Item target/release/hyperview-server.exe "$env:RUNNER_TEMP\servers\ExcaliburView-Server-$v.exe"                                  # WHAT: kept by version. WHY: the install and the updates.
+          }
+          "first=$($versions[0])" >> $env:GITHUB_OUTPUT    # WHAT: handed on. WHY: the script names them.
+          "second=$($versions[1])" >> $env:GITHUB_OUTPUT   # WHAT: as above. WHY: as above.
+          "third=$($versions[2])" >> $env:GITHUB_OUTPUT    # WHAT: as above. WHY: as above.
+
+      - name: The Office Server at LatCon, end to end
+        env:
+          FIRST: ${{ steps.servers.outputs.first }}     # WHAT: the versions, as variables. WHY: never pasted into the script's text.
+          SECOND: ${{ steps.servers.outputs.second }}
+          THIRD: ${{ steps.servers.outputs.third }}
+        run: >-
+          ./view/deploy/windows-test/office-e2e.ps1
+          -View "$env:GITHUB_WORKSPACE\view" -Latcon "$env:GITHUB_WORKSPACE\latcon"
+          -Old "$env:RUNNER_TEMP\build-1.0.1\Citadel Server.exe" -Servers "$env:RUNNER_TEMP\servers"
+          -Kit "$env:RUNNER_TEMP\kit" -CellPart "$env:RUNNER_TEMP\ExcaliburOffice-Citadel.tar.gz"
+          -Key "$env:RUNNER_TEMP\test-keys\test-release.key" -Device "$env:RUNNER_TEMP\office-device\OfficeDevice.exe"
+          -Work "$env:RUNNER_TEMP\e2e" -First $env:FIRST -Second $env:SECOND -Third $env:THIRD
+
+      - name: Keep the logs
+        if: always()   # WHAT: pass or fail. WHY: a failed run's logs say why.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # WHAT: v4.6.2, 2025-03-19. WHY: pinned by commit, as View's other workflows.
+        with:
+          name: office-e2e-logs                 # WHAT: the download's name. WHY: plain.
+          path: ${{ runner.temp }}/e2e/logs     # WHAT: the servers' and the feed's logs. WHY: logs only, no keys or programs.
+          if-no-files-found: ignore             # WHAT: no error when an earlier step failed. WHY: the run already says what failed.
+          retention-days: 14                    # WHAT: kept two weeks. WHY: long enough to look.
