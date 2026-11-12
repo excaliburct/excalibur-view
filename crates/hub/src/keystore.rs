@@ -60,6 +60,7 @@ fn read_back(path: &Path) -> Result<DeviceKey, String> {
 /// Keeps `key` at `path`, written whole or not at all, and never over a key
 /// already there.
 fn keep(path: &Path, key: &DeviceKey) -> Result<(), String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // WHAT: a count of part files this process made. WHY: two threads reading the clock in the same nanosecond still get different names
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?; // WHAT: the folder. WHY: first run
     }
@@ -68,15 +69,59 @@ fn keep(path: &Path, key: &DeviceKey) -> Result<(), String> {
     secret.fill(0); // WHAT: cleared. WHY: as above
     let sealed = sealed?;
     let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()); // WHAT: a fresh number. WHY: two first runs never share a part file
-    let part = path.with_extension(format!("saving{}-{n}", std::process::id())); // WHAT: a file beside it, this run's own. WHY: put into place whole
+    let count = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // WHAT: this part file's number. WHY: as above
+    let part = path.with_extension(format!("saving{}-{n}-{count}", std::process::id())); // WHAT: a file beside it, this run's own. WHY: put into place whole; create_new refuses a name already taken
     write_private(&part, &sealed).map_err(|e| e.to_string())?;
-    let placed = match std::fs::hard_link(&part, path) {
-        Ok(()) => Ok(()), // WHAT: linked into place, only if no key was there. WHY: never over another first run's key
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()), // WHAT: another first run kept one first. WHY: that one is read back and used
-        Err(e) => Err(format!("this computer's office server key couldn't be put in place ({e}); nothing was kept")), // WHAT: refused, never a move that could replace a key already there. WHY: review: a key is never written over, on any disk
+    let placed = place_new(&part, path, |from, to| std::fs::hard_link(from, to)); // WHAT: into place only if no key is there. WHY: never over another first run's key, on any disk
+    let _ = std::fs::remove_file(&part); // WHAT: the part file gone, whatever happened. WHY: never a stray copy of a key
+    placed.map_err(|e| e.to_string()) // WHAT: placed, or why not. WHY: the caller reads the key on the disk
+}
+
+/// Puts the part file `part` at `path` only if nothing is there yet: by a
+/// hard link (`link`), or on a disk without hard links (FAT, exFAT, some
+/// network shares) by a move that never replaces. When neither is possible
+/// it refuses rather than replace. A key already there is kept, and this
+/// part file is let go. (Excalibur CAD's `place_new`, aa669de.)
+fn place_new(part: &Path, path: &Path, link: impl Fn(&Path, &Path) -> std::io::Result<()>) -> std::io::Result<()> {
+    let placed = match link(part, path) {
+        Ok(()) => return std::fs::remove_file(part), // WHAT: named, and the part's own name taken off. WHY: the key is whole under its real name only
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e), // WHAT: another first run's key is there. WHY: kept, below
+        Err(_) => rename_no_replace(part, path), // WHAT: a disk without hard links. WHY: a move that never replaces, or a refusal
     };
-    let _ = std::fs::remove_file(&part); // WHAT: the part file gone. WHY: never a stray copy of a key
-    placed
+    match placed {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => std::fs::remove_file(part), // WHAT: theirs is kept, this one let go. WHY: the caller reads the key on disk, so two first runs agree
+        other => other, // WHAT: moved, or a refusal said. WHY: never a replace
+    }
+}
+
+/// Moves `from` to `to` only if nothing is at `to`: `AlreadyExists` if
+/// something is. Windows: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`;
+/// Linux: `renameat2` with `RENAME_NOREPLACE`; elsewhere refused.
+fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _; // WHAT: paths as UTF-16. WHY: what the wide Windows call takes
+        use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH}; // WHAT: the move, flushed. WHY: no MOVEFILE_REPLACE_EXISTING, so it never replaces
+        let wide = |p: &Path| p.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<u16>>(); // WHAT: a path, ended by a zero. WHY: as Windows reads it
+        let (f, t) = (wide(from), wide(to)); // WHAT: both paths. WHY: kept alive for the call
+        // SAFETY: both pointers are to zero-ended UTF-16 buffers that live until the call returns; Windows only reads them.
+        let moved = unsafe { MoveFileExW(windows::core::PCWSTR(f.as_ptr()), windows::core::PCWSTR(t.as_ptr()), MOVEFILE_WRITE_THROUGH) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: a move that never replaces
+        moved.map_err(|e| if to.exists() { std::io::Error::from(std::io::ErrorKind::AlreadyExists) } else { std::io::Error::other(e.to_string()) }) // WHAT: done, or AlreadyExists when something is there. WHY: the caller keeps the key already there
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        use std::os::unix::ffi::OsStrExt as _; // WHAT: paths as bytes. WHY: as the system call takes them
+        let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput)); // WHAT: a path, ended by a zero. WHY: as the system call reads it
+        let (f, t) = (c(from)?, c(to)?); // WHAT: both paths. WHY: kept alive for the call
+        // SAFETY: both pointers are to zero-ended strings that live until the call returns; the kernel only reads them.
+        let done = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Linux system call: a rename that never replaces
+        if done == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) } // WHAT: moved, or why not (EEXIST reads as AlreadyExists). WHY: never a replace
+    }
+    #[cfg(not(any(windows, all(target_os = "linux", target_env = "gnu"))))]
+    {
+        let _ = (from, to); // WHAT: unused here. WHY: no move that never replaces on this system
+        Err(std::io::Error::other("this disk can't make a new file without risking replacing one, so the office server key wasn't kept; use a folder on a local disk")) // WHAT: refused, in plain words. WHY: never a replace
+    }
 }
 
 /// Writes `bytes` to a new file only its owner may read (0600 on Unix).
@@ -156,8 +201,10 @@ mod tests {
     use super::*;
 
     fn folder() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // WHAT: a count of folders made. WHY: two tests reading the clock in the same nanosecond never share one
         let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(); // WHAT: a fresh name. WHY: tests run side by side
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("keys-{n}"))
+        let count = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // WHAT: this folder's number. WHY: as above
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("keys-{n}-{count}")) // WHAT: the folder. WHY: its own, every time
     }
 
     #[test]
@@ -187,6 +234,21 @@ mod tests {
     }
 
     #[test]
+    fn without_hard_links_a_new_key_is_moved_in_only_into_an_empty_place() {
+        let dir = folder(); // WHAT: a fresh folder. WHY: no key in it yet
+        std::fs::create_dir_all(&dir).unwrap(); // WHAT: made. WHY: the files go in it
+        let no_links = |_: &Path, _: &Path| Err(std::io::Error::other("hard links not supported")); // WHAT: a disk without hard links (FAT, exFAT, some shares). WHY: re-review: the fallback replaced a key
+        let (first, second, kept) = (dir.join("first.part"), dir.join("second.part"), dir.join(FILE)); // WHAT: two runs' part files, and the key's place. WHY: two first runs at once
+        std::fs::write(&first, b"first").unwrap(); // WHAT: the first run's key. WHY: put in first
+        std::fs::write(&second, b"second").unwrap(); // WHAT: the second run's. WHY: must not replace it
+        place_new(&first, &kept, no_links).unwrap(); // WHAT: into the empty place. WHY: moved
+        place_new(&second, &kept, no_links).unwrap(); // WHAT: into a place already taken. WHY: let go, not moved over
+        assert_eq!(std::fs::read(&kept).unwrap(), b"first", "the key already there is never replaced"); // WHAT: the first key. WHY: two first runs agree
+        assert!(!first.exists() && !second.exists(), "no part file is left behind"); // WHAT: tidied. WHY: never a stray copy of a key
+        let _ = std::fs::remove_dir_all(&dir); // WHAT: tidied. WHY: a test leaves nothing
+    }
+
+    #[test]
     fn a_damaged_key_is_said_and_never_replaced() {
         let dir = folder();
         std::fs::create_dir_all(&dir).unwrap();
@@ -199,11 +261,11 @@ mod tests {
     #[test]
     fn a_key_is_never_written_into_a_file_someone_else_made() {
         let dir = folder(); // WHAT: a fresh folder. WHY: its own files
-        std::fs::create_dir_all(&dir).unwrap();
-        let planted = dir.join("planted");
-        std::fs::write(&planted, b"theirs").unwrap(); // WHAT: a file somebody else made. WHY: the attack
-        assert!(write_private(&planted, b"ours").is_err(), "an existing file is never written into");
-        assert_eq!(std::fs::read(&planted).unwrap(), b"theirs");
-        let _ = std::fs::remove_dir_all(&dir); // WHAT: tidied. WHY: nothing left behind
+        std::fs::create_dir_all(&dir).unwrap(); // WHAT: made. WHY: the file goes in it
+        let planted = dir.join("planted"); // WHAT: a file somebody else made. WHY: the attack
+        std::fs::write(&planted, b"theirs").unwrap(); // WHAT: written first. WHY: there before the key
+        assert!(write_private(&planted, b"ours").is_err(), "an existing file is never written into"); // WHAT: refused. WHY: create_new
+        assert_eq!(std::fs::read(&planted).unwrap(), b"theirs"); // WHAT: untouched. WHY: never written into
+        let _ = std::fs::remove_dir_all(&dir); // WHAT: tidied. WHY: a test leaves nothing
     }
 }

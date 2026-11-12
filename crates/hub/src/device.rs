@@ -716,4 +716,79 @@ mod tests {
         assert!(!verify(&key.public_key(), &other, &signed.signature), "another query");
         assert!(!verify(&key.public_key(), &message, "not a signature"));
     }
+
+    /// A small random-number source with a fixed seed, so a failure can be
+    /// run again exactly. (xorshift64*, no dependency.)
+    struct Random(u64);
+
+    impl Random {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12; // WHAT: xorshift. WHY: cheap and well spread
+            self.0 ^= self.0 << 25; // WHAT: the second shift. WHY: xorshift64*'s three
+            self.0 ^= self.0 >> 27; // WHAT: the third. WHY: likewise
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D) // WHAT: the scrambled output. WHY: the * of xorshift64*
+        }
+
+        fn bytes(&mut self, most: usize) -> Vec<u8> {
+            let n = usize::try_from(self.next() % (most as u64 + 1)).unwrap_or(0); // WHAT: a length up to `most`. WHY: short and long inputs
+            (0..n).map(|_| u8::try_from(self.next() & 0xff).unwrap_or(0)).collect() // WHAT: any bytes. WHY: the parser sees everything
+        }
+
+        /// Text that is mostly what a header could hold, sometimes not.
+        fn text(&mut self, most: usize) -> String {
+            let alphabet = b"0123456789abcdefABCDEF+/=:-_ \n\r\t{}\"\\/?.%\x00\xc3\xa9"; // WHAT: hex, base64, separators, line breaks, a zero and a split UTF-8 letter. WHY: near-misses of real fields, and the bytes that smuggle lines
+            let n = usize::try_from(self.next() % (most as u64 + 1)).unwrap_or(0); // WHAT: a length up to `most`. WHY: short and long
+            let picked: Vec<u8> = (0..n).map(|_| alphabet[usize::try_from(self.next()).unwrap_or(0) % alphabet.len()]).collect(); // WHAT: the letters. WHY: drawn from the alphabet
+            String::from_utf8_lossy(&picked).into_owned() // WHAT: as text, broken letters replaced. WHY: the fields are strings
+        }
+    }
+
+    #[test]
+    fn random_signatures_keys_and_fields_never_panic_and_never_verify() {
+        let key = fixed(); // WHAT: the test key. WHY: the one the random signatures are checked against
+        let public = key.public_key(); // WHAT: its public half. WHY: what the verifier holds
+        let mut random = Random(0x0DDB_1A5E_5BAD_5EED); // WHAT: a fixed seed. WHY: a failure runs again exactly
+        for round in 0..20_000 { // WHAT: twenty thousand rounds. WHY: wide, and still quick
+            let signature = if round % 3 == 0 { base64::engine::general_purpose::STANDARD.encode(random.bytes(64)) } else { random.text(100) }; // WHAT: random signatures, some well formed. WHY: the parser and the verifier
+            let message = random.bytes(300); // WHAT: random lines. WHY: never signed by the key
+            assert!(!verify(&public, &message, &signature), "a random signature never verifies (round {round})"); // WHAT: refused, never a panic. WHY: the verifier
+            let _ = parse_public_key(&random.text(60)); // WHAT: random key text. WHY: never panics
+            let request = Request { // WHAT: a request of random fields. WHY: the message builder
+                server_pin: &random.text(70), // WHAT: a random pin line. WHY: likewise
+                device_id: &random.text(40), // WHAT: a random id. WHY: likewise
+                method: &random.text(8), // WHAT: a random method. WHY: likewise
+                target: &random.text(120), // WHAT: a random target. WHY: likewise
+                body_sha256: &random.text(70), // WHAT: a random hash. WHY: likewise
+                time: i64::try_from(random.next() >> 1).unwrap_or(0) - i64::try_from(random.next() >> 2).unwrap_or(0), // WHAT: a time either side of zero. WHY: signs and sizes
+            };
+            if let Ok(lines) = request.message() { // WHAT: when the fields are allowed. WHY: anything else is refused
+                assert_eq!(lines.split(|b| *b == b'\n').count(), 8, "a message that is made is always seven lines, nothing smuggled in"); // WHAT: seven ended lines, so eight pieces. WHY: no field adds one
+            }
+        }
+    }
+
+    #[test]
+    fn random_enrol_proofs_never_panic_and_never_prove() {
+        let key = fixed(); // WHAT: the test key. WHY: sometimes the request names a real key
+        let mut random = Random(0x005E_ED0F_E4F0_11ED); // WHAT: a fixed seed. WHY: a failure runs again exactly
+        for round in 0..20_000 { // WHAT: twenty thousand rounds. WHY: wide, and still quick
+            let ask = Ask {
+                public_key: if round % 4 == 0 { key.public_key_text() } else { random.text(60) }, // WHAT: a real key a quarter of the time. WHY: deeper than the key parser
+                app: ["view", "cad", "archetype", "latcon-estimating", "word"][usize::try_from(random.next() % 5).unwrap_or(0)].to_string(), // WHAT: the apps, and one that isn't. WHY: the app check
+                app_version: random.text(20), // WHAT: random. WHY: every field
+                machine: random.text(40), // WHAT: random. WHY: likewise
+                os_user: random.text(40), // WHAT: random. WHY: likewise
+                display_name: random.text(40), // WHAT: random. WHY: likewise
+                platform: random.text(20), // WHAT: random. WHY: likewise
+                time: i64::try_from(random.next() >> 1).unwrap_or(0), // WHAT: a random time. WHY: likewise
+                proof: if round % 2 == 0 { base64::engine::general_purpose::STANDARD.encode(random.bytes(64)) } else { random.text(100) }, // WHAT: half well-formed proofs. WHY: past the parser to the verifier
+            }; // WHAT: a random request to be let in. WHY: the proof parser and checker
+            assert!(ask.proven(PIN).is_none(), "a random proof never proves (round {round})"); // WHAT: refused, never a panic. WHY: the proof checker
+            if let Ok(lines) = (Enroll { server_pin: PIN, public_key: &ask.public_key, app: &ask.app, machine: &ask.machine, os_user: &ask.os_user, time: ask.time }).message() { // WHAT: the proof's message, when allowed. WHY: its builder
+                assert_eq!(lines.split(|b| *b == b'\n').count(), 8, "always seven lines"); // WHAT: seven ended lines, so eight pieces. WHY: no field adds one
+            }
+        }
+        let good = Ask::signed(&key, PIN, "view", "0.7.0", "PC", "dana", "Dana", "windows-x64", 1).unwrap(); // WHAT: a real request. WHY: the checker isn't simply refusing everything
+        assert!(good.proven(PIN).is_some(), "and a real proof still proves"); // WHAT: proven. WHY: likewise
+    }
 }
