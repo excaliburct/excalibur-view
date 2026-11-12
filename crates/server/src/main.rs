@@ -105,7 +105,7 @@ fn main() {
                 }
             }
         }
-        "--reopen-claim" | "--make-admin" | "--reset-admins" => device_console(&first, given.get(2).map(String::as_str)), // WHAT: the device list's console commands. WHY: §3 and the security review's M3; on the server itself
+        "--reopen-claim" | "--make-admin" | "--reset-admins" | "--retry-citadel-move" => device_console(&first, given.get(2).map(String::as_str)), // WHAT: the device list's console commands. WHY: §3 and the security review's M3; on the server itself
         "--console" | "--serve" => console(),
         #[cfg(windows)]
         "" => front_door(),
@@ -124,6 +124,7 @@ fn device_console(command: &str, id: Option<&str>) {
     if std::env::var_os("HYPERVIEW_DATA").is_none() && hyperview_server::winsvc::data_folder().exists() { config.data = hyperview_server::winsvc::data_folder(); } // WHAT: the installed service's data. WHY: the same folder the service serves
     let done = Store::open(&config.database(), &config.blobs()).and_then(|store| match command {
         "--reopen-claim" => hyperview_server::devices::reopen_claim(&store).map(|until| format!("  The first computer to ask, until {until}, becomes the office's admin.")), // WHAT: claiming open for a day. WHY: only while the office has no admin
+        "--retry-citadel-move" => hyperview_server::cellmove::retry(&store).map(|()| "  The failed Citadel move is cleared. Restart the Office Server service and it tries once more.".to_string()), // WHAT: a failure cleared. WHY: the console way to try the move again
         "--make-admin" => hyperview_server::devices::make_admin_here(&store, id.unwrap_or_default()).map(|id| format!("  The computer {id} is approved, and an admin.")), // WHAT: one computer made an admin. WHY: the way back when every admin computer is lost
         _ => hyperview_server::devices::reset_admins_here(&store).map(|until| format!("  No computer is an admin now. The first computer on the office network to ask, until {until}, becomes the admin.")), // WHAT: every admin unmade, claiming open. WHY: the same
     });

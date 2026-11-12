@@ -1316,6 +1316,7 @@ fn schemas() -> Value {
             ("licensed", "boolean", "Whether the licence switches it on."),
             ("state", "string", "running, not-in-this-build or off; Citadel, which runs alongside, may also be looking, not-found, not-answering or certificate-changed."),
             ("version", "string", "The version it runs. Absent unless running."),
+            ("note", "string", "A sentence about it, when there is one: for Citadel, how its 1.0 data moved in (moved N jobs, nothing to move, or move failed with why; then state is move-failed and the cell is not started)."),
         ]),
         "CopyAsked": object(&[
             ("name", "string", "What to call the copy. Leave it out for \"<the set> — Takeoff\"."),

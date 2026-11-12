@@ -419,6 +419,8 @@ pub struct OfficePart {
     pub state: String, // WHAT: running, off, not-in-this-build, looking, not-found, not-answering, certificate-changed. WHY: what the panel says
     #[serde(default)]
     pub version: Option<String>, // WHAT: the version it runs. WHY: shown beside it
+    #[serde(default)]
+    pub note: Option<String>, // WHAT: a sentence about it: for Citadel, how its old data moved in. WHY: shown under it
 }
 
 impl OfficePart {
@@ -433,6 +435,8 @@ impl OfficePart {
             "not-found" => "On the license, but not found on the server.".into(),
             "not-answering" => "On the license, installed, but not answering.".into(),
             "certificate-changed" => "Showing a different certificate than before. Ask whoever looks after the server before trusting it.".into(),
+            "pipe-taken" => "Not started: another program holds its connection to the server. Ask whoever looks after the server.".into(), // WHAT: the pipe alarm. WHY: said plainly
+            "move-failed" => format!("Not started: its old data couldn't be moved in. {}", self.note.clone().unwrap_or_default()), // WHAT: the move's alarm, with its words. WHY: the person can act on it
             other => other.to_string(), // WHAT: a word a newer server uses. WHY: shown as it is, rather than hidden
         }
     }
@@ -804,7 +808,7 @@ mod tests {
 
     #[test]
     fn an_office_server_part_reads_as_words_and_a_newer_word_is_shown_not_hidden() {
-        let part = |state: &str, version: Option<&str>| OfficePart { name: "cad".into(), title: "Excalibur CAD".into(), licensed: true, state: state.into(), version: version.map(str::to_string) };
+        let part = |state: &str, version: Option<&str>| OfficePart { name: "cad".into(), title: "Excalibur CAD".into(), licensed: true, state: state.into(), version: version.map(str::to_string), note: None };
         assert_eq!(part("running", Some("0.7.0")).line(), "Running 0.7.0.");
         assert!(part("certificate-changed", None).line().contains("Ask whoever looks after the server"));
         assert_eq!(part("off", None).line(), "Not on this office's license.");

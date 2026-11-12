@@ -22,6 +22,7 @@ pub mod archetype; // WHAT: Archetype's shared jobs, moved in. WHY: the Office S
 pub mod audit;
 pub mod auth;
 pub mod cad; // WHAT: Excalibur CAD's office drawings, moved in. WHY: the Office Server's cad part
+pub mod cellmove; // WHAT: Citadel Server 1.0's data moved into the cell once, before its first start. WHY: the restricted cell can't read the old folder itself
 pub mod cell; // WHAT: the Citadel cell, started, watched and answered over its pipe. WHY: Citadel runs inside the Office Server (docs/OFFICE-ENROLLMENT.md §6a)
 pub mod citadel; // WHAT: the Citadel cell's port, looked at by its pin. WHY: the Office Server's citadel part, kept blind; the cell is the only way Citadel runs (crate::cell)
 pub mod config;

@@ -200,6 +200,7 @@
     "Office.version": "string",
     "OfficePart.licensed": "boolean",
     "OfficePart.name": "string",
+    "OfficePart.note": "string",
     "OfficePart.state": "string",
     "OfficePart.title": "string",
     "OfficePart.version": "string",

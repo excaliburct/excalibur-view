@@ -56,7 +56,11 @@ pub fn start(server: Shared) {
             crate::lockdown::lock_parent(office); // WHAT: the system's and administrators' alone. WHY: an account that made it first could swap the folder below
         }
         let _ = std::fs::create_dir_all(&data); // WHAT: the cell's data folder. WHY: made once
-        icacls(&super::data_steps(&data, &sid)); // WHAT: the system and the cell only. WHY: §6
+        let old = crate::cellmove::old_folder(&program_data); // WHAT: Citadel Server 1.0's folder. WHY: moved in before the cell's first start
+        if !crate::cellmove::before_first_start(&server.store, &OldCitadel, &crate::cellmove::Run, &program, &old, &data) {
+            return; // WHAT: the move failed: the cell is not started. WHY: a cell started empty would make a new certificate; /api/v1/office shows the alarm
+        }
+        icacls(&super::data_steps(&data, &sid)); // WHAT: the system and the cell only, the moved files included. WHY: §6
         if let Some(own) = program.parent() {
             icacls(&super::program_steps(own, &sid)); // WHAT: the cell may read and run its program. WHY: the service's folder is locked to the system and administrators
         }
@@ -271,5 +275,38 @@ fn restricted_process(program: &Path, line: &str, sid: &str) -> std::io::Result<
         }
         CloseHandle(info.hThread); // WHAT: the thread's handle let go. WHY: only the process is waited for
         Ok(Raw(info.hProcess as usize))
+    }
+}
+
+/// Citadel Server 1.0's Windows service, through the service manager.
+struct OldCitadel;
+
+impl crate::cellmove::OldService for OldCitadel {
+    fn present(&self) -> bool {
+        use windows_service::service::ServiceAccess;
+        use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+            .and_then(|manager| manager.open_service(crate::cellmove::OLD_SERVICE, ServiceAccess::QUERY_STATUS))
+            .is_ok() // WHAT: whether it opens. WHY: installed or not
+    }
+
+    fn stop_and_disable(&self) -> Result<(), String> {
+        use windows_service::service::{ServiceAccess, ServiceState};
+        use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).map_err(|e| e.to_string())?; // WHAT: the service manager. WHY: as the system
+        let service = manager.open_service(crate::cellmove::OLD_SERVICE, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP).map_err(|e| e.to_string())?; // WHAT: the 1.0 service. WHY: to stop it
+        let _ = service.stop(); // WHAT: asked to stop. WHY: it holds port 47110 and its files
+        let deadline = Instant::now() + std::time::Duration::from_secs(60); // WHAT: a minute. WHY: a service shutting down cleanly
+        loop {
+            match service.query_status().map(|s| s.current_state) {
+                Ok(ServiceState::Stopped) => break, // WHAT: stopped. WHY: done
+                _ if Instant::now() >= deadline => return Err("it didn't stop within a minute".into()), // WHAT: refused. WHY: the move never runs beside it
+                _ => std::thread::sleep(std::time::Duration::from_millis(300)), // WHAT: waited. WHY: asked again shortly
+            }
+        }
+        use std::os::windows::process::CommandExt; // WHAT: Windows-only process options. WHY: no console window
+        let system = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from); // WHAT: Windows' folder. WHY: sc.exe by its full path
+        let disabled = std::process::Command::new(system.join("System32").join("sc.exe")).args(["config", crate::cellmove::OLD_SERVICE, "start=", "disabled"]).creation_flags(CREATE_NO_WINDOW).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status(); // WHAT: set to never start, never deleted. WHY: it can't take the port back at the next boot, and can still be looked at
+        if matches!(disabled, Ok(status) if status.success()) { Ok(()) } else { Err("it stopped, but couldn't be disabled".into()) } // WHAT: done, or why not. WHY: a 1.0 service that starts at the next boot would fight the cell for its port
     }
 }

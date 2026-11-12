@@ -27,6 +27,8 @@ pub struct Part {
     pub state: &'static str, // WHAT: running, not-in-this-build, off; for Citadel also looking, not-found, not-answering, certificate-changed. WHY: Fleet turns a licensed part that isn't running amber
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>, // WHAT: the part's running version, when it runs. WHY: Fleet compares it with the shelf
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>, // WHAT: a sentence about the part, when there is one: for Citadel, how its 1.0 data moved in. WHY: "moved N jobs", "nothing to move" or "move failed: ..." shown to an admin and to Fleet
 }
 
 /// The parts whose code this build carries. A part is added here in the same
@@ -60,7 +62,22 @@ pub fn parts(server: &Server) -> Vec<Part> {
     } else {
         Some(crate::citadel::Seen::NotFound) // WHAT: no cell here (no program, or not Windows). WHY: the cell is the only way Citadel runs; something else on 47110 is never reported as Citadel
     };
-    parts_of(&licensed(server), IN_THIS_BUILD, citadel.as_ref())
+    with_move(parts_of(&licensed(server), IN_THIS_BUILD, citadel.as_ref()), crate::cellmove::recorded(&server.store).as_ref()) // WHAT: every part, Citadel's with how its old data moved in. WHY: shown on /api/v1/office
+}
+
+/// `parts` with Citadel's move added: its words as the note, and, after a
+/// failure, the state "move-failed" and no version.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn with_move(mut parts: Vec<Part>, moved: Option<&crate::cellmove::Moved>) -> Vec<Part> {
+    let Some(moved) = moved else { return parts }; // WHAT: no move recorded. WHY: nothing to add
+    for part in parts.iter_mut().filter(|p| p.name == Module::Citadel.name() && p.licensed) {
+        if !moved.lets_the_cell_start() {
+            part.state = "move-failed"; // WHAT: the alarm. WHY: the cell was not started, and an admin must act
+            part.version = None; // WHAT: nothing runs. WHY: never a version for a cell that isn't running
+        }
+        part.note = Some(moved.words()); // WHAT: "moved N jobs", "nothing to move" or "move failed: ...". WHY: shown on /api/v1/office
+    }
+    parts
 }
 
 /// [`parts`], from a licensed list, a built list and the last look at
@@ -78,6 +95,7 @@ pub fn parts_of(licensed: &[Module], built: &[Module], citadel: Option<&crate::c
                     licensed: true,
                     state: citadel.map_or("looking", |s| s.state()), // WHAT: what the last look saw, or "looking" before the first. WHY: Citadel runs alongside, so its state is what it answers
                     version: citadel.and_then(super::citadel::Seen::version), // WHAT: Citadel's own version. WHY: Fleet compares it with Citadel's shelf
+                    note: None, // WHAT: none yet. WHY: `parts` adds the move's result
                 };
             }
             let state = match (on, built.contains(&part)) {
@@ -91,6 +109,7 @@ pub fn parts_of(licensed: &[Module], built: &[Module], citadel: Option<&crate::c
                 licensed: on,
                 state,
                 version: (state == "running").then(|| crate::VERSION.to_string()), // WHAT: the running build's version. WHY: every part carried today ships inside this server
+                note: None, // WHAT: nothing to add. WHY: only Citadel's move has a sentence
             }
         })
         .collect()
@@ -167,6 +186,21 @@ mod tests {
         assert!(!serves_of(&[Module::View], &built, Module::Cad), "carried but not licensed is not served");
         assert!(!serves_of(&[Module::View, Module::Citadel], &built, Module::Citadel), "licensed but not carried is not served");
         assert!(serves_of(&[Module::View], IN_THIS_BUILD, Module::View), "View, always");
+    }
+
+    #[test]
+    fn citadel_s_move_is_said_and_a_failed_one_is_an_alarm() {
+        use crate::cellmove::Moved;
+        let on = [Module::View, Module::Citadel];
+        let running = crate::citadel::Seen::Running { version: "1.1.0".into() };
+        let moved = with_move(parts_of(&on, IN_THIS_BUILD, Some(&running)), Some(&Moved::Moved { jobs: 12 }));
+        assert_eq!(state_of(&moved, "citadel").note.as_deref(), Some("moved 12 jobs"));
+        assert_eq!(state_of(&moved, "citadel").state, "running");
+        let failed = with_move(parts_of(&on, IN_THIS_BUILD, Some(&running)), Some(&Moved::Failed { reason: "no access".into() }));
+        assert_eq!(state_of(&failed, "citadel").state, "move-failed", "an alarm, never running");
+        assert!(state_of(&failed, "citadel").version.is_none());
+        assert!(state_of(&failed, "citadel").note.as_deref().unwrap_or_default().starts_with("move failed: no access"));
+        assert!(state_of(&with_move(parts_of(&[Module::View], IN_THIS_BUILD, None), Some(&Moved::Nothing)), "citadel").note.is_none(), "unlicensed, nothing said");
     }
 
     #[test]
