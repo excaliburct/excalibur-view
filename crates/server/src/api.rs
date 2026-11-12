@@ -388,7 +388,7 @@ pub const MIDDLING_BODY: usize = 64 * 1024 * 1024; // WHAT: 64 MiB. WHY: a whole
 /// before its route reads the body then answers a request already read, so
 /// the answer is never lost to a reset on a Mac. Bigger bodies (uploads) are
 /// left to their routes, read only after the gate, as before.
-pub(crate) async fn small_bodies_read_first(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+async fn small_bodies_read_first(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let declared = request.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<usize>().ok()); // WHAT: the length the request says its body has. WHY: only a small one is read here
     let Some(length) = declared.filter(|n| *n > 0 && *n <= REFUSAL_READS_UP_TO) else {
         return next.run(request).await; // WHAT: no body, a big one, or one of unsaid length. WHY: left to the route, as before
@@ -605,6 +605,7 @@ pub fn router(server: Shared) -> Router {
         .merge(crate::mcp::router(server.clone()).route_layer(axum::middleware::from_fn_with_state(server.clone(), crate::devices::gate))) // WHAT: the assistant's door held by the device gate too. WHY: security review H1: a session from anywhere read the takeoffs here with no device; an assistant's own key still passes, as a key does
         .layer(axum::middleware::from_fn_with_state(server, origin_checked)) // WHAT: a browser page from anywhere else refused. WHY: DNS rebinding let a web page someone in the office opened claim an unclaimed server or join an open one (audit, 2026-11-11)
         .layer(axum::middleware::from_fn(marked)) // WHAT: every answer marked not to be kept, sniffed or framed. WHY: the API said none of it, so a proxy or a browser was left to guess.
+        .layer(axum::middleware::from_fn(small_bodies_read_first)) // WHAT: a small body read whole before any door looks at it, outermost. WHY: a refusal sent with the body unread is lost to a reset on a Mac
 }
 
 /// Refuses a request a web browser sent from a page that isn't on the

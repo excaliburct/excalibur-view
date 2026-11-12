@@ -265,6 +265,8 @@ def citadel_cell():
     """tools/citadel_cell.py, loaded by its path beside this file."""
     import importlib.util  # WHAT: loading a file as a module. WHY: by its own path, never whatever is first on sys.path
     spec = importlib.util.spec_from_file_location("citadel_cell", os.path.join(os.path.dirname(os.path.abspath(__file__)), "citadel_cell.py"))  # WHAT: the file beside this one. WHY: as above
+    if spec is None or spec.loader is None:
+        raise SystemExit("tools/citadel_cell.py can't be loaded")  # WHAT: refused, in words. WHY: never a crash on a missing file
     module = importlib.util.module_from_spec(spec)  # WHAT: the module. WHY: loaded next
     spec.loader.exec_module(module)  # WHAT: loaded. WHY: its checks are used
     return module
