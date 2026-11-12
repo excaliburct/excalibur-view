@@ -671,6 +671,7 @@ fn folders_gate(server: &Shared, headers: &HeaderMap, project: &str) -> Answer<W
     Ok(who) // WHAT: let in. WHY: every check above passed.
 }
 
+#[allow(clippy::too_many_lines)] // WHAT: one request's folders made and rules set, in one transaction. WHY: the steps share the transaction and its tallies; split, they would be passed between functions for nothing
 fn folders_made(
     server: &Shared,
     who: &Who,
@@ -866,6 +867,7 @@ fn saved_at(sent: &str) -> Answer<Option<String>> {
 /// # Errors
 ///
 /// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
+#[allow(clippy::too_many_lines)] // WHAT: one request's checks in one function. WHY: they run in this order and each leans on the one before; split, the gate a reviewer must read in order would be scattered
 pub async fn upload_file(
     State(server): State<Shared>,
     headers: HeaderMap,

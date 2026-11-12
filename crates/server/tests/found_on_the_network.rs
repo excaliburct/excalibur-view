@@ -56,6 +56,7 @@ fn look_for(name: &str) -> Option<hub::discover::Found> {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // WHAT: one test, read top to bottom. WHY: a scenario split into pieces reads worse than one that is long
 fn a_seat_finds_the_office_server_without_being_told_where_it_is() {
     // WHAT: is the asking port free on this computer? WHY: the server only answers seats when it holds the port; something
     // else holding it (the HP's pen-test copies hold it on purpose, so they never announce themselves) leaves nothing to test.

@@ -464,6 +464,7 @@ fn a_good_night_sends_only_encrypted_bytes_reads_them_back_and_marks_it() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // WHAT: one test, read top to bottom. WHY: a scenario split into pieces reads worse than one that is long
 fn the_drill_restores_into_scratch_checks_everything_and_fails_when_it_should() {
     let w = world();
     assert_eq!(job(&w).backup().code, 0); // WHAT: a backup to drill. WHY: the setup.
@@ -1400,6 +1401,7 @@ fn a_folder_the_link_check_cannot_read_is_a_refusal() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // WHAT: one test, read top to bottom. WHY: a scenario split into pieces reads worse than one that is long
 fn a_work_folder_others_could_change_is_refused() {
     #[cfg(windows)]
     {

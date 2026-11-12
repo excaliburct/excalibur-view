@@ -457,6 +457,7 @@ pub fn fresh_id(prefix: &str) -> String {
 
 // ---- the routes -----------------------------------------------------------
 
+#[allow(clippy::too_many_lines)] // WHAT: the route table in one function. WHY: one line per route; split, a route would have to be looked for in two places
 pub fn router(server: Shared) -> Router {
     let limit = usize::try_from(server.config.largest_upload).unwrap_or(usize::MAX); // WHAT: the largest drawing or file the office takes. WHY: only the routes that take a whole file are given it.
     let uploads = DefaultBodyLimit::max(limit); // WHAT: the upload limit, as a layer. WHY: put on each upload route below, and nowhere else.
@@ -895,6 +896,7 @@ fn how_joining(server: &Server) -> (String, String, String) {
 
 // ---- signing in -----------------------------------------------------------
 
+#[allow(clippy::too_many_lines)] // WHAT: one request's checks in one function. WHY: they run in this order and each leans on the one before; split, the gate a reviewer must read in order would be scattered
 async fn sign_in(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -1464,6 +1466,7 @@ async fn one_set(
     found.map(Json).ok_or_else(|| Denied::missing("drawing set"))
 }
 
+#[allow(clippy::too_many_lines)] // WHAT: one request's checks in one function. WHY: they run in this order and each leans on the one before; split, the gate a reviewer must read in order would be scattered
 async fn upload_set(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -3683,6 +3686,7 @@ struct JoinBody {
     device: Option<hub::device::Ask>, // WHAT: the computer's request to be let in. WHY: a good code or invitation from outside admits the computer too
 }
 
+#[allow(clippy::too_many_lines)] // WHAT: one request's checks in one function. WHY: they run in this order and each leans on the one before; split, the gate a reviewer must read in order would be scattered
 async fn join(
     State(server): State<Shared>,
     headers: HeaderMap,

@@ -1805,6 +1805,7 @@ impl Job<'_> {
         } // WHAT: the result. WHY: the exit code.
     }
 
+    #[allow(clippy::too_many_lines)] // WHAT: the night's numbered steps, in one function. WHY: each step leans on what the one before checked and holds; the backup is security code, and splitting it is a change of its own to review apart
     fn backup_locked(&self, stage: &Path) -> std::result::Result<i32, Exit> {
         #[cfg(test)]
         assert!(!FAULT.with(std::cell::Cell::get), "a fault planted by a test"); // WHAT: the tests' fault, when one is planted. WHY: proves a fault becomes a failed run.
@@ -2676,6 +2677,7 @@ impl Drill<'_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // WHAT: the drill's steps, in one function. WHY: as for the backup: each check leans on the one before, and splitting it is a change of its own to review apart
     fn run_in(&self, identity: &Path) -> std::result::Result<String, Exit> {
         let j = &self.job;
         let dl = self.scratch.join("download");

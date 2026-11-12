@@ -566,6 +566,7 @@ fn a_sync_key_does_its_list_and_only_on_projects_filed_under_a_reference() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // WHAT: one test, read top to bottom. WHY: a scenario split into pieces reads worse than one that is long
 fn no_key_administers_whoever_made_it_and_an_integration_key_otherwise_works_as_before() {
     let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
     let admin = session(&office, "sam@example.com"); // WHAT: the administrator. WHY: makes the key.

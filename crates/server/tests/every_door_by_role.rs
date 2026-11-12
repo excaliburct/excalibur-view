@@ -1084,6 +1084,7 @@ fn things(office: &Office) -> Things {
 
 /// The path and body for one route, made fresh: a person to remove, a key
 /// to take back, an invitation to drop.
+#[allow(clippy::too_many_lines)] // WHAT: the body each route is knocked with, one arm per route. WHY: a table; split, a route would have to be looked for in two places
 fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Body) {
     let fresh_person = || {
         let id = format!("usr_probe_{n}"); // WHAT: a throwaway person. WHY: a removal or role change must not touch the people knocking.
