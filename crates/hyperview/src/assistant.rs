@@ -49,6 +49,10 @@ pub struct Connection {
     /// What the server calls itself, for the error messages.
     #[serde(default)]
     pub name: String,
+    /// The Office Server's certificate pin, when it was reached over its own
+    /// HTTPS: the assistant holds it to the same certificate the program does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>, // WHAT: the pin, or none. WHY: a self-made certificate isn't vouched for by any authority, so it is checked by its pin
 }
 
 /// The name Hyperview goes by in the assistant app's list.
@@ -284,7 +288,7 @@ pub fn serve() -> i32 {
         Some(c) => format!("office server: {} {}", c.name, c.base),
         None => "no office server kept on this computer (Help → Connect Assistant makes one)".into(), // WHAT: the log line when no office server is kept. WHY: names the Help command by its menu name, so the log points at something the person can find.
     });
-    let agent = office_agent();
+    let agent = office_agent(connection.as_ref().and_then(|c| c.pin.as_deref()));
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     for line in stdin.lock().lines() {
@@ -311,8 +315,14 @@ pub fn serve() -> i32 {
 /// Without kept-alive connections: a pooled socket to an office server that
 /// has since restarted — it updates itself — fails as "connection forcibly
 /// closed" (10054) on its next use, and a question is lost to it.
-fn office_agent() -> hub::web::ureq::Agent {
-    hub::web::agent()
+fn office_agent(pin: Option<&str>) -> hub::web::ureq::Agent {
+    let builder = match pin.map(|p| hub::pinned::agent(Some(p))) {
+        Some(Ok((pinned, _))) => pinned, // WHAT: held to the Office Server's pin. WHY: its own HTTPS, checked the way the program checks it
+        Some(Err(_)) => hub::pinned::agent(Some(&"0".repeat(64))).map(|(a, _)| a).unwrap_or_else(|_| hub::web::agent()), // WHAT: a kept pin that doesn't read matches nothing. WHY: never falls back to trusting any certificate
+        None => hub::web::agent(), // WHAT: authorities, as before. WHY: plain HTTP, or a tunnel's address
+    };
+    builder
+        .redirects(0) // WHAT: no redirect followed. WHY: review: the assistant's key is never sent on to another host
         .timeout_connect(Duration::from_secs(8))
         .timeout_read(Duration::from_secs(120))
         .max_idle_connections(0)
@@ -955,7 +965,7 @@ mod tests {
         // initialize and tools/list are answered here, so the assistant connects and
         // every tool can say what is wrong, instead of the whole connector
         // showing as failed because the office was out of reach.
-        let agent = office_agent();
+        let agent = office_agent(None);
         let log = BridgeLog { path: None };
         let hello = answer(
             &agent,

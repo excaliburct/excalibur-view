@@ -8,6 +8,7 @@
 
 use serde_json::{json, Value};
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn document(name: &str) -> Value {
     json!({
         "openapi": "3.1.0",
@@ -27,9 +28,9 @@ pub fn document(name: &str) -> Value {
                     "description": "A token from POST /auth/token."
                 }
             },
-            "schemas": joined(schemas(), folder_schemas()),
+            "schemas": joined(joined(schemas(), folder_schemas()), device_schemas()), // WHAT: with the device list's. WHY: described with the rest
         },
-        "paths": joined(paths(), folder_paths()),
+        "paths": joined(joined(paths(), folder_paths()), device_paths()), // WHAT: with the device list's routes. WHY: the test holds every route described
     })
 }
 
@@ -52,7 +53,81 @@ fn see_schema(description: &str) -> Value {
     }) // WHAT: a word or a list of group names. WHY: how a folder's rule travels.
 }
 
+/// The signed-request headers every device route needs, in words.
+const SIGNED: &str = "Signed by the device: X-Excalibur-Device, X-Excalibur-Time and X-Excalibur-Signature over \
+                      excalibur-request/1, the device id, the method, the path and query, the body's SHA-256 and the time, \
+                      each line ended by a line feed (docs/OFFICE-ENROLLMENT.md section 4). Any failure is 401 device_unknown.";
+
+/// The office's device list and identity (docs/OFFICE-ENROLLMENT.md).
+fn device_paths() -> Value {
+    let admin = format!("{SIGNED} Only an approved admin device may call it; the last admin can't be lost (409 last_admin)."); // WHAT: the admin routes' note. WHY: guard 4, said
+    json!({
+        "/office/identity": {
+            "get": {
+                "summary": "The office certificate.",
+                "description": "The certificate the office was given, exactly as stored, as text. 404 until there is one.",
+                "security": [],
+                "responses": { "200": { "description": "The certificate." }, "404": { "description": "None yet." } }
+            }
+        },
+        "/devices/request": {
+            "post": {
+                "summary": "A computer asks to be let in.",
+                "description": "From the office network only (403 otherwise), rate-limited per address. The proof signs \
+                                excalibur-enroll/1, the server's pin, the public key, the app, the machine, the Windows user \
+                                and the time, each on its own line. The first computer, while none is approved and within a \
+                                day of the service's first start, is approved as an admin. A seat with a session from before \
+                                devices began is approved at once.",
+                "security": [],
+                "requestBody": body("DeviceAsk"),
+                "responses": ok("DeviceAnswer")
+            }
+        },
+        "/devices/me": { "get": { "summary": "How this computer stands.", "description": SIGNED, "security": [], "responses": ok("DeviceMe") } },
+        "/devices": { "get": { "summary": "Every computer, newest waiting first.", "description": admin, "security": [], "responses": ok_list("DeviceInfo") } },
+        "/devices/{id}/approve": { "post": { "summary": "Approve a computer.", "description": admin, "security": [], "parameters": [path_param("id", "The device id.")], "requestBody": body("DeviceApprove"), "responses": ok("DeviceDone") } },
+        "/devices/{id}/refuse": { "post": { "summary": "Refuse a computer.", "description": admin, "security": [], "parameters": [path_param("id", "The device id.")], "responses": ok("DeviceDone") } },
+        "/devices/{id}/remove": { "post": { "summary": "Remove a computer; it must ask again.", "description": admin, "security": [], "parameters": [path_param("id", "The device id.")], "responses": ok("DeviceDone") } },
+        "/devices/{id}/admin": { "post": { "summary": "Make or unmake an admin computer.", "description": admin, "security": [], "parameters": [path_param("id", "The device id.")], "requestBody": body("DeviceAdmin"), "responses": ok("DeviceDone") } }
+    })
+}
+
+/// The device list's schemas.
+fn device_schemas() -> Value {
+    json!({
+        "DeviceAsk": object(&[
+            ("public_key", "string", "The Ed25519 public key, base64 (44 characters)."),
+            ("app", "string", "view, cad, archetype or latcon-estimating."),
+            ("app_version", "string", ""),
+            ("machine", "string", "The computer's name."),
+            ("os_user", "string", "The Windows user."),
+            ("display_name", "string", "The person's name."),
+            ("platform", "string", "windows-x64 and the like."),
+            ("time", "integer", "Unix seconds."),
+            ("proof", "string", "The base64 Ed25519 signature of the enrol lines."),
+        ]),
+        "DeviceAnswer": object(&[("device_id", "string", "32 lowercase hex."), ("state", "string", "waiting or approved.")]),
+        "DeviceMe": object(&[
+            ("state", "string", "waiting, approved, refused or removed."),
+            ("admin", "boolean", ""),
+            ("approved_by", "string", ""),
+            ("approved_at", "string", "RFC 3339."),
+            ("claimable", "boolean", "True while the office has no admin computer and claiming is open: an app may offer to make this computer the admin."),
+        ]),
+        "DeviceInfo": object(&[
+            ("id", "string", ""), ("app", "string", ""), ("app_version", "string", ""), ("machine", "string", ""), ("os_user", "string", ""),
+            ("display_name", "string", ""), ("platform", "string", ""), ("state", "string", ""), ("admin", "boolean", ""), ("asked", "string", "RFC 3339."),
+            ("asked_from", "string", "The address it asked from."), ("approved_by", "string", ""), ("approved_at", "string", ""),
+            ("how", "string", "asked, claimed, migrated, joined or citadel."),
+        ]),
+        "DeviceApprove": object(&[("admin", "boolean", "Approve as an admin.")]),
+        "DeviceAdmin": object(&[("on", "boolean", "Make (true) or unmake (false) an admin.")]),
+        "DeviceDone": object(&[("id", "string", ""), ("done", "string", "What was done.")]),
+    })
+}
+
 /// The routes for groups, folders and files that aren't drawings.
+#[allow(clippy::too_many_lines)] // WHAT: a part of the API's description, written as data. WHY: a document, not logic; it reads top to bottom as the routes do
 fn folder_paths() -> Value {
     json!({
         "/groups": {
@@ -269,6 +344,7 @@ Weights come from the unit weight carried by the tool that drew the markup, out 
 of the tool chest the estimator was using. They are that company's numbers. \
 This server does not look anything up in a section table.";
 
+#[allow(clippy::too_many_lines)] // WHAT: the routes' descriptions, written as data. WHY: a document, not logic; it reads top to bottom as the routes do
 fn paths() -> Value {
     json!({
         "/health": {
@@ -624,6 +700,59 @@ another drawing.",
                     "content": { "text/csv": { "schema": { "type": "string" } } } } }
             }
         },
+        "/admin/invites": {
+            "get": {
+                "summary": "The invitations not yet thrown away. Administrators only.",
+                "responses": ok_list("Invitation")
+            },
+            "post": {
+                "summary": "One code, for one person, used once. Administrators only.",
+                "description": "Nothing is emailed: the administrator sends the code themselves. \
+The email is kept and checked when the code is used, so a forwarded invitation is no spare account.",
+                "requestBody": body("NewInvite"),
+                "responses": ok("Invitation")
+            }
+        },
+        "/admin/invites/{code}": {
+            "delete": {
+                "summary": "Throw an invitation away. Administrators only.",
+                "parameters": [path_param("code", "The invitation's code.")],
+                "responses": ok_list("Invitation")
+            }
+        },
+        "/admin/remote": {
+            "get": {
+                "summary": "Whether the office is reachable from outside, and at what name. Administrators only.",
+                "description": "Never the token: a screen that can show a secret is a screen somebody can photograph.",
+                "responses": ok("Remote")
+            },
+            "post": {
+                "summary": "Turn on reaching the office from outside, through the tunnel. Administrators only.",
+                "requestBody": body("ChangeRemote"),
+                "responses": ok("Remote")
+            },
+            "delete": {
+                "summary": "Turn reaching the office from outside off, and forget the tunnel's settings. Administrators only.",
+                "responses": ok("Remote")
+            }
+        },
+        "/projects/{id}/people": {
+            "get": {
+                "summary": "Who is on a project: their ids.",
+                "parameters": [path_param("id", "The project.")],
+                "responses": { "200": { "description": "Done.", "content": { "application/json": {
+                    "schema": { "type": "array", "items": { "type": "string" } }
+                } } } }
+            },
+            "post": {
+                "summary": "Put somebody on a project, or take them off. Administrators only.",
+                "parameters": [path_param("id", "The project.")],
+                "requestBody": body("WhoOnProject"),
+                "responses": { "200": { "description": "Who is on it now: their ids.", "content": { "application/json": {
+                    "schema": { "type": "array", "items": { "type": "string" } }
+                } } } }
+            }
+        },
         "/people": {
             "get": {
                 "summary": "Everyone with a seat. Administrators only.",
@@ -767,6 +896,127 @@ another drawing.",
                                 server against the keys built into it; nothing is sent anywhere.",
                 "requestBody": body("NewLicense"),
                 "responses": ok("Standing")
+            }
+        },
+        "/cad/drawings": {
+            "get": {
+                "summary": "The office's Excalibur CAD drawings, by folder then name.",
+                "description": "The cad part of the Office Server: answers 404 unless the office's licence switches it on. Archived drawings are not listed. Anybody signed in may ask.",
+                "responses": ok_list("CadDrawing")
+            },
+            "post": {
+                "summary": "A new CAD drawing, its first version from the body.",
+                "description": "Writers only. The name is 1 to 120 characters with no slashes; a folder is names joined by '/', at most 8 deep. 409 when that folder already has that name.",
+                "parameters": [query_param("folder", "Where it goes. Empty is the top."), query_param("name", "Its name, such as Base plate.excad.")],
+                "requestBody": { "required": true, "description": "The drawing file's bytes, as Excalibur CAD saves it. Up to 256 MB.", "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
+                "responses": ok("CadDrawing")
+            }
+        },
+        "/cad/drawings/{id}": {
+            "get": {
+                "summary": "One CAD drawing: its newest version, and who has it checked out.",
+                "parameters": [path_param("id", "The drawing.")],
+                "responses": ok("CadDrawing")
+            }
+        },
+        "/cad/drawings/{id}/file": {
+            "get": {
+                "summary": "A version's bytes; the newest unless one is named.",
+                "description": "The X-Version header says which version came, for the next save's base.",
+                "parameters": [path_param("id", "The drawing."), query_param("version", "A version number. Leave it out for the newest.")],
+                "responses": { "200": { "description": "The drawing file." } }
+            },
+            "put": {
+                "summary": "A new version, by the person who has the drawing checked out.",
+                "description": "Writers only, and only with the drawing checked out to them. 409 when someone saved since the version named as base: nothing is overwritten.",
+                "parameters": [path_param("id", "The drawing."), query_param("base", "The version this was opened from."), query_param("note", "What changed, up to 500 characters.")],
+                "requestBody": { "required": true, "description": "The drawing file's bytes, as Excalibur CAD saves it. Up to 256 MB.", "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
+                "responses": ok("CadDrawing")
+            }
+        },
+        "/cad/drawings/{id}/lock": {
+            "post": {
+                "summary": "Check the drawing out: nobody else can save it until it is checked in.",
+                "description": "Writers only. 409, saying who, when someone else has it.",
+                "parameters": [path_param("id", "The drawing.")],
+                "responses": ok("CadDrawing")
+            },
+            "delete": {
+                "summary": "Check it back in.",
+                "description": "By the person who has it; with force=true, by an administrator signed in, whoever has it.",
+                "parameters": [path_param("id", "The drawing."), query_param("force", "true to take it back from someone else. Administrators only.")],
+                "responses": ok("CadDrawing")
+            }
+        },
+        "/cad/drawings/{id}/versions": {
+            "get": {
+                "summary": "Every version of the drawing, newest first. Nothing is ever deleted.",
+                "parameters": [path_param("id", "The drawing.")],
+                "responses": ok_list("CadVersion")
+            }
+        },
+        "/cad/drawings/{id}/restore": {
+            "post": {
+                "summary": "Bring an old version back as the newest, the others kept.",
+                "description": "A save, so the drawing must be checked out to whoever asks.",
+                "parameters": [path_param("id", "The drawing."), query_param("version", "The version to bring back.")],
+                "responses": ok("CadDrawing")
+            }
+        },
+        "/cad/drawings/{id}/archive": {
+            "post": {
+                "summary": "Hide the drawing from the list, every version kept. Administrators only.",
+                "parameters": [path_param("id", "The drawing.")],
+                "responses": { "200": { "description": "Archived." } }
+            }
+        },
+        "/admin/citadel/forget-pin": {
+            "post": {
+                "summary": "Forget Citadel Server's certificate pin. Administrators signed in only.",
+                "description": "The Office Server keeps the pin of Citadel Server's certificate from its first answer and believes no other after. After Citadel Server is reinstalled (a new certificate), an administrator forgets the old pin here; the server looks again at once and keeps the certificate that answers. The log says who.",
+                "responses": { "200": { "description": "Forgotten; the state after looking again." } }
+            }
+        },
+        "/archetype/jobs": {
+            "get": { "summary": "Archetype's jobs on this server, by name.", "description": "The archetype part of the Office Server: answers 404 unless the office's licence switches it on. Anybody signed in may read any job.", "responses": ok_list("ArchetypeJob") },
+            "post": { "summary": "Put a new job on the server, checked out to whoever put it there.", "description": "Writers only. Body: {name, number, machine}. 409 when a job with that name and number is already there.", "responses": ok("ArchetypeJob") }
+        },
+        "/archetype/jobs/{id}": {
+            "get": { "summary": "One job: its revision, and who has it checked out, on which computer.", "parameters": [path_param("id", "The job.")], "responses": ok("ArchetypeJob") }
+        },
+        "/archetype/jobs/{id}/files": {
+            "get": { "summary": "A check-in's files (path, SHA-256, size); the latest unless a revision is named.", "parameters": [path_param("id", "The job."), query_param("revision", "A revision. Leave it out for the latest.")], "responses": { "200": { "description": "{job, revision, files}." } } }
+        },
+        "/archetype/jobs/{id}/history": {
+            "get": { "summary": "Who checked in, out, gave back or took back, newest first. Every check-in is kept.", "parameters": [path_param("id", "The job.")], "responses": { "200": { "description": "The history." } } }
+        },
+        "/archetype/jobs/{id}/checkout": {
+            "post": { "summary": "Take the job to work on: one person, on one computer.", "description": "Body: {machine}. 409, saying who, where and since when, when someone else has it. Viewers are refused.", "parameters": [path_param("id", "The job.")], "responses": ok("ArchetypeJob") }
+        },
+        "/archetype/jobs/{id}/checkin": {
+            "post": { "summary": "Hand work back as a new revision, never over a newer one.", "description": "Body: {base_revision, comment, files, keep, machine}. Every file must have been sent first (PUT /archetype/files/{digest}); job.frame must be among them; paths are checked. 409 when it isn't this person's, or the server moved on.", "parameters": [path_param("id", "The job.")], "responses": { "200": { "description": "{job, revision, changes}." } } }
+        },
+        "/archetype/jobs/{id}/release": {
+            "post": { "summary": "Give a check-out back without checking anything in.", "parameters": [path_param("id", "The job.")], "responses": ok("ArchetypeJob") }
+        },
+        "/archetype/jobs/{id}/takeback": {
+            "post": { "summary": "Take a check-out back from somebody. Administrators signed in only.", "description": "Their work stays on their computer; the history says who took it back.", "parameters": [path_param("id", "The job.")], "responses": ok("ArchetypeJob") }
+        },
+        "/archetype/files/missing": {
+            "post": { "summary": "Which of these files Archetype hasn't been sent yet. Writers only.", "description": "Body: {digests}. Only files sent to Archetype count: nothing is learned about other files on the server.", "responses": { "200": { "description": "{digests}." } } }
+        },
+        "/archetype/files/{digest}": {
+            "put": { "summary": "Send one of a job's files. Writers only.", "description": "Kept only when its SHA-256 is the digest in the address. Read after the checks, up to the office's upload limit.", "parameters": [path_param("digest", "The file's SHA-256, lower-case hex.")], "responses": { "200": { "description": "Kept." } } },
+            "get": { "summary": "One of a job's files, by its SHA-256.", "description": "Only files sent to Archetype are handed out here.", "parameters": [path_param("digest", "The file's SHA-256, lower-case hex.")], "responses": { "200": { "description": "The file." } } }
+        },
+        "/office": {
+            "get": {
+                "summary": "The parts this Excalibur Office Server runs.",
+                "description": "Every part Excalibur makes (view, cad, archetype, citadel), whether \
+                                this office's signed licence switches it on, and how it is: running, \
+                                not-in-this-build (licensed, but this server needs an update to run \
+                                it) or off. View is always on. Anybody signed in may ask.",
+                "responses": ok("Office")
             }
         },
         "/sets/{id}/copy": {
@@ -927,6 +1177,7 @@ fn query_param(name: &str, description: &str) -> Value {
             "description": description, "schema": { "type": "string" } })
 }
 
+#[allow(clippy::too_many_lines)] // WHAT: the shapes' descriptions, written as data. WHY: a document, not logic; one entry per shape
 fn schemas() -> Value {
     json!({
         "Problem": object(&[
@@ -940,6 +1191,8 @@ fn schemas() -> Value {
             ("name", "string", "What the company calls this installation."),
             ("claimed", "boolean", "False only on a server nobody has set up yet. Absent on an older server, which means claimed."),
             ("joining", "string", "How somebody without an account gets one: code, open or closed."),
+            ("secure_port", "integer", "The port this same API answers on over HTTPS, on this host, with the server's own certificate. A client keeps the certificate's pin (SHA-256 of its public key) from its first HTTPS connection and refuses another after; never take the pin from this answer. Absent when HTTPS is off."),
+            ("product", "string", "Always excalibur-office: one server for every Excalibur part."),
         ]),
         "SignIn": object(&[("email", "string", ""), ("password", "string", "")]),
         "Setup": object(&[
@@ -976,6 +1229,36 @@ fn schemas() -> Value {
             ("new", "string", "Twelve characters at the very least."),
         ]),
         "Changed": object(&[("changed", "boolean", "")]),
+        "Invitation": object(&[
+            ("code", "string", "The secret. This is the whole of what gets sent to somebody."),
+            ("email", "string", "Who it is for; checked when it is used."),
+            ("name", "string", ""),
+            ("role", "string", "What they will be: viewer, estimator or admin."),
+            ("expires", "string", "When it stops working, RFC 3339."),
+            ("used", "boolean", "True when it has been used or has run out."),
+        ]),
+        "NewInvite": object(&[
+            ("email", "string", "Who it is for."),
+            ("name", "string", ""),
+            ("role", "string", "viewer, estimator or admin."),
+            ("days", "integer", "How many days it lasts. Thirty when not said."),
+        ]),
+        "Remote": object(&[
+            ("off", "boolean", "Nobody has turned it on: the ordinary state."),
+            ("sealed", "boolean", "Sealed, and refusing."),
+            ("starting", "boolean", ""),
+            ("on", "boolean", "On, and the address answered from the outside."),
+            ("hostname", "string", "The hostname, when there is one. Never the token."),
+            ("said", "string", "The sentence to put on screen."),
+        ]),
+        "ChangeRemote": object(&[
+            ("token", "string", "The tunnel's token."),
+            ("hostname", "string", "The name the office is reached at from outside."),
+        ]),
+        "WhoOnProject": object(&[
+            ("person", "string", "The person's id."),
+            ("on", "boolean", "True puts them on, false takes them off. True when not said."),
+        ]),
         "NewRole": object(&[("role", "string", "viewer, estimator or admin.")]),
         "Removed": object(&[("removed", "string", "The person who is no longer on this server.")]),
         "SignedOut": object(&[("signed_out", "boolean", "")]),
@@ -1070,6 +1353,54 @@ fn schemas() -> Value {
             ("sharing", "boolean", "Whether new work can be shared through the server now."),
             ("message", "string", "One sentence to show."),
             ("buy_url", "string", "Where to buy or renew."),
+        ]),
+        "Office": { // WHAT: written out, not by object(). WHY: its parts are a list of OfficePart, which object() can't say
+            "type": "object",
+            "properties": {
+                "product": { "type": "string", "description": "Always excalibur-office." },
+                "version": { "type": "string", "description": "The server's version." },
+                "parts": { "type": "array", "items": { "$ref": "#/components/schemas/OfficePart" }, "description": "Every part Excalibur makes." }
+            }
+        },
+        "CadDrawing": object(&[
+            ("id", "integer", ""),
+            ("folder", "string", "Names joined by '/'. Empty is the top."),
+            ("name", "string", ""),
+            ("version", "integer", "The newest version."),
+            ("size", "integer", "Its bytes."),
+            ("saved_by", "string", "Who saved the newest version: their email."),
+            ("saved_at", "integer", "When, in seconds since 1970."),
+            ("locked_by", "string", "Who has it checked out: their email. Absent when nobody does."),
+            ("locked_at", "integer", "Since when, in seconds since 1970."),
+        ]),
+        "CadVersion": object(&[
+            ("version", "integer", ""),
+            ("size", "integer", ""),
+            ("sha256", "string", "The bytes' SHA-256."),
+            ("saved_by", "string", ""),
+            ("saved_at", "integer", ""),
+            ("note", "string", "What changed."),
+        ]),
+        "ArchetypeJob": object(&[
+            ("id", "string", ""),
+            ("name", "string", "What's on its title block."),
+            ("number", "string", "The shop's job number."),
+            ("created", "string", "RFC 3339."),
+            ("created_by", "string", ""),
+            ("revision", "integer", "How many check-ins it has had."),
+            ("updated", "string", "The last check-in, RFC 3339."),
+            ("updated_by", "string", ""),
+            ("holder", "object", "Who has it checked out: person, name, since, machine. Absent when nobody does."),
+            ("files", "integer", "Files in the latest check-in."),
+            ("bytes", "integer", "Their size."),
+        ]),
+        "OfficePart": object(&[
+            ("name", "string", "view, cad, archetype or citadel."),
+            ("title", "string", "Its name for people."),
+            ("licensed", "boolean", "Whether the licence switches it on."),
+            ("state", "string", "running, not-in-this-build or off; Citadel, which runs alongside, may also be looking, not-found, not-answering or certificate-changed."),
+            ("version", "string", "The version it runs. Absent unless running."),
+            ("note", "string", "A sentence about it, when there is one: for Citadel, how its 1.0 data moved in (moved N jobs, nothing to move, or move failed with why; then state is move-failed and the cell is not started)."),
         ]),
         "CopyAsked": object(&[
             ("name", "string", "What to call the copy. Leave it out for \"<the set> — Takeoff\"."),

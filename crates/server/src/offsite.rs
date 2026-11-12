@@ -59,8 +59,8 @@ pub const VIEW: Product = Product {
     database: "hyperview.sqlite", // WHAT: the store's file. WHY: Config::database.
     blobs: "files",               // WHAT: the drawings by digest. WHY: Config::blobs.
     counts: &[
-        "people", "projects", "sets", "sheets", "markups", "chests", "folders", "files", "audit",
-    ], // WHAT: what the drill counts. WHY: the records a shop would miss.
+        "people", "projects", "sets", "sheets", "markups", "chests", "folders", "files", "audit", "cad_drawings", "cad_versions", "arch_jobs", "arch_checkins",
+    ], // WHAT: what the drill counts, CAD's drawings and versions and Archetype's jobs and check-ins too. WHY: the records a shop would miss.
     references: view_references,  // WHAT: the digest columns. WHY: below.
     record: view_record,          // WHAT: the newest drawing set. WHY: the record the drill opens.
 };
@@ -72,6 +72,8 @@ fn view_references(db: &Connection) -> Result<BTreeSet<String>> {
         ("chests", "digest"),
         ("plugins", "digest"),
         ("files", "digest"),
+        ("cad_versions", "sha256"),
+        ("arch_files", "digest"),
     ] {
         // WHAT: every table holding a file's digest. WHY: releases are left out: a server fetches those again from the feed.
         let sql = format!("SELECT {column} FROM {table}"); // WHAT: the column. WHY: names are constants above, never input.
@@ -101,6 +103,7 @@ const KEEP: [(&str, usize); 3] = [("daily", 7), ("weekly", 4), ("monthly", 12)];
 const EXT: &str = ".tar.gz.age"; // WHAT: the catalog's ending. WHY: says what it is: a gzipped tar, encrypted with age.
 
 /// The catalog's name for a moment, in UTC, to the second.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn object_name(product: &str, t: time::OffsetDateTime) -> String {
     let t = t.to_offset(time::UtcOffset::UTC); // WHAT: in UTC. WHY: UTC never repeats an hour, so two runs never share a name.
     format!(
@@ -115,6 +118,7 @@ pub fn object_name(product: &str, t: time::OffsetDateTime) -> String {
 }
 
 /// The moment a name stands for, or `None` for anything that isn't exactly one of ours.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn parse_name(product: &str, name: &str) -> Option<time::OffsetDateTime> {
     let rest = name
         .strip_prefix(product)?
@@ -131,14 +135,16 @@ pub fn parse_name(product: &str, name: &str) -> Option<time::OffsetDateTime> {
         return None;
     } // WHAT: exactly yyyymmdd-hhmmss. WHY: nothing else is ours.
     let n = |a: usize, z: usize| rest[a..z].parse::<u32>().ok(); // WHAT: a number from the name. WHY: each field below.
-    let month = time::Month::try_from(n(4, 6)? as u8).ok()?; // WHAT: the month. WHY: a 13th month is refused.
-    let date = time::Date::from_calendar_date(n(0, 4)? as i32, month, n(6, 8)? as u8).ok()?; // WHAT: the day. WHY: a 32nd day is refused, not rolled over.
-    let t = time::Time::from_hms(n(9, 11)? as u8, n(11, 13)? as u8, n(13, 15)? as u8).ok()?; // WHAT: the time. WHY: the same.
+    let byte = |a: usize, z: usize| u8::try_from(n(a, z)?).ok(); // WHAT: a two-digit field as a byte. WHY: two digits always fit, so nothing is cut as the cast could
+    let month = time::Month::try_from(byte(4, 6)?).ok()?; // WHAT: the month. WHY: a 13th month is refused.
+    let date = time::Date::from_calendar_date(i32::try_from(n(0, 4)?).ok()?, month, byte(6, 8)?).ok()?; // WHAT: the day, in its four-digit year. WHY: a 32nd day is refused, not rolled over.
+    let t = time::Time::from_hms(byte(9, 11)?, byte(11, 13)?, byte(13, 15)?).ok()?; // WHAT: the time. WHY: the same.
     Some(time::PrimitiveDateTime::new(date, t).assume_utc()) // WHAT: the moment. WHY: names are written in UTC.
 }
 
 /// Whether `name` is one of ours and dated no more than a day after `now`. A name from the future is a clock gone wrong or a
 /// planted object: seven "2099" names must never push the real catalogs out of the keep, or be the one a drill picks.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn believable(product: &str, name: &str, now: time::OffsetDateTime) -> bool {
     parse_name(product, name).is_some_and(|t| t <= now + time::Duration::days(1))
     // WHAT: ours, and not from the future. WHY: as above.
@@ -153,6 +159,10 @@ pub struct Plan {
 }
 
 /// The keep rule, on its own so the tests can attack it.
+///
+/// # Errors
+///
+/// Fails when the rule can't keep tonight's copy, so nothing is deleted.
 pub fn plan(product: &str, listing: &BTreeMap<String, Vec<String>>, tonight: &str) -> Result<Plan> {
     let when =
         parse_name(product, tonight).ok_or_else(|| anyhow!("not a catalog name: {tonight}"))?; // WHAT: tonight's date. WHY: the plan never runs on a name it can't date.
@@ -210,6 +220,7 @@ pub fn plan(product: &str, listing: &BTreeMap<String, Vec<String>>, tonight: &st
 /// `None`. Every entry is checked, no link followed. Unix: owned by root or this account, no group or other write, and
 /// rclone.conf readable by its owner only. Windows: owned by the system, administrators or this account, and no change
 /// right for anyone else.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn others_can_change(work: &Path) -> Option<String> {
     let mut stack = vec![work.to_path_buf()]; // WHAT: entries still to look at. WHY: the whole tree, not only the folder, bin and rclone.conf.
     while let Some(p) = stack.pop() {
@@ -270,7 +281,7 @@ pub fn others_can_change(work: &Path) -> Option<String> {
 #[cfg(unix)]
 fn my_uid() -> u32 {
     #[cfg(test)]
-    if let Some(u) = PRETEND_UID.with(|c| c.get()) {
+    if let Some(u) = PRETEND_UID.with(std::cell::Cell::get) { // WHAT: the account a test pretends to be. WHY: read from its cell
         return u;
     } // WHAT: the tests' other account. WHY: proves a stranger's file is refused, without being root.
     nix::unistd::getuid().as_raw() // WHAT: this process's account. WHY: its own files are trusted.
@@ -618,6 +629,7 @@ mod winacl {
 
 /// The first file in the work folder holding an age private key, if any. `bin` (age's own program names the format) and
 /// the job's logs are skipped, and so is anything over 64 KB: a key file is a few lines.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn private_key_in(work: &Path) -> Option<PathBuf> {
     let mut stack = vec![work.to_path_buf()]; // WHAT: folders still to look in. WHY: the whole work folder, not only the recipients file.
     while let Some(dir) = stack.pop() {
@@ -651,7 +663,12 @@ pub fn private_key_in(work: &Path) -> Option<PathBuf> {
 }
 
 /// Reads the recipients file. Only age public keys (age1…) may be in it.
+///
+/// # Errors
+///
+/// Fails when the file has no keys or anything in it is not an age public key.
 pub fn check_recipients(text: &str) -> Result<usize> {
+    const CH: &str = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"; // WHAT: the letters an age key uses (bech32). WHY: anything else is a typo.
     if text.to_ascii_uppercase().contains("AGE-SECRET-KEY-") {
         bail!("the recipients file holds a PRIVATE key (AGE-SECRET-KEY-…). Only the public line (age1…) belongs on this server. Remove it now, and keep the private key with Creede, off this machine.");
     } // WHAT: refuse a private key. WHY: the key that opens every backup must never sit on the machine they are meant to survive.
@@ -660,7 +677,6 @@ pub fn check_recipients(text: &str) -> Result<usize> {
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .collect(); // WHAT: the key lines. WHY: age-keygen's comments are allowed.
-    const CH: &str = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"; // WHAT: the letters an age key uses (bech32). WHY: anything else is a typo.
     if let Some(bad) = keys.iter().find(|k| {
         !(k.len() == 62 && k.starts_with("age1") && k[4..].chars().all(|c| CH.contains(c)))
     }) {
@@ -703,6 +719,10 @@ fn key_ok(key: &str) -> bool {
 
 impl Target {
     /// `rclone:REMOTE:bucket/folder` for rclone (its program and settings in WORK), anything else a folder.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the target is malformed.
     pub fn parse(spec: &str, work: &Path) -> Result<Target> {
         if let Some(remote) = spec.strip_prefix("rclone:") {
             // WHAT: an rclone remote. WHY: the cloud.
@@ -737,6 +757,7 @@ impl Target {
     }
 
     /// Where it went, in words, for the ops report. No keys, no account numbers.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn words(&self) -> String {
         match self {
             Target::Folder(p) => format!("folder {}", p.display()),
@@ -791,6 +812,10 @@ impl Target {
     }
 
     /// Sends one file, never over an object that is already there.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the object is already there or the file could not be sent.
     pub fn put(&self, local: &Path, key: &str) -> Result<()> {
         match self {
             Target::Folder(_) => {
@@ -799,7 +824,7 @@ impl Target {
                     bail!("{key} is already there; a backup is never written over");
                 } // WHAT: refuse an overwrite. WHY: what was sent stays as it was sent.
                 #[cfg(test)]
-                if let Some(n) = FAIL_PUT_AFTER.with(|f| f.get()) {
+                if let Some(n) = FAIL_PUT_AFTER.with(std::cell::Cell::get) { // WHAT: the uploads left before a planted failure. WHY: read from its cell
                     if n == 0 {
                         bail!("a planted upload failure");
                     }
@@ -807,7 +832,7 @@ impl Target {
                 } // WHAT: the tests' connection that drops part way. WHY: the next night must still run.
                 #[cfg(test)]
                 if LOSE_UPLOADS
-                    .with(|l| l.get())
+                    .with(std::cell::Cell::get) // WHAT: the folder whose uploads a test loses. WHY: read from its cell
                     .is_some_and(|f| key.starts_with(f))
                 {
                     return Ok(());
@@ -840,6 +865,10 @@ impl Target {
     }
 
     /// Sends every file in a local folder into a folder of the target.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the folder can't be read or any file could not be sent.
     pub fn put_all(&self, local_dir: &Path, folder: &str) -> Result<()> {
         match self {
             Target::Folder(_) => {
@@ -873,6 +902,10 @@ impl Target {
     }
 
     /// The objects in a folder: name and size.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the target can't be listed.
     pub fn list(&self, folder: &str) -> Result<Vec<(String, u64)>> {
         match self {
             Target::Folder(_) => {
@@ -904,13 +937,17 @@ impl Target {
                     serde_json::from_str(if text.trim().is_empty() { "[]" } else { &text })?; // WHAT: read the JSON. WHY: an empty answer is no objects.
                 Ok(items
                     .into_iter()
-                    .map(|i| (i.name, i.size.max(0) as u64))
+                    .map(|i| (i.name, u64::try_from(i.size).unwrap_or(0))) // WHAT: name and size, a negative size read as nought. WHY: exactly what `.max(0) as u64` gave
                     .collect()) // WHAT: name and size. WHY: the size confirms an upload.
             }
         }
     }
 
     /// A copy inside the target (weekly/, monthly/). Nothing is sent again.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the copy could not be made.
     pub fn copy(&self, from: &str, to: &str) -> Result<()> {
         match self {
             Target::Folder(_) => {
@@ -926,6 +963,10 @@ impl Target {
     }
 
     /// Deletes one object. Only the keep rule calls this, only for our own names.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the object could not be deleted.
     pub fn delete(&self, key: &str) -> Result<()> {
         match self {
             Target::Folder(_) => {
@@ -940,6 +981,10 @@ impl Target {
     }
 
     /// Fetches one object to a local file.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the object could not be fetched.
     pub fn get(&self, key: &str, local: &Path) -> Result<()> {
         match self {
             Target::Folder(_) => {
@@ -957,6 +1002,10 @@ impl Target {
     }
 
     /// Fetches many objects of one folder into a local folder.
+    ///
+    /// # Errors
+    ///
+    /// Fails when any of them could not be fetched.
     pub fn get_many(&self, folder: &str, names: &[String], local_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(local_dir)?; // WHAT: the folder. WHY: they land there.
         match self {
@@ -1002,6 +1051,7 @@ pub enum Cipher {
 
 impl Cipher {
     /// The program this runs, if it runs one.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn program(&self) -> Option<&Path> {
         match self {
             Cipher::Age(exe) => Some(exe),
@@ -1011,6 +1061,10 @@ impl Cipher {
     }
 
     /// Encrypts what `fill` writes, to the recipients file, into `out`. Nothing unencrypted touches the disk.
+    ///
+    /// # Errors
+    ///
+    /// Fails when age could not be run, `fill` fails, or age does not finish cleanly.
     pub fn encrypt_stream(
         &self,
         recipients: &Path,
@@ -1020,13 +1074,13 @@ impl Cipher {
         match self {
             Cipher::Age(exe) => {
                 let _ = std::fs::remove_file(out);
-                let file =
+                let encrypted = // WHAT: the encrypted file, named apart from `fill`. WHY: the two read alike
                     create_private(out).with_context(|| format!("making {}", out.display()))?; // WHAT: the encrypted file, owner-only before a byte is in it. WHY: everything in the work folder is this account's alone.
                 let mut child = Command::new(exe)
                     .arg("-R")
                     .arg(recipients)
                     .stdin(Stdio::piped())
-                    .stdout(file)
+                    .stdout(encrypted) // WHAT: age writes into the encrypted file. WHY: owner-only from its first byte
                     .stderr(Stdio::piped())
                     .spawn()
                     .with_context(|| format!("starting {}", exe.display()))?; // WHAT: age reads the stream and writes the encrypted file into it. WHY: the server locks with the public key only.
@@ -1060,6 +1114,10 @@ impl Cipher {
     }
 
     /// Encrypts one file into another. Returns the SHA-256 of the bytes that went in, as they went.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file can't be read or the encryption fails.
     pub fn encrypt_file(&self, recipients: &Path, input: &Path, out: &Path) -> Result<String> {
         let mut h = Sha256::new(); // WHAT: the fingerprint of what is sent. WHY: a file changed between its check and its sending is caught.
         self.encrypt_stream(recipients, out, |w| {
@@ -1079,6 +1137,10 @@ impl Cipher {
     }
 
     /// Opens a passphrase-locked file (Creede's locked key): age asks for the passphrase on the console itself.
+    ///
+    /// # Errors
+    ///
+    /// Fails when age could not be run or the passphrase is wrong.
     pub fn unlock(&self, input: &Path, out: &Path) -> Result<()> {
         match self {
             Cipher::Age(exe) => {
@@ -1117,6 +1179,10 @@ impl Cipher {
     }
 
     /// Decrypts with Creede's private key (an unlocked key: see `Drill::run`, which opens a locked one once).
+    ///
+    /// # Errors
+    ///
+    /// Fails when age could not be run or the file does not open with that key.
     pub fn decrypt_file(&self, identity: &Path, input: &Path, out: &Path) -> Result<()> {
         match self {
             Cipher::Age(exe) => {
@@ -1226,7 +1292,7 @@ impl TarOut<'_> {
         if name.len() > 99 || !key_ok(name) {
             bail!("an archive name must be short and plain: {name}");
         } // WHAT: the names we write. WHY: the reader refuses anything else.
-        if size >= 0o77777777777 {
+        if size >= 0o77_777_777_777 { // WHAT: the largest size ustar's eleven octal digits hold. WHY: the same number, its digits grouped
             bail!("{name} is too big for the archive ({size} bytes)");
         } // WHAT: ustar's size limit (8 GiB). WHY: refuse rather than write a broken archive.
         let mut h = [0u8; 512]; // WHAT: the header block. WHY: ustar's fixed layout.
@@ -1240,7 +1306,7 @@ impl TarOut<'_> {
         h[257..263].copy_from_slice(b"ustar\0");
         h[263..265].copy_from_slice(b"00"); // WHAT: the format marker. WHY: any tar reads it.
         h[148..156].copy_from_slice(b"        "); // WHAT: blanks while summing. WHY: the checksum's rule.
-        let sum: u32 = h.iter().map(|&b| b as u32).sum(); // WHAT: the checksum. WHY: readers check it.
+        let sum: u32 = h.iter().map(|&b| u32::from(b)).sum(); // WHAT: the checksum. WHY: readers check it.
         h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes()); // WHAT: write it. WHY: ustar's form.
         self.w.write_all(&h)?; // WHAT: the header. WHY: before its bytes.
         let copied = std::io::copy(&mut body.take(size), self.w)?; // WHAT: the file's bytes. WHY: streamed.
@@ -1278,7 +1344,7 @@ fn untar(r: &mut dyn Read, into: &Path, limit: u64, expect: &[(&str, u64)]) -> R
             .ok_or_else(|| anyhow!("a damaged archive header"))?; // WHAT: the header's own checksum. WHY: a damaged header is refused.
         let mut blank = h;
         blank[148..156].copy_from_slice(b"        "); // WHAT: blanks where the sum goes. WHY: the rule it was made with.
-        if blank.iter().map(|&b| b as u32).sum::<u32>() != stored {
+        if blank.iter().map(|&b| u32::from(b)).sum::<u32>() != stored { // WHAT: the header summed, each byte widened. WHY: compared with the checksum it carries
             bail!("a damaged archive header");
         } // WHAT: compare. WHY: never act on a damaged header.
         if h[156] != b'0' && h[156] != 0 {
@@ -1342,6 +1408,10 @@ pub struct Manifest {
     pub blobs: Vec<(String, u64)>, // WHAT: every drawing file: digest and size. WHY: the drill checks each is in the bucket.
     #[serde(rename = "missingOnDisk")]
     pub missing_on_disk: Vec<String>, // WHAT: files the database names that weren't on this disk. WHY: damage found by the backup is said, never hidden.
+    #[serde(default)]
+    pub installation: Option<String>, // WHAT: the office whose data this is (its installation id). WHY: a drill says whose backup it restored; catalogs made before 2026-11-11 have none (audit M2)
+    #[serde(default)]
+    pub company: Option<String>, // WHAT: the company name the office was set up with, if any. WHY: inside the encrypted catalog only, so a person restoring sees whose it is in words
 }
 
 /// Beside the catalog, unencrypted: sizes and fingerprints only, never a name or a record.
@@ -1385,6 +1455,164 @@ pub const FAILED_MARKER: &str = "offsite-failed.json"; // WHAT: written after a 
 const BUSY: &str = "another off-site backup is still running"; // WHAT: the lock's refusal. WHY: a run already going is not a failed night.
 pub const DRILL_MARKER: &str = "offsite-drill.json"; // WHAT: written after a passed drill. WHY: the ops report's restoreTested.
 
+// ---------------------------------------------------------------- whose target it is
+
+const OWNER_FORMAT: &str = "excalibur-offsite-owner-1"; // WHAT: the owner marker's format. WHY: a later format is refused, not misread.
+const OWNER_CAP: u64 = 4 * 1024; // WHAT: the largest owner marker read. WHY: a real one is about 150 bytes.
+
+/// At the top of a target, one per product (`owner-view.json`): which office's backups the target holds. Unencrypted,
+/// and holds no name or record, only the office's installation id. Two offices pointed at one NAS share or bucket
+/// folder would each prune the other's catalogs as their own; this marker makes the second one refuse (audit M2).
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct Owner {
+    pub format: String, // WHAT: OWNER_FORMAT. WHY: as above.
+    pub product: String, // WHAT: "view". WHY: one bucket may hold several products' folders, each with its own owner.
+    pub installation: String, // WHAT: the office's installation id. WHY: the one thing compared.
+    pub since: String, // WHAT: when the target was first used. WHY: a person reading it knows how long it has been this office's.
+}
+
+/// The owner marker's object name for a product.
+fn owner_key(product: &str) -> String {
+    format!("owner-{product}.json") // WHAT: at the top of the target. WHY: beside daily/, weekly/, monthly/ and blobs/, never inside them.
+}
+
+/// An installation id as the server makes them: a short word, `_`, hex. Anything else is refused.
+fn is_installation(s: &str) -> bool {
+    (1..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') // WHAT: plain characters, short. WHY: it is printed in the log and compared; a planted marker can't carry anything else.
+}
+
+/// The office's installation id from a database (the backup's consistent copy). The server makes it as it first starts.
+///
+/// # Errors
+///
+/// Fails when the database can't be opened or has no installation id.
+pub fn installation_of(db: &Path) -> Result<String> {
+    use rusqlite::OptionalExtension; // WHAT: a row that may be missing. WHY: a database the server never ran on has none.
+    let c = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?; // WHAT: read-only. WHY: the copy is never changed.
+    let id: Option<String> = c
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [crate::api::settings::INSTALLATION],
+            |r| r.get(0),
+        )
+        .optional()?; // WHAT: the server's own name for itself. WHY: the same id the office answers to on the network.
+    match id.map(|s| s.trim().to_string()) {
+        Some(s) if is_installation(&s) => Ok(s),
+        Some(_) => bail!("this office's installation id isn't one the server makes"),
+        None => bail!("this data has no installation id yet: start the server once, then back up"),
+    } // WHAT: the id, or why not. WHY: a backup with no office to name would adopt any target.
+}
+
+/// The company name the office was set up with, from a database copy, or `None`. Never fails a backup.
+fn company_of(db: &Path) -> Option<String> {
+    use rusqlite::OptionalExtension; // WHAT: a row that may be missing. WHY: an office not set up yet has none.
+    let c = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?; // WHAT: read-only. WHY: the copy is never changed.
+    c.query_row("SELECT value FROM settings WHERE key = ?1", [crate::api::settings::COMPANY], |r| r.get::<_, String>(0))
+        .optional()
+        .ok()
+        .flatten()
+        .map(|s| s.chars().filter(|c| !c.is_control()).take(200).collect()) // WHAT: printable, at most 200 characters. WHY: shown in the drill's log line
+}
+
+impl Target {
+    /// The objects at the top of the target: name and size. Folders are left out.
+    fn top(&self) -> Result<Vec<(String, u64)>> {
+        match self {
+            Target::Folder(root) => {
+                if !root.exists() {
+                    return Ok(Vec::new());
+                } // WHAT: none yet. WHY: the first night makes the folder.
+                let mut out = Vec::new();
+                for e in std::fs::read_dir(root)? {
+                    let e = e?;
+                    let m = e.metadata()?;
+                    if m.is_file() {
+                        out.push((e.file_name().to_string_lossy().into_owned(), m.len()));
+                    }
+                } // WHAT: each file. WHY: the owner marker is one.
+                Ok(out)
+            }
+            Target::Rclone { remote, .. } => {
+                #[derive(Deserialize)]
+                struct Item {
+                    #[serde(rename = "Name")]
+                    name: String,
+                    #[serde(rename = "Size")]
+                    size: i64,
+                } // WHAT: rclone's listing. WHY: the two fields used.
+                let text = self.rclone(&["lsjson", remote, "--files-only"])?; // WHAT: the top level only (lsjson doesn't recurse by default). WHY: the marker sits there.
+                let items: Vec<Item> =
+                    serde_json::from_str(if text.trim().is_empty() { "[]" } else { &text })?;
+                Ok(items.into_iter().map(|i| (i.name, u64::try_from(i.size).unwrap_or(0))).collect()) // WHAT: name and size, a negative size read as nought. WHY: exactly what `.max(0) as u64` gave
+            }
+        }
+    }
+
+    /// The product's owner marker, read and checked, or `None` when the target has none. A listing that fails is an
+    /// error, never "none": a target that can't be read must not be adopted. The error carries the exit code: 3 the
+    /// target couldn't be reached, 2 its marker is refused.
+    ///
+    /// # Errors
+    ///
+    /// The exit code: 3 when the target couldn't be reached, 2 when its marker is refused.
+    pub fn owner(&self, product: &str, scratch: &Path) -> std::result::Result<Option<Owner>, Exit> {
+        let key = owner_key(product); // WHAT: its name. WHY: looked for at the top.
+        let top = self.top().map_err(|e| refuse(3, format!("listing {} failed: {e:#}", self.words())))?; // WHAT: the top level. WHY: an unreadable target is a failed night, not a new target
+        let Some((_, size)) = top.into_iter().find(|(n, _)| *n == key) else {
+            return Ok(None);
+        }; // WHAT: not there. WHY: a new target, adopted by the caller.
+        if size > OWNER_CAP {
+            return Err(refuse(2, format!("{key} is listed at {size} bytes, over the {OWNER_CAP} an owner marker can be; not fetched")));
+        } // WHAT: refuse a giant unfetched. WHY: it would fill the disk.
+        let local = scratch.join(".owner.json"); // WHAT: where it lands. WHY: in the job's own folder.
+        let _ = std::fs::remove_file(&local); // WHAT: no leftover. WHY: a copy fails on some systems over a file.
+        self.get(&key, &local).map_err(|e| refuse(3, format!("fetching {key} failed: {e:#}")))?; // WHAT: fetch it. WHY: read below.
+        let bytes = read_capped(&local, OWNER_CAP); // WHAT: read it, within the cap. WHY: the listing could have lied.
+        let _ = std::fs::remove_file(&local); // WHAT: tidy. WHY: kept nowhere.
+        let bytes = bytes.map_err(|e| refuse(2, format!("{key}: {e:#}")))?;
+        let o: Owner = serde_json::from_slice(&bytes).map_err(|e| refuse(2, format!("{key} doesn't read: {e}")))?; // WHAT: parse. WHY: a broken marker is a refusal, never a new target.
+        if o.format != OWNER_FORMAT || o.product != product || !is_installation(&o.installation) {
+            return Err(refuse(2, format!("{key} is not one this program writes")));
+        } // WHAT: exactly as written. WHY: a planted marker can't say something else.
+        Ok(Some(o))
+    }
+
+    /// Makes sure the target is this office's: adopts a target with no owner, refuses one owned by another office.
+    /// Returns what to log.
+    ///
+    /// # Errors
+    ///
+    /// The exit code: 3 when the target couldn't be reached, 2 when another office owns it.
+    pub fn claim(&self, product: &str, installation: &str, scratch: &Path) -> std::result::Result<String, Exit> {
+        if let Some(o) = self.owner(product, scratch)? {
+            if o.installation == installation {
+                return Ok(format!("target belongs to this office ({installation})"));
+            } // WHAT: ours. WHY: the usual night.
+            return Err(refuse(2, format!("{} belongs to another office (installation {}, since {}), not this one ({installation}). Two offices must never share a backup folder: each prunes the other's backups as its own. Give this office its own folder or bucket path (README.md, Off-site backups)", self.words(), o.installation, o.since)));
+        } // WHAT: another office's. WHY: refused before anything is sent or pruned.
+        let o = Owner {
+            format: OWNER_FORMAT.into(),
+            product: product.into(),
+            installation: installation.into(),
+            since: time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
+        }; // WHAT: the marker. WHY: this office takes the new target.
+        let local = scratch.join(".owner-new.json"); // WHAT: written here first. WHY: sent like any object.
+        let bytes = serde_json::to_vec_pretty(&o).map_err(|e| refuse(2, e))?;
+        write_atomic(&local, &bytes).map_err(|e| refuse(2, format!("{e:#}")))?;
+        let sent = self.put(&local, &owner_key(product)); // WHAT: send it. WHY: never over one that's there (a folder target refuses).
+        let _ = std::fs::remove_file(&local);
+        sent.map_err(|e| refuse(3, format!("writing the owner marker failed: {e:#}")))?;
+        match self.owner(product, scratch)? {
+            Some(back) if back.installation == installation => {
+                Ok(format!("target was new: it now belongs to this office ({installation})"))
+            }
+            _ => Err(refuse(2, format!("{} did not keep this office's owner marker; not backing up", self.words()))),
+        } // WHAT: read it back. WHY: two offices starting the same night: only the one whose marker stuck goes on.
+    }
+}
+
 /// What the ops report says about off-site backups: each field `None` when unknown, never a guess.
 #[derive(Serialize, Default, Clone, Debug, PartialEq)]
 pub struct Report {
@@ -1399,9 +1627,9 @@ pub struct Report {
     pub last_failed_why: Option<String>, // WHAT: why it failed. WHY: what to look at first.
 }
 
-fn past_time(s: &Option<String>) -> Option<time::OffsetDateTime> {
+fn past_time(s: Option<&str>) -> Option<time::OffsetDateTime> { // WHAT: the time as text, if there is one. WHY: borrowed as it is read
     let t = time::OffsetDateTime::parse(
-        s.as_deref()?,
+        s?, // WHAT: the text, or no time. WHY: as before
         &time::format_description::well_known::Rfc3339,
     )
     .ok()?; // WHAT: read the time. WHY: a garbled one is unknown.
@@ -1418,6 +1646,7 @@ fn read_marker(path: &Path) -> Option<Marker> {
 }
 
 /// The ops report's off-site section, read from the data folder.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn report(data: &Path) -> Report {
     let b = read_marker(&data.join(BACKUP_MARKER)).unwrap_or_default(); // WHAT: the backup marker. WHY: unknown when absent.
     let d = read_marker(&data.join(DRILL_MARKER)).unwrap_or_default(); // WHAT: the drill marker. WHY: the same.
@@ -1427,27 +1656,28 @@ pub fn report(data: &Path) -> Report {
             .ok()
     }; // WHAT: back to text. WHY: one form in the report.
     Report {
-        last_good: past_time(&b.last_good).and_then(iso), // WHAT: a real past time, or None. WHY: never a guess.
+        last_good: past_time(b.last_good.as_deref()).and_then(iso), // WHAT: a real past time, or None. WHY: never a guess.
         r#where: b
             .r#where
-            .filter(|_| past_time(&b.last_good).is_some())
+            .filter(|_| past_time(b.last_good.as_deref()).is_some()) // WHAT: only with a real last good time. WHY: never a guess
             .map(|w| w.chars().take(200).collect()), // WHAT: where, with a good time only. WHY: half a marker is no marker.
         restore_tested: if d.ok == Some(true) {
-            past_time(&d.at).and_then(iso)
+            past_time(d.at.as_deref()).and_then(iso) // WHAT: the drill's time, if real. WHY: never a guess
         } else {
             None
         }, // WHAT: a passed drill's time only. WHY: a failed drill proves nothing.
-        last_failed: past_time(&f.at).and_then(iso), // WHAT: a real past time, or None. WHY: never a guess.
+        last_failed: past_time(f.at.as_deref()).and_then(iso), // WHAT: a real past time, or None. WHY: never a guess.
         last_failed_why: f
             .why
-            .filter(|_| past_time(&f.at).is_some())
+            .filter(|_| past_time(f.at.as_deref()).is_some()) // WHAT: only with a real failure time. WHY: never a guess
             .map(|w| w.chars().take(300).collect()), // WHAT: why, with a good time only. WHY: half a marker is no marker.
     }
 }
 
 /// Days since the last confirmed off-site backup, or `None` for never.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn backup_days(data: &Path) -> Option<f64> {
-    let t = past_time(&read_marker(&data.join(BACKUP_MARKER))?.last_good)?; // WHAT: its time. WHY: unknown when absent or damaged.
+    let t = past_time(read_marker(&data.join(BACKUP_MARKER))?.last_good.as_deref())?; // WHAT: its time. WHY: unknown when absent or damaged.
     Some(((time::OffsetDateTime::now_utc() - t).as_seconds_f64() / 86_400.0).max(0.0))
     // WHAT: in days. WHY: Fleet's backupDays.
 }
@@ -1496,8 +1726,7 @@ impl Job<'_> {
         println!("{line}"); // WHAT: to the console. WHY: a person running it sees it.
         let path = self.own().join("offsite.log"); // WHAT: the log file. WHY: beside the job.
         if std::fs::metadata(&path)
-            .map(|m| m.len() > 4 * 1024 * 1024)
-            .unwrap_or(false)
+            .is_ok_and(|m| m.len() > 4 * 1024 * 1024) // WHAT: whether the log is past 4 MB. WHY: false when it can't be read
         {
             let _ = std::fs::rename(&path, self.own().join("offsite.log.1"));
         } // WHAT: one old log kept past 4 MB. WHY: a log must never fill the disk.
@@ -1545,7 +1774,7 @@ impl Job<'_> {
             return refuse(4, "the work folder and the data folder must be apart: a backup inside what it backs up grows forever");
         } // WHAT: refuse overlap. WHY: the spool would be backed up into itself.
         if let Err(e) =
-            create_private_dir(&own).and_then(|_| create_private_dir(&own.join("spool")))
+            create_private_dir(&own).and_then(|()| create_private_dir(&own.join("spool"))) // WHAT: the folder, then its spool. WHY: the spool only when its folder is made
         {
             return refuse(2, format!("could not make {}: {e}", own.display()));
         } // WHAT: make it, owner-only. WHY: the first run; the stage inside holds the database unencrypted.
@@ -1576,11 +1805,10 @@ impl Job<'_> {
         } // WHAT: the result. WHY: the exit code.
     }
 
+    #[allow(clippy::too_many_lines)] // WHAT: the night's numbered steps, in one function. WHY: each step leans on what the one before checked and holds; the backup is security code, and splitting it is a change of its own to review apart
     fn backup_locked(&self, stage: &Path) -> std::result::Result<i32, Exit> {
         #[cfg(test)]
-        if FAULT.with(|f| f.get()) {
-            panic!("a fault planted by a test");
-        } // WHAT: the tests' fault. WHY: proves a fault becomes a failed run.
+        assert!(!FAULT.with(std::cell::Cell::get), "a fault planted by a test"); // WHAT: the tests' fault, when one is planted. WHY: proves a fault becomes a failed run.
         let own = self.own(); // WHAT: the job's folder. WHY: spool and salt.
         let recipients = self.work.join("age-recipients.txt"); // WHAT: the public key file. WHY: Creede puts it there.
         let keys = check_recipients(&std::fs::read_to_string(&recipients).unwrap_or_default())
@@ -1629,6 +1857,11 @@ impl Job<'_> {
                 .collect::<Vec<_>>()
                 .join(", ")
         )); // WHAT: the counts. WHY: the log shows what was backed up.
+        let installation = installation_of(&copy).map_err(|e| refuse(2, format!("{e:#}")))?; // WHAT: whose data this is. WHY: the target is checked against it next.
+        let claimed = self
+            .target
+            .claim(self.product.id, &installation, &own)?; // WHAT: the target is this office's, or is made so. WHY: before anything is sent or pruned (audit M2).
+        self.log(&claimed); // WHAT: say whose it is. WHY: the log shows the check ran.
 
         // 2. the drawing files: the ones on disk, each sent once
         let mut on_disk = list_blobs(&self.data.join(self.product.blobs))
@@ -1657,7 +1890,7 @@ impl Job<'_> {
         let (mut sent, mut sent_bytes, mut batch_bytes) = (0usize, 0u64, 0u64); // WHAT: tallies. WHY: the log and the batch size.
         let mut damaged = Vec::new(); // WHAT: files whose bytes don't match their name. WHY: never sent, and reported.
         let mut warned = 0usize; // WHAT: warnings that leave tonight's backup good but not clean. WHY: exit 5, for someone to look at.
-        let send = |sizes: &mut BTreeMap<String, u64>| -> std::result::Result<(), Exit> {
+        let send_batch = |sizes: &mut BTreeMap<String, u64>| -> std::result::Result<(), Exit> { // WHAT: named apart from `sent`, the count. WHY: the two read alike
             // WHAT: send one batch and note each file's encrypted size. WHY: the sizes the read-back expects.
             let mut batch = BTreeMap::new(); // WHAT: this batch's sizes. WHY: kept before sending, so a batch cut short is checked, not unknown.
             for e in std::fs::read_dir(&outgoing)
@@ -1694,14 +1927,13 @@ impl Job<'_> {
             } // WHAT: already there. WHY: files never change, so once is enough; the manifest keeps the fingerprint already in the bucket.
             if !matches_digest(path, digest).unwrap_or(false) {
                 self.log(&format!(
-                    "WARNING: {:.12} on disk doesn't match its own fingerprint; not sent",
-                    digest
+                    "WARNING: {digest:.12} on disk doesn't match its own fingerprint; not sent" // WHAT: the warning, naming the file. WHY: the log says which
                 ));
                 damaged.push(digest.clone());
                 continue;
             } // WHAT: check before sending. WHY: never send damaged bytes as good ones.
             #[cfg(test)]
-            if CHANGE_WHILE_SENT.with(|c| c.get()) {
+            if CHANGE_WHILE_SENT.with(std::cell::Cell::get) { // WHAT: whether a test changes a file while it is sent. WHY: read from its cell
                 std::fs::write(path, b"changed while it was being sent")
                     .map_err(|e| refuse(2, e))?;
             } // WHAT: the tests' change between the check and the send. WHY: the fingerprint taken while sending must catch it.
@@ -1714,8 +1946,7 @@ impl Job<'_> {
             if as_sent != *digest {
                 let _ = std::fs::remove_file(&out);
                 self.log(&format!(
-                    "WARNING: {:.12} changed while it was being sent; not sent tonight",
-                    digest
+                    "WARNING: {digest:.12} changed while it was being sent; not sent tonight" // WHAT: the warning, naming the file. WHY: likewise
                 ));
                 damaged.push(digest.clone());
                 continue;
@@ -1724,12 +1955,12 @@ impl Job<'_> {
             sent_bytes += *size;
             batch_bytes += *size; // WHAT: count it. WHY: the log and the batch.
             if batch_bytes > 1 << 30 {
-                send(&mut sizes)?;
+                send_batch(&mut sizes)?; // WHAT: a batch sent. WHY: at each gigabyte
                 batch_bytes = 0;
             } // WHAT: send each gigabyte. WHY: the spool never holds the whole data.
         }
         if outgoing.exists() {
-            send(&mut sizes)?;
+            send_batch(&mut sizes)?; // WHAT: the last batch sent. WHY: whatever is left
         } // WHAT: the last batch. WHY: everything new is sent.
         if !damaged.is_empty() || !missing_on_disk.is_empty() {
             warned += 1;
@@ -1779,7 +2010,7 @@ impl Job<'_> {
         self.log(&format!(
             "files: {} in all, {sent} new sent ({:.1} MB), every one read back",
             on_disk.len(),
-            sent_bytes as f64 / 1048576.0
+            megabytes(sent_bytes)
         )); // WHAT: the tally. WHY: upload time and cost follow from it.
 
         // 3. the catalog: database and manifest, packed, gzipped and locked
@@ -1797,6 +2028,8 @@ impl Job<'_> {
             salt: salt.clone(),
             blobs: on_disk.iter().map(|(d, (_, s))| (d.clone(), *s)).collect(),
             missing_on_disk,
+            installation: Some(installation.clone()),
+            company: company_of(&copy),
         }; // WHAT: the manifest. WHY: what the drill checks against.
         let mj = serde_json::to_vec_pretty(&manifest).map_err(|e| refuse(2, e))?; // WHAT: as JSON. WHY: packed first.
         let spool = own.join("spool");
@@ -1861,10 +2094,7 @@ impl Job<'_> {
         )); // WHAT: note it. WHY: the important line.
 
         // 5. mark it: only now does Fleet hear of it, and only for the target the server is set to
-        if !self.mark {
-            self.log(&format!("sent to {}, which isn't this server's own off-site target: not marked, backupDays unchanged", self.target.words()));
-        } else {
-            // WHAT: a hand run elsewhere. WHY: a USB disk tried once must not stand for the nightly off-site copy.
+        if self.mark { // WHAT: this server's own target. WHY: only then does Fleet hear of it
             let marker = Marker {
                 last_good: Some(manifest.created_at.clone()),
                 r#where: Some(self.target.words()),
@@ -1877,6 +2107,9 @@ impl Job<'_> {
             )
             .map_err(|e| refuse(3, format!("sent, but could not write the marker: {e:#}")))?;
             // WHAT: write it whole. WHY: Fleet never reads half a file.
+        } else { // WHAT: another target. WHY: not marked
+            // WHAT: a hand run elsewhere. WHY: a USB disk tried once must not stand for the nightly off-site copy.
+            self.log(&format!("sent to {}, which isn't this server's own off-site target: not marked, backupDays unchanged", self.target.words())); // WHAT: said in the log. WHY: Fleet hears nothing of it
         } // WHAT: the end of the marking. WHY: skipped for another target.
 
         // 6. weekly / monthly copies and the keep rule
@@ -1904,7 +2137,7 @@ impl Job<'_> {
                 match self
                     .target
                     .copy(&format!("daily/{name}"), &format!("{g}/{name}"))
-                    .and_then(|_| {
+                    .and_then(|()| { // WHAT: then its sidecar. WHY: only when the catalog copied
                         self.target
                             .copy(&format!("daily/{name}.json"), &format!("{g}/{name}.json"))
                     }) {
@@ -1980,7 +2213,7 @@ fn hold_lock(path: &Path) -> std::result::Result<std::fs::File, Exit> {
 /// A fault's message, for the log.
 fn panic_words(p: &(dyn std::any::Any + Send)) -> String {
     p.downcast_ref::<&str>()
-        .map(|s| s.to_string())
+        .map(ToString::to_string) // WHAT: a panic's &str, as text. WHY: the log says what stopped it
         .or_else(|| p.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "an unexpected fault".into()) // WHAT: the text a panic carries. WHY: the log says what stopped it.
 }
@@ -1996,6 +2229,10 @@ thread_local! {
 }
 
 /// SQLite's own consistent copy of a database in use (VACUUM INTO), then made a single file.
+///
+/// # Errors
+///
+/// Fails when the database can't be copied.
 pub fn snapshot(live: &Path, to: &Path) -> Result<()> {
     let db = Connection::open_with_flags(
         live,
@@ -2007,6 +2244,10 @@ pub fn snapshot(live: &Path, to: &Path) -> Result<()> {
 }
 
 /// Opens a copy, checks it, counts it, and lists the files it names.
+///
+/// # Errors
+///
+/// Fails when the copy can't be opened or does not pass its check.
 pub fn check_database(
     product: &Product,
     path: &Path,
@@ -2039,6 +2280,10 @@ fn is_digest(s: &str) -> bool {
 } // WHAT: 64 lowercase hex letters. WHY: the store's names.
 
 /// Every file in the store, by digest: its path and size. `aa/bb/digest`, nothing else.
+///
+/// # Errors
+///
+/// Fails when the store can't be read or holds something that isn't a stored file.
 pub fn list_blobs(root: &Path) -> Result<BTreeMap<String, (PathBuf, u64)>> {
     let mut out = BTreeMap::new(); // WHAT: the files. WHY: sorted, so runs are repeatable.
     if !root.exists() {
@@ -2072,6 +2317,7 @@ fn matches_digest(path: &Path, digest: &str) -> Result<bool> {
 } // WHAT: the file is what its name says. WHY: never send damaged bytes as good ones.
 
 /// The object name of a drawing file: a salted digest, so the bucket doesn't say which files it holds.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn object_for(salt: &str, digest: &str) -> String {
     format!(
         "{}.age",
@@ -2103,10 +2349,21 @@ fn read_sizes(path: &Path) -> Result<BTreeMap<String, u64>> {
     // WHAT: read it. WHY: never silently replaced.
 }
 
+/// A size in megabytes, for a log line.
+#[allow(clippy::cast_precision_loss)] // WHAT: a byte count widened to a float. WHY: shown to a tenth of a megabyte; a float holds every size below 8 PB exactly, and no conversion without a cast exists from a 64-bit number
+fn megabytes(bytes: u64) -> f64 {
+    bytes as f64 / 1_048_576.0 // WHAT: bytes to megabytes. WHY: the same tally the log has always shown
+}
+
 fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    crate::store::hex(b) // WHAT: the store's hex writer. WHY: one way of writing hex in the server
 } // WHAT: bytes as hex. WHY: names and fingerprints.
 
+/// The SHA-256 of a file, as lowercase hex, read in pieces.
+///
+/// # Errors
+///
+/// Fails when the file can't be read.
 pub fn sha256_file(path: &Path) -> Result<String> {
     let mut f = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?; // WHAT: open it. WHY: streamed.
     let mut h = Sha256::new();
@@ -2159,7 +2416,7 @@ fn new_private_dir(path: &Path) -> Result<()> {
         winacl::create_dir(path, &me, &[&me, winacl::SYSTEM])?;
     } // WHAT: born with only this account and the system, nothing inherited. WHY: no moment when another account could plant a junction in it.
     #[cfg(all(test, unix))]
-    if LOOSEN_SCRATCH.with(|l| l.get()) {
+    if LOOSEN_SCRATCH.with(std::cell::Cell::get) { // WHAT: whether a test loosens the scratch folder. WHY: read from its cell
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
     } // WHAT: the tests' folder opened up after it is made. WHY: proves the check below catches it.
@@ -2263,14 +2520,16 @@ fn valid_manifest(product: &Product, man: &Manifest) -> Result<()> {
         bail!("the database fingerprint or the salt is not 64 hex digits");
     } // WHAT: the two fingerprints. WHY: they name and check files.
     if let Some((d, _)) = man.blobs.iter().find(|(d, _)| !is_digest(d)) {
-        bail!("a file fingerprint is not 64 hex digits: {:.16}", d);
+        bail!("a file fingerprint is not 64 hex digits: {d:.16}"); // WHAT: refused, naming the start of it. WHY: a bad digest must never become a path
     } // WHAT: every file. WHY: digests become paths and object names.
     if let Some(d) = man.missing_on_disk.iter().find(|d| !is_digest(d)) {
         bail!(
-            "a missing file's fingerprint is not 64 hex digits: {:.16}",
-            d
+            "a missing file's fingerprint is not 64 hex digits: {d:.16}" // WHAT: the refusal, naming the start of it. WHY: a bad digest must never become a path
         );
     } // WHAT: the same. WHY: compared with the database.
+    if man.installation.as_deref().is_some_and(|i| !is_installation(i)) {
+        bail!("its office's installation id isn't one the server makes");
+    } // WHAT: plain characters. WHY: printed in the drill's summary.
     Ok(())
 }
 
@@ -2287,7 +2546,7 @@ fn real(p: &Path) -> PathBuf {
     let mut rest = Vec::new(); // WHAT: the nearest folder that exists, and what is below it. WHY: a folder not made yet still has a real place.
     while !base.exists() {
         match (
-            base.file_name().map(|n| n.to_os_string()),
+            base.file_name().map(std::ffi::OsStr::to_os_string), // WHAT: this folder's own name. WHY: walked back up below
             base.parent().map(Path::to_path_buf),
         ) {
             (Some(n), Some(up)) => {
@@ -2323,6 +2582,7 @@ pub struct Drill<'a> {
 
 impl Drill<'_> {
     /// Runs the drill. RESTORE DRILL PASSED, or the reason it didn't.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn run(&self) -> Exit {
         let identity = match std::path::absolute(&self.identity) {
             Ok(p) => p,
@@ -2401,8 +2661,7 @@ impl Drill<'_> {
                     &serde_json::to_vec_pretty(&m).unwrap_or_default(),
                 ) {
                     self.job.log(&format!(
-                        "WARNING: passed, but could not write {}: {e:#}",
-                        DRILL_MARKER
+                        "WARNING: passed, but could not write {DRILL_MARKER}: {e:#}" // WHAT: the warning, naming the marker. WHY: the log says what wasn't written
                     ));
                 } // WHAT: write it. WHY: Fleet shows when a restore was last proven.
                 self.job.log(&format!("RESTORE DRILL PASSED: {summary}"));
@@ -2418,29 +2677,29 @@ impl Drill<'_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // WHAT: the drill's steps, in one function. WHY: as for the backup: each check leans on the one before, and splitting it is a change of its own to review apart
     fn run_in(&self, identity: &Path) -> std::result::Result<String, Exit> {
         let j = &self.job;
         let dl = self.scratch.join("download");
         std::fs::create_dir_all(&dl).map_err(|e| refuse(4, e))?; // WHAT: the download folder. WHY: inside the scratch.
-        let name = match &self.object {
-            Some(o) => o.clone(),
-            None => {
-                let mut all = Vec::new();
-                for f in ["daily", "weekly", "monthly"] {
-                    for (n, _) in j
-                        .target
-                        .list(f)
-                        .map_err(|e| refuse(3, format!("could not list the bucket: {e:#}")))?
-                    {
-                        if believable(j.product.id, &n, time::OffsetDateTime::now_utc()) {
-                            all.push(format!("{f}/{n}"));
-                        }
+        let name = if let Some(o) = &self.object { // WHAT: the catalog asked for. WHY: drilled as named
+            o.clone() // WHAT: the name asked for. WHY: drilled as named
+        } else { // WHAT: none named. WHY: the newest anywhere is drilled
+            let mut all = Vec::new();
+            for f in ["daily", "weekly", "monthly"] {
+                for (n, _) in j
+                    .target
+                    .list(f)
+                    .map_err(|e| refuse(3, format!("could not list the bucket: {e:#}")))?
+                {
+                    if believable(j.product.id, &n, time::OffsetDateTime::now_utc()) {
+                        all.push(format!("{f}/{n}"));
                     }
                 }
-                all.sort_by_key(|k| k.rsplit('/').next().unwrap_or("").to_string());
-                all.pop()
-                    .ok_or_else(|| refuse(3, "there is no backup in the target to drill"))?
             }
+            all.sort_by_key(|k| k.rsplit('/').next().unwrap_or("").to_string());
+            all.pop()
+                .ok_or_else(|| refuse(3, "there is no backup in the target to drill"))?
         }; // WHAT: the catalog, or the newest anywhere. WHY: --latest by default.
         let base = name.rsplit('/').next().unwrap_or(&name).to_string(); // WHAT: its own name. WHY: checked against the manifest.
         if parse_name(j.product.id, &base).is_none() || !key_ok(&name) {
@@ -2479,9 +2738,7 @@ impl Drill<'_> {
                 2,
                 format!(
                     "the catalog is listed at {} bytes and its sidecar says {}; not fetched",
-                    cat_size
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| "no".into()),
+                    cat_size.map_or_else(|| "no".into(), |n| n.to_string()), // WHAT: the catalog's listed size, or "no". WHY: said in the refusal
                     side.age_bytes
                 ),
             ));
@@ -2542,6 +2799,19 @@ impl Drill<'_> {
                 "the manifest is for another product, format or catalog",
             ));
         } // WHAT: the right one. WHY: never check against the wrong manifest.
+        let owner = j
+            .target
+            .owner(j.product.id, &dl)?; // WHAT: whose target this is. WHY: compared with whose catalog it is.
+        if let (Some(o), Some(i)) = (&owner, &man.installation) {
+            if o.installation != *i {
+                return Err(refuse(2, format!("{name} was made by office {i}, but this target belongs to office {}; it was put here by someone else, and is not restored", o.installation)));
+            }
+        } // WHAT: a catalog from another office in this office's target. WHY: never restored as this office's data (audit M2).
+        let office = match (&man.installation, &man.company) {
+            (Some(i), Some(c)) if !c.is_empty() => format!("{c}, office {i}"),
+            (Some(i), _) => format!("office {i}"),
+            (None, _) => "an office not named (made before catalogs named their office)".to_string(),
+        }; // WHAT: whose backup this is, in words. WHY: the summary says what was restored and whose it was.
         let db = restored.join(j.product.database); // WHAT: the restored database. WHY: checked next.
         if sha256_file(&db).map_err(|e| refuse(2, e))? != man.database_sha256 {
             return Err(refuse(
@@ -2568,8 +2838,7 @@ impl Drill<'_> {
             return Err(refuse(
                 2,
                 format!(
-                    "the database names a file the manifest doesn't list ({:.12})",
-                    d
+                    "the database names a file the manifest doesn't list ({d:.12})" // WHAT: the refusal, naming the file. WHY: a hole is found now
                 ),
             ));
         } // WHAT: every named file accounted for. WHY: a hole is found now, not on the bad day.
@@ -2582,14 +2851,12 @@ impl Drill<'_> {
         if let Some((d, _)) = man.blobs.iter().find(|(d, s)| {
             there
                 .get(&object_for(&man.salt, d))
-                .map(|&b| b <= *s)
-                .unwrap_or(true)
+                .is_none_or(|&b| b <= *s) // WHAT: missing, or short of its size. WHY: either is a hole
         }) {
             return Err(refuse(
                 2,
                 format!(
-                    "a file the backup lists is not in the bucket at full size ({:.12})",
-                    d
+                    "a file the backup lists is not in the bucket at full size ({d:.12})" // WHAT: the refusal, naming the file. WHY: likewise
                 ),
             ));
         } // WHAT: all present. WHY: a missing file is a hole in the backup.
@@ -2635,7 +2902,7 @@ impl Drill<'_> {
             if sha256_file(&out).map_err(|e| refuse(2, e))? != *d {
                 return Err(refuse(
                     2,
-                    format!("a restored file doesn't match its fingerprint ({:.12})", d),
+                    format!("a restored file doesn't match its fingerprint ({d:.12})"), // WHAT: the refusal, naming the start of it. WHY: a restore that differs is not a restore
                 ));
             } // WHAT: compare. WHY: every byte the same.
         }
@@ -2643,42 +2910,39 @@ impl Drill<'_> {
         if let Some(l) = link_inside(&self.scratch) {
             return Err(refuse(2, format!("{} is a link or reparse point inside the scratch folder; refusing to open the restore", l.display())));
         } // WHAT: no links anywhere in the restore. WHY: nothing it opens may point elsewhere.
-        let opened = match &record {
+        let opened = if let Some((id, d)) = &record { // WHAT: the newest set, if the backup has one. WHY: its drawing is read below
             // WHAT: open one real record through the server's own store. WHY: the app reads it, not just this check.
-            Some((id, d)) => {
-                let store = crate::Store::open(&db, &files).map_err(|e| {
-                    refuse(
-                        2,
-                        format!("the server could not open the restored data: {e:#}"),
-                    )
-                })?;
-                let bytes = store.get_blob(d).map_err(|e| {
-                    refuse(
-                        2,
-                        format!("the server could not read record {id}'s file: {e:#}"),
-                    )
-                })?;
-                format!(
-                    "record {id} opened ({} bytes, {})",
-                    bytes.len(),
-                    if bytes.starts_with(b"%PDF") {
-                        "a PDF"
-                    } else {
-                        "a file"
-                    }
+            let store = crate::Store::open(&db, &files).map_err(|e| {
+                refuse(
+                    2,
+                    format!("the server could not open the restored data: {e:#}"),
                 )
-            } // WHAT: the newest set, its drawing read. WHY: proof the restore is usable.
-            None => {
-                crate::Store::open(&db, &files).map_err(|e| {
-                    refuse(
-                        2,
-                        format!("the server could not open the restored data: {e:#}"),
-                    )
-                })?;
-                "no records yet; the server opened the data".to_string()
-            } // WHAT: an empty server. WHY: still proves it opens.
-        };
-        Ok(format!("{name}: counts match ({}), {} of {} files fetched and fingerprint-checked{}, every file present in the target, {opened}", counts.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "), want.len(), man.blobs.len(), if self.full { " (full restore)" } else { "" }))
+            })?;
+            let bytes = store.get_blob(d).map_err(|e| {
+                refuse(
+                    2,
+                    format!("the server could not read record {id}'s file: {e:#}"),
+                )
+            })?;
+            format!(
+                "record {id} opened ({} bytes, {})",
+                bytes.len(),
+                if bytes.starts_with(b"%PDF") {
+                    "a PDF"
+                } else {
+                    "a file"
+                }
+            )
+        } else { // WHAT: the newest set, its drawing read, above; an empty server here. WHY: proof the restore is usable, or still that it opens
+            crate::Store::open(&db, &files).map_err(|e| {
+                refuse(
+                    2,
+                    format!("the server could not open the restored data: {e:#}"),
+                )
+            })?;
+            "no records yet; the server opened the data".to_string()
+        }; // WHAT: what was opened. WHY: said in the summary
+        Ok(format!("{name} ({office}): counts match ({}), {} of {} files fetched and fingerprint-checked{}, every file present in the target, {opened}", counts.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "), want.len(), man.blobs.len(), if self.full { " (full restore)" } else { "" }))
         // WHAT: the summary. WHY: the log and the marker say what was proven.
     }
 }
@@ -2729,6 +2993,10 @@ impl Drop for OpenedKey {
 // ---------------------------------------------------------------- the settings, the command line and the night
 
 /// The job the settings describe: the data folder, the work folder and the target. `None` when either setting is empty.
+///
+/// # Errors
+///
+/// Fails when the work folder or the target can't be read.
 pub fn job_from(
     product: &'static Product,
     data: PathBuf,
@@ -2759,6 +3027,10 @@ pub fn job_from(
 }
 
 /// The time of night, "1:30" or "01:30", 24-hour, the server's own clock.
+///
+/// # Errors
+///
+/// Fails, saying what is wanted, when it isn't a time of day.
 pub fn night_time(at: &str) -> Result<chrono::NaiveTime> {
     let t = at.trim(); // WHAT: without spaces. WHY: a setting typed with a space still reads.
     let ok = t.len() >= 4
@@ -2775,6 +3047,10 @@ pub fn night_time(at: &str) -> Result<chrono::NaiveTime> {
 }
 
 /// Checks the off-site settings as the server starts: a typo is found now, not at night.
+///
+/// # Errors
+///
+/// Fails, saying which setting is wrong, when they can't work together.
 pub fn check_settings(
     data: &Path,
     work: Option<&str>,
@@ -2796,6 +3072,7 @@ pub fn check_settings(
 }
 
 /// Whether tonight's backup is due: past the time, none confirmed since it, and no failed try in the last hour.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn due(
     now: chrono::NaiveDateTime,
     at: chrono::NaiveTime,
@@ -2809,7 +3086,7 @@ pub fn due(
     if last_good.is_some_and(|g| g >= from) {
         return false;
     } // WHAT: done today. WHY: one a day.
-    !last_try.is_some_and(|t| now - t < chrono::Duration::hours(1)) // WHAT: a failed try under an hour ago waits. WHY: tried again gently, not every look.
+    last_try.is_none_or(|t| now - t >= chrono::Duration::hours(1)) // WHAT: no failed try, or the last an hour or more ago; one under an hour ago waits. WHY: tried again gently, not every look.
 }
 
 /// How often the server looks whether tonight's backup is due.
@@ -2903,7 +3180,7 @@ fn clear_leftover_keys(identity: &Path, job: &Job) {
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let n = e.file_name().to_string_lossy().into_owned(); // WHAT: its name. WHY: only ours are touched.
         if n.starts_with(".drill-key-")
-            && n.ends_with(".txt")
+            && std::path::Path::new(&n).extension().is_some_and(|x| x == "txt") // WHAT: ends in .txt, exactly as written. WHY: only the drill's own opened keys
             && std::fs::remove_file(e.path()).is_ok()
         {
             job.log(&format!(
@@ -3007,8 +3284,7 @@ pub fn main_from_args(
     } // WHAT: a target first, then --name value pairs and two flags. WHY: a mistyped option must not be ignored.
     let data = opt
         .get("--data")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| config.data.clone()); // WHAT: the data folder the server uses, or the one given. WHY: the installed program finds its own drawings.
+        .map_or_else(|| config.data.clone(), PathBuf::from); // WHAT: the data folder the server uses, or the one given. WHY: the installed program finds its own drawings.
     let work = opt
         .get("--work")
         .cloned()
@@ -3070,3 +3346,22 @@ pub fn main_from_args(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cad_part {
+    // WHAT: the cad part's drawings ride in View's backup. WHY: one server, one backup; a CAD drawing left out would be lost with the disk.
+    #[test]
+    fn cad_drawings_are_counted_and_their_files_carried() {
+        let db = rusqlite::Connection::open_in_memory().unwrap(); // WHAT: a database like the server's. WHY: the backup reads it
+        db.execute_batch(crate::store::SCHEMA_FOR_TESTS).unwrap(); // WHAT: View's tables. WHY: the references query reads them all
+        db.execute_batch(crate::cad::SCHEMA).unwrap(); // WHAT: CAD's. WHY: the same database
+        db.execute_batch(crate::archetype::SCHEMA).unwrap(); // WHAT: Archetype's. WHY: the same database
+        db.execute("INSERT INTO cad_drawings (id, folder, name, created_by, created_at) VALUES (1, '', 'P.excad', 'sam', 1)", []).unwrap();
+        db.execute("INSERT INTO cad_versions (drawing, version, sha256, size, saved_by, saved_at) VALUES (1, 1, ?1, 2, 'sam', 1)", [&"c".repeat(64)]).unwrap();
+        assert!(super::view_references(&db).unwrap().contains(&"c".repeat(64)), "a CAD drawing's file is one the backup must carry");
+        assert!(super::VIEW.counts.contains(&"cad_drawings") && super::VIEW.counts.contains(&"cad_versions"), "and the drill counts them");
+        db.execute("INSERT INTO arch_files (digest, bytes, sent) VALUES (?1, 3, 'now')", [&"d".repeat(64)]).unwrap(); // WHAT: a file sent for an Archetype job. WHY: it rides in the backup too
+        assert!(super::view_references(&db).unwrap().contains(&"d".repeat(64)), "an Archetype job's file is carried");
+        assert!(super::VIEW.counts.contains(&"arch_jobs") && super::VIEW.counts.contains(&"arch_checkins"), "and the drill counts Archetype's jobs");
+    }
+}

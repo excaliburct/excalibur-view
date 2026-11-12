@@ -78,6 +78,8 @@ jobs:
         run: cargo test --workspace
 
       - name: Build both programs
+        env:
+          RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=crate"  # WHAT: this machine's workspace path kept out of the binary. WHY: only CI knows it (reverse-engineering hardening, 2026-11-11)
         run: cargo build --release -p hyperview -p hyperview-server
 
       # Named the way the release publishes them, so nobody has to know which

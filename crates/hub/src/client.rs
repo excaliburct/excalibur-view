@@ -21,6 +21,12 @@ pub struct Client {
     base: String,
     token: Option<String>,
     agent: ureq::Agent,
+    /// The certificate pin this client holds its server to, when it is an
+    /// Office Server's HTTPS (`crate::secure`).
+    pin: Option<String>, // WHAT: the pin, when pinned. WHY: whoever reaches the same server later (the assistant) holds it to the same certificate
+    /// This computer's device key, when it signs its requests (§4 of
+    /// docs/OFFICE-ENROLLMENT.md).
+    device: Option<std::sync::Arc<crate::device::Signer>>, // WHAT: the signer, shared. WHY: every request to an Office Server is signed by an approved device
 }
 
 /// A request on its way out, and whether it may be sent a second time.
@@ -31,15 +37,42 @@ pub struct Client {
 pub struct Attempt {
     request: ureq::Request,
     twice: bool,
+    device: Option<std::sync::Arc<crate::device::Signer>>, // WHAT: the device that signs it, if any. WHY: signed as it is sent, over the body actually sent
+    pin: Option<String>, // WHAT: the pin of the server it goes to. WHY: the signature is bound to that server
 }
 
 impl Attempt {
     fn again(request: ureq::Request) -> Attempt {
-        Attempt { request, twice: true }
+        Attempt { request, twice: true, device: None, pin: None }
     }
 
     fn once(request: ureq::Request) -> Attempt {
-        Attempt { request, twice: false }
+        Attempt { request, twice: false, device: None, pin: None }
+    }
+
+    /// Signed by `device` when it goes.
+    fn by(mut self, device: Option<std::sync::Arc<crate::device::Signer>>, pin: Option<&str>) -> Attempt {
+        self.device = device; // WHAT: the signer. WHY: §4
+        self.pin = pin.map(str::to_string); // WHAT: the server's pin. WHY: the signature's pin line
+        self
+    }
+
+    /// `request` with the three signature headers for `body`, when a device
+    /// signs; as it is otherwise.
+    fn signed(device: Option<&crate::device::Signer>, pin: Option<&str>, request: ureq::Request, body: &[u8]) -> Result<ureq::Request, String> {
+        let Some(device) = device else { return Ok(request) }; // WHAT: no device. WHY: an older server, or before one is made
+        let url = request.request_url().map_err(|e| e.to_string())?; // WHAT: the address as it will be sent, queries added. WHY: the path and query exactly as sent
+        let url = url.as_url();
+        let target = match url.query() {
+            Some(query) if !query.is_empty() => format!("{}?{query}", url.path()), // WHAT: path and query. WHY: as the request line writes them
+            _ => url.path().to_string(), // WHAT: the path alone. WHY: no query is written without its '?'
+        };
+        let headers = device.sign(pin.unwrap_or(crate::device::NO_PIN), request.method(), &target, body, crate::device::unix_now())?; // WHAT: the headers, for this server's pin. WHY: §4
+        Ok(request
+            .set(crate::device::HEADER_DEVICE, &headers.device)
+            .set(crate::device::HEADER_TIME, &headers.time)
+            .set(crate::device::HEADER_SIGNATURE, &headers.signature)
+            .set(crate::device::HEADER_BODY, &headers.body)) // WHAT: put on. WHY: the server checks them before anything else, the body last
     }
 
     /// The one check every request to an office server passes.
@@ -68,25 +101,24 @@ impl Attempt {
     fn call(self) -> Result<ureq::Response, ureq::Error> {
         self.allowed()?;
         let spare = self.twice.then(|| self.request.clone());
-        match (self.request.call(), spare) {
-            (Err(e), Some(spare)) if never_arrived(&e) => spare.call(),
+        let device = self.device.as_deref(); // WHAT: the signer. WHY: each try signed for itself
+        let pin = self.pin.as_deref(); // WHAT: the server's pin. WHY: signed into every try
+        let unsigned = |e: String| ureq::Error::from(std::io::Error::other(e)); // WHAT: a request that couldn't be signed, as a transport failure. WHY: said like any other
+        match (Self::signed(device, pin, self.request, b"").map_err(unsigned)?.call(), spare) {
+            (Err(e), Some(spare)) if never_arrived(&e) => Self::signed(device, pin, spare, b"").map_err(unsigned)?.call(), // WHAT: signed again. WHY: a fresh signature, never a replay of the first
             (result, _) => result,
         }
     }
 
     fn send_json(self, body: impl serde::Serialize) -> Result<ureq::Response, ureq::Error> {
-        self.allowed()?;
-        // Turned into a value first, so the same bytes can go twice without
-        // the caller having to hand over something cloneable.
-        let body = match serde_json::to_value(body) {
+        // Turned into bytes first, so the same bytes can go twice without
+        // the caller having to hand over something cloneable, and so the
+        // signature is over exactly what is sent.
+        let body = match serde_json::to_vec(&body) {
             Ok(body) => body,
             Err(e) => return Err(ureq::Error::from(std::io::Error::other(e))),
         };
-        let spare = self.twice.then(|| self.request.clone());
-        match (self.request.send_json(&body), spare) {
-            (Err(e), Some(spare)) if never_arrived(&e) => spare.send_json(&body),
-            (result, _) => result,
-        }
+        self.set("Content-Type", "application/json").send_bytes(&body) // WHAT: the JSON's bytes, as JSON. WHY: what ureq's send_json sends, signed over those bytes
     }
 
     /// The two builder methods callers use, passed straight through so a
@@ -104,8 +136,11 @@ impl Attempt {
     fn send_bytes(self, body: &[u8]) -> Result<ureq::Response, ureq::Error> {
         self.allowed()?;
         let spare = self.twice.then(|| self.request.clone());
-        match (self.request.send_bytes(body), spare) {
-            (Err(e), Some(spare)) if never_arrived(&e) => spare.send_bytes(body),
+        let device = self.device.as_deref(); // WHAT: the signer. WHY: each try signed for itself
+        let pin = self.pin.as_deref(); // WHAT: the server's pin. WHY: signed into every try
+        let unsigned = |e: String| ureq::Error::from(std::io::Error::other(e)); // WHAT: a request that couldn't be signed, as a transport failure. WHY: said like any other
+        match (Self::signed(device, pin, self.request, body).map_err(unsigned)?.send_bytes(body), spare) {
+            (Err(e), Some(spare)) if never_arrived(&e) => Self::signed(device, pin, spare, body).map_err(unsigned)?.send_bytes(body), // WHAT: signed again. WHY: as for a GET
             (result, _) => result,
         }
     }
@@ -169,6 +204,22 @@ pub enum Trouble {
     Unreadable(String),
     /// This build is too old for that server, or the other way round.
     Mismatch { ours: u32, theirs: u32 },
+    /// A server other than the one this computer is linked to, at an address
+    /// it hasn't linked to before: never taken unless the person confirms it
+    /// is the office's new server, both short pins in front of them.
+    NewServer { seen: String, message: String }, // WHAT: the pin this server showed, and the words with both short pins. WHY: confirmed by that very pin, so a swap in between is refused again
+}
+
+impl Trouble {
+    /// The server's short name for why, when it gave one.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Trouble::Refused(p) => Some(p.error.as_str()), // WHAT: the server's own word. WHY: told apart by the app
+            Trouble::NewServer { .. } => Some("new_office_server"), // WHAT: its own code. WHY: the app offers the confirmation for it
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Trouble {
@@ -182,6 +233,7 @@ impl std::fmt::Display for Trouble {
                 "This copy of Excalibur View speaks version {ours} and that server speaks {theirs}. \
                  One of them needs updating."
             ),
+            Trouble::NewServer { message, .. } => write!(f, "{message}"), // WHAT: the words, both short pins in them. WHY: the person decides
         }
     }
 }
@@ -196,15 +248,49 @@ impl Client {
             base: base.trim_end_matches('/').to_string(),
             token: None,
             agent: crate::web::agent()
+                .redirects(0) // WHAT: no redirect followed. WHY: review: ureq follows five by default and would send the sign-in and the X-Excalibur headers on to another host
                 .timeout_connect(Duration::from_secs(8))
                 .timeout_read(Duration::from_secs(120))
                 .build(),
+            pin: None, // WHAT: no pin. WHY: plain HTTP, or an address its certificate authority vouches for
+            device: None, // WHAT: no device yet. WHY: given with `with_device`
         }
+    }
+
+    /// A client for `base` that accepts only the certificate with `pin`
+    /// (`crate::pinned`): an Office Server's own HTTPS.
+    pub fn pinned(base: &str, pin: &str) -> Answer<Client> {
+        let (agent, _) = crate::pinned::agent(Some(pin)).map_err(Trouble::Unreadable)?; // WHAT: the pinned check. WHY: a malformed pin is refused, never treated as none
+        Ok(Client {
+            base: base.trim_end_matches('/').to_string(),
+            token: None,
+            agent: agent.timeout_connect(Duration::from_secs(8)).timeout_read(Duration::from_secs(120)).build(), // WHAT: the same timeouts as any client. WHY: only the certificate check differs
+            pin: Some(pin.to_string()), // WHAT: the pin it holds. WHY: handed on to whatever reaches this server next
+            device: None, // WHAT: no device yet. WHY: given with `with_device`
+        })
+    }
+
+    /// This client, signing every request with `device`.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+    pub fn with_device(mut self, device: std::sync::Arc<crate::device::Signer>) -> Client {
+        self.device = Some(device); // WHAT: kept. WHY: every request is signed (§4)
+        self
+    }
+
+    /// The device this client signs with, if any.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+    pub fn device(&self) -> Option<&crate::device::Signer> {
+        self.device.as_deref() // WHAT: borrowed. WHY: its id, shown to a person waiting
     }
 
     pub fn with_token(mut self, token: &str) -> Client {
         self.token = Some(token.to_string());
         self
+    }
+
+    /// The certificate pin this client holds its server to, if any.
+    pub fn pin(&self) -> Option<&str> {
+        self.pin.as_deref()
     }
 
     pub fn base(&self) -> &str {
@@ -226,7 +312,7 @@ impl Client {
     /// never arrives. Sending it again is the whole fix, and it is safe here
     /// because asking twice is the same as asking once.
     fn get(&self, path: &str) -> Attempt {
-        Attempt::again(self.sign(self.agent.get(&self.url(path))))
+        Attempt::again(self.sign(self.agent.get(&self.url(path)))).by(self.device.clone(), self.pin.as_deref()) // WHAT: signed by the device when there is one. WHY: §4
     }
 
     /// A POST, which is sent once and once only.
@@ -236,7 +322,7 @@ impl Client {
     /// two people, two of whatever it made. Better a sentence somebody can act
     /// on than a duplicate they have to find.
     fn post(&self, path: &str) -> Attempt {
-        Attempt::once(self.sign(self.agent.post(&self.url(path))))
+        Attempt::once(self.sign(self.agent.post(&self.url(path)))).by(self.device.clone(), self.pin.as_deref()) // WHAT: signed by the device when there is one. WHY: §4
     }
 
     fn sign(&self, request: ureq::Request) -> ureq::Request {
@@ -306,7 +392,7 @@ impl Client {
 
     pub fn remote_off(&self) -> Answer<crate::Remote> {
         Self::read(
-            Attempt::once(self.sign(self.agent.delete(&self.url("/admin/remote")))).call(),
+            Attempt::once(self.sign(self.agent.delete(&self.url("/admin/remote")))).by(self.device.clone(), self.pin.as_deref()).call(), // WHAT: signed. WHY: §4
         )
     }
 
@@ -361,12 +447,145 @@ impl Client {
         Ok(session)
     }
 
+    /// Joins from outside the office with a code or invitation, carrying
+    /// this computer's request to be let in, so the join admits it too (§5).
+    ///
+    /// # Errors
+    ///
+    /// Why not, in words: the server refused, or couldn't be reached.
+    pub fn join_with_device(&mut self, join: &Join, ask: &crate::device::Ask) -> Answer<Session> {
+        let mut body = serde_json::to_value(join).map_err(|e| Trouble::Unreadable(e.to_string()))?; // WHAT: the join as JSON. WHY: the device is added beside its fields
+        body["device"] = serde_json::to_value(ask).map_err(|e| Trouble::Unreadable(e.to_string()))?; // WHAT: the computer's request. WHY: the server admits it with the join
+        let session: Session = Self::read(self.post("/join").send_json(body))?;
+        self.token = Some(session.token.clone());
+        Ok(session)
+    }
+
+    // ---- this computer on the office's device list ----------------------------
+
+    /// This computer's request to be let in, signed for this server: the pin
+    /// this client holds, or "none" for a server without HTTPS.
+    ///
+    /// # Errors
+    ///
+    /// Why not, in words: the server refused, or couldn't be reached.
+    pub fn device_ask(&self, app: &str, display_name: &str) -> Answer<crate::device::Ask> {
+        let device = self.device.as_deref().ok_or_else(|| Trouble::Unreadable("this computer has no device key".into()))?; // WHAT: the key. WHY: nothing to ask with otherwise
+        let pin = self.pin.clone().unwrap_or_else(|| crate::device::NO_PIN.to_string()); // WHAT: the pin of the server it is talking to. WHY: §3: bound to the real server
+        crate::device::Ask::signed(
+            device.key(),
+            &pin,
+            app,
+            env!("CARGO_PKG_VERSION"),
+            &crate::device::machine_name(),
+            &crate::device::os_user(),
+            display_name,
+            crate::device::platform(),
+            crate::device::unix_now(),
+        )
+        .map_err(Trouble::Unreadable) // WHAT: the request, or why not. WHY: a field that can't be signed is said
+    }
+
+    /// `POST /devices/request`: asks to be let in. The session this client
+    /// holds goes with it, so a seat signed in before 0.7.0 comes over
+    /// approved. `None` when the server has no device list (older than 0.7.0).
+    ///
+    /// # Errors
+    ///
+    /// Why not, in words: the server refused, or couldn't be reached.
+    pub fn ask_to_be_let_in(&self, app: &str, display_name: &str) -> Answer<Option<crate::device::Answer>> {
+        let ask = self.device_ask(app, display_name)?; // WHAT: the signed request. WHY: §3
+        match Self::read(self.post("/devices/request").send_json(&ask)) {
+            Ok(answer) => Ok(Some(answer)),
+            Err(Trouble::Refused(problem)) if problem.error == "not_found" || problem.error == "http_error" => Ok(None), // WHAT: no such route. WHY: a server from before devices; nothing to ask
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `GET /devices/me`: how this computer stands.
+    ///
+    /// # Errors
+    ///
+    /// Why not, in words: the server refused, or couldn't be reached.
+    pub fn device_me(&self) -> Answer<crate::device::Me> {
+        Self::read(self.get("/devices/me").call())
+    }
+
+    /// `GET /devices`: every computer, for an admin's list.
+    ///
+    /// # Errors
+    ///
+    /// Why not, in words: the server refused, or couldn't be reached.
+    pub fn devices(&self) -> Answer<Vec<crate::device::Info>> {
+        Self::read(self.get("/devices").call())
+    }
+
+    /// `POST /devices/{id}/approve`.
+    ///
+    /// # Errors
+    ///
+    /// Why not, in words: the server refused, or couldn't be reached.
+    pub fn approve_device(&self, id: &str, admin: bool) -> Answer<serde_json::Value> {
+        Self::read(self.post(&format!("/devices/{id}/approve")).send_json(serde_json::json!({ "admin": admin })))
+    }
+
+    /// `POST /devices/{id}/refuse`.
+    ///
+    /// # Errors
+    ///
+    /// Why not, in words: the server refused, or couldn't be reached.
+    pub fn refuse_device(&self, id: &str) -> Answer<serde_json::Value> {
+        Self::read(self.post(&format!("/devices/{id}/refuse")).send_bytes(b""))
+    }
+
+    /// `POST /devices/{id}/remove`.
+    ///
+    /// # Errors
+    ///
+    /// Why not, in words: the server refused, or couldn't be reached.
+    pub fn remove_device(&self, id: &str) -> Answer<serde_json::Value> {
+        Self::read(self.post(&format!("/devices/{id}/remove")).send_bytes(b""))
+    }
+
+    /// `POST /devices/{id}/admin`.
+    ///
+    /// # Errors
+    ///
+    /// Why not, in words: the server refused, or couldn't be reached.
+    pub fn device_admin(&self, id: &str, on: bool) -> Answer<serde_json::Value> {
+        Self::read(self.post(&format!("/devices/{id}/admin")).send_json(serde_json::json!({ "on": on })))
+    }
+
+    /// `GET /office/identity`: the office certificate's text, or `None`
+    /// when the server has none.
+    ///
+    /// # Errors
+    ///
+    /// Why not, in words: the server refused, or couldn't be reached.
+    pub fn office_identity(&self) -> Answer<Option<String>> {
+        match self.get("/office/identity").call() {
+            Ok(response) => response.into_string().map(Some).map_err(|e| Trouble::Unreadable(e.to_string())), // WHAT: the text. WHY: checked by the caller
+            Err(ureq::Error::Status(404, _)) => Ok(None), // WHAT: none yet. WHY: the baseline pin still holds
+            Err(e) => Self::read::<serde_json::Value>(Err(e)).map(|_| None), // WHAT: any other failure, in words. WHY: as every call
+        }
+    }
+
     /// Where the office stands with Excalibur View Office. A server from
     /// before licensing has never heard of it and answers `None`.
     pub fn license(&self) -> Answer<Option<crate::license::Standing>> {
         match Self::read(self.get("/license").call()) {
             Ok(standing) => Ok(Some(standing)),
             Err(Trouble::Refused(problem)) if problem.error == "not_found" => Ok(None),
+            Err(other) => Err(other),
+        }
+    }
+
+    /// The Office Server's parts and how each is. `None` from a server older
+    /// than the Office Server.
+    pub fn office_parts(&self) -> Answer<Option<crate::OfficeParts>> {
+        match Self::read(self.get("/office").call()) {
+            Ok(parts) => Ok(Some(parts)),
+            Err(Trouble::Refused(problem)) if problem.error == "not_found" => Ok(None), // WHAT: an older server. WHY: shows nothing, never an error
             Err(other) => Err(other),
         }
     }
@@ -476,7 +695,7 @@ impl Client {
     /// Throws one away before it is used.
     pub fn drop_invite(&self, code: &str) -> Answer<Vec<crate::Invitation>> {
         Self::read(
-            Attempt::once(self.sign(self.agent.delete(&self.url(&format!("/admin/invites/{code}")))))
+            Attempt::once(self.sign(self.agent.delete(&self.url(&format!("/admin/invites/{code}"))))).by(self.device.clone(), self.pin.as_deref()) // WHAT: signed. WHY: §4
                 .call(),
         )
     }
@@ -860,12 +1079,14 @@ impl Client {
     /// Fetches an installer. Nothing is done with these bytes until
     /// [`crate::update::Trusted::check`] has passed on them.
     pub fn download_update(&self, download: &str) -> Answer<Vec<u8>> {
-        let url = if download.starts_with("http://") || download.starts_with("https://") {
-            download.to_string()
-        } else {
-            format!("{}{}", self.base, download)
-        };
-        match self.sign(self.agent.get(&url)).call() {
+        let elsewhere = download.starts_with("http://") || download.starts_with("https://"); // WHAT: a whole address, not a path on this server. WHY: decides whether the token goes with it
+        if !elsewhere && !download.starts_with('/') {
+            return Err(Trouble::Unreadable(format!("the server named its download oddly ({download:.60}); not fetched"))); // WHAT: refused. WHY: "@evil.example/x" or ".evil.example/x" glued onto the address would send the token elsewhere (audit re-check)
+        }
+        let url = if elsewhere { download.to_string() } else { format!("{}{}", self.base, download) };
+        let here = !elsewhere || download.strip_prefix(self.base.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with('/')); // WHAT: on this server. WHY: the sign-in token is sent only to the server it belongs to (audit, 2026-11-11)
+        let asking = if here { self.sign(self.agent.get(&url)) } else { self.agent.get(&url) }; // WHAT: signed only here. WHY: as above; the installer is checked by its signature either way
+        match asking.call() {
             Ok(response) => {
                 let mut bytes = Vec::new();
                 response

@@ -5,7 +5,7 @@ use egui::{Color32, RichText};
 
 use crate::app::App;
 use crate::updatebox;
-use crate::server::{Ask, Standing, Told};
+use crate::server::{Ask, ComputerChange, Standing, Told};
 
 /// The purpose the server gives a sync key.
 pub const SYNC_PURPOSE: &str = "sync"; // WHAT: the word the server's POST /api/v1/me/keys takes. WHY: one spelling, used by the button and the label alike.
@@ -79,6 +79,8 @@ pub struct SigningIn {
     /// Nothing answered, so say so rather than leaving an empty box.
     pub looked: bool,
     pub error: Option<String>,
+    /// A new office server the person must confirm: (address, its pin, words).
+    pub confirm: Option<(String, String, String)>, // WHAT: the question and its words. WHY: another office server than the one this computer knows
     pub waiting: bool,
     /// Set once a server has been claimed: the code to hand round, and what
     /// hosting it on this computer actually got them.
@@ -93,6 +95,8 @@ pub struct SigningIn {
 /// The server panel's forms.
 #[derive(Default)]
 pub struct OfficePanel {
+    /// The Office Server's parts, as it last said: empty from an older server.
+    pub parts: Vec<hub::OfficePart>, // WHAT: view, cad, archetype, citadel and how each is. WHY: shown in Studio > Office
     /// A project being started: (job number, name).
     pub new_project: Option<(String, String)>,
     pub joining: Option<hub::Joining>,
@@ -159,6 +163,20 @@ pub struct OfficePanel {
     pub folders_for: String, // WHAT: whose folders those are. WHY: a late answer for another project is dropped.
     /// A folder whose rule is being changed: (folder, the rule as it is being picked).
     pub changing_rule: Option<(String, hub::See)>, // WHAT: the folder and the rule being picked. WHY: changed only when Save is pressed.
+    /// The office's computers, when this computer is an admin's; `None`
+    /// otherwise, and then Studio shows no Computers section.
+    pub computers: Option<Vec<hub::device::Info>>, // WHAT: every computer on the office's device list. WHY: Studio → Office → Computers
+    pub computers_note: Option<String>, // WHAT: what was just done, or why not. WHY: said under the list
+    pub computers_asked: Option<std::time::Instant>, // WHAT: when the list was last asked for. WHY: a computer that isn't an admin's asks only once a minute
+    /// This computer waiting for an admin to approve it.
+    pub approval: Option<Approval>, // WHAT: the waiting screen, when it is open. WHY: §3: "Waiting for an admin to approve this computer"
+}
+
+/// The waiting screen's state.
+pub struct Approval {
+    pub device: String, // WHAT: this computer's device id. WHY: shown small, for an admin who asks which one
+    pub asked: Option<std::time::Instant>, // WHAT: when the server was last asked. WHY: every 5 s
+    pub said: Option<String>, // WHAT: an answer that ends the wait badly ("refused"). WHY: said in plain words
 }
 
 /// An account being made for somebody, as it is being typed.
@@ -226,6 +244,8 @@ struct PanelActions {
     make_group: Option<String>, // WHAT: Make group pressed, with the name. WHY: sent.
     /// (group, person, in): a tick in a group changed.
     change_group: Option<(String, String, bool)>, // WHAT: somebody ticked in or out. WHY: sent.
+    /// (device id, what to do, its name): an admin's button on a computer.
+    computer: Option<(String, ComputerChange, String)>, // WHAT: Approve, Refuse, Remove or Make/Unmake admin pressed. WHY: sent.
 }
 
 impl App {
@@ -514,6 +534,32 @@ impl App {
                     self.office.keys = office.keys;
                     self.office.notices = office.notices;
                 }
+                Told::Parts(parts) => self.office.parts = parts, // WHAT: kept. WHY: the Office panel shows them
+                Told::Waiting { device } => {
+                    if let Some(signing) = self.signing_in.as_mut() {
+                        signing.waiting = false; // WHAT: the sign-in box stops its spinner. WHY: the waiting screen takes over
+                    }
+                    self.office.approval = Some(Approval { device, asked: Some(std::time::Instant::now()), said: None }); // WHAT: the waiting screen opens. WHY: §3
+                }
+                Told::Standing(me) => {
+                    if let Some(approval) = self.office.approval.as_mut() {
+                        match me.state.as_str() {
+                            "approved" => {
+                                self.office.approval = None; // WHAT: closed. WHY: approved; what waited carries on by itself
+                                self.status = "This computer is approved. Connecting…".into(); // WHAT: said. WHY: so nobody wonders what happened
+                            }
+                            "refused" => approval.said = Some("An admin said no to this computer. Ask them, then try again.".into()), // WHAT: said. WHY: plain words
+                            "removed" => approval.said = Some("This computer was taken off the office's list. Ask an admin, then try again.".into()), // WHAT: said. WHY: plain words
+                            _ => {} // WHAT: still waiting. WHY: asked again in 5 s
+                        }
+                    }
+                }
+                Told::Computers { list, note } => {
+                    self.office.computers = list; // WHAT: the list, or none for a computer that isn't an admin's. WHY: shown in Studio
+                    if note.is_some() {
+                        self.office.computers_note = note; // WHAT: what was done. WHY: said under the list
+                    }
+                }
                 Told::License { standing, added } => {
                     if added {
                         if let Some(l) = standing.as_deref() {
@@ -591,6 +637,14 @@ impl App {
                     self.standing.busy = None; // WHAT: done. WHY: the spinner stops.
                     self.office.changing_rule = None; // WHAT: the rule picker closed. WHY: the change went.
                     self.status = said; // WHAT: the sentence. WHY: on the status line.
+                }
+                Told::Confirm { base, what, words } => {
+                    if let Some(signing) = self.signing_in.as_mut() {
+                        signing.waiting = false; // WHAT: the spinner stops. WHY: the question is shown instead
+                        signing.confirm = Some((base, what, words)); // WHAT: the question. WHY: shown with its two buttons
+                    } else {
+                        self.error = Some(words); // WHAT: said. WHY: without the sign-in window there is nowhere to confirm; signing in again asks
+                    }
                 }
                 Told::Trouble(message) => {
                     self.standing.busy = None;
@@ -720,6 +774,52 @@ impl App {
     // have not got one, sign in. Nobody types an address unless they want to,
     // and nobody runs anything.
 
+    /// "Waiting for an admin to approve this computer": shown while this
+    /// computer waits, asking the server every 5 s (§3).
+    pub fn approval_window(&mut self, ctx: &egui::Context) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(5); // WHAT: 5 s. WHY: §3
+        let Some(approval) = self.office.approval.as_mut() else { return }; // WHAT: nothing waits. WHY: no window
+        let due = approval.said.is_none() && approval.asked.is_none_or(|at| at.elapsed() >= EVERY); // WHAT: time to ask again, while still waiting. WHY: §3
+        if due {
+            approval.asked = Some(std::time::Instant::now());
+        }
+        let theme = self.chrome.theme;
+        let mut close = false;
+        egui::Window::new("Waiting for approval")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_min_width(380.0);
+                match approval.said.as_ref() {
+                    None => {
+                        ui.horizontal(|ui| {
+                            ui.spinner(); // WHAT: something is happening. WHY: nobody wonders if it froze
+                            ui.label(RichText::new("Waiting for an admin to approve this computer").strong().size(14.0));
+                        });
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("Ask whoever looks after the office server to open Studio, then Office, then Computers, and press Approve. This window closes by itself once they do.").size(11.5)); // WHAT: what to do, in plain words. WHY: for people who aren't technical
+                    }
+                    Some(said) => {
+                        ui.label(RichText::new(said).size(12.0)); // WHAT: refused or removed. WHY: plain words
+                    }
+                }
+                ui.add_space(6.0);
+                ui.label(RichText::new(format!("This computer: {}. Its code: {}", hub::device::machine_name(), hub::device::short_id(&approval.device))).size(12.0)); // WHAT: which computer, and its code. WHY: security review L5: the admin sees the same code beside its name
+                ui.label(RichText::new("Tell the admin this code, so they approve the right computer.").color(theme.faint).size(10.0)); // WHAT: what the code is for. WHY: plain words
+                if ui.button(if approval.said.is_some() { "Close" } else { "Stop waiting" }).clicked() {
+                    close = true; // WHAT: closed. WHY: the person gave up
+                }
+            });
+        if close {
+            self.office.approval = None;
+            self.ask(Ask::StopWaiting); // WHAT: what waited is forgotten. WHY: never done later by surprise
+        } else if due {
+            self.ask(Ask::Standing); // WHAT: asked. WHY: every 5 s
+        }
+        ctx.request_repaint_after(EVERY); // WHAT: drawn again soon. WHY: so the next ask comes on time
+    }
+
     pub fn sign_in_dialog(&mut self, ctx: &egui::Context) {
         let Some(mut signing) = self.signing_in.take() else {
             return;
@@ -731,6 +831,7 @@ impl App {
         let mut look = false;
         let mut host_here = false;
         let mut pick: Option<String> = None;
+        let mut confirmed_now: Option<(String, String)> = None; // WHAT: a warning confirmed this frame. WHY: told to the worker once the window is drawn
 
         egui::Window::new("Connect to a server")
             .collapsible(false)
@@ -866,6 +967,27 @@ impl App {
                     ui.add_space(8.0);
                     ui.colored_label(Color32::from_rgb(235, 120, 120), error);
                 }
+                let mut answered = None; // WHAT: the person's answer to a warning, this frame. WHY: acted on after the window is drawn
+                if let Some((_, _, words)) = &signing.confirm {
+                    ui.add_space(8.0);
+                    ui.colored_label(theme.warn, words); // WHAT: the warning, in full, both short pins in it. WHY: the person decides having read it
+                    ui.horizontal(|ui| {
+                        if ui.button("It's the office's new server: use it").clicked() {
+                            answered = Some(true);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            answered = Some(false);
+                        }
+                    });
+                }
+                if let Some(yes) = answered {
+                    if let Some((base, what, _)) = signing.confirm.take() {
+                        if yes {
+                            confirmed_now = Some((base, what)); // WHAT: kept for this run. WHY: the next connection goes on
+                            signing.error = Some("Confirmed. Press the button below again to connect.".into()); // WHAT: what to do next. WHY: plain words
+                        }
+                    }
+                }
 
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
@@ -915,6 +1037,9 @@ impl App {
                 });
             });
 
+        if let Some((base, what)) = confirmed_now {
+            self.ask(Ask::Confirmed { base, what }); // WHAT: the confirmation, to the worker. WHY: the next connection to that server goes on
+        }
         if let Some(base) = pick {
             signing.base = base;
             signing.found = None;
@@ -1330,6 +1455,7 @@ impl App {
                                 &mut actions,
                             );
                         }
+                        computers_section(ui, theme, &mut self.office, &mut actions); // WHAT: the office's computers, for an admin's computer. WHY: Studio → Office → Computers (§3)
                         password_section(ui, theme, &mut self.office, &mut actions);
                     }
                     Some(project) => {
@@ -1409,8 +1535,16 @@ impl App {
             self.standing.busy = Some("Removing them…".into());
             self.ask(Ask::RemovePerson { id, name });
         }
+        if let Some((id, change, name)) = actions.computer.take() {
+            self.ask(Ask::Computer { id, change, name }); // WHAT: an admin's answer. WHY: sent; the list comes back with it
+        }
         if actions.look_again {
             self.office.last_looked = Some(std::time::Instant::now());
+            let every = if self.office.computers.is_some() { std::time::Duration::from_secs(10) } else { std::time::Duration::from_secs(60) }; // WHAT: an admin's list every 10 s, others once a minute. WHY: a notice when someone is waiting, without asking the server needlessly
+            if self.office.computers_asked.is_none_or(|at| at.elapsed() >= every) {
+                self.office.computers_asked = Some(std::time::Instant::now());
+                self.ask(Ask::Computers); // WHAT: who is waiting. WHY: the notice and the list
+            }
             self.ask(Ask::Projects);
             self.ask(Ask::Chests);
             // And, if a project is open, what is in it -- a set issued again
@@ -2242,6 +2376,10 @@ fn office_section(
                 );
                 ui.add_space(10.0);
             }
+            if !office.parts.is_empty() {
+                parts_section(ui, theme, &office.parts); // WHAT: the Office Server's parts. WHY: one place to see what this office runs
+                ui.add_space(10.0);
+            }
 
             // Join code
             ui.label(RichText::new("Join code").strong().size(12.0));
@@ -2703,6 +2841,125 @@ fn licenses_in(places: &[(std::path::PathBuf, String)]) -> Vec<FoundLicense> {
     found.sort_by(|a, b| b.0.cmp(&a.0));
     found.dedup_by(|a, b| a.1.company == b.1.company);
     found.into_iter().take(3).map(|(_, f)| f).collect()
+}
+
+/// How long ago an RFC 3339 time was, in words: "2 minutes ago".
+fn ago(at: &str) -> String {
+    let Some(then) = hub::device::unix_of(at) else { return "a while ago".into() }; // WHAT: the time, or a vague word. WHY: a time that doesn't read isn't guessed at
+    let seconds = (hub::device::unix_now() - then).max(0); // WHAT: how long since. WHY: in words below
+    match seconds {
+        0..=59 => "just now".into(),
+        60..=119 => "a minute ago".into(),
+        120..=3599 => format!("{} minutes ago", seconds / 60),
+        3600..=7199 => "an hour ago".into(),
+        7200..=86_399 => format!("{} hours ago", seconds / 3600),
+        _ => format!("{} days ago", seconds / 86_400),
+    }
+}
+
+/// The sentence an admin reads for a waiting computer, in §3's words:
+/// who, which computer, the Windows user, which app, when and from where.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn waiting_sentence(c: &hub::device::Info) -> String {
+    let who = if c.display_name.trim().is_empty() { c.os_user.as_str() } else { c.display_name.as_str() }; // WHAT: the person, or the Windows user. WHY: always somebody
+    let from = if c.asked_from.is_empty() { String::new() } else { format!(" from {}", c.asked_from) }; // WHAT: where from, when known. WHY: an admin can tell the office's own computers
+    format!("{who} ({}, signed in to Windows as {}) wants to use {}. Asked {}{from}.", c.machine, c.os_user, hub::device::app_title(&c.app), ago(&c.asked))
+}
+
+/// What the Computers list says beside "Let it use every app".
+pub const CARRIED_OVER_NOTE: &str = "carried over from Citadel, check before widening"; // WHAT: the words. WHY: a computer the Citadel cell carried over was approved by Citadel's pairing, not by an admin here, so it is checked before it is let into every app
+
+/// The note for a computer carried over from Citadel, or none for any other.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn carried_over_note(c: &hub::device::Info) -> Option<&'static str> { // WHAT: the note for one computer. WHY: kept apart from the drawing so it can be tested
+    (c.scope == "citadel").then_some(CARRIED_OVER_NOTE) // WHAT: the note, for a Citadel-scoped computer only. WHY: the server says "citadel" for those and "all" for the rest
+}
+
+/// Studio → Office → Computers: who is waiting, with Approve, Approve as
+/// admin and Refuse; who is in, with Remove and Make or Unmake admin. Shown
+/// only on an admin's computer.
+fn computers_section(ui: &mut egui::Ui, theme: ui::chrome::Theme, office: &mut OfficePanel, actions: &mut PanelActions) {
+    let Some(computers) = office.computers.as_ref() else { return }; // WHAT: not an admin's computer. WHY: nothing to show
+    let waiting: Vec<&hub::device::Info> = computers.iter().filter(|c| c.state == "waiting").collect(); // WHAT: who waits. WHY: first, and the notice
+    let approved: Vec<&hub::device::Info> = computers.iter().filter(|c| c.state == "approved").collect(); // WHAT: who is in. WHY: the second list
+    let away: Vec<&hub::device::Info> = computers.iter().filter(|c| c.state == "refused" || c.state == "removed").collect(); // WHAT: who was turned away or taken off. WHY: only an admin's Approve brings one back
+    let title = if waiting.is_empty() { "Computers".to_string() } else { format!("Computers  ({} waiting)", waiting.len()) }; // WHAT: the heading, with the count. WHY: a notice when someone is waiting
+    ui.add_space(8.0);
+    if !waiting.is_empty() {
+        ui.label(RichText::new(if waiting.len() == 1 { "Someone is waiting for you to approve their computer.".to_string() } else { format!("{} people are waiting for you to approve their computers.", waiting.len()) }).color(theme.warn).strong().size(12.0)); // WHAT: the notice. WHY: §3: admins are told someone is waiting
+    }
+    egui::CollapsingHeader::new(RichText::new(title).color(theme.faint).size(11.0)).id_salt("computers").default_open(!waiting.is_empty()).show(ui, |ui| {
+        for c in &waiting {
+            ui.label(RichText::new(waiting_sentence(c)).size(11.5)); // WHAT: who, which computer, which app, when, from where. WHY: §3's wording
+            ui.label(RichText::new(format!("Its code: {}. It shows the same code on its own screen.", hub::device::short_id(&c.id))).color(theme.faint).size(10.5)); // WHAT: the device id's first digits. WHY: security review L5: the admin matches it with the computer asking
+            let name = if c.display_name.is_empty() { c.machine.clone() } else { c.display_name.clone() }; // WHAT: how the sentence after names it. WHY: plain
+            ui.horizontal(|ui| {
+                if ui.button("Approve").clicked() {
+                    actions.computer = Some((c.id.clone(), ComputerChange::Approve, name.clone())); // WHAT: let in. WHY: the usual answer
+                }
+                if ui.button("Approve as admin").on_hover_text("They can approve other computers too.").clicked() {
+                    actions.computer = Some((c.id.clone(), ComputerChange::ApproveAsAdmin, name.clone())); // WHAT: let in as an admin. WHY: §3
+                }
+                if ui.button("Refuse").clicked() {
+                    actions.computer = Some((c.id.clone(), ComputerChange::Refuse, name.clone())); // WHAT: turned down. WHY: §3
+                }
+            });
+            ui.add_space(6.0);
+        }
+        if waiting.is_empty() {
+            ui.label(RichText::new("Nobody is waiting.").color(theme.faint).size(10.5)); // WHAT: said. WHY: an empty list reads as broken otherwise
+        }
+        ui.add_space(4.0);
+        ui.label(RichText::new("Approved").strong().size(11.5)); // WHAT: the second list. WHY: who can use the office server
+        for c in &approved {
+            let who = if c.display_name.is_empty() { c.os_user.as_str() } else { c.display_name.as_str() }; // WHAT: the person. WHY: named first
+            let name = format!("{who} ({})", c.machine); // WHAT: "Dana (DANA-LAPTOP)". WHY: what an admin recognises
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{name}, {}{}{}  ({})", hub::device::app_title(&c.app), if c.admin { ", admin" } else { "" }, if c.scope == "citadel" { ", LatCon Estimating only" } else { "" }, hub::device::short_id(&c.id))).size(11.0)); // WHAT: who, the app, whether an admin, whether for the estimating program only, and its code. WHY: one line each
+                if let Some(note) = carried_over_note(c) { // WHAT: a computer carried over from Citadel. WHY: only it has the button and the note
+                    if ui.small_button("Let it use every app").on_hover_text("It came over from the old Citadel Server, approved for estimating only.").clicked() { // WHAT: the button that widens it. WHY: as before, now inside the Citadel case
+                        actions.computer = Some((c.id.clone(), ComputerChange::Approve, name.clone())); // WHAT: approved for every app. WHY: security review M1: an admin widens it
+                    }
+                    ui.label(RichText::new(note).color(theme.warn).size(10.5)); // WHAT: "carried over from Citadel, check before widening", beside the button. WHY: an admin knows to check it is one of the office's own before letting it into every app
+                }
+                if ui.small_button("Remove").on_hover_text("This computer has to ask again to come back.").clicked() {
+                    actions.computer = Some((c.id.clone(), ComputerChange::Remove, name.clone())); // WHAT: taken off. WHY: §3
+                }
+                let (label, change) = if c.admin { ("Unmake admin", ComputerChange::UnmakeAdmin) } else { ("Make admin", ComputerChange::MakeAdmin) }; // WHAT: the one that applies. WHY: §3
+                if ui.small_button(label).clicked() {
+                    actions.computer = Some((c.id.clone(), change, name.clone()));
+                }
+            });
+        }
+        if !away.is_empty() {
+            ui.add_space(4.0);
+            ui.label(RichText::new("Turned away or taken off").strong().size(11.5)); // WHAT: the third list. WHY: such a computer can't come back by asking; an admin brings it back here
+            for c in &away {
+                let who = if c.display_name.is_empty() { c.os_user.as_str() } else { c.display_name.as_str() }; // WHAT: the person. WHY: named first
+                let name = format!("{who} ({})", c.machine); // WHAT: "Dana (DANA-LAPTOP)". WHY: what an admin recognises
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{name}, {}, {}  ({})", hub::device::app_title(&c.app), c.state, hub::device::short_id(&c.id))).color(theme.faint).size(11.0)); // WHAT: who, which app, why, its code. WHY: one line each
+                    if ui.small_button("Approve").clicked() {
+                        actions.computer = Some((c.id.clone(), ComputerChange::Approve, name.clone())); // WHAT: let back in. WHY: only an admin can
+                    }
+                });
+            }
+        }
+        if let Some(note) = office.computers_note.as_ref() {
+            ui.label(RichText::new(note).color(theme.faint).size(10.5)); // WHAT: what was just done, or why not. WHY: "Make someone else an admin first" is read here
+        }
+    });
+}
+
+/// Studio → Office → Parts: every part of the Office Server, and how each is.
+fn parts_section(ui: &mut egui::Ui, theme: ui::chrome::Theme, parts: &[hub::OfficePart]) {
+    ui.label(RichText::new("Office Server").strong().size(12.0)); // WHAT: the heading. WHY: names the one server
+    for part in parts {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(&part.title).size(11.0)); // WHAT: the part's name. WHY: View, Excalibur CAD, Archetype, Citadel
+            ui.label(RichText::new(part.line()).color(if part.state == "certificate-changed" { theme.warn } else { theme.faint }).size(10.0)); // WHAT: how it is, in words. WHY: a changed certificate stands out
+        });
+    }
 }
 
 /// Studio → Office → License: what the office has, and the three things an
@@ -3294,6 +3551,56 @@ mod tests {
         write(&dir, "huge.evlicense", &"x".repeat(9 * 1024));
         assert!(licenses_in(&[(dir.clone(), "E:".into())]).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One computer on the list, approved, with the scope the server gave it.
+    fn a_computer(id: &str, scope: &str) -> hub::device::Info { // WHAT: a made-up computer. WHY: the list the test draws
+        hub::device::Info { // WHAT: its fields. WHY: only those the list shows
+            id: id.repeat(64 / id.len()), // WHAT: a 64-digit id. WHY: the shape the server's ids have
+            app: "view".into(), // WHAT: Excalibur View. WHY: any app
+            machine: "SHOP-PC".into(), // WHAT: the computer's name. WHY: shown
+            os_user: "dana".into(), // WHAT: the Windows user. WHY: shown
+            state: "approved".into(), // WHAT: let in. WHY: the list the button is on
+            scope: scope.into(), // WHAT: "citadel" or "all". WHY: the case
+            ..hub::device::Info::default() // WHAT: the rest left empty. WHY: not shown on this list
+        }
+    }
+
+    /// Every piece of text one pass of the Computers section drew.
+    fn texts_drawn(computers: Vec<hub::device::Info>) -> Vec<String> { // WHAT: the section drawn once, its text read back. WHY: what an admin would see
+        fn collect(shape: &egui::Shape, into: &mut Vec<String>) { // WHAT: the text in one shape. WHY: shapes nest
+            match shape { // WHAT: by kind. WHY: only text is wanted
+                egui::Shape::Text(text) => into.push(text.galley.text().to_string()), // WHAT: a piece of text. WHY: what an admin reads
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, into)), // WHAT: shapes inside shapes. WHY: a layout nests them
+                _ => {} // WHAT: anything else. WHY: not text
+            }
+        }
+        let ctx = egui::Context::default(); // WHAT: a window with nothing in it. WHY: the section is drawn as the program draws it
+        let mut office = OfficePanel { computers: Some(computers), ..OfficePanel::default() }; // WHAT: an admin's panel with this list. WHY: the section draws only for an admin
+        let mut actions = PanelActions::default(); // WHAT: nothing pressed. WHY: nothing is clicked
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0))), ..Default::default() }; // WHAT: a wide window. WHY: one row fits on one line
+        let theme = ui::chrome::Theme::dark(); // WHAT: the dark look. WHY: any look draws the same words
+        let output = ctx.run(input, |ctx| { // WHAT: one pass. WHY: enough to lay out and paint the list
+            egui::CentralPanel::default().show(ctx, |panel| computers_section(panel, theme, &mut office, &mut actions)); // WHAT: the section, drawn once. WHY: the shapes it makes are read below
+        });
+        let mut texts = Vec::new(); // WHAT: what was drawn. WHY: searched by the test
+        for clipped in &output.shapes { // WHAT: each shape painted. WHY: in the order it was drawn
+            collect(&clipped.shape, &mut texts); // WHAT: each shape's text. WHY: the same
+        }
+        texts // WHAT: what was drawn, in order. WHY: the test looks for the note after the button
+    }
+
+    #[test]
+    fn a_computer_carried_over_from_citadel_says_so_beside_let_it_use_every_app() { // WHAT: the test. WHY: the note shows beside the button for a Citadel computer only
+        assert_eq!(carried_over_note(&a_computer("c", "citadel")), Some("carried over from Citadel, check before widening")); // WHAT: the note, in these words. WHY: what the admin is to read
+        assert_eq!(carried_over_note(&a_computer("a", "all")), None); // WHAT: none for a computer approved for every app. WHY: nothing to check
+        assert_eq!(carried_over_note(&a_computer("b", "")), None); // WHAT: none from an older server that sends no scope. WHY: only "citadel" is carried over
+        let waiting = hub::device::Info { state: "waiting".into(), ..a_computer("w", "all") }; // WHAT: someone waiting too. WHY: the section opens by itself only then, as it does for an admin who has someone to approve
+        let drawn = texts_drawn(vec![waiting.clone(), a_computer("c", "citadel")]); // WHAT: the list with a Citadel computer on it. WHY: the case
+        let button = drawn.iter().position(|t| t == "Let it use every app").expect("the button is drawn"); // WHAT: the button. WHY: the note goes beside it
+        assert_eq!(drawn.get(button + 1).map(String::as_str), Some(CARRIED_OVER_NOTE), "the note comes right after the button: {drawn:?}"); // WHAT: the note, next. WHY: beside the button it is about
+        let plain = texts_drawn(vec![waiting, a_computer("a", "all")]); // WHAT: the list with only ordinary computers. WHY: the other case
+        assert!(!plain.iter().any(|t| t == CARRIED_OVER_NOTE || t == "Let it use every app"), "no note or button: {plain:?}"); // WHAT: neither shown. WHY: nothing was carried over
     }
 }
 

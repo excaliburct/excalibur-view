@@ -695,11 +695,24 @@ def licenses_here(folder):
 
 
 def held_by(folder, company):
+    """(the licence this company holds, None), or (None, why) when a person has
+    to say which. A licence spelled exactly as given wins; only without one is
+    a loose match ("Acme Builders" and "Acme Builders, LLC") looked for, and
+    more than one of those is never guessed between."""
+    here = licenses_here(folder)  # WHAT: every licence on this PC, newest first. WHY: the newest copy of each is the one held
+    for lic in here:
+        if lic["company"] == company:
+            return lic, None  # WHAT: spelled exactly as given. WHY: the one meant, whatever looks like it
     same = simple(company)
-    for lic in licenses_here(folder):
+    loose = {}
+    for lic in here:
         if simple(lic["company"]) == same:
-            return lic
-    return None
+            loose.setdefault(lic["id"], lic)  # WHAT: each licence once, its newest copy. WHY: renewals of one licence are not two companies
+    if len(loose) > 1:
+        named = "; ".join(f"'{l['company']}' ({l['id']})" for l in loose.values())  # WHAT: every look-alike, by name and id. WHY: so the person can choose
+        return None, (f"'{company}' looks like more than one licence here: {named}. Finish it with --company "
+                      "and the name exactly as the right licence spells it, or issue it by hand.")
+    return next(iter(loose.values()), None), None  # WHAT: the one loose match, or none. WHY: a first purchase has no licence yet
 
 
 def simple(name):
@@ -714,7 +727,15 @@ def next_license(folder, sale, company, key_path):
     """What this sale means for that company's license: a first one, more
     users on the one they have, or another year of updates."""
     today = datetime.date.today()
-    held = held_by(folder, company)
+    if not simple(company):  # WHAT: a name with nothing left once "Inc", "LLC" and punctuation are taken out. WHY: it would match any licence whose name is all noise too
+        return None, (f"'{company}' is not a company name a licence can be matched on. "
+                      "Finish it with --company and the company's real name.")
+    held, why = held_by(folder, company)
+    if why:
+        return None, why  # WHAT: several look-alikes. WHY: never guessed between
+    if held and held["company"] != company:  # WHAT: matched loosely, spelled differently. WHY: "Acme Builders" might be another company than "Acme Builders, LLC"; a person decides
+        return None, (f"the order says '{company}' and the licence held says '{held['company']}'. If they are the same "
+                      f"company, finish it with --company \"{held['company']}\"; if not, issue theirs by hand.")
     if held and held.get("updates_through") == publish.FOREVER:
         return None, "that company's license already covers every user and every update, for good. Nothing to issue."
     edition, renewing = BUYING.get(sale["kind"], ("office", False))
@@ -743,8 +764,12 @@ def next_license(folder, sale, company, key_path):
         through = publish.a_year_on(from_day)
         note = "Updates renewed"
     lic = publish.make_license(
-        key_path, company, edition=edition, users=users, updates_through=through, note=note,
+        # WHAT: the company exactly as the licence already held spells it, when there is one. WHY: the office server takes a renewal by
+        # itself only when id and company both match (license::is_a_renewal); "Acme Builders" on a licence held as "Acme Builders, LLC"
+        # would be paid for and never arrive. The cloud service does the same (licensing/src/index.js).
+        key_path, held["company"] if held else company, edition=edition, users=users, updates_through=through, note=note,
         id=held["id"] if held else None,
+        modules=held.get("modules") if held else None,  # WHAT: the Office Server parts the held licence has. WHY: more seats must not switch CAD or Citadel off
     )
     return lic, None
 

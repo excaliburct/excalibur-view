@@ -349,11 +349,11 @@ fn take(
                     release.platform,
                     release.published,
                     release.notes,
-                    release.bytes as i64,
+                    crate::store::int::signed(release.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     release.digest.to_lowercase(),
                     release.signature,
                     release.key,
-                    release.minimum_api_version as i64
+                    i64::from(release.minimum_api_version) // WHAT: widened, never cut. WHY: every one of these fits a 64-bit number
                 ],
             )?;
             Ok(())
@@ -383,8 +383,7 @@ fn already_have(server: &Server, release: &Release) -> bool {
                 |r| r.get::<_, i64>(0),
             )?)
         })
-        .map(|n| n > 0)
-        .unwrap_or(false)
+        .is_ok_and(|n| n > 0) // WHAT: whether any are held, false when it can't be read. WHY: as before
 }
 
 /// The newest viewer this server already holds for one platform, or "0" when

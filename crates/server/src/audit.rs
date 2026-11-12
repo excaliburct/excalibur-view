@@ -21,6 +21,8 @@
 //! The log lives on the office's own server with everything else. It is never
 //! sent anywhere, sealed or not.
 
+use std::fmt::Write as _; // WHAT: write! into a String. WHY: text is written straight in, with no string made only to be copied
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -81,52 +83,74 @@ pub mod action {
     pub const MOVED: &str = "moved to another folder"; // WHAT: a set or a file moved. WHY: moving one can change who sees it.
 }
 
+/// WHAT: the longest any one field of an entry is kept. WHY: a field is
+/// often what a stranger typed; uncapped, a megabyte "email" a second filled
+/// the disk and an export of them ran the server out of memory (audit, 2026-11-11).
+pub const LONGEST_FIELD: usize = 512;
+
+/// WHAT: `text` cut to `LONGEST_FIELD` characters, marked when cut. WHY: as above.
+fn clip(text: &str) -> String {
+    if text.chars().count() <= LONGEST_FIELD {
+        return text.to_string(); // WHAT: as it was. WHY: the usual case
+    }
+    let mut cut: String = text.chars().take(LONGEST_FIELD).collect(); // WHAT: the first characters. WHY: enough to see what it was
+    cut.push('…'); // WHAT: marked. WHY: whoever reads it knows there was more
+    cut
+}
+
 impl Entry {
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn new(action: &str, email: &str) -> Entry {
         Entry {
             at: now(),
             person: None,
-            email: email.to_string(),
-            action: action.to_string(),
+            email: clip(email), // WHAT: capped. WHY: often a stranger's typing
+            action: clip(action),
             subject: String::new(),
             detail: String::new(),
             address: String::new(),
         }
     }
 
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn by(mut self, person: &str) -> Entry {
-        self.person = Some(person.to_string());
+        self.person = Some(clip(person)); // WHAT: capped. WHY: as every field
         self
     }
 
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn about(mut self, subject: impl Into<String>) -> Entry {
-        self.subject = subject.into();
+        self.subject = clip(&subject.into()); // WHAT: capped. WHY: as every field
         self
     }
 
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn saying(mut self, detail: impl Into<String>) -> Entry {
-        self.detail = detail.into();
+        self.detail = clip(&detail.into()); // WHAT: capped. WHY: as every field
         self
     }
 
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn from(mut self, address: impl Into<String>) -> Entry {
-        self.address = address.into();
+        self.address = clip(&address.into()); // WHAT: capped. WHY: as every field
         self
     }
 
     /// One line, the way it reads in an export.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn line(&self) -> String {
         let mut said = format!("{}  {}  {}", self.at, self.email, self.action);
         if !self.subject.is_empty() {
-            said.push_str(&format!(": {}", self.subject));
+            let _ = write!(said, ": {}", self.subject); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         if !self.detail.is_empty() {
-            said.push_str(&format!(" ({})", self.detail));
+            let _ = write!(said, " ({})", self.detail); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         said
     }
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn now() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
@@ -134,18 +158,19 @@ pub fn now() -> String {
 }
 
 /// The whole log as a CSV an auditor can open, quoted properly.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn as_csv(entries: &[Entry]) -> String {
     let mut out = String::from("when,who,action,subject,detail,from\n");
     for e in entries {
-        out.push_str(&format!(
-            "{},{},{},{},{},{}\n",
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "{},{},{},{},{},{}", // WHAT: six fields, comma-separated. WHY: one CSV line
             field(&e.at),
             field(&e.email),
             field(&e.action),
             field(&e.subject),
             field(&e.detail),
             field(&e.address)
-        ));
+        );
     }
     out
 }
@@ -171,7 +196,7 @@ mod tests {
         let row = csv.lines().nth(1).unwrap(); // WHAT: the entry's line. WHY: checked.
         assert!(row.contains(",\"'=HYPERLINK("), "the formula is text: {row}");
         for start in ["+1", "-1", "@SUM(A1)", "\tx"] {
-            assert!(field(start).starts_with("'") || field(start).starts_with("\"'"), "{start:?} -> {}", field(start));
+            assert!(field(start).starts_with('\'') || field(start).starts_with("\"'"), "{start:?} -> {}", field(start)); // WHAT: every risky start made text. WHY: a spreadsheet never runs it as a formula
         }
         assert_eq!(field("pat@acme.test"), "pat@acme.test", "an ordinary cell is left alone");
     }
@@ -215,6 +240,20 @@ mod tests {
     fn the_time_is_utc_and_sorts_as_text() {
         let e = Entry::new(action::SIGNED_IN, "pat@acme.test");
         assert!(e.at.ends_with('Z') || e.at.contains('+'), "{}", e.at);
-        assert_eq!(e.at.len() >= 20, true, "{}", e.at);
+        assert!(e.at.len() >= 20, "{}", e.at); // WHAT: a full time, to the second. WHY: sorts as text
+    }
+}
+
+
+#[cfg(test)]
+mod clipped {
+    #[test]
+    fn every_field_of_an_entry_is_capped() {
+        let huge = "x".repeat(1_000_000); // WHAT: a megabyte of text. WHY: what a stranger sent as an email
+        let entry = super::Entry::new("sign-in refused", &huge).about(huge.clone()).saying(huge.clone()).from(huge.clone()).by(&huge);
+        for field in [&entry.email, &entry.subject, &entry.detail, &entry.address, entry.person.as_ref().unwrap()] {
+            assert!(field.chars().count() <= super::LONGEST_FIELD + 1, "{}", field.len()); // WHAT: capped, with its mark. WHY: the disk and the export stay bounded
+        }
+        assert_eq!(super::Entry::new("a", "sam@example.com").email, "sam@example.com"); // WHAT: an ordinary one untouched. WHY: nothing lost
     }
 }

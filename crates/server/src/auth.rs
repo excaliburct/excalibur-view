@@ -26,6 +26,9 @@ pub const SESSION_DAYS: i64 = 30;
 /// request.
 const SLIDE_AFTER_HOURS: i64 = 24;
 
+/// # Errors
+///
+/// Fails when the hashing itself fails, which only a broken system does.
 pub fn hash_password(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
@@ -34,6 +37,7 @@ pub fn hash_password(password: &str) -> Result<String> {
         .map_err(|e| anyhow!("hashing that password: {e}"))
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn password_matches(password: &str, stored: &str) -> bool {
     let Ok(parsed) = PasswordHash::new(stored) else {
         return false;
@@ -41,6 +45,41 @@ pub fn password_matches(password: &str, stored: &str) -> bool {
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok()
+}
+
+/// WHAT: the password hashes and checks running at once. WHY: each is slow and
+/// heavy on purpose; unlimited, a crowd of addresses could keep every one of the
+/// server's threads hashing and stall every request (audit, 2026-11-11).
+fn hashing() -> std::sync::Arc<tokio::sync::Semaphore> {
+    static TURNS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new(); // WHAT: made once. WHY: one limit for the whole server
+    TURNS.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4))).clone() // WHAT: four at a time, shared. WHY: an owned turn can go into the blocking job with the work
+}
+
+/// `password_matches`, waited for in turn and run off the server's async
+/// threads.
+pub async fn password_matches_in_turn(password: &str, stored: &str) -> bool {
+    let Ok(turn) = hashing().acquire_owned().await else {
+        return false; // WHAT: no turn (the limit was closed). WHY: refusing is the safe answer
+    };
+    let (password, stored) = (password.to_string(), stored.to_string()); // WHAT: owned copies. WHY: moved to the blocking thread
+    tokio::task::spawn_blocking(move || {
+        let _turn = turn; // WHAT: the turn held by the work itself. WHY: a caller who hangs up mid-check no longer frees a turn while the hash still runs (audit re-check)
+        password_matches(&password, &stored)
+    }).await.unwrap_or(false) // WHAT: checked on a blocking thread. WHY: never holds an async thread; a failed task is a refusal
+}
+
+/// `hash_password`, waited for in turn and run off the server's async threads.
+///
+/// # Errors
+///
+/// Fails as `hash_password` does, or when the work could not be run.
+pub async fn hash_password_in_turn(password: &str) -> Result<String> {
+    let turn = hashing().acquire_owned().await.map_err(|e| anyhow!("waiting to hash that password: {e}"))?; // WHAT: a turn. WHY: as above
+    let password = password.to_string(); // WHAT: an owned copy. WHY: moved to the blocking thread
+    tokio::task::spawn_blocking(move || {
+        let _turn = turn; // WHAT: held by the work. WHY: as above
+        hash_password(&password)
+    }).await.map_err(|e| anyhow!("hashing that password: {e}"))? // WHAT: hashed on a blocking thread. WHY: as above
 }
 
 /// A stored password nobody has, checked against when an account does not
@@ -58,6 +97,7 @@ pub fn no_such_account() -> &'static str {
 ///
 /// They are not the same. The server keeps only the hash, so somebody who
 /// reads the database cannot then act as anybody in it.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn new_token() -> (String, String) {
     let mut bytes = [0u8; 32];
     rand::Rng::fill(&mut rand::thread_rng(), &mut bytes);
@@ -66,6 +106,7 @@ pub fn new_token() -> (String, String) {
     (token, stored)
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn token_hash(token: &str) -> String {
     hex(&Sha256::digest(token.as_bytes()))
 }
@@ -93,12 +134,14 @@ pub struct KeyUse {
 
 impl Who {
     /// Whether this request came with a key of `purpose`.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn is_key(&self, purpose: &str) -> bool {
         self.key.as_ref().is_some_and(|k| k.purpose == purpose) // WHAT: true only for a key made for that purpose. WHY: a signed-in person is never mistaken for a key.
     }
 }
 
 impl Who {
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn as_user(&self) -> hub::User {
         hub::User {
             id: self.id.clone(),
@@ -109,6 +152,7 @@ impl Who {
     }
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn role_from(text: &str) -> Role {
     match text {
         "admin" => Role::Admin,
@@ -117,14 +161,39 @@ pub fn role_from(text: &str) -> Role {
     }
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn role_name(role: Role) -> &'static str {
     role.word()
 }
 
 /// Finds who a token belongs to, if it is still good — and, since the token
 /// was just used, keeps it alive a while longer.
+///
+/// # Errors
+///
+/// Fails when the database can't be read or written.
 pub fn whose(db: &Connection, token: &str, now: &str) -> Result<Option<Who>> {
     let hash = token_hash(token);
+    let Some((who, expires)) = whose_and_when(db, &hash, now)? else {
+        return Ok(None);
+    };
+    keep_alive(db, &hash, &expires, now); // WHAT: the session lengthened if it is due. WHY: a failure to write never signs anybody out, so there is nothing to pass on
+    Ok(Some(who))
+}
+
+/// [`whose`], leaving the session exactly as it was: never kept alive. For
+/// doors open to callers that can't sign (the update routes).
+///
+/// # Errors
+///
+/// When the database can't be read.
+pub fn whose_still(db: &Connection, token: &str, now: &str) -> Result<Option<Who>> {
+    Ok(whose_and_when(db, &token_hash(token), now)?.map(|(who, _)| who)) // WHAT: who, and nothing written. WHY: security review H2e
+}
+
+/// The person a session's digest belongs to, and when it ends, if it is
+/// still good.
+fn whose_and_when(db: &Connection, hash: &str, now: &str) -> Result<Option<(Who, String)>> {
     let found = db
         .query_row(
             "SELECT people.id, people.name, people.email, people.role, sessions.expires
@@ -145,11 +214,7 @@ pub fn whose(db: &Connection, token: &str, now: &str) -> Result<Option<Who>> {
             },
         )
         .optional()?;
-    let Some((who, expires)) = found else {
-        return Ok(None);
-    };
-    keep_alive(db, &hash, &expires, now)?;
-    Ok(Some(who))
+    Ok(found) // WHAT: the person and the session's end. WHY: the caller decides whether to keep it alive
 }
 
 /// Pushes a session's expiry back out to the full span, now that it has been
@@ -159,16 +224,16 @@ pub fn whose(db: &Connection, token: &str, now: &str) -> Result<Option<Who>> {
 /// A failure to write is not a failure to authenticate: the person is who
 /// they say they are either way, and a read-only moment (a locked database, a
 /// disk that has filled) should not sign the office out.
-fn keep_alive(db: &Connection, hash: &str, expires: &str, now: &str) -> Result<()> {
+fn keep_alive(db: &Connection, hash: &str, expires: &str, now: &str) { // WHAT: nothing handed back. WHY: it never failed; every trouble is logged and let go, as the doc says
     let (Some(now_at), Some(expires_at)) = (parse_time(now), parse_time(expires)) else {
-        return Ok(());
+        return; // WHAT: a time that can't be read leaves it alone. WHY: as before
     };
     let wanted = now_at + time::Duration::days(SESSION_DAYS);
     if wanted - expires_at < time::Duration::hours(SLIDE_AFTER_HOURS) {
-        return Ok(());
+        return; // WHAT: not due yet. WHY: as before
     }
     let Ok(text) = wanted.format(&time::format_description::well_known::Rfc3339) else {
-        return Ok(());
+        return; // WHAT: a time that can't be written leaves it alone. WHY: as before
     };
     if let Err(e) = db.execute(
         "UPDATE sessions SET expires = ?1 WHERE token = ?2 AND expires < ?1",
@@ -176,7 +241,6 @@ fn keep_alive(db: &Connection, hash: &str, expires: &str, now: &str) -> Result<(
     ) {
         tracing::warn!("a session could not be kept alive: {e}");
     }
-    Ok(())
 }
 
 fn parse_time(text: &str) -> Option<time::OffsetDateTime> {
@@ -187,7 +251,7 @@ fn parse_time(text: &str) -> Option<time::OffsetDateTime> {
 pub mod purpose {
     /// An assistant: the MCP endpoint and nothing else, and that read-only.
     pub const ASSISTANT: &str = "assistant";
-    /// Another system — FabWire — using the API as the person who made it.
+    /// Another system — `FabWire` — using the API as the person who made it.
     /// It never carries an administrator's power, even when an administrator
     /// made it: running the server takes a signed-in administrator.
     pub const INTEGRATION: &str = "integration";
@@ -207,6 +271,7 @@ pub const LONGEST_KEY_DAYS: u32 = 3650; // WHAT: the cap on a key's lifetime. WH
 pub const KEY_PREFIX: &str = "hvk_";
 
 /// A new key, and the digest that is kept of it.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn fresh_key() -> (String, String) {
     let mut bytes = [0u8; 24];
     rand::Rng::fill(&mut rand::thread_rng(), &mut bytes);
@@ -219,6 +284,10 @@ pub fn fresh_key() -> (String, String) {
 ///
 /// A `sync` key acts as its maker with at most an estimator's role: it may
 /// change what it was made to change and never what an administrator could.
+///
+/// # Errors
+///
+/// Fails when the database can't be read or written.
 pub fn whose_key(db: &Connection, key: &str, purposes: &[&str], now: &str) -> Result<Option<Who>> {
     let digest = token_hash(key);
     let found: Option<(Who, String, String)> = db
@@ -285,6 +354,10 @@ pub struct KeyFound {
 /// nothing is written and nobody is signed in by asking. None when there is
 /// no such key, and also when it has run out or its end cannot be read, so
 /// an expired key is answered exactly like one that does not exist.
+///
+/// # Errors
+///
+/// Fails when the database can't be read.
 pub fn purpose_of(db: &Connection, key: &str, now: &str) -> Result<Option<KeyFound>> {
     let found: Option<(KeyFound, Option<String>, Role)> = db
         .query_row(
@@ -310,6 +383,7 @@ pub fn purpose_of(db: &Connection, key: &str, now: &str) -> Result<Option<KeyFou
 }
 
 /// The moment `days` from `now`, written the way every other time here is.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn days_from(now: &str, days: u32) -> Option<String> {
     let start = parse_time(now)?; // WHAT: now, read back as a time. WHY: the end is counted from it.
     let end = start + time::Duration::days(i64::from(days)); // WHAT: that many whole days later. WHY: "30 days" means the same instant thirty days on.
@@ -490,6 +564,7 @@ const WORDS: &[&str] = &[
 /// thousand million million guesses; it is not a password hash's worth of
 /// strength and is not meant to be, because it is the thing that decides who
 /// may *ask* for an account rather than the thing that protects one.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn readable_secret() -> String {
     let mut rng = rand::thread_rng();
     let mut out = Vec::new();
@@ -502,6 +577,7 @@ pub fn readable_secret() -> String {
 
 /// Two of those compared without letting the time taken say how much of one
 /// was right, and without caring how somebody typed the spaces or the case.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn secret_matches(typed: &str, stored: &str) -> bool {
     fn tidy(s: &str) -> String {
         s.trim().to_lowercase().replace([' ', '_'], "-")

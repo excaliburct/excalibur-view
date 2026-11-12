@@ -55,6 +55,7 @@ pub const CLOUDFLARED_VERSION: &str = "2026.9.1";
 /// of this server, so nothing would ever run it. When there is one, the
 /// download for it is a `.tgz` and has to be unpacked before it is hashed,
 /// which is why it cannot simply be pasted in beside the other two.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn expected_digest() -> &'static str {
     if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         "2837888cc0f5d58f15b6dc478376de90b4d3ba5241c7947455d1e0a0df429712"
@@ -103,6 +104,7 @@ pub enum State {
 
 impl State {
     /// One line for the panel.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn in_words(&self) -> String {
         match self {
             State::Off => "Off. Seats find this server on the shop network only.".into(),
@@ -147,6 +149,7 @@ impl std::fmt::Debug for Tunnel {
 
 impl Tunnel {
     /// What to show, without starting or stopping anything.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn state_now(&self) -> State {
         if hub::sealed::is_sealed() {
             return State::Sealed;
@@ -180,10 +183,11 @@ impl Tunnel {
     /// False once somebody has turned it off, which is how the restart loop
     /// knows to stop rather than fighting them.
     fn wanted(&self) -> bool {
-        self.inner.lock().map(|i| i.wanted).unwrap_or(false)
+        self.inner.lock().is_ok_and(|i| i.wanted) // WHAT: whether it is wanted, false when the lock is poisoned. WHY: the restart loop stops rather than fight
     }
 
     /// True when a connector of ours is running right now.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn running(&self) -> bool {
         let Ok(mut inner) = self.inner.lock() else {
             return false;
@@ -298,6 +302,7 @@ fn want_matches(connector: &Path) -> Option<()> {
 /// How the connector is started: its token handed over in its environment,
 /// as `TUNNEL_TOKEN`, never on its command line, where anybody on the
 /// computer who can list programs could read it.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn connector_command(connector: &Path, token: &str) -> std::process::Command {
     let mut command = std::process::Command::new(connector); // WHAT: the connector. WHY: run as a child of the server.
     command
@@ -317,7 +322,7 @@ pub fn connector_command(connector: &Path, token: &str) -> std::process::Command
 /// remote access works and finds out otherwise in a truck has been failed
 /// twice.
 fn reachable(hostname: &str) -> Result<(), String> {
-    let url = format!("https://{hostname}/health");
+    let url = format!("https://{hostname}{}/health", hub::API_ROOT); // WHAT: the real health route. WHY: /health has never existed, so the check always said unreachable
     hub::web::outbound("Checking the tunnel answers", &url)?;
     let agent = hub::web::agent()
         .timeout(std::time::Duration::from_secs(20))
@@ -359,6 +364,10 @@ fn download(url: &str) -> Result<Vec<u8>, String> {
 /// somebody misunderstanding the box rather than an attack, and saying so at
 /// the point of typing is worth more than a connector that starts and never
 /// works.
+///
+/// # Errors
+///
+/// A sentence saying what is wrong with what was typed.
 pub fn a_hostname(typed: &str) -> Result<String, String> {
     let typed = typed.trim().trim_end_matches('.').to_ascii_lowercase();
     if typed.is_empty() {
@@ -395,6 +404,10 @@ pub fn a_hostname(typed: &str) -> Result<String, String> {
 /// a token that would have worked is worse than passing one that will not.
 /// What this catches is the common mistake, which is pasting the whole
 /// `cloudflared service install <token>` command line.
+///
+/// # Errors
+///
+/// A sentence saying what is wrong with what was typed.
 pub fn a_token(typed: &str) -> Result<String, String> {
     let typed = typed.trim();
     if typed.is_empty() {
@@ -414,6 +427,7 @@ pub fn a_token(typed: &str) -> Result<String, String> {
 }
 
 /// Where the connector is kept, beside the server's own data.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn connector_path(data: &Path) -> PathBuf {
     let name = if cfg!(target_os = "windows") {
         "cloudflared.exe"
@@ -430,6 +444,10 @@ pub fn connector_path(data: &Path) -> PathBuf {
 /// exactly the thing that has to be checked, and a build with no digest for
 /// its own platform does not fetch at all. Better no remote access than a
 /// program nobody verified.
+///
+/// # Errors
+///
+/// A sentence saying why, when it can't be fetched or its digest is wrong.
 pub fn fetch_connector(data: &Path, get: impl Fn(&str) -> Result<Vec<u8>, String>) -> Result<PathBuf, String> {
     let want = expected_digest();
     if want.is_empty() {
@@ -476,7 +494,7 @@ fn digest_of(path: &Path) -> Option<String> {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    crate::store::hex(bytes) // WHAT: the store's hex writer. WHY: one way of writing hex in the server
 }
 
 /// What is stored, if anything.
@@ -490,6 +508,10 @@ pub fn held(store: &crate::store::Store) -> Option<(String, String)> {
 }
 
 /// Keeps the token and hostname for next time.
+///
+/// # Errors
+///
+/// A sentence saying why, when it can't be kept.
 pub fn remember(store: &crate::store::Store, token: &str, hostname: &str) -> Result<(), String> {
     store.set_setting(TOKEN, token).map_err(|e| e.to_string())?;
     store.set_setting(HOSTNAME, hostname).map_err(|e| e.to_string())?;
@@ -497,6 +519,10 @@ pub fn remember(store: &crate::store::Store, token: &str, hostname: &str) -> Res
 }
 
 /// Forgets it, which is what turning it off means.
+///
+/// # Errors
+///
+/// A sentence saying why, when it can't be forgotten.
 pub fn forget(store: &crate::store::Store) -> Result<(), String> {
     store.set_setting(TOKEN, "").map_err(|e| e.to_string())?;
     store.set_setting(HOSTNAME, "").map_err(|e| e.to_string())?;
@@ -679,7 +705,7 @@ mod tests {
             State::Trouble { why: "it would not start".into() },
         ] {
             let said = state.in_words();
-            assert!(!said.is_empty());
+            assert_ne!(said, ""); // WHAT: it says something. WHY: a failure shows what
             assert!(said.len() > 10, "{state:?} says too little: {said:?}");
         }
     }

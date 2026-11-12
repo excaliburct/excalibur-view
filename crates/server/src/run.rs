@@ -28,6 +28,7 @@ impl Serving {
     /// The address to hand to somebody at another desk. Never `0.0.0.0`, which
     /// means "every address on this machine" to the machine and nothing at all
     /// to anybody typing it.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn url(&self) -> String {
         if self.address.ip().is_unspecified() {
             match local_address() {
@@ -45,6 +46,10 @@ impl Serving {
 /// `ready` is called once, as soon as it is listening, with where it landed.
 /// That is how the program that started it knows what address to show somebody
 /// without guessing or racing it.
+///
+/// # Errors
+///
+/// Fails when the address can't be listened on or serving stops with an error.
 pub async fn serve(
     config: Config,
     stop: impl std::future::Future<Output = ()> + Send + 'static,
@@ -65,8 +70,21 @@ pub async fn serve(
         .await
         .with_context(|| format!("listening on {}", config.listen))?;
     let address = listener.local_addr().unwrap_or(config.listen);
+    let https_only = match &config.https_only {
+        Ok(on) => *on,
+        Err(v) => anyhow::bail!("HYPERVIEW_HTTPS_ONLY is {v:?}; it takes on or off"), // WHAT: refuse to start. WHY: a typo in a security switch is found now, not by a seat that was never turned away
+    };
+    if https_only && !config.tls {
+        anyhow::bail!("HYPERVIEW_HTTPS_ONLY=on needs HTTPS, but HYPERVIEW_TLS is off; turn one of them back"); // WHAT: refuse to start. WHY: HTTPS-only with no HTTPS would turn every seat away
+    }
 
+    let secure = if config.tls {
+        Some(secure_settings(&config.data, address)?) // WHAT: the certificate and TLS settings, before anything is served. WHY: a server that can't keep its certificate private doesn't start half-secure
+    } else {
+        None
+    };
     let server = Arc::new(Server::new(store, config));
+    let secure = secure.map(|(settings, pin)| secured(&server, address.port(), pin, settings)); // WHAT: the port and pin noted, the TLS settings kept. WHY: served with below
     let claimed = !server.store.is_empty().unwrap_or(false);
     let name = api::installation_name(&server);
 
@@ -93,9 +111,7 @@ pub async fn serve(
         .name("hyperview-announce".into())
         .spawn(move || {
             hub::discover::answer_for(|asker| {
-                let host = hub::discover::facing(asker.ip())
-                    .map(|ip| ip.to_string())
-                    .unwrap_or_else(|| "localhost".into());
+                let host = hub::discover::facing(asker.ip()).map_or_else(|| "localhost".into(), |ip| ip.to_string()); // WHAT: the address this computer faces the asker on, else localhost. WHY: the answer it is told to use
                 hub::discover::Answer {
                     name: api::installation_name(&announcing),
                     url: format!("http://{host}:{port}"),
@@ -106,7 +122,7 @@ pub async fn serve(
                     ready: !announcing.store.is_empty().unwrap_or(false),
                     id: id.clone(),
                 }
-            })
+            });
         })
         .ok();
 
@@ -118,13 +134,30 @@ pub async fn serve(
     if server.config.check_for_updates {
         tokio::spawn(crate::updates::keep_up_to_date(Arc::clone(&server)));
     }
+    tokio::spawn(crate::citadel::watch(Arc::clone(&server))); // WHAT: looks at the Citadel cell's port every five minutes. WHY: only while the licence switches the citadel part on; its version and pin
+    crate::cell::start(&server); // WHAT: the Citadel cell started and watched, when the licence lists it and its program is here. WHY: Citadel runs inside the Office Server (docs/OFFICE-ENROLLMENT.md §6a)
     if server.config.offsite_target.is_some() {
         if let Some(work) = server.config.offsite_work.as_deref() { crate::offsite::lock_work(std::path::Path::new(work)); } // WHAT: the work folder made the system's, administrators' and this server's only (Windows). WHY: it holds the programs run on the data and the bucket's key.
         tokio::spawn(crate::offsite::nightly(Arc::clone(&server))); // WHAT: tonight's off-site backup, once a night. WHY: off until HYPERVIEW_OFFSITE_TARGET is set.
     }
 
-    let app = api::router(server).layer(tower_http::trace::TraceLayer::new_for_http());
+    let app = api::router(server)
+        .layer(axum::middleware::map_request(|request: axum::extract::Request| async move {
+            request.map(|body| axum::body::Body::new(tower_http::timeout::TimeoutBody::new(crate::tls::BODY_IDLE, body))) // WHAT: every request body with an idle limit. WHY: a body that stops arriving gives its connection back
+        }))
+        .layer(tower_http::trace::TraceLayer::new_for_http());
     ready(&serving);
+    if let Some(settings) = secure {
+        if https_only {
+            tracing::info!("{name} is serving the Excalibur View API on {}/api/v1, HTTPS only (plain HTTP from this machine alone)", serving.url());
+        } else {
+            tracing::info!("{name} is serving the Excalibur View API on {}/api/v1, HTTPS and plain HTTP on the one port", serving.url());
+        }
+        let plain = if https_only { crate::tls::Plain::ThisMachineOnly } else { crate::tls::Plain::Everyone }; // WHAT: who may still use plain HTTP. WHY: the switch above
+        crate::tls::serve(listener, settings, app, stop, plain).await; // WHAT: HTTPS and plain HTTP on the API's port. WHY: an update needs no new firewall rule or tunnel rule
+        tracing::info!("stopped cleanly");
+        return Ok(());
+    }
 
     tracing::info!("{name} is serving the Excalibur View API on {}/api/v1", serving.url());
     // With connect info, so the presence ledger can say which machine a seat
@@ -141,9 +174,28 @@ pub async fn serve(
     Ok(())
 }
 
+/// Notes that HTTPS answers on `port` with the certificate whose pin is
+/// `pin`, and hands back the TLS settings to serve with.
+fn secured(server: &Server, port: u16, pin: String, settings: Arc<rustls::ServerConfig>) -> Arc<rustls::ServerConfig> {
+    let _ = server.secure_port.set(port); // WHAT: HTTPS answers on the API's own port. WHY: /health offers it; a seat moves there
+    let _ = server.pin.set(pin); // WHAT: the certificate's pin. WHY: device requests are bound to it (`crate::devices`)
+    settings
+}
+
+/// The TLS settings, with the certificate made the first time. Its pin goes
+/// in the log so a person can compare it with a seat's.
+fn secure_settings(data: &std::path::Path, at: SocketAddr) -> Result<(Arc<rustls::ServerConfig>, String)> {
+    let (cert, key) = crate::tls::load_or_make(data).map_err(anyhow::Error::msg)?; // WHAT: the server's own certificate. WHY: made once, kept after
+    let config = crate::tls::server_config(&cert, &key).map_err(anyhow::Error::msg)?; // WHAT: the TLS settings. WHY: a damaged pair stops the start, saying so
+    let pin = crate::tls::pin(&cert).map_err(anyhow::Error::msg)?; // WHAT: its pin. WHY: logged for a person to compare
+    tracing::info!("HTTPS on {at}; certificate pin {} (View); fingerprint {} (Excalibur CAD)", hub::pinned::short(&pin), crate::tls::fingerprint(&cert).unwrap_or_default()); // WHAT: said once at start, both ways the programs show it. WHY: a person compares what their program shows with this
+    Ok((config, pin)) // WHAT: the settings and the pin. WHY: the pin binds device requests to this server
+}
+
 /// This machine's address on the network it is actually on. Asked of the
 /// operating system rather than guessed from a list of interfaces, because a
 /// shop machine has four of those and only one of them is the answer.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn local_address() -> Option<std::net::IpAddr> {
     // Nothing is sent: connecting a UDP socket only picks a route.
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
@@ -169,8 +221,8 @@ pub async fn on_a_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = interrupt => {},
-        _ = terminate => {},
+        () = interrupt => {}, // WHAT: Ctrl+C. WHY: stops the server
+        () = terminate => {}, // WHAT: the service being stopped. WHY: likewise
     }
     tracing::info!("stopping");
 }
@@ -178,6 +230,10 @@ pub async fn on_a_signal() {
 /// Makes the first account when a server is started with nothing on it and
 /// nobody is going to be sitting in front of the program to set it up — the
 /// headless case, where somebody installed this on a Linux box.
+///
+/// # Errors
+///
+/// Fails when the database can't be read or written.
 pub fn first_administrator(store: &Store) -> Result<String> {
     let password = crate::auth::readable_secret();
     let hashed = crate::auth::hash_password(&password)?;

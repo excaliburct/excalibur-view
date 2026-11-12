@@ -232,7 +232,7 @@ impl Office {
     }
 
     /// One assistant tool's answer, asked with `token`.
-    fn tool(&self, token: &str, name: &str, arguments: Value) -> String {
+    fn tool(&self, token: &str, name: &str, arguments: &Value) -> String { // WHAT: the tool's arguments, lent. WHY: only written into the request
         let (status, said) = self.ask(token, "POST", "/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": arguments } }))); // WHAT: a tool call. WHY: how an assistant asks.
         assert_eq!(status, 200, "{said}"); // WHAT: the endpoint answered. WHY: refusals come back inside.
         said.pointer("/result/content/0/text")
@@ -568,17 +568,17 @@ fn an_assistant_working_for_a_field_hand_sees_what_she_sees_and_no_more() {
     let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
     let job = a_job(&office); // WHAT: the job. WHY: under test.
     let key = office.key(&office.fay, "assistant"); // WHAT: Fay's assistant key. WHY: the assistant acts as her.
-    let sets = office.tool(&key, "list_sets", json!({ "project": "26-500" })); // WHAT: the job's sets, found by its number. WHY: the assistant's search.
+    let sets = office.tool(&key, "list_sets", &json!({ "project": "26-500" })); // WHAT: the job's sets, found by its number. WHY: the assistant's search.
     assert!(
         sets.contains("S-101") && !sets.contains("Contract"),
         "{sets}"
     ); // WHAT: the shop's, not the contract. WHY: as the API's list.
-    let every = office.tool(&key, "list_sets", json!({})); // WHAT: every set on the server. WHY: the widest search.
+    let every = office.tool(&key, "list_sets", &json!({})); // WHAT: every set on the server. WHY: the widest search.
     assert!(!every.contains("Contract"), "{every}"); // WHAT: still not the contract. WHY: likewise.
-    let jobs = office.tool(&key, "list_projects", json!({})); // WHAT: the jobs. WHY: their counts.
+    let jobs = office.tool(&key, "list_projects", &json!({})); // WHAT: the jobs. WHY: their counts.
     assert!(jobs.contains("2 current drawing set(s)"), "{jobs}"); // WHAT: two, not three. WHY: a hidden folder is not counted.
     for tool in ["takeoff", "sheets", "shop_list", "counted_twice"] {
-        let hidden = office.tool(&key, tool, json!({ "set": job.contract })); // WHAT: a tool on the contract. WHY: each reads the set.
+        let hidden = office.tool(&key, tool, &json!({ "set": job.contract })); // WHAT: a tool on the contract. WHY: each reads the set.
         assert!(
             hidden.contains("no drawing set called") && !hidden.contains("SECRET"),
             "{tool}: {hidden}"
@@ -587,10 +587,10 @@ fn an_assistant_working_for_a_field_hand_sees_what_she_sees_and_no_more() {
     let compared = office.tool(
         &key,
         "revision_cost",
-        json!({ "was_bid": job.shop, "arrived": job.contract }),
+        &json!({ "was_bid": job.shop, "arrived": job.contract }), // WHAT: the call, lent. WHY: only written into the request
     ); // WHAT: a comparison against the contract. WHY: a way round through a second set.
     assert!(compared.contains("no drawing set called"), "{compared}"); // WHAT: refused. WHY: both sides are gated.
-    let takeoff = office.tool(&key, "takeoff", json!({ "set": job.shop })); // WHAT: the shop drawing's takeoff. WHY: hers.
+    let takeoff = office.tool(&key, "takeoff", &json!({ "set": job.shop })); // WHAT: the shop drawing's takeoff. WHY: hers.
     assert!(takeoff.contains("W12x26"), "{takeoff}"); // WHAT: its beam. WHY: given to Field.
 }
 

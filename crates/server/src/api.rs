@@ -4,6 +4,7 @@
 //! the two agree, so the published description of this server cannot drift
 //! away from what it actually does.
 
+use std::fmt::Write as _; // WHAT: write! into a String. WHY: text is written straight in, with no string made only to be copied
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -13,13 +14,16 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use hub::update::{Channel, Release, UpdateOffer};
-use hub::*;
+use hub::{ // WHAT: each shape from hub this file uses, by name. WHY: a new name in hub can't quietly shadow one here, as a glob let it
+    ChangeNotice, Chest, Claimed, DrawingSet, Health, Join, MarkupPage, NewMarkup, Problem, Role, Session, Setup, Sheet, // WHAT: the request and answer shapes. WHY: as above
+    SignIn, Takeoff, User, API_ROOT, API_VERSION, // WHAT: and the API's version and root. WHY: as above
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 
 use crate::auth::{self, Who};
 use crate::quantities::{self, SheetScale, Stored};
-use crate::store::{is_digest, Store};
+use crate::store::{int, is_digest, Store}; // WHAT: the store, its digest check and its whole-number conversions. WHY: SQLite keeps every integer signed
 use crate::{Config, VERSION};
 
 /// What a client sent with a request whose handler has no use for it. Reading
@@ -47,6 +51,17 @@ pub struct Server {
     /// key's id. In memory, like `patience`: a refused key writes at most one
     /// line a minute, so a misused key cannot fill the log.
     pub key_refusals_logged: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    /// The port this server's HTTPS listens on, once it does (`crate::tls`).
+    pub secure_port: std::sync::OnceLock<u16>, // WHAT: set once HTTPS is bound. WHY: /health never offers a port that isn't answering, and each server says its own
+    /// The pin of this server's HTTPS certificate, once it has one.
+    pub pin: std::sync::OnceLock<String>, // WHAT: the 8714 certificate's SPKI SHA-256. WHY: device requests are bound to it (crate::devices)
+    /// Signatures already seen inside the ±300 s window (`crate::devices`).
+    pub replays: crate::devices::Replays, // WHAT: the replay cache. WHY: a signed request is accepted once
+    /// When this process started, in Unix seconds: a signature dated before it
+    /// is refused, so a restart's empty replay cache opens no window.
+    pub started: i64, // WHAT: the start time. WHY: security review L3
+    /// The Citadel cell, as its supervisor last saw it (`crate::cell`).
+    pub cell: crate::cell::Watch, // WHAT: the cell's state. WHY: /api/v1/office reports it
 }
 
 impl Server {
@@ -57,11 +72,17 @@ impl Server {
             updates: crate::updates::Watch::default(),
             patience: crate::patience::Patience::default(),
             tunnel: crate::tunnel::Tunnel::default(),
-            manifests: Default::default(),
-            notices: Default::default(),
-            key_refusals_logged: Default::default(), // WHAT: no refusals written yet. WHY: empty on every start, as patience is.
+            manifests: std::sync::Mutex::default(), // WHAT: no plugin manifests read yet. WHY: each is read once, when first asked for
+            notices: crate::notices::Pending::default(), // WHAT: no notices waiting. WHY: empty on every start
+            key_refusals_logged: std::sync::Mutex::default(), // WHAT: no refusals written yet. WHY: empty on every start, as patience is.
+            secure_port: std::sync::OnceLock::default(), // WHAT: no HTTPS yet. WHY: set by run::serve once it listens
+            pin: std::sync::OnceLock::default(), // WHAT: no certificate yet. WHY: set by run::serve with HTTPS
+            replays: crate::devices::Replays::default(), // WHAT: nothing seen yet. WHY: empty on every start; a signature older than five minutes is refused by its time anyway
+            started: hub::device::unix_now(), // WHAT: now. WHY: nothing signed before this start is taken
+            cell: crate::cell::Watch::default(), // WHAT: no cell yet. WHY: started by run::serve when the licence and the files allow
         };
         crate::license::begin(&server);
+        crate::devices::begin(&server); // WHAT: when the device list began and until when it can be claimed, noted once. WHY: guard 2 and guard 8 read them
         server
     }
 }
@@ -81,6 +102,11 @@ impl IntoResponse for Denied {
 }
 
 impl Denied {
+    /// Any status, with its problem. For the device list's own answers.
+    pub(crate) fn new(status: StatusCode, problem: Problem) -> Denied {
+        Denied(status, problem) // WHAT: as given. WHY: 401 device_unknown, 409 last_admin and the rest
+    }
+
     pub(crate) fn unauthorised() -> Denied {
         Denied(
             StatusCode::UNAUTHORIZED,
@@ -161,6 +187,18 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
         .strip_prefix("Bearer ")
         .or_else(|| value.strip_prefix("bearer "))
         .map(|t| t.trim().to_string())
+}
+
+/// [`caller`] for a door open to seats that can't sign: a session is
+/// looked up without being kept alive.
+fn caller_still(server: &Server, headers: &HeaderMap) -> Answer<Who> {
+    let token = bearer(headers).ok_or_else(Denied::unauthorised)?; // WHAT: the token. WHY: none, nobody
+    let now = now(); // WHAT: the time. WHY: a session past its end is nobody
+    let found = server
+        .store
+        .with(|db| if token.starts_with(auth::KEY_PREFIX) { auth::whose_key(db, &token, &[auth::purpose::INTEGRATION, auth::purpose::SYNC], &now) } else { auth::whose_still(db, &token, &now) })
+        .map_err(|e| Denied::broke("check who you are", e))?; // WHAT: the person, the session left exactly as it was. WHY: security review H2e
+    found.ok_or_else(Denied::unauthorised)
 }
 
 pub(crate) fn caller(server: &Server, headers: &HeaderMap) -> Answer<Who> {
@@ -298,7 +336,7 @@ async fn keys_keep_to_their_purpose(
     if refusal_worth_a_line(&server, &id) {
         record(
             &server,
-            crate::audit::Entry::new(crate::audit::action::KEY_REFUSED, &maker) // WHAT: under the email of whoever made the key. WHY: so the line says whose key strayed.
+            &crate::audit::Entry::new(crate::audit::action::KEY_REFUSED, &maker) // WHAT: under the email of whoever made the key. WHY: so the line says whose key strayed.
                 .about(format!("{method} {path}"))
                 .saying(auth::purpose::SYNC.to_string()),
         );
@@ -316,7 +354,7 @@ async fn keys_keep_to_their_purpose(
 /// for, its query or its body, and where it came from. Only 403s: those
 /// come from somebody signed in or holding a key, so a stranger can't fill
 /// the log with them the way they could with 401s.
-async fn refusals_logged(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+async fn refusals_logged(State(server): State<Shared>, request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let method = request.method().clone(); // WHAT: GET, POST... WHY: half of which door.
     let route = request
         .extensions()
@@ -325,7 +363,7 @@ async fn refusals_logged(request: axum::extract::Request, next: axum::middleware
         .unwrap_or_default(); // WHAT: the route's pattern (`/sets/:id/file`). WHY: names the door without anything the caller typed.
     let from = seen_from(request.headers()); // WHAT: the caller's address, as `where_from` found it. WHY: one machine or forty.
     let answer = next.run(request).await; // WHAT: the route's answer. WHY: logged only when it was a refusal.
-    if answer.status() == StatusCode::FORBIDDEN {
+    if answer.status() == StatusCode::FORBIDDEN && refusal_worth_a_line(&server, &format!("403 {from}")) { // WHAT: at most a line a minute an address. WHY: some refusals need no credential, so a stranger could write lines without end (audit, 2026-11-11)
         tracing::warn!("refused {method} {route} from {}", if from.is_empty() { "an unknown address" } else { from.as_str() }); // WHAT: one line. WHY: an administrator reading the log sees who tried which door.
     }
     answer
@@ -357,6 +395,15 @@ pub(crate) async fn turned_away(body: Body, denied: Denied) -> Response {
     refused
 }
 
+/// WHAT: a turn to read a large body; four at a time across the server. WHY: a
+/// few signed-in writers sending big uploads at once could hold gigabytes and
+/// stop the server (audit, 2026-11-11). Held for the whole request, so what was
+/// read stays counted until it is done with; a fifth waits its turn.
+pub(crate) async fn big_turn() -> Option<tokio::sync::SemaphorePermit<'static>> {
+    static TURNS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new(); // WHAT: one limit for the whole server. WHY: as above
+    TURNS.get_or_init(|| tokio::sync::Semaphore::new(4)).acquire().await.ok() // WHAT: a turn, waited for. WHY: never refused, only queued
+}
+
 /// The body of a request whose caller has already been let in, up to `limit`
 /// bytes; past it, a plain 413.
 pub(crate) async fn body_once_let_in(body: Body, limit: usize) -> Answer<axum::body::Bytes> {
@@ -379,7 +426,7 @@ const KEY_REFUSAL_QUIET: std::time::Duration = std::time::Duration::from_secs(60
 
 /// Whether a refusal of key `id` should be written now: the first one, then
 /// at most one a minute. Notes the time when it says yes.
-fn refusal_worth_a_line(server: &Server, id: &str) -> bool {
+pub(crate) fn refusal_worth_a_line(server: &Server, id: &str) -> bool { // WHAT: crate-wide now. WHY: the device gate writes its refusals the same way
     let Ok(mut logged) = server.key_refusals_logged.lock() else {
         return true; // WHAT: the lock is poisoned. WHY: writing the line is the safe way round; losing it is not.
     };
@@ -394,12 +441,14 @@ fn refusal_worth_a_line(server: &Server, id: &str) -> bool {
     true
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn now() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn fresh_id(prefix: &str) -> String {
     let mut bytes = [0u8; 12];
     rand::Rng::fill(&mut rand::thread_rng(), &mut bytes);
@@ -408,8 +457,9 @@ pub fn fresh_id(prefix: &str) -> String {
 
 // ---- the routes -----------------------------------------------------------
 
+#[allow(clippy::too_many_lines)] // WHAT: the route table in one function. WHY: one line per route; split, a route would have to be looked for in two places
 pub fn router(server: Shared) -> Router {
-    let limit = server.config.largest_upload as usize; // WHAT: the largest drawing or file the office takes. WHY: only the routes that take a whole file are given it.
+    let limit = usize::try_from(server.config.largest_upload).unwrap_or(usize::MAX); // WHAT: the largest drawing or file the office takes. WHY: only the routes that take a whole file are given it.
     let uploads = DefaultBodyLimit::max(limit); // WHAT: the upload limit, as a layer. WHY: put on each upload route below, and nowhere else.
     let api = Router::new()
         .route("/health", get(health))
@@ -461,6 +511,33 @@ pub fn router(server: Shared) -> Router {
         .route("/notices/:id/test", post(test_notice))
         .route("/notices/:id/remove", post(remove_notice))
         .route("/license", get(read_license).post(add_license))
+        .route("/office", get(crate::office::read)) // WHAT: the parts this Office Server runs. WHY: the Manager and the program show what an office has
+        .route("/office/identity", get(crate::devices::identity)) // WHAT: the office certificate, when one is stored. WHY: an app marks the server verified by it (§2.4)
+        .route("/devices/request", post(crate::devices::request)) // WHAT: a computer asks to be let in. WHY: codeless linking (docs/OFFICE-ENROLLMENT.md §3)
+        .route("/devices/me", get(crate::devices::me)) // WHAT: how this computer stands. WHY: the waiting screen asks every 5 s
+        .route("/devices", get(crate::devices::list)) // WHAT: every computer, newest waiting first. WHY: an admin's Computers list
+        .route("/devices/:id/approve", post(crate::devices::approve)) // WHAT: let one in. WHY: §3
+        .route("/devices/:id/refuse", post(crate::devices::refuse)) // WHAT: turn one down. WHY: §3
+        .route("/devices/:id/remove", post(crate::devices::remove)) // WHAT: take one off. WHY: §3
+        .route("/devices/:id/admin", post(crate::devices::make_admin)) // WHAT: make or unmake an admin. WHY: §3
+        .route("/admin/citadel/forget-pin", post(crate::citadel::forget_pin)) // WHAT: Citadel Server's pin forgotten. WHY: after a reinstall, an administrator lets the next look keep the new one
+        .route("/archetype/jobs", get(crate::archetype::list_jobs).post(crate::archetype::create_job)) // WHAT: Archetype's jobs, and a new one. WHY: the archetype part; 404 unless licensed; bodies are read after the checks
+        .route("/archetype/jobs/:id", get(crate::archetype::one_job)) // WHAT: one job. WHY: who has it, its revision
+        .route("/archetype/jobs/:id/files", get(crate::archetype::job_files)) // WHAT: a check-in's files. WHY: opened on any computer
+        .route("/archetype/jobs/:id/history", get(crate::archetype::job_history)) // WHAT: who did what. WHY: every check-in kept
+        .route("/archetype/jobs/:id/checkout", post(crate::archetype::check_out)) // WHAT: taken to work on. WHY: one person, one computer
+        .route("/archetype/jobs/:id/checkin", post(crate::archetype::check_in)) // WHAT: work handed back. WHY: a new revision, never over another
+        .route("/archetype/jobs/:id/release", post(crate::archetype::release)) // WHAT: given back. WHY: without checking anything in
+        .route("/archetype/jobs/:id/takeback", post(crate::archetype::take_back)) // WHAT: taken back by an administrator. WHY: somebody went home with it
+        .route("/archetype/files/missing", post(crate::archetype::missing_files)) // WHAT: which files a check-in must send. WHY: only those travel
+        .route("/archetype/files/:digest", axum::routing::put(crate::archetype::put_file).get(crate::archetype::get_file)) // WHAT: a job's file, sent and fetched. WHY: only files sent to Archetype are handed out here
+        .route("/cad/drawings", get(crate::cad::list).post(crate::cad::create)) // WHAT: the office's CAD drawings, and a new one. WHY: the cad part; 404 unless licensed; the body is read by the handler, after its checks, capped at CAD's 256 MB
+        .route("/cad/drawings/:id", get(crate::cad::one)) // WHAT: one CAD drawing. WHY: who has it out, its version
+        .route("/cad/drawings/:id/file", get(crate::cad::file).put(crate::cad::save)) // WHAT: its bytes, and a new version. WHY: opened and saved by Excalibur CAD; the body is read after the checks
+        .route("/cad/drawings/:id/lock", post(crate::cad::lock).delete(crate::cad::unlock)) // WHAT: checked out and back in. WHY: one person changes a drawing at a time
+        .route("/cad/drawings/:id/versions", get(crate::cad::versions)) // WHAT: every version. WHY: nothing is ever lost
+        .route("/cad/drawings/:id/restore", post(crate::cad::restore)) // WHAT: an old version brought back. WHY: as a new version, the others kept
+        .route("/cad/drawings/:id/archive", post(crate::cad::archive)) // WHAT: hidden, every version kept. WHY: administrators tidy the list without deleting anything
         .route("/audit", get(read_audit))
         .route("/audit.csv", get(audit_csv))
         .route("/admin/pin", post(set_pin))
@@ -482,8 +559,9 @@ pub fn router(server: Shared) -> Router {
         .route("/signoffs/:id/signature.png", get(crate::signoffs::picture)) // WHAT: a signature as a picture. WHY: printed on the form.
         .route("/sets/:id/folder", post(crate::folders::move_set)) // WHAT: a drawing set moved, with its issues. WHY: likewise.
         // WHAT: every matched route first checks that a key keeps to its purpose. WHY: one gate in front of all of them, so a new route is closed to sync keys unless it is put on SYNC_ROUTES on purpose.
+        .route_layer(axum::middleware::from_fn_with_state(server.clone(), crate::devices::gate)) // WHAT: every matched route held to its door: an approved device's signature, before View's own checks. WHY: §4 and §5; inside the key check, so a sync key off its list is refused as before
         .route_layer(axum::middleware::from_fn_with_state(server.clone(), keys_keep_to_their_purpose))
-        .route_layer(axum::middleware::from_fn(refusals_logged)) // WHAT: every 403 written in the server's log. WHY: somebody signed in walking the API for doors they may not open left no trace.
+        .route_layer(axum::middleware::from_fn_with_state(server.clone(), refusals_logged)) // WHAT: every 403 written in the server's log. WHY: somebody signed in walking the API for doors they may not open left no trace.
         // WHAT: every other route takes at most a small body. WHY: a JSON extractor reads the whole body before the handler asks who is calling, so a large limit everywhere let anybody, signed in or not, make the server hold hundreds of megabytes per request.
         .layer(DefaultBodyLimit::max(SMALL_BODY))
         // Who is connected, for the Fleet's board. Sees every API request,
@@ -505,8 +583,27 @@ pub fn router(server: Shared) -> Router {
         .merge(crate::fleet::router(server.clone()))
         // Where an assistant asks about the quantities. Same token as the
         // API, and read-only: see the note at the top of `crate::mcp`.
-        .merge(crate::mcp::router(server))
+        .merge(crate::mcp::router(server.clone()).route_layer(axum::middleware::from_fn_with_state(server.clone(), crate::devices::gate))) // WHAT: the assistant's door held by the device gate too. WHY: security review H1: a session from anywhere read the takeoffs here with no device; an assistant's own key still passes, as a key does
+        .layer(axum::middleware::from_fn_with_state(server, origin_checked)) // WHAT: a browser page from anywhere else refused. WHY: DNS rebinding let a web page someone in the office opened claim an unclaimed server or join an open one (audit, 2026-11-11)
         .layer(axum::middleware::from_fn(marked)) // WHAT: every answer marked not to be kept, sniffed or framed. WHY: the API said none of it, so a proxy or a browser was left to guess.
+}
+
+/// Refuses a request a web browser sent from a page that isn't on the
+/// office's list (`HYPERVIEW_ALLOW_ORIGINS`). Browsers always say where a
+/// page came from (`Origin`) on anything but a plain read; the seats, Fleet
+/// and the tunnel's connector send no such header, so they are unaffected.
+async fn origin_checked(
+    State(server): State<Shared>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if let Some(origin) = request.headers().get(header::ORIGIN) {
+        let named = origin.to_str().unwrap_or_default().trim_end_matches('/'); // WHAT: the page's origin, as sent. WHY: compared with the list
+        if !server.config.allow_origins.iter().any(|allowed| allowed.trim_end_matches('/') == named) {
+            return Denied(StatusCode::FORBIDDEN, Problem::new("forbidden", "Requests from web pages are not accepted here.")).into_response(); // WHAT: refused before any route. WHY: a page can't act as somebody in the office
+        }
+    }
+    next.run(request).await
 }
 
 /// What every answer says about itself, unless its route already said:
@@ -554,6 +651,12 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/admin/updates"),
     ("GET", "/admin/fleet"),
     ("POST", "/admin/fleet"),
+    ("GET", "/admin/invites"), // WHAT: the invitations. WHY: audit: described, so the openapi and the role and key tests cover it
+    ("POST", "/admin/invites"), // WHAT: one made. WHY: likewise
+    ("DELETE", "/admin/invites/{code}"), // WHAT: one thrown away. WHY: likewise
+    ("GET", "/admin/remote"), // WHAT: reaching the office from outside. WHY: likewise
+    ("POST", "/admin/remote"), // WHAT: turned on. WHY: likewise
+    ("DELETE", "/admin/remote"), // WHAT: turned off. WHY: likewise
     ("GET", "/projects"),
     ("POST", "/projects"),
     ("GET", "/projects/{id}"),
@@ -574,6 +677,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/people"),
     ("POST", "/people/{id}/role"),
     ("POST", "/people/{id}/remove"),
+    ("GET", "/projects/{id}/people"), // WHAT: who is on a project. WHY: likewise
+    ("POST", "/projects/{id}/people"), // WHAT: put on or taken off. WHY: likewise
     ("GET", "/chests"),
     ("POST", "/chests"),
     ("GET", "/notices"),
@@ -582,6 +687,38 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/notices/{id}/remove"),
     ("GET", "/license"),
     ("POST", "/license"),
+    ("GET", "/office"), // WHAT: the Office Server's parts. WHY: described, so the test holds the two together
+    ("GET", "/office/identity"), // WHAT: the office certificate. WHY: likewise
+    ("POST", "/devices/request"), // WHAT: a computer asks to be let in. WHY: likewise
+    ("GET", "/devices/me"), // WHAT: how it stands. WHY: likewise
+    ("GET", "/devices"), // WHAT: the list. WHY: likewise
+    ("POST", "/devices/{id}/approve"), // WHAT: approve. WHY: likewise
+    ("POST", "/devices/{id}/refuse"), // WHAT: refuse. WHY: likewise
+    ("POST", "/devices/{id}/remove"), // WHAT: remove. WHY: likewise
+    ("POST", "/devices/{id}/admin"), // WHAT: admin on or off. WHY: likewise
+    ("POST", "/admin/citadel/forget-pin"), // WHAT: Citadel's pin forgotten. WHY: likewise
+    ("GET", "/archetype/jobs"), // WHAT: Archetype's jobs. WHY: likewise
+    ("POST", "/archetype/jobs"), // WHAT: a new one. WHY: likewise
+    ("GET", "/archetype/jobs/{id}"), // WHAT: one. WHY: likewise
+    ("GET", "/archetype/jobs/{id}/files"), // WHAT: its files. WHY: likewise
+    ("GET", "/archetype/jobs/{id}/history"), // WHAT: its history. WHY: likewise
+    ("POST", "/archetype/jobs/{id}/checkout"), // WHAT: checked out. WHY: likewise
+    ("POST", "/archetype/jobs/{id}/checkin"), // WHAT: checked in. WHY: likewise
+    ("POST", "/archetype/jobs/{id}/release"), // WHAT: given back. WHY: likewise
+    ("POST", "/archetype/jobs/{id}/takeback"), // WHAT: taken back. WHY: likewise
+    ("POST", "/archetype/files/missing"), // WHAT: files to send. WHY: likewise
+    ("PUT", "/archetype/files/{digest}"), // WHAT: a file sent. WHY: likewise
+    ("GET", "/archetype/files/{digest}"), // WHAT: a file fetched. WHY: likewise
+    ("GET", "/cad/drawings"), // WHAT: CAD drawings. WHY: likewise
+    ("POST", "/cad/drawings"), // WHAT: a new CAD drawing. WHY: likewise
+    ("GET", "/cad/drawings/{id}"), // WHAT: one. WHY: likewise
+    ("GET", "/cad/drawings/{id}/file"), // WHAT: its bytes. WHY: likewise
+    ("PUT", "/cad/drawings/{id}/file"), // WHAT: a new version. WHY: likewise
+    ("POST", "/cad/drawings/{id}/lock"), // WHAT: checked out. WHY: likewise
+    ("DELETE", "/cad/drawings/{id}/lock"), // WHAT: checked in. WHY: likewise
+    ("GET", "/cad/drawings/{id}/versions"), // WHAT: its versions. WHY: likewise
+    ("POST", "/cad/drawings/{id}/restore"), // WHAT: one brought back. WHY: likewise
+    ("POST", "/cad/drawings/{id}/archive"), // WHAT: hidden. WHY: likewise
     ("GET", "/audit"),
     ("GET", "/audit.csv"),
     ("POST", "/admin/pin"),
@@ -615,7 +752,7 @@ pub const ROUTES: &[(&str, &str)] = &[
 
 // ---- is it there ----------------------------------------------------------
 
-async fn health(State(server): State<Shared>) -> Json<Health> {
+async fn health(State(server): State<Shared>, headers: HeaderMap) -> Json<Health> {
     // Claimed unless the server can prove otherwise. If the database cannot be
     // read, the honest answer is not "help yourself" — a client that is told a
     // server is unclaimed offers to take it over.
@@ -626,7 +763,7 @@ async fn health(State(server): State<Shared>) -> Json<Health> {
         version: VERSION.to_string(),
         name: installation_name(&server),
         claimed,
-        joining: if claimed { how_joining(&server).0 } else { String::new() },
+        joining: if claimed { joining_for(how_joining(&server).0, from_outside(&headers)) } else { String::new() }, // WHAT: said as this caller is treated. WHY: "open" told strangers on the internet there was a door
         // Only when it has been checked from the outside. Handing a seat an
         // address that does not answer is worse than handing it nothing: it
         // would try the broken one in a truck and conclude the server is
@@ -635,6 +772,8 @@ async fn health(State(server): State<Shared>) -> Json<Health> {
             crate::tunnel::State::On { address } => Some(address),
             _ => None,
         },
+        secure_port: server.secure_port.get().copied(), // WHAT: this server's HTTPS port, once it is listening. WHY: a seat moves there; never claimed before it listens
+        product: "excalibur-office".into(), // WHAT: what this server is. WHY: Archetype's seats find their jobs under its archetype part
     })
 }
 
@@ -691,7 +830,8 @@ fn days_of(body: &ChangeJoining) -> Option<u32> {
 
 /// A date that many days from now, as the settings store it.
 fn in_days(days: u32) -> String {
-    let when = time::OffsetDateTime::now_utc() + time::Duration::days(days as i64);
+    let days = days.min(auth::LONGEST_KEY_DAYS); // WHAT: at most ten years. WHY: a huge number overflowed the date and ended the request (audit, 2026-11-11)
+    let when = time::OffsetDateTime::now_utc() + time::Duration::days(i64::from(days));
     when.format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
 }
@@ -764,6 +904,7 @@ fn how_joining(server: &Server) -> (String, String, String) {
 
 // ---- signing in -----------------------------------------------------------
 
+#[allow(clippy::too_many_lines)] // WHAT: one request's checks in one function. WHY: they run in this order and each leans on the one before; split, the gate a reviewer must read in order would be scattered
 async fn sign_in(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -771,6 +912,12 @@ async fn sign_in(
 ) -> Answer<Json<Session>> {
     let email = body.email.trim().to_lowercase();
     let from = seen_from(&headers);
+    if email.chars().count() > 254 || email.chars().any(char::is_control) {
+        return Err(Denied(
+            StatusCode::UNAUTHORIZED,
+            Problem::new("unauthorised", "That email address and password do not match."),
+        )); // WHAT: refused before anything is kept or written. WHY: no account has such an address, and a megabyte one a try filled the audit log (audit, 2026-11-11)
+    }
 
     // The account is looked up first (one indexed read, no password check),
     // so that a real account's count can be kept for good. Counted against
@@ -792,18 +939,22 @@ async fn sign_in(
         .map_err(|e| Denied::broke("look you up", e))?;
 
     let counted = crate::patience::counted_as(&from); // WHAT: the address as it is counted: an IPv6 caller by its /64. WHY: a new address from the same /64 is the same caller.
-    let real: &[&str] = if session.is_some() { &[email.as_str()] } else { &[] }; // WHAT: the account, when there is one. WHY: a real account's count is never forgotten to make room.
+    // WHAT: the account counted apart for tries from the internet. WHY: a stranger's wrong guesses through the tunnel made the account wait on the office network too, so anybody who knew an administrator's address could lock them out (audit, 2026-11-11)
+    let account = if from_outside(&headers) { format!("{email}\u{1}outside") } else { email.clone() };
+    let real: &[&str] = if session.is_some() { &[account.as_str()] } else { &[] }; // WHAT: the account, when there is one. WHY: a real account's count is never forgotten to make room.
     // WHAT: asked and counted in one step: this try is counted as wrong before it is checked, and a right password clears it below. WHY: asked and counted apart, a burst sent together was all asked before any was counted.
     if let Err(owed) = server
         .patience
-        .begin_keeping(crate::patience::SIGNING_IN, &[email.as_str(), counted.as_str()], real)
+        .begin_keeping(crate::patience::SIGNING_IN, &[account.as_str(), counted.as_str()], real)
     {
-        record(
-            &server,
-            crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email)
-                .saying("too many wrong tries")
-                .from(from.clone()),
-        );
+        if refusal_worth_a_line(&server, &format!("wait:{counted}")) {
+            record(
+                &server,
+                &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
+                    .saying("too many wrong tries")
+                    .from(from.clone()),
+            ); // WHAT: written once a minute an address. WHY: every refused try wrote a line, so the limit didn't slow the log
+        }
         return Err(Denied(
             StatusCode::TOO_MANY_REQUESTS,
             Problem::new("too_many", crate::patience::refusal(owed)), // WHAT: the wait, in words. WHY: said to whoever is told to wait.
@@ -817,7 +968,7 @@ async fn sign_in(
         // see in the log, and it was the one refusal that went unrecorded.
         record(
             &server,
-            crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email)
+            &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                 .saying("no account with that address")
                 .from(from.clone()),
         );
@@ -826,16 +977,16 @@ async fn sign_in(
         // for. And checked against a password all the same, so the answer
         // takes as long as a wrong password does: an answer that came back
         // at once said which addresses have no account.
-        let _ = auth::password_matches(&body.password, auth::no_such_account()); // WHAT: a password check that can never pass. WHY: the time it takes is the same as a real one, so timing tells nobody whether the account exists.
+        let _ = auth::password_matches_in_turn(&body.password, auth::no_such_account()).await; // WHAT: a password check that can never pass. WHY: the time it takes is the same as a real one, so timing tells nobody whether the account exists.
         return Err(Denied(
             StatusCode::UNAUTHORIZED,
             Problem::new("unauthorised", "That email address and password do not match."),
         ));
     };
-    if !auth::password_matches(&body.password, &stored) {
+    if !auth::password_matches_in_turn(&body.password, &stored).await {
         record(
             &server,
-            crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &body.email)
+            &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email) // WHAT: the address as checked. WHY: the raw one could be padded out
                 .by(&id)
                 .saying("the password did not match")
                 .from(from.clone()),
@@ -848,7 +999,7 @@ async fn sign_in(
     }
 
     // Right. Whatever was held against them goes.
-    server.patience.right(&email);
+    server.patience.right(&account); // WHAT: the account's count, as it was counted here. WHY: the same name `begin` used
     server.patience.right(&counted); // WHAT: the address's count, as it was counted. WHY: the same name `begin` used.
 
     let (token, hashed) = auth::new_token();
@@ -872,7 +1023,7 @@ async fn sign_in(
 
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::SIGNED_IN, &body.email)
+        &crate::audit::Entry::new(crate::audit::action::SIGNED_IN, &body.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&id)
             .from(seen_from(&headers)),
     );
@@ -934,7 +1085,7 @@ async fn change_password(
     check_password(&body.new)?; // WHAT: the new password's length checked first. WHY: a short one is refused without counting as a guess at the current one.
     if let Err(owed) = server.patience.begin_keeping(crate::patience::SIGNING_IN, &[email.as_str(), from.as_str()], &[email.as_str()]) {
         // WHAT: too many wrong current passwords lately: refused before the password is checked; otherwise this try is counted until it proves right. WHY: the same limit as sign-in, so this door is no faster for guessing, even in a burst.
-        return Err(Denied(StatusCode::TOO_MANY_REQUESTS, Problem::new("too_many", &crate::patience::refusal(owed))));
+        return Err(Denied(StatusCode::TOO_MANY_REQUESTS, Problem::new("too_many", crate::patience::refusal(owed)))); // WHAT: refused, saying how long to wait. WHY: the sentence is handed over as it is made
     }
     let stored: String = server
         .store
@@ -946,7 +1097,7 @@ async fn change_password(
             )?)
         })
         .map_err(|e| Denied::broke("look you up", e))?;
-    if !auth::password_matches(&body.current, &stored) {
+    if !auth::password_matches_in_turn(&body.current, &stored).await {
         // WHAT: nothing more to count. WHY: `begin` counted this try against the account and the address already.
         return Err(Denied(
             StatusCode::UNAUTHORIZED,
@@ -955,7 +1106,7 @@ async fn change_password(
     }
     server.patience.right(&email); // WHAT: the right password clears the account's count. WHY: as a right sign-in does.
     server.patience.right(&from); // WHAT: and the address's. WHY: likewise.
-    let hashed = auth::hash_password(&body.new).map_err(|e| Denied::broke("keep that password", e))?;
+    let hashed = auth::hash_password_in_turn(&body.new).await.map_err(|e| Denied::broke("keep that password", e))?;
     // Every other place this person is signed in stops working: changing a
     // password is very often what somebody does because they think somebody
     // else has it.
@@ -977,7 +1128,7 @@ async fn change_password(
     tracing::info!("{} changed their password", who.email);
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::CHANGED_PASSWORD, &who.email).by(&who.id),
+        &crate::audit::Entry::new(crate::audit::action::CHANGED_PASSWORD, &who.email).by(&who.id), // WHAT: the audit line, lent to the log. WHY: written there, not kept
     );
     Ok(Json(serde_json::json!({ "changed": true })))
 }
@@ -1048,7 +1199,7 @@ async fn change_updates(
     tracing::info!("{} set updates to {channel}", who.email);
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::CHANGED_SETTING, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::CHANGED_SETTING, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about("update channel")
             .saying(channel),
@@ -1106,9 +1257,9 @@ async fn change_remote(
             "This server is sealed, so it makes no outward connections at all \u{2014} including this one. That is what the Sealed edition is.",
         ));
     }
-    let token = crate::tunnel::a_token(&body.token).map_err(|e| Denied::wrong(e))?;
+    let token = crate::tunnel::a_token(&body.token).map_err(Denied::wrong)?; // WHAT: the token, or a bad request saying why. WHY: checked before it is kept
     let hostname =
-        crate::tunnel::a_hostname(&body.hostname).map_err(|e| Denied::wrong(e))?;
+        crate::tunnel::a_hostname(&body.hostname).map_err(Denied::wrong)?; // WHAT: the hostname, likewise. WHY: the same
     crate::tunnel::remember(&server.store, &token, &hostname)
         .map_err(|e| Denied::broke("keep the tunnel settings", e))?;
     // Whatever was running before belongs to the old token.
@@ -1178,11 +1329,11 @@ pub(crate) fn set_from_row(r: &rusqlite::Row) -> rusqlite::Result<DrawingSet> {
         name: r.get(2)?,
         filename: r.get(3)?,
         digest: r.get(4)?,
-        bytes: r.get::<_, i64>(5)? as u64,
-        sheets: r.get::<_, i64>(6)? as usize,
+        bytes: int::unsigned(r.get(5)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
+        sheets: int::index(r.get(6)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
         uploaded: r.get(7)?,
         uploaded_by: r.get(8)?,
-        revision: r.get::<_, i64>(9)? as u64,
+        revision: int::unsigned(r.get(9)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
         supersedes: r.get(10)?,
         superseded_by: r.get(11)?,
         already_here: false,
@@ -1323,6 +1474,7 @@ async fn one_set(
     found.map(Json).ok_or_else(|| Denied::missing("drawing set"))
 }
 
+#[allow(clippy::too_many_lines)] // WHAT: one request's checks in one function. WHY: they run in this order and each leans on the one before; split, the gate a reviewer must read in order would be scattered
 async fn upload_set(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -1463,8 +1615,8 @@ async fn upload_set(
                     set.name,
                     set.filename,
                     set.digest,
-                    set.bytes as i64,
-                    set.sheets as i64,
+                    int::signed(set.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
+                    int::of_index(set.sheets), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     set.uploaded,
                     set.uploaded_by,
                     set.supersedes,
@@ -1477,12 +1629,12 @@ async fn upload_set(
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         set.id,
-                        sheet.page as i64,
+                        int::of_index(sheet.page), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                         sheet.number,
                         sheet.title,
                         sheet.width,
                         sheet.height,
-                        sheet.rotation as i64,
+                        i64::from(sheet.rotation), // WHAT: widened, never cut. WHY: every one of these fits a 64-bit number
                         sheet.scale
                     ],
                 )?;
@@ -1498,7 +1650,7 @@ async fn upload_set(
                     set.carried_forward = carried;
                     set.carry_note = note;
                     if carried > 0 {
-                        set.revision = read_set(db, &set.id)?.map(|s| s.revision).unwrap_or(0);
+                        set.revision = read_set(db, &set.id)?.map_or(0, |s| s.revision); // WHAT: the set's revision after the carry, nought when it can't be read. WHY: the answer shows the markups' revision
                     }
                 }
             }
@@ -1553,7 +1705,7 @@ async fn set_file(
     // Reaching a drawing is the line an auditor most wants to see.
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::DOWNLOADED_SET, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::DOWNLOADED_SET, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(set.name.clone())
             .saying(format!("{} sheets", set.sheets)),
@@ -1604,12 +1756,12 @@ pub(crate) fn sheets_for(db: &Connection, set: &str) -> rusqlite::Result<Vec<She
     let rows: Vec<Sheet> = statement
         .query_map(params![set], |r| {
             Ok(Sheet {
-                page: r.get::<_, i64>(0)? as usize,
+                page: int::index(r.get(0)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                 number: r.get(1)?,
                 title: r.get(2)?,
                 width: r.get(3)?,
                 height: r.get(4)?,
-                rotation: r.get::<_, i64>(5)? as i32,
+                rotation: r.get::<_, i32>(5)?, // WHAT: read as the 32-bit number it was written from. WHY: SQLite refuses to hand back one that doesn't fit, where the cast cut it short
                 scale: r.get(6)?,
             })
         })?
@@ -1656,11 +1808,11 @@ fn markups_since(db: &Connection, set: &str, since: u64) -> rusqlite::Result<Vec
          FROM markups WHERE set_id = ?1 AND revision > ?2 ORDER BY revision, id",
     )?;
     let rows: Vec<hub::Markup> = statement
-        .query_map(params![set, since as i64], |r| {
+        .query_map(params![set, int::signed(since)], |r| { // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
             let bytes: Vec<u8> = r.get(8)?;
             Ok(hub::Markup {
                 id: r.get(0)?,
-                page: r.get::<_, i64>(1)? as usize,
+                page: int::index(r.get(1)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                 subject: r.get(2)?,
                 kind: r.get(3)?,
                 caption: r.get(4)?,
@@ -1668,7 +1820,7 @@ fn markups_since(db: &Connection, set: &str, since: u64) -> rusqlite::Result<Vec
                 colour: r.get(6)?,
                 created: r.get(7)?,
                 dictionary: base64::engine::general_purpose::STANDARD.encode(&bytes),
-                revision: r.get::<_, i64>(9)? as u64,
+                revision: int::unsigned(r.get(9)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                 removed: r.get::<_, i64>(10)? != 0,
             })
         })?
@@ -1705,7 +1857,7 @@ async fn add_markups(
     Path(id): Path<String>,
     body: Body,
 ) -> Response {
-    let gate = writer(&server, &headers).and_then(|who| may_reach_set(&server, &who, &id).map(|_| who)); // WHAT: who may mark this set up, asked before the body is read. WHY: a stranger's batch is never read.
+    let gate = writer(&server, &headers).and_then(|who| may_reach_set(&server, &who, &id).map(|()| who)); // WHAT: who may mark this set up, asked before the body is read. WHY: a stranger's batch is never read.
     let who = match gate {
         Ok(who) => who, // WHAT: let in. WHY: their batch is read next.
         Err(denied) => return turned_away(body, denied).await, // WHAT: refused, with the body read no further than a little. WHY: as above.
@@ -1714,16 +1866,16 @@ async fn add_markups(
         Ok(incoming) => incoming, // WHAT: the batch. WHY: saved below.
         Err(denied) => return denied.into_response(), // WHAT: too big, or not JSON. WHY: said plainly.
     };
-    markups_added(&server, &who, &id, incoming).into_response() // WHAT: the batch saved. WHY: what the route did before, unchanged.
+    markups_added(&server, &who, &id, &incoming).into_response() // WHAT: the batch saved. WHY: what the route did before, unchanged.
 }
 
-fn markups_added(server: &Shared, who: &Who, id: &str, incoming: Vec<NewMarkup>) -> Answer<Json<MarkupPage>> {
+fn markups_added(server: &Shared, who: &Who, id: &str, incoming: &[NewMarkup]) -> Answer<Json<MarkupPage>> { // WHAT: the batch, lent. WHY: only read, never kept
     use base64::Engine;
 
     // Everything is parsed and checked before anything is written, so a batch
     // with one bad markup in it does not leave half of itself in the file.
     let mut ready = Vec::with_capacity(incoming.len());
-    for one in &incoming {
+    for one in incoming { // WHAT: each markup in the batch. WHY: checked before any is written
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(one.dictionary.as_bytes())
             .map_err(|_| Denied::wrong("A markup's dictionary was not valid base64."))?;
@@ -1752,7 +1904,7 @@ fn markups_added(server: &Shared, who: &Who, id: &str, incoming: Vec<NewMarkup>)
                     db.execute(
                         "UPDATE markups SET removed = 1, revision = ?1
                          WHERE id = ?2 AND set_id = ?3",
-                        params![revision as i64, old, id],
+                        params![int::signed(revision), old, id], // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     )?;
                 }
                 let scale = sheets
@@ -1774,20 +1926,20 @@ fn markups_added(server: &Shared, who: &Who, id: &str, incoming: Vec<NewMarkup>)
                     params![
                         fresh_id("mk"),
                         id,
-                        one.page as i64,
+                        int::of_index(one.page), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                         markup.subject(),
                         markup.kind().name(),
                         caption,
                         who.name,
                         format!(
                             "#{:02X}{:02X}{:02X}",
-                            (colour[0] * 255.0) as u8,
-                            (colour[1] * 255.0) as u8,
-                            (colour[2] * 255.0) as u8
+                            colour_byte(colour[0]), // WHAT: red as a byte. WHY: the stored colour is #RRGGBB
+                            colour_byte(colour[1]), // WHAT: green as a byte. WHY: likewise
+                            colour_byte(colour[2]) // WHAT: blue as a byte. WHY: likewise
                         ),
                         now_text,
                         bytes,
-                        revision as i64
+                        int::signed(revision) // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     ],
                 )?;
             }
@@ -1945,7 +2097,7 @@ fn gather(server: &Server, id: &str) -> Answer<(u64, Vec<Stored>, Vec<SheetScale
                 .query_map(params![id], |r| {
                     Ok(Stored {
                         id: r.get(0)?,
-                        page: r.get::<_, i64>(1)? as usize,
+                        page: int::index(r.get(1)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                         dictionary: r.get(2)?,
                         author: r.get(3)?,
                     })
@@ -2007,7 +2159,7 @@ async fn takeoff_csv(
     // job, and it was the one export nobody could see had happened.
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::EXPORTED_TAKEOFF, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::EXPORTED_TAKEOFF, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(&id)
             .saying("as a spreadsheet")
@@ -2039,9 +2191,11 @@ async fn takeoff_csv(
 async fn make_key(
     State(server): State<Shared>,
     headers: HeaderMap,
+    device: Option<axum::Extension<crate::devices::Device>>,
     Json(asked): Json<hub::NewKey>,
 ) -> Answer<Json<hub::ApiKey>> {
     let who = person(&server, &headers)?;
+    let made_from = device.map(|axum::Extension(d)| d.id); // WHAT: the computer the key is made from, when the gate checked one. WHY: removing that computer takes the key back
     let purpose = match asked.purpose.trim() {
         p if p == auth::purpose::ASSISTANT => auth::purpose::ASSISTANT,
         p if p == auth::purpose::INTEGRATION => {
@@ -2088,8 +2242,8 @@ async fn make_key(
                 params![who.id, purpose, name],
             )?;
             db.execute(
-                "INSERT INTO keys (id, digest, person, purpose, name, made, expires) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", // WHAT: the new key, with its end if it has one. WHY: the end is checked on every use.
-                params![id, digest, who.id, purpose, name, made, expires],
+                "INSERT INTO keys (id, digest, person, purpose, name, made, expires, device) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", // WHAT: the new key, with its end if it has one, and the computer it came from. WHY: the end is checked on every use; the computer's removal takes it back
+                params![id, digest, who.id, purpose, name, made, expires, made_from],
             )?;
             Ok(())
         })
@@ -2097,7 +2251,7 @@ async fn make_key(
     tracing::info!("{} made a {purpose} key called {name}", who.email);
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::MADE_KEY, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::MADE_KEY, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(name)
             .saying(purpose.to_string()),
@@ -2167,7 +2321,7 @@ async fn revoke_key(
     }
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::REVOKED_KEY, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::REVOKED_KEY, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(&id),
     );
@@ -2275,8 +2429,8 @@ fn markuplist_of(server: &Server, id: &str, user: &[takeoff::user::UserColumn]) 
             };
             let carried_forward = carried.contains(markup);
             let needs_check = row.status == crate::projects::CARRIED;
-            brought += carried_forward as usize;
-            unchecked += needs_check as usize;
+            brought += usize::from(carried_forward); // WHAT: one more when this markup was carried forward. WHY: the count the reply gives
+            unchecked += usize::from(needs_check); // WHAT: one more when it still needs checking. WHY: likewise
             entry["MarkupId"] = serde_json::json!(markup);
             entry["Hyperview"] = serde_json::json!({
                 "MarkupId": markup,
@@ -2337,9 +2491,9 @@ async fn project_markuplist(
     Path(project): Path<String>,
     Query(everything): Query<Everything>,
 ) -> Answer<Json<serde_json::Value>> {
+    type Listed = (String, String, Option<String>, i64); // WHAT: a set's id, name, folder and revision. WHY: named first, before the statements that use it
     let who = caller(&server, &headers)?;
     may_reach_project(&server, &who, &project)?;
-    type Listed = (String, String, Option<String>, i64);
     let sight = crate::folders::sight(&server, &project, &who)?; // WHAT: which folders this person sees. WHY: a hidden folder's sets are left out of the pull, its stamp included.
     let (sets, stamp): (Vec<Listed>, Option<crate::projects::Stamp>) = server
         .store
@@ -2403,9 +2557,9 @@ async fn chests(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json
                         name: r.get(1)?,
                         filename: r.get(2)?,
                         digest: r.get(3)?,
-                        bytes: r.get::<_, i64>(4)? as u64,
-                        tools: r.get::<_, i64>(5)? as usize,
-                        sets: r.get::<_, i64>(6)? as usize,
+                        bytes: int::unsigned(r.get(4)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
+                        tools: int::index(r.get(5)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
+                        sets: int::index(r.get(6)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                         uploaded: r.get(7)?,
                         shared: r.get::<_, i64>(8)? != 0,
                     })
@@ -2469,7 +2623,7 @@ async fn plugins(State(server): State<Shared>, headers: HeaderMap) -> Answer<Jso
                         name: r.get(1)?,
                         version: r.get(2)?,
                         digest: r.get(3)?,
-                        bytes: r.get::<_, i64>(4)? as u64,
+                        bytes: int::unsigned(r.get(4)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                         uploaded: r.get(5)?,
                         uploaded_by: r.get(6)?,
                         key: r.get(7)?,
@@ -2481,7 +2635,7 @@ async fn plugins(State(server): State<Shared>, headers: HeaderMap) -> Answer<Jso
         })
         .map_err(|e| Denied::broke("list the plugins", e))?;
     let mut list = list;
-    for plugin in list.iter_mut() {
+    for plugin in &mut list { // WHAT: each plugin listed. WHY: its manifest is filled in
         plugin.manifest = manifest_of(&server, &plugin.digest).await;
     }
     Ok(Json(list))
@@ -2601,28 +2755,29 @@ async fn add_plugin(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let gate = administrator(&server, &headers).and_then(|who| sharing(&server).map(|_| who)); // WHAT: an administrator, while sharing is allowed, asked first. WHY: a plugin file is read only for them.
+    let gate = administrator(&server, &headers).and_then(|who| sharing(&server).map(|()| who)); // WHAT: an administrator, while sharing is allowed, asked first. WHY: a plugin file is read only for them.
     let who = match gate {
         Ok(who) => who, // WHAT: let in. WHY: the file is read next.
         Err(denied) => return turned_away(body, denied).await, // WHAT: refused before the file is read. WHY: as above.
     };
-    let body = match body_once_let_in(body, server.config.largest_upload as usize).await {
+    let _turn = big_turn().await; // WHAT: one of four big reads at a time. WHY: a plugin file can be as large as any upload (audit, 2026-11-11)
+    let body = match body_once_let_in(body, usize::try_from(server.config.largest_upload).unwrap_or(usize::MAX)).await {
         Ok(body) => body, // WHAT: the plugin file. WHY: checked below.
         Err(denied) => return denied.into_response(), // WHAT: bigger than any upload. WHY: said plainly.
     };
-    plugin_added(&server, who, body).into_response() // WHAT: the plugin checked and kept, as before. WHY: unchanged once let in.
+    plugin_added(&server, &who, &body).into_response() // WHAT: the plugin checked and kept, as before. WHY: unchanged once let in.
 }
 
-fn plugin_added(server: &Shared, who: Who, body: axum::body::Bytes) -> Answer<Json<hub::PluginInfo>> {
+fn plugin_added(server: &Shared, who: &Who, body: &[u8]) -> Answer<Json<hub::PluginInfo>> { // WHAT: who sent it and its bytes, lent. WHY: only read, never kept
     if body.is_empty() {
         return Err(Denied::wrong("No plugin came with that."));
     }
     let mut trusted = crate::plugin_trust();
     trusted.keys.extend(server.config.plugin_keys_for_tests.iter().cloned());
-    let checked = hub::plugin::check(&trusted, &body).map_err(Denied::wrong)?;
+    let checked = hub::plugin::check(&trusted, body).map_err(Denied::wrong)?; // WHAT: the file's signature and shape checked. WHY: only a signed plugin is kept
     let digest = server
         .store
-        .put_blob(&body)
+        .put_blob(body) // WHAT: the file kept by its digest. WHY: served to the seats
         .map_err(|e| Denied::broke("store that plugin", e))?;
     let manifest = plugin_host::manifest_of(&checked.wasm).ok();
     let plugin = hub::PluginInfo {
@@ -2651,7 +2806,7 @@ fn plugin_added(server: &Shared, who: Who, body: axum::body::Bytes) -> Answer<Js
                     plugin.name,
                     plugin.version,
                     plugin.digest,
-                    plugin.bytes as i64,
+                    int::signed(plugin.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     plugin.key,
                     plugin.uploaded,
                     plugin.uploaded_by
@@ -2709,7 +2864,7 @@ async fn update_latest(
     headers: HeaderMap,
     Query(asking): Query<Asking>,
 ) -> Answer<Json<UpdateOffer>> {
-    caller(&server, &headers)?;
+    caller_still(&server, &headers)?; // WHAT: who is asking, without keeping their session alive. WHY: security review H2e: this door is open to seats that can't sign, so it must never make an old session last for ever
     // A seat asking is a reason to look at the publisher's feed, when the last
     // look was a while ago: the office hears about a fix within minutes of
     // somebody opening Hyperview, not at the server's next turn. Somebody who
@@ -2771,11 +2926,11 @@ async fn update_latest(
                         published: r.get(3)?,
                         notes: r.get(4)?,
                         download: String::new(),
-                        bytes: r.get::<_, i64>(5)? as u64,
+                        bytes: int::unsigned(r.get(5)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                         digest: r.get(6)?,
                         signature: r.get(7)?,
                         key: r.get(8)?,
-                        minimum_api_version: r.get::<_, i64>(9)? as u32,
+                        minimum_api_version: r.get::<_, u32>(9)?, // WHAT: read as the 32-bit number it was written from. WHY: SQLite refuses to hand back one that doesn't fit, where the cast cut it short
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -2802,8 +2957,7 @@ async fn update_latest(
     });
     let required = release
         .as_ref()
-        .map(|r| r.minimum_api_version > API_VERSION)
-        .unwrap_or(false);
+        .is_some_and(|r| r.minimum_api_version > API_VERSION); // WHAT: whether the newest release needs a newer API than this server's. WHY: then the seat must update before it connects
 
     Ok(Json(UpdateOffer {
         release,
@@ -2813,6 +2967,7 @@ async fn update_latest(
     }))
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn channel_name(channel: Channel) -> &'static str {
     match channel {
         Channel::Stable => "stable",
@@ -2826,7 +2981,7 @@ async fn update_download(
     Path(version): Path<String>,
     Query(asking): Query<Asking>,
 ) -> Answer<Response> {
-    caller(&server, &headers)?;
+    caller_still(&server, &headers)?; // WHAT: who is asking, their session untouched. WHY: security review H2e
     let platform = if asking.platform.trim().is_empty() {
         hub::feed::ASSUMED_PLATFORM.to_string()
     } else {
@@ -2921,7 +3076,7 @@ async fn add_person(
              far harder to guess than a short one with symbols in it.",
         ));
     }
-    let hashed = auth::hash_password(&body.password)
+    let hashed = auth::hash_password_in_turn(&body.password).await
         .map_err(|e| Denied::broke("set that password", e))?;
     let user = User {
         id: fresh_id("usr"),
@@ -2950,7 +3105,7 @@ async fn add_person(
         .map_err(|e| Denied::broke("add that person", e))?;
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::ADDED_PERSON, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::ADDED_PERSON, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(&user.email)
             .saying(auth::role_name(user.role)),
@@ -3031,7 +3186,7 @@ async fn change_role(
 
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::CHANGED_ROLE, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::CHANGED_ROLE, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(&email)
             .saying(format!("{was} to {}", auth::role_name(role))),
@@ -3093,7 +3248,7 @@ async fn remove_person(
 
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::REMOVED_PERSON, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::REMOVED_PERSON, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(&email)
             .saying("their sessions and keys went with them"),
@@ -3130,7 +3285,7 @@ async fn sign_out(State(server): State<Shared>, headers: HeaderMap, _sent: Unuse
         .map_err(|e| Denied::broke("sign you out", e))?;
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::SIGNED_OUT, &who.email).by(&who.id),
+        &crate::audit::Entry::new(crate::audit::action::SIGNED_OUT, &who.email).by(&who.id), // WHAT: the audit line, lent to the log. WHY: written there, not kept
     );
     Ok(Json(serde_json::json!({ "signed_out": true })))
 }
@@ -3163,10 +3318,10 @@ async fn add_license(
 ) -> Answer<Json<hub::license::Standing>> {
     let who = administrator(&server, &headers)?;
     let license = crate::license::install(&server, &body.license).map_err(Denied::wrong)?;
-    tracing::info!("license {} for {} added by {}", license.id, license.company, who.email);
+    tracing::info!("license {}… for {} added by {}", license.id.chars().take(8).collect::<String>(), license.company, who.email); // WHAT: the id shortened. WHY: the whole id finds the licence file on the feed (audit, 2026-11-11)
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::ADDED_LICENSE, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::ADDED_LICENSE, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(license.id.clone())
             .saying(format!("{} for {}", license.edition.title(), license.company)),
@@ -3239,8 +3394,8 @@ async fn copy_set(
                     copy.name,
                     copy.filename,
                     copy.digest,
-                    copy.bytes as i64,
-                    copy.sheets as i64,
+                    int::signed(copy.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
+                    int::of_index(copy.sheets), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     copy.uploaded,
                     copy.uploaded_by,
                     copy.folder,
@@ -3263,7 +3418,7 @@ async fn copy_set(
     let copy = made.ok_or_else(|| Denied::missing("drawing set"))?;
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::UPLOADED_SET, &who.email)
+        &crate::audit::Entry::new(crate::audit::action::UPLOADED_SET, &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(copy.name.clone())
             .saying("a copy to take off on"),
@@ -3294,6 +3449,24 @@ pub(crate) fn seen_from(headers: &HeaderMap) -> String {
 /// caller sends under this name is removed first.
 const PEER: &str = "x-excalibur-peer"; // WHAT: a header only this server writes. WHY: the routes read the caller's address from one place.
 
+/// The header `where_from` sets to "1" for a request the tunnel's connector
+/// passed on from the internet. Whatever a caller sends under this name is
+/// removed first.
+const OUTSIDE: &str = "x-excalibur-outside"; // WHAT: a header only this server writes. WHY: routes that trust the office network treat the internet differently
+
+/// WHAT: how joining works for one caller: "open" becomes "code" for a
+/// caller from the internet; anything else is as set. WHY: open joining is for
+/// the office network (audit, 2026-11-11).
+pub(crate) fn joining_for(how: String, outside: bool) -> String {
+    if how == "open" && outside { "code".to_string() } else { how } // WHAT: the one rule. WHY: as above
+}
+
+/// Whether this request came from the internet, through the tunnel's
+/// connector on this machine, as `where_from` worked it out.
+pub(crate) fn from_outside(headers: &HeaderMap) -> bool {
+    headers.get(OUTSIDE).is_some_and(|v| v.as_bytes() == b"1") // WHAT: set only by `where_from`. WHY: a caller's own copy was thrown away
+}
+
 /// Works out where a request came from and writes it where `seen_from`
 /// reads it. Runs in front of every API route.
 ///
@@ -3315,6 +3488,12 @@ pub(crate) async fn where_from(
     let peer = connected.map(|axum::extract::ConnectInfo(at)| at); // WHAT: the socket's other end, when the server knows it. WHY: what actually connected.
     let address = address_of(peer, request.headers(), proxied); // WHAT: the caller's address. WHY: counted and written in the log.
     request.headers_mut().remove(PEER); // WHAT: anything the caller sent under that name, gone. WHY: it is this server's to write.
+    request.headers_mut().remove(OUTSIDE); // WHAT: the same for the outside mark. WHY: as above
+    let outside = request.headers().contains_key("cf-connecting-ip")
+        || (proxied && peer.is_some_and(|p| p.ip().to_canonical().is_loopback()) && request.headers().contains_key("x-forwarded-for")); // WHAT: Cloudflare's header on any request, or a proxy's on this machine. WHY: the marker was missed when an office ran its own connector or pointed the tunnel at the LAN address (audit re-check); a caller who adds the header only makes the server stricter with themselves
+    if outside {
+        request.headers_mut().insert(OUTSIDE, header::HeaderValue::from_static("1")); // WHAT: marked. WHY: read by `from_outside`
+    }
     if let Ok(value) = header::HeaderValue::from_str(&address) {
         request.headers_mut().insert(PEER, value); // WHAT: written. WHY: `seen_from` reads it.
     }
@@ -3334,10 +3513,14 @@ fn behind_proxy() -> bool {
 /// The address a request came from: the socket's, or, from a proxy on this
 /// machine, the address the proxy says it is passing on. Empty when the
 /// server was not told the socket (only ever in a test).
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn address_of(peer: Option<std::net::SocketAddr>, headers: &HeaderMap, proxied: bool) -> String {
     let Some(peer) = peer else {
         return String::new(); // WHAT: nothing known. WHY: as before, such a request is not counted with the others.
     };
+    // WHAT: a forwarded address believed only when a proxy is expected here. WHY: believing Cloudflare's header from this
+    // machine without that let any program on the server claim a new address per guess and dodge the limits (the ASVS
+    // test caught it). An office running its own connector sets HYPERVIEW_BEHIND_PROXY=1 (docs/OFFICE-SERVER.md).
     if proxied && peer.ip().to_canonical().is_loopback() {
         let said = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string); // WHAT: one header's text. WHY: read twice below.
         // WHAT: Cloudflare's own header first. WHY: Cloudflare sets it and overwrites any a caller sent.
@@ -3352,8 +3535,8 @@ pub fn address_of(peer: Option<std::net::SocketAddr>, headers: &HeaderMap, proxi
     peer.ip().to_canonical().to_string() // WHAT: the machine that connected, an IPv4 address written as IPv6 as itself. WHY: the only address a caller can't make up, written one way whatever the socket listens on.
 }
 
-pub(crate) fn record(server: &Server, entry: crate::audit::Entry) { // WHAT: crate-wide now. WHY: the folders' and files' routes write the same log.
-    if let Err(e) = server.store.audit(&entry) {
+pub(crate) fn record(server: &Server, entry: &crate::audit::Entry) { // WHAT: crate-wide now. WHY: the folders' and files' routes write the same log.
+    if let Err(e) = server.store.audit(entry) { // WHAT: the line written. WHY: a failure is said, never passed on
         tracing::warn!("the audit log could not be written: {e}");
     }
 }
@@ -3446,7 +3629,7 @@ async fn claim(State(server): State<Shared>, Json(body): Json<Setup>) -> Answer<
     check_password(&body.password)?;
 
     let hashed =
-        auth::hash_password(&body.password).map_err(|e| Denied::broke("set that password", e))?;
+        auth::hash_password_in_turn(&body.password).await.map_err(|e| Denied::broke("set that password", e))?;
     let id = fresh_id("usr");
     let created = now();
 
@@ -3502,12 +3685,23 @@ async fn claim(State(server): State<Shared>, Json(body): Json<Setup>) -> Answer<
 
 // ---- and everybody after --------------------------------------------------
 
+/// A join, and the computer it came from when it came from outside (§5).
+#[derive(Deserialize)]
+struct JoinBody {
+    #[serde(flatten)]
+    join: Join, // WHAT: the join itself, as always. WHY: every program already sends it
+    #[serde(default)]
+    device: Option<hub::device::Ask>, // WHAT: the computer's request to be let in. WHY: a good code or invitation from outside admits the computer too
+}
+
+#[allow(clippy::too_many_lines)] // WHAT: one request's checks in one function. WHY: they run in this order and each leans on the one before; split, the gate a reviewer must read in order would be scattered
 async fn join(
     State(server): State<Shared>,
     headers: HeaderMap,
-    Json(body): Json<Join>,
+    Json(JoinBody { join: body, device }): Json<JoinBody>,
 ) -> Answer<Json<Session>> {
     let (how, code, role) = how_joining(&server);
+    let how = joining_for(how, from_outside(&headers)); // WHAT: "open" is for the office network; from the internet a code or an invitation is still asked for. WHY: open joining with remote access on gave anybody an estimator's account (audit, 2026-11-11)
     let from = seen_from(&headers);
     let counted = crate::patience::counted_as(&from); // WHAT: the address as it is counted: an IPv6 caller by its /64. WHY: a new address from the same /64 is the same caller.
 
@@ -3520,7 +3714,7 @@ async fn join(
     if let Err(owed) = server.patience.begin(crate::patience::JOINING, &[counted.as_str()]) {
         return Err(Denied(
             StatusCode::TOO_MANY_REQUESTS,
-            Problem::new("too_many", &crate::patience::refusal(owed)),
+            Problem::new("too_many", crate::patience::refusal(owed)), // WHAT: refused, saying how long to wait. WHY: the sentence is handed over as it is made
         ));
     }
 
@@ -3538,7 +3732,7 @@ async fn join(
             // WHAT: counted already. WHY: `begin` counted this try.
             record(
                 &server,
-                crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &invite.email)
+                &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &invite.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                     .saying(if invite.used.is_some() {
                         "that invitation has already been used"
                     } else {
@@ -3574,7 +3768,7 @@ async fn join(
                 // WHAT: counted already. WHY: `begin` counted this try.
                 record(
                     &server,
-                    crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, "")
+                    &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, "") // WHAT: the audit line, lent to the log. WHY: written there, not kept
                         .saying("the join code has run out")
                         .from(from.clone()),
                 );
@@ -3593,7 +3787,7 @@ async fn join(
                 // WHAT: counted already. WHY: `begin` counted this try.
                 record(
                     &server,
-                    crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, "")
+                    &crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, "") // WHAT: the audit line, lent to the log. WHY: written there, not kept
                         .saying("the join code did not match")
                         .from(from.clone()),
                 );
@@ -3623,6 +3817,10 @@ async fn join(
     }
 
     crate::license::room_for_another(&server).map_err(Denied::license_users)?;
+    let device = device.filter(|_| from_outside(&headers)); // WHAT: a computer's request, only from outside. WHY: in the office a computer asks and an admin approves; the gate already let this one through
+    if let Some(ask) = device.as_ref() {
+        crate::devices::proven_for_join(&server, ask)?; // WHAT: its proof checked before any account is made. WHY: a join never admits a key nobody holds
+    }
     let name = body.name.trim().to_string();
     let email = body.email.trim().to_lowercase();
     if name.is_empty() {
@@ -3635,7 +3833,7 @@ async fn join(
     check_password(&body.password)?;
 
     let hashed =
-        auth::hash_password(&body.password).map_err(|e| Denied::broke("set that password", e))?;
+        auth::hash_password_in_turn(&body.password).await.map_err(|e| Denied::broke("set that password", e))?;
     // An invitation made out to one address is for that address. Otherwise
     // one forwarded email is a spare account for whoever got it.
     if let Some(invite) = invited.as_ref() {
@@ -3694,13 +3892,20 @@ async fn join(
         }
         record(
             &server,
-            crate::audit::Entry::new("invitation_used", &email)
+            &crate::audit::Entry::new("invitation_used", &email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
                 .by(&id)
                 .saying(format!("invited as {}", auth::role_name(role))),
         );
     }
 
     tracing::info!("{email} made an account");
+    if let Some(ask) = device.as_ref() {
+        let by = match invited.as_ref() {
+            Some(invite) => format!("an invitation for {}", invite.email), // WHAT: the invitation. WHY: who let it in
+            None => "the join code".to_string(), // WHAT: the code. WHY: likewise
+        };
+        crate::devices::joined(&server, ask, &from, &by)?; // WHAT: the computer let in, approved. WHY: §5: the join code and invitations stay a way in from outside
+    }
     Ok(Json(issue_session(&server, &id, &name, &email, role)?))
 }
 
@@ -3757,7 +3962,7 @@ async fn make_invite(
         .map_err(|e| Denied::broke("write that invitation down", e))?;
     record(
         &server,
-        crate::audit::Entry::new("invitation_made", &who.email)
+        &crate::audit::Entry::new("invitation_made", &who.email) // WHAT: the audit line, lent to the log. WHY: written there, not kept
             .by(&who.id)
             .about(email.clone())
             .saying(format!("as {}", auth::role_name(asked))),
@@ -3813,7 +4018,7 @@ async fn drop_invite(
         .map_err(|e| Denied::broke("throw that invitation away", e))?;
     record(
         &server,
-        crate::audit::Entry::new("invitation_dropped", &who.email).by(&who.id),
+        &crate::audit::Entry::new("invitation_dropped", &who.email).by(&who.id), // WHAT: the audit line, lent to the log. WHY: written there, not kept
     );
     list_invites(State(server), headers).await
 }
@@ -4028,6 +4233,7 @@ async fn upload_release(
     headers: HeaderMap,
     mut form: Multipart,
 ) -> Answer<Json<Release>> {
+    use sha2::{Digest, Sha256}; // WHAT: the digest the installer is checked against. WHY: named first, before the statements that use it
     administrator(&server, &headers)?;
     let mut manifest: Option<Release> = None;
     let mut installer: Vec<u8> = Vec::new();
@@ -4065,7 +4271,6 @@ async fn upload_release(
     // are trusted, the seats do — but it can check that the file and the
     // manifest describe each other, and refuse a pairing that is already
     // wrong rather than serving it to six machines that will each reject it.
-    use sha2::{Digest, Sha256};
     let digest = crate::store::hex(&Sha256::digest(&installer));
     if digest != release.digest.to_lowercase() {
         return Err(Denied::wrong(format!(
@@ -4084,7 +4289,6 @@ async fn upload_release(
              so it is refused here.",
         ));
     }
-
     server
         .store
         .put_blob(&installer)
@@ -4101,18 +4305,19 @@ async fn upload_release(
                      channel = excluded.channel, published = excluded.published,
                      notes = excluded.notes, bytes = excluded.bytes,
                      digest = excluded.digest, signature = excluded.signature,
-                     signing_key = excluded.signing_key, minimum_api = excluded.minimum_api",
+                     signing_key = excluded.signing_key, minimum_api = excluded.minimum_api,
+                     ready = 0", // WHAT: replaced bytes are offered again only when made ready again. WHY: an upload silently swapped what seats were already being offered (audit, 2026-11-11)
                 params![
                     release.version,
                     channel_name(release.channel),
                     release.platform,
                     release.published,
                     release.notes,
-                    release.bytes as i64,
+                    int::signed(release.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     release.digest.to_lowercase(),
                     release.signature,
                     release.key,
-                    release.minimum_api_version as i64
+                    i64::from(release.minimum_api_version) // WHAT: widened, never cut. WHY: every one of these fits a 64-bit number
                 ],
             )?;
             Ok(())
@@ -4155,7 +4360,7 @@ async fn release_ready(
         .with(|db| {
             Ok(db.execute(
                 "UPDATE releases SET ready = ?1 WHERE version = ?2 AND platform = ?3",
-                params![body.ready as i64, version, platform],
+                params![i64::from(body.ready), version, platform], // WHAT: ready as 1 or 0. WHY: SQLite has no true or false
             )?)
         })
         .map_err(|e| Denied::broke("change that release", e))?;
@@ -4223,7 +4428,7 @@ async fn upload_chest(
     let chest = Chest {
         id: fresh_id("cst"),
         name: if name.trim().is_empty() {
-            profile.map(|p| p.name).unwrap_or_else(|| filename.clone())
+            profile.map_or_else(|| filename.clone(), |p| p.name) // WHAT: the chest's own name, else its file's. WHY: a chest is never nameless
         } else {
             name.trim().to_string()
         },
@@ -4246,9 +4451,9 @@ async fn upload_chest(
                     chest.name,
                     chest.filename,
                     chest.digest,
-                    chest.bytes as i64,
-                    chest.tools as i64,
-                    chest.sets as i64,
+                    int::signed(chest.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
+                    int::of_index(chest.tools), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
+                    int::of_index(chest.sets), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     chest.uploaded
                 ],
             )?;
@@ -4272,13 +4477,22 @@ async fn upload_chest(
 /// assistant or integration key; never a sync key, which is for its own list
 /// of routes. The answers are exactly what that person would get from the API:
 /// every tool below takes this Who and applies the same project gate.
-pub fn mcp_caller(server: &Server, headers: &HeaderMap) -> Result<Who, ()> {
+/// `None`, with nothing said, when the request carries no assistant or
+/// integration key that is still good.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn mcp_caller(server: &Server, headers: &HeaderMap) -> Option<Who> { // WHAT: the person behind an assistant or integration key, or none. WHY: an absent caller is all the endpoint needs to know
     caller_as(
         server,
         headers,
         &[auth::purpose::ASSISTANT, auth::purpose::INTEGRATION],
     )
-    .map_err(|_| ())
+    .ok() // WHAT: the person, or none. WHY: why it was refused is not told to an assistant
+}
+
+/// One channel of a colour, 0 to 1, as the byte `#RRGGBB` writes.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // WHAT: a fraction scaled to a byte by a float-to-int cast. WHY: Rust's cast saturates, so 0..1 lands in 0..255 and anything outside is held at the ends; no conversion without a cast exists for a float
+fn colour_byte(channel: f32) -> u8 {
+    (channel * 255.0) as u8 // WHAT: the byte, cut toward zero as before. WHY: the same colour text the markups have always been stored with
 }
 
 fn broke(what: &str, e: impl std::fmt::Display) -> String {
@@ -4299,6 +4513,9 @@ fn mcp_may_read_set(server: &Server, who: &Who, id: &str) -> Result<(), String> 
     may_reach_set(server, who, id).map_err(|_| format!("There is no drawing set called {id} on this server.")) // WHAT: the REST routes' own gate. WHY: one rule for both doors; a refusal reads as "not here".
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_projects(server: &Server, who: &Who) -> Result<String, String> {
     let everything = who.role == hub::Role::Admin; // WHAT: whether this person sees every job. WHY: the same administrator rule as the project list.
     let list: Vec<(String, String, String, i64, Option<String>)> = server
@@ -4316,7 +4533,7 @@ pub fn mcp_projects(server: &Server, who: &Who) -> Result<String, String> {
             if !crate::folders::is_office(who) {
                 for row in &mut rows {
                     let sight = crate::folders::sight_of(db, &row.0, who)?; // WHAT: what this person sees of the job. WHY: its count of sets is only theirs.
-                    row.3 = crate::folders::current_sets_seen(db, &row.0, &sight)? as i64; // WHAT: the sets they can read. WHY: a hidden folder is not even counted for an assistant.
+                    row.3 = int::of_index(crate::folders::current_sets_seen(db, &row.0, &sight)?); // WHAT: the sets they can read. WHY: a hidden folder is not even counted for an assistant.
                 }
             }
             Ok(rows)
@@ -4331,9 +4548,9 @@ pub fn mcp_projects(server: &Server, who: &Who) -> Result<String, String> {
             Some(when) => format!("  (archived {})", when.get(..10).unwrap_or(&when)),
             None => String::new(),
         };
-        out.push_str(&format!(
-            "  {number}  {name}  —  {sets} current drawing set(s){put_away}   [id {id}]\n"
-        ));
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "  {number}  {name}  —  {sets} current drawing set(s){put_away}   [id {id}]" // WHAT: one job's line. WHY: what the assistant reads
+        );
     }
     Ok(out)
 }
@@ -4342,6 +4559,10 @@ pub fn mcp_projects(server: &Server, who: &Who) -> Result<String, String> {
 /// drawing replaced is marked so, because its quantities are not the job's
 /// any more; so is takeoff carried forward onto a new issue and not yet
 /// checked.
+///
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_sets(server: &Server, who: &Who, project: Option<&str>) -> Result<String, String> {
     type Row = (String, String, String, i64, i64, Option<String>, Option<String>, i64);
     let everything = who.role == hub::Role::Admin; // WHAT: whether this person sees every job. WHY: the same administrator rule as everywhere else.
@@ -4398,17 +4619,17 @@ pub fn mcp_sets(server: &Server, who: &Who, project: Option<&str>) -> Result<Str
         }
         let mut notes = String::new();
         if let (Some(newer), Some(newer_name)) = (&newer, &newer_name) {
-            notes.push_str(&format!("  — superseded by {newer_name} [id {newer}]"));
+            let _ = write!(notes, "  — superseded by {newer_name} [id {newer}]"); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         if carried > 0 {
-            notes.push_str(&format!(
+            let _ = write!(notes, // WHAT: written straight into the text. WHY: no string is made only to be copied in
                 "  — {carried} markup(s) carried forward from the issue before, marked \"{}\" until somebody checks them",
                 crate::projects::CARRIED
-            ));
+            );
         }
-        out.push_str(&format!(
-            "  {name}  —  {sheets} sheets, revision {revision}, uploaded {uploaded}   [id {id}]{notes}\n"
-        ));
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "  {name}  —  {sheets} sheets, revision {revision}, uploaded {uploaded}   [id {id}]{notes}" // WHAT: one set's line. WHY: likewise
+        );
     }
     Ok(out)
 }
@@ -4438,8 +4659,7 @@ fn mcp_short_by(rows: &[takeoff::Row], sheets: &[quantities::SheetScale]) -> Str
         .map(|page| {
             sheets
                 .get(*page)
-                .map(|s| s.number.clone())
-                .unwrap_or_else(|| format!("sheet {}", page + 1))
+                .map_or_else(|| format!("sheet {}", page + 1), |s| s.number.clone()) // WHAT: the sheet's number, else its place. WHY: every page has a name to show
         })
         .collect();
     format!(
@@ -4451,6 +4671,9 @@ fn mcp_short_by(rows: &[takeoff::Row], sheets: &[quantities::SheetScale]) -> Str
     )
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_takeoff(server: &Server, who: &Who, id: &str) -> Result<String, String> {
     let (rows, sheets) = mcp_gather(server, who, id)?; // WHAT: the set's measurements, if this person may read it. WHY: the gate lives in mcp_gather.
     if rows.is_empty() {
@@ -4459,45 +4682,50 @@ pub fn mcp_takeoff(server: &Server, who: &Who, id: &str) -> Result<String, Strin
     let summary = takeoff::summarise(&rows, quantities::WEIGHTS);
     let mut out = format!("Takeoff for {id} — {} markup(s).\n\n", summary.picks);
     for group in &summary.groups {
-        out.push_str(&format!("  {}  ({})\n", group.subject, group.kind.name()));
-        out.push_str(&format!("      {} markup(s)", group.picks));
+        let _ = writeln!(out, "  {}  ({})", group.subject, group.kind.name()); // WHAT: written straight into the text. WHY: no string is made only to be copied in
+        let _ = write!(out, "      {} markup(s)", group.picks); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         if group.length > 0.0 {
-            out.push_str(&format!(", {:.2} ft", group.length));
+            let _ = write!(out, ", {:.2} ft", group.length); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         if group.area > 0.0 {
-            out.push_str(&format!(", {:.2} sq ft", group.area));
+            let _ = write!(out, ", {:.2} sq ft", group.area); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         if group.count > 0.0 && group.kind == annot::Kind::Count {
-            out.push_str(&format!(", count {:.0}", group.count));
+            let _ = write!(out, ", count {:.0}", group.count); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         // Absent, never zero. The distinction is the whole argument.
-        match group.weighed {
-            true => out.push_str(&format!(", {:.0} lb", group.pounds)),
-            false => out.push_str(", NO unit weight in the tool chest for this shape — \
-                                   it has no weight, which is not a weight of zero"),
-        }
+        if group.weighed { // WHAT: a shape with a unit weight. WHY: its pounds are shown
+            let _ = write!(out, ", {:.0} lb", group.pounds); // WHAT: written straight into the text. WHY: no string is made only to be copied in
+        } else { // WHAT: one without. WHY: said, never shown as zero
+            out.push_str(", NO unit weight in the tool chest for this shape — \
+                                   it has no weight, which is not a weight of zero"); // WHAT: that there is no weight. WHY: absent is never zero
+        } // WHAT: the weight, or that there is none. WHY: absent is never zero
         if group.unscaled > 0 {
-            out.push_str(&format!(
+            let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
                 " — {} of them left out for want of a scale",
                 group.unscaled
-            ));
+            );
         }
         out.push('\n');
     }
-    match summary.pounds > 0.0 {
-        true => out.push_str(&format!(
-            "\nTOTAL: {:.0} lb · {:.3} tons\n",
+    if summary.pounds > 0.0 { // WHAT: a takeoff with weight. WHY: the total shown
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "\nTOTAL: {:.0} lb · {:.3} tons", // WHAT: the total, with its line ended by writeln. WHY: the same text as before
             summary.pounds,
             summary.tons()
-        )),
-        false => out.push_str(
+        );
+    } else { // WHAT: one with none. WHY: said plainly
+        out.push_str( // WHAT: that nothing carries a weight. WHY: as above
             "\nTOTAL: no weight — nothing on this takeoff carries a unit weight.\n",
-        ),
-    }
+        );
+    } // WHAT: the total weight, or that there is none. WHY: the same distinction for the whole
     out.push_str(&mcp_short_by(&rows, &sheets));
     Ok(out)
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_shop_list(
     server: &Server,
     who: &Who,
@@ -4518,19 +4746,19 @@ pub fn mcp_shop_list(
     }
     let mut out = format!("Cut list for {id} — lengths in feet, every one rounded UP.\n\n");
     for shape in &list.shapes {
-        out.push_str(&format!("  {}\n", shape.name));
+        let _ = writeln!(out, "  {}", shape.name); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         for cut in &shape.cuts {
-            out.push_str(&format!(
+            let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
                 "      {:.3} ft  × {}",
                 cut.length, cut.count
-            ));
+            );
             if !cut.places.is_empty() {
-                out.push_str(&format!("   at {}", cut.places.join(", ")));
+                let _ = write!(out, "   at {}", cut.places.join(", ")); // WHAT: written straight into the text. WHY: no string is made only to be copied in
             }
             out.push('\n');
         }
-        out.push_str(&format!(
-            "      {} piece(s), {:.2} ft, {}\n",
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "      {} piece(s), {:.2} ft, {}", // WHAT: one cut's line. WHY: likewise
             shape.pieces,
             shape.total_length,
             match shape.pounds {
@@ -4538,43 +4766,43 @@ pub fn mcp_shop_list(
                 None => "NO unit weight in the tool chest — no weight, not a weight of zero"
                     .to_string(),
             }
-        ));
+        );
     }
-    out.push_str(&format!(
+    let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
         "\n{} piece(s) altogether · {}\n",
         list.pieces,
         list.weight_says()
-    ));
+    );
 
     match stock_feet {
         Some(stock) if stock > 0.0 => {
-            out.push_str(&format!("\nWHAT TO BUY, in {stock} ft stock:\n"));
+            let _ = write!(out, "\nWHAT TO BUY, in {stock} ft stock:\n"); // WHAT: written straight into the text. WHY: no string is made only to be copied in
             for nest in takeoff::shoplist::nest_all(&list, stock, takeoff::shoplist::INCH / 8.0)
             {
-                out.push_str(&format!(
-                    "  {}: {} stick(s), {:.0}% of the steel ends up in the building\n",
+                let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+                    "  {}: {} stick(s), {:.0}% of the steel ends up in the building", // WHAT: one shape's nest. WHY: likewise
                     nest.shape,
                     nest.sticks_to_buy(),
                     nest.yield_of() * 100.0
-                ));
+                );
                 if nest.unnested > 0 {
-                    out.push_str(&format!(
-                        "      {} piece(s) were NOT nested: a shape with more than {} pieces, or one past the first {} pieces of the whole list, is not nested one by one, so none of them is on a stick\n",
+                    let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+                        "      {} piece(s) were NOT nested: a shape with more than {} pieces, or one past the first {} pieces of the whole list, is not nested one by one, so none of them is on a stick", // WHAT: the pieces left unnested. WHY: likewise
                         nest.unnested,
                         takeoff::shoplist::MOST_NESTED,
                         takeoff::shoplist::MOST_NESTED_IN_ALL
-                    )); // WHAT: said plainly. WHY: an answer with no sticks must not read as nothing to buy.
+                    ); // WHAT: said plainly. WHY: an answer with no sticks must not read as nothing to buy.
                 } else if !nest.is_whole() {
-                    out.push_str(&format!(
+                    let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
                         "      {} piece(s) WILL NOT come out of {stock} ft stock and are on \
-                         no stick: {}\n",
+                         no stick: {}", // WHAT: the pieces too long for the stock. WHY: likewise
                         nest.too_long.len(),
                         nest.too_long
                             .iter()
                             .map(|p| format!("{p:.2} ft"))
                             .collect::<Vec<_>>()
                             .join(", ")
-                    ));
+                    );
                 }
             }
         }
@@ -4588,12 +4816,15 @@ pub fn mcp_shop_list(
 
     let missing = list.what_is_missing();
     if !missing.is_empty() {
-        out.push_str(&format!("\n{missing}\n"));
+        let _ = write!(out, "\n{missing}\n"); // WHAT: written straight into the text. WHY: no string is made only to be copied in
     }
     out.push_str(&mcp_short_by(&rows, &sheets));
     Ok(out)
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_doubles(server: &Server, who: &Who, id: &str) -> Result<String, String> {
     let (rows, sheets) = mcp_gather(server, who, id)?; // WHAT: the set's measurements, if this person may read it. WHY: the gate lives in mcp_gather.
     let found = takeoff::doubles::find(&rows, takeoff::doubles::HowClose::default());
@@ -4607,8 +4838,7 @@ pub fn mcp_doubles(server: &Server, who: &Who, id: &str) -> Result<String, Strin
     let name_of = |page: usize| {
         sheets
             .get(page)
-            .map(|s| s.number.clone())
-            .unwrap_or_else(|| format!("sheet {}", page + 1))
+            .map_or_else(|| format!("sheet {}", page + 1), |s| s.number.clone()) // WHAT: the sheet's number, else its place. WHY: every page has a name to show
     };
     let mut out = format!(
         "{} pair(s) on {id} sit in the same place measuring the same thing. \
@@ -4617,17 +4847,17 @@ pub fn mcp_doubles(server: &Server, who: &Who, id: &str) -> Result<String, Strin
         found.pairs.len()
     );
     for pair in &found.pairs {
-        out.push_str(&format!(
+        let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
             "  {}  {}  ({})\n      {}\n",
             name_of(pair.page),
             pair.subject,
             pair.sure.name(),
             pair.why
-        ));
+        );
     }
     let worth = found.what_it_is_worth(quantities::WEIGHTS, &rows);
     if !worth.is_empty() {
-        out.push_str(&format!("\n{worth}\n"));
+        let _ = write!(out, "\n{worth}\n"); // WHAT: written straight into the text. WHY: no string is made only to be copied in
     }
     out.push_str(
         "\nWhether any of these is really a double is for the estimator to decide. A \
@@ -4637,6 +4867,9 @@ pub fn mcp_doubles(server: &Server, who: &Who, id: &str) -> Result<String, Strin
     Ok(out)
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_revision(server: &Server, who: &Who, was_bid: &str, arrived: &str) -> Result<String, String> {
     let (before, _) = mcp_gather(server, who, was_bid)?; // WHAT: the set that was bid, if this person may read it. WHY: both sides are gated.
     let (after, _) = mcp_gather(server, who, arrived)?; // WHAT: the set that arrived, likewise. WHY: comparing against a set you may not see would leak it.
@@ -4646,8 +4879,8 @@ pub fn mcp_revision(server: &Server, who: &Who, was_bid: &str, arrived: &str) ->
         revision.headline()
     );
     for line in revision.changes() {
-        out.push_str(&format!(
-            "  {}  ({})  {} → {} {}  [{}]\n",
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "  {}  ({})  {} → {} {}  [{}]", // WHAT: one change's line. WHY: likewise
             line.subject,
             line.what.name(),
             format_args!("{:.2}", line.quantity.0),
@@ -4659,15 +4892,18 @@ pub fn mcp_revision(server: &Server, who: &Who, was_bid: &str, arrived: &str) ->
                          can be worked out"
                     .to_string(),
             }
-        ));
+        );
     }
     let missing = revision.what_is_missing();
     if !missing.is_empty() {
-        out.push_str(&format!("\n{missing}\n"));
+        let _ = write!(out, "\n{missing}\n"); // WHAT: written straight into the text. WHY: no string is made only to be copied in
     }
     Ok(out)
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_sheets(server: &Server, who: &Who, id: &str) -> Result<String, String> {
     mcp_may_read_set(server, who, id)?; // WHAT: the project gate. WHY: the sheet list of a set is part of the set.
     let (_, _, sheets) =
@@ -4682,23 +4918,23 @@ pub fn mcp_sheets(server: &Server, who: &Who, id: &str) -> Result<String, String
         .collect();
     let mut out = format!("{} sheet(s) in {id}:\n", sheets.len());
     for sheet in &sheets {
-        out.push_str(&format!(
-            "  {}  —  {}\n",
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "  {}  —  {}", // WHAT: one sheet's line. WHY: likewise
             sheet.number,
             match &sheet.scale {
                 Some(scale) => scale.ratio.clone(),
                 None => "NO SCALE SET".to_string(),
             }
-        ));
+        );
     }
     if !without.is_empty() {
-        out.push_str(&format!(
+        let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
             "\n{} sheet(s) have no scale: {}. Any measurement on those is left out of \
              every total — never counted as zero. A takeoff of this set is short by \
              whatever is on them.\n",
             without.len(),
             without.join(", ")
-        ));
+        );
     }
     Ok(out)
 }
@@ -4779,5 +5015,23 @@ mod where_a_request_came_from {
         assert_eq!(address_of(local, &headers(&[("x-forwarded-for", "1.2.3.4, 203.0.113.9")]), true), "203.0.113.9", "else the last entry, the one the proxy added, not the caller's first");
         assert_eq!(address_of(local, &headers(&[("x-forwarded-for", "not an address")]), true), "127.0.0.1", "nonsense is not an address");
         assert_eq!(address_of(None, &headers(&[]), true), "", "no socket known, nothing to say");
+    }
+}
+
+
+#[cfg(test)]
+mod audit_2026_11_11 {
+    #[test]
+    fn open_joining_asks_a_caller_from_the_internet_for_a_code() {
+        assert_eq!(super::joining_for("open".into(), true), "code"); // WHAT: from the internet. WHY: a code or invitation still asked for
+        assert_eq!(super::joining_for("open".into(), false), "open"); // WHAT: the office network. WHY: unchanged
+        assert_eq!(super::joining_for("closed".into(), true), "closed"); // WHAT: other settings. WHY: as set
+        assert_eq!(super::joining_for("code".into(), true), "code");
+    }
+
+    #[test]
+    fn a_huge_number_of_days_is_ten_years_not_a_crash() {
+        let far = super::in_days(u32::MAX); // WHAT: the largest a caller could send. WHY: it overflowed the date before
+        assert!(far.starts_with("20"), "{far}"); // WHAT: a real date. WHY: clamped to ten years
     }
 }

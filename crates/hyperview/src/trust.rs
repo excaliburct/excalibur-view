@@ -59,11 +59,19 @@ pub const LICENSE_KEYS: &[(&str, &str)] = &[
 /// plugins signed again.
 ///
 /// Plugins already signed with a key from [`KEYS`] keep loading. A partner
-/// who writes plugins, like FabWire, can be given a key of their own here.
+/// who writes plugins, like `FabWire`, can be given a key of their own here.
 ///
 /// Make one with `publish.py make-key`, on the PC that will sign with it, and
 /// paste the line it prints below.
 pub const PLUGIN_KEYS: &[(&str, &str)] = &[];
+
+/// The keys an office certificate may be signed with, and nothing else
+/// (docs/OFFICE-ENROLLMENT.md §2.4): the `YubiKey`'s "office" slot.
+///
+/// Empty until certificates are signed: then no certificate verifies, and an
+/// office is held to the pin its first contact kept, as every office is
+/// today. A key here never signs a release, a licence or a plugin.
+pub const OFFICE_KEYS: &[(&str, &str)] = &[];
 
 /// Where new versions are published: a releases page on GitHub.
 ///

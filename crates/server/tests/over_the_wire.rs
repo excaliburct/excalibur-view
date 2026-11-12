@@ -34,7 +34,7 @@ impl Drop for Scratch {
 /// A running server, and how to reach it.
 struct Running {
     base: String,
-    _scratch: Scratch,
+    scratch: Scratch, // WHAT: the scratch folder. WHY: kept for the server's life, removed when it is dropped
     _runtime: tokio::runtime::Runtime,
 }
 
@@ -102,7 +102,7 @@ fn start_with(people: bool) -> Running {
 
     Running {
         base: format!("http://{address}"),
-        _scratch: scratch,
+        scratch, // WHAT: the scratch folder, kept for the server's life. WHY: removed when the server is dropped
         _runtime: runtime,
     }
 }
@@ -211,11 +211,11 @@ fn a_beam(length_points: f64) -> String {
 
 fn set_scale(server: &Running, set: &str, page: usize, scale: Option<&str>) {
     // The desktop sets a sheet's scale as part of saving; a test reaches in.
-    let path = std::path::Path::new(&server._scratch.0).join("hyperview.sqlite");
+    let path = std::path::Path::new(&server.scratch.0).join("hyperview.sqlite"); // WHAT: the server's database. WHY: a test reaches in
     let db = rusqlite::Connection::open(path).unwrap();
     db.execute(
         "UPDATE sheets SET scale = ?1 WHERE set_id = ?2 AND page = ?3",
-        params![scale, set, page as i64],
+        params![scale, set, i64::try_from(page).unwrap()], // WHAT: the scale, set and page. WHY: the page as SQLite keeps it
     )
     .unwrap();
 }
@@ -431,11 +431,11 @@ fn a_markup_comes_back_as_the_annotation_it_went_up_as() {
     let project = client.create_project("6742", "Elm West").expect("project");
     let set = upload(&server, client.token().unwrap(), &project.id, &a_drawing());
 
-    let sent = a_beam(720.0);
+    let beam = a_beam(720.0); // WHAT: the markup sent up. WHY: named apart from `set`
     client
         .push_markups(
             &set.id,
-            &[hub::NewMarkup { page: 0, dictionary: sent.clone(), replaces: None }],
+            &[hub::NewMarkup { page: 0, dictionary: beam.clone(), replaces: None }], // WHAT: the markup sent. WHY: one, on the first page
         )
         .expect("push");
 
@@ -443,7 +443,7 @@ fn a_markup_comes_back_as_the_annotation_it_went_up_as() {
     assert_eq!(page.markups.len(), 1);
     // Byte for byte. There is no lossy middle format for fidelity to leak out
     // of, which is the whole reason a markup travels as its own dictionary.
-    assert_eq!(page.markups[0].dictionary, sent);
+    assert_eq!(page.markups[0].dictionary, beam); // WHAT: it comes back exactly. WHY: the dictionary is the markup
 
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(page.markups[0].dictionary.as_bytes())
@@ -1238,7 +1238,7 @@ fn start_maintained(key: &str) -> Running {
     });
     Running {
         base: format!("http://{address}"),
-        _scratch: scratch,
+        scratch, // WHAT: the scratch folder, kept for the server's life. WHY: removed when the server is dropped
         _runtime: runtime,
     }
 }
@@ -1298,10 +1298,16 @@ fn the_ops_route_needs_the_key_and_tells_the_truth_about_backups() {
     // from losing every takeoff it has done should show amber, not green.
     assert!(body.contains("\"backupDays\":null"), "{body}");
     assert!(body.contains("\"signingRequired\":true"), "{body}");
+    let ops: serde_json::Value = serde_json::from_str(&body).expect("ops is JSON"); // WHAT: the report, read. WHY: to check its parts
+    let parts = ops["parts"].as_array().expect("every Office Server part is reported"); // WHAT: the parts list. WHY: Fleet sees one server whatever it runs
+    assert_eq!(parts.len(), 4, "{body}"); // WHAT: view, cad, archetype, citadel. WHY: off parts are listed too
+    assert!(parts.iter().any(|p| p["name"] == "view" && p["state"] == "running"), "{body}"); // WHAT: View runs. WHY: it always does
+    assert!(parts.iter().all(|p| p["name"] == "view" || p["state"] == "off"), "{body}"); // WHAT: nothing else, with no licence. WHY: only a signed licence switches a part on
 }
 
 #[test]
 fn a_release_signed_by_nobody_this_build_trusts_is_refused() {
+    use base64::Engine; // WHAT: base64, for the installer in the push. WHY: named first, before the statements that use it
     // The heart of it. The Fleet's key opens the door; it does not vouch for
     // what comes through it.
     let key = "a-long-maintenance-key-nobody-guesses";
@@ -1322,7 +1328,6 @@ fn a_release_signed_by_nobody_this_build_trusts_is_refused() {
         minimum_api_version: 1,
     };
 
-    use base64::Engine;
     let body = serde_json::json!({
         "release": release,
         "installer": base64::engine::general_purpose::STANDARD.encode(&installer),
@@ -1340,7 +1345,7 @@ fn a_release_signed_by_nobody_this_build_trusts_is_refused() {
         .expect("a body");
     let answer: serde_json::Value = serde_json::from_str(&said).expect("json");
     assert_eq!(
-        answer["written"].as_array().map(|a| a.len()),
+        answer["written"].as_array().map(Vec::len), // WHAT: how many were written. WHY: none should be
         Some(0),
         "nothing should have been written: {said}"
     );
@@ -1431,10 +1436,10 @@ fn the_answer(stream: &mut std::net::TcpStream) -> String {
 
 #[test]
 fn a_push_the_size_of_a_real_build_gets_past_the_size_check() {
+    use base64::Engine; // WHAT: base64, for the installer in the push. WHY: named first, before the statements that use it
     let key = "a-long-maintenance-key-nobody-guesses";
     let server = start_maintained(key);
     let installer = vec![0x5a_u8; 60 * 1024 * 1024]; // WHAT: 60 MiB, the size of the Linux program. WHY: the biggest push there is today.
-    use base64::Engine;
     let body = serde_json::to_vec(&serde_json::json!({
         "release": unsigned_release(&installer),
         "installer": base64::engine::general_purpose::STANDARD.encode(&installer),
@@ -1606,7 +1611,7 @@ fn the_fleet_can_ask_who_is_connected_and_the_answer_names_the_seat() {
     });
     let server = Running {
         base: format!("http://{address}"),
-        _scratch: scratch,
+        scratch, // WHAT: the scratch folder, kept for the server's life. WHY: removed when the server is dropped
         _runtime: runtime,
     };
 
@@ -1964,7 +1969,7 @@ fn a_project_with_nobody_named_on_it_is_everybodys() {
     let hand = signed_in(&server, "est@example.com", "camber-weld-joist-plate-19");
 
     let project = boss.create_project("6742", "Elm West").expect("project");
-    assert!(boss.who_is_on(&project.id).expect("who").is_empty());
+    assert_eq!(boss.who_is_on(&project.id).expect("who"), Vec::<String>::new()); // WHAT: nobody named on the new job. WHY: a failure shows who was
 
     let seen = hand.projects().expect("list");
     assert!(
@@ -2119,7 +2124,7 @@ fn an_invitation_gets_somebody_in_and_gives_them_the_role_it_says() {
     let invite = boss
         .invite("newhand@example.com", "New Hand", "estimator", None)
         .expect("invite");
-    assert!(!invite.code.is_empty());
+    assert_ne!(invite.code, ""); // WHAT: a code was made. WHY: a failure shows what came back
     assert_eq!(invite.role, "estimator");
 
     let mut joining = Client::new(&server.base);

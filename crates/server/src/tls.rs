@@ -1,0 +1,389 @@
+//! The Office Server's own certificate, so sign-ins and drawings travel
+//! encrypted, and HTTPS served with it beside the plain-HTTP API.
+//!
+//! Made the first time the server starts and kept beside the data: the
+//! certificate (public) and its private key (readable by the server alone).
+//! No certificate authority is involved. A seat keeps the certificate's pin
+//! the first time it connects and refuses a server that shows another, the way
+//! Citadel's office computers pin Citadel Server: the pin is the SHA-256 of
+//! the certificate's public key (`hub::pinned`), so one rule covers every
+//! Excalibur server. The pin is in the log as the server starts and in the
+//! Manager, so a person can compare it.
+//!
+//! Ported from Excalibur CAD's server, which serves its HTTPS the same way.
+
+use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Connections served at once (an office has a handful of computers),
+/// and from any one address (so one machine can't take them all).
+const MOST_CONNECTIONS: usize = 512; // WHAT: the cap on open connections. WHY: a flood waits instead of exhausting the machine
+/// The most of those this machine itself may hold: the tunnel connector, through
+/// which every remote seat arrives. The rest are kept for the office's own computers.
+const MOST_FROM_HERE: usize = 448; // WHAT: 448 of the 512. WHY: a stranger through the tunnel can never take the slots the office's own seats need
+/// How long a request's body may go without sending anything.
+pub const BODY_IDLE: Duration = Duration::from_secs(120); // WHAT: two minutes between pieces of a body. WHY: a body that stops arriving gives its connection back
+const MOST_FROM_ONE: usize = 16; // WHAT: the cap from one address. WHY: one machine can't take every slot
+/// The longest one connection is kept, however it's used.
+const CONNECTION: Duration = Duration::from_secs(3600); // WHAT: an hour. WHY: a 512 MB drawing set over a slow tunnel fits; a held-open socket doesn't stay forever
+/// How long a connection may take to finish its encryption handshake.
+const HANDSHAKE: Duration = Duration::from_secs(10); // WHAT: ten seconds. WHY: a stalled handshake gives its slot back
+
+/// The certificate's file, in the data folder.
+pub const CERT: &str = "tls-cert.pem"; // WHAT: the public certificate. WHY: kept with the data, backed up with it
+/// The private key's file, in the data folder.
+pub const KEY: &str = "tls-key.pem"; // WHAT: the private key. WHY: readable by the server alone
+
+/// The encryption settings for the certificate and key (PEM).
+///
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
+pub fn server_config(cert_pem: &str, key_pem: &str) -> Result<Arc<rustls::ServerConfig>, String> {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    let cert = CertificateDer::from_pem_slice(cert_pem.as_bytes()).map_err(|_| "the certificate file is damaged".to_string())?; // WHAT: the certificate read. WHY: shown in every handshake
+    let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).map_err(|_| "the key file is damaged".to_string())?; // WHAT: the key read. WHY: signs every handshake
+    let provider = Arc::new(rustls::crypto::ring::default_provider()); // WHAT: the same crypto the client uses. WHY: one implementation to trust
+    let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?
+        .with_no_client_auth()
+        .with_single_cert(vec![cert], key)
+        .map_err(|e| format!("the server's certificate: {e}"))?; // WHAT: checks the key matches the certificate. WHY: a mismatched pair is refused at start, not at the first seat
+    config.alpn_protocols = vec![b"http/1.1".to_vec()]; // WHAT: HTTP/1.1 only. WHY: what the seats and Fleet speak
+    Ok(Arc::new(config))
+}
+
+/// The pin of a PEM certificate: the SHA-256 of its public key, as the seats
+/// keep it.
+///
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
+pub fn pin(cert_pem: &str) -> Result<String, String> {
+    use rustls::pki_types::pem::PemObject;
+    let der = rustls::pki_types::CertificateDer::from_pem_slice(cert_pem.as_bytes()).map_err(|_| "the certificate file is damaged".to_string())?; // WHAT: the certificate's DER. WHY: the pin is read from it
+    hub::pinned::pin_of(der.as_ref()).ok_or_else(|| "the certificate file is damaged".to_string()) // WHAT: SHA-256 of the SPKI. WHY: the same rule as Citadel's pin
+}
+
+/// The certificate's fingerprint (SHA-256 of the whole certificate), as
+/// Excalibur CAD shows it for a person to compare: 64 hex digits in groups
+/// of four.
+///
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
+pub fn fingerprint(cert_pem: &str) -> Result<String, String> {
+    use rustls::pki_types::pem::PemObject;
+    use sha2::Digest;
+    let der = rustls::pki_types::CertificateDer::from_pem_slice(cert_pem.as_bytes()).map_err(|_| "the certificate file is damaged".to_string())?; // WHAT: the certificate's DER. WHY: CAD fingerprints all of it
+    let hex = crate::store::hex(&sha2::Sha256::digest(der.as_ref())); // WHAT: its SHA-256. WHY: what CAD compares
+    Ok(hex.as_bytes().chunks(4).map(|c| String::from_utf8_lossy(c).to_uppercase()).collect::<Vec<_>>().join(" ")) // WHAT: in groups of four, upper case. WHY: exactly as CAD shows it
+}
+
+/// The first byte of every TLS connection: a handshake record.
+const TLS_HANDSHAKE: u8 = 0x16; // WHAT: TLS's record type for a handshake. WHY: no HTTP request starts with it, so one port serves both
+
+/// Who may use plain HTTP on the shared port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Plain {
+    /// Every computer: seats from before 0.7.0 speak only plain HTTP. The default.
+    Everyone,
+    /// This machine alone (the tunnel connector, a script on the server). `HYPERVIEW_HTTPS_ONLY=on`, audit M5.
+    ThisMachineOnly,
+}
+
+/// What a computer that may not use plain HTTP is told before its connection closes.
+const USE_HTTPS: &[u8] = b"HTTP/1.1 426 Upgrade Required\r\nUpgrade: TLS/1.3\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 83\r\n\r\nThis Office Server takes HTTPS only. Update Excalibur on this computer to connect.\n"; // WHAT: a short refusal in plain words. WHY: a seat left on an old version says why it can't connect, instead of a bare dropped connection
+
+/// How long a stopping server lets open requests finish.
+const DRAIN: Duration = Duration::from_secs(10); // WHAT: ten seconds. WHY: a save in flight lands; a held-open socket doesn't keep the service from stopping
+
+/// Answers `router` on `listener` until `shutdown` finishes, HTTPS and plain
+/// HTTP on the same port: a connection that opens with a TLS handshake is
+/// encrypted with the server's own certificate, any other is plain HTTP for a
+/// seat that hasn't moved yet. One port, so an office's firewall and its
+/// tunnel's rules stay exactly as they are when the server is updated. Each
+/// connection's address is handed to the handlers (sign-ins are limited per
+/// address, and presence says where a seat is); a stalled start is dropped.
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    config: Arc<rustls::ServerConfig>,
+    router: axum::Router,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    plain: Plain,
+) {
+    let acceptor = tokio_rustls::TlsAcceptor::from(config); // WHAT: the TLS side of each connection. WHY: rustls, as everywhere else
+    let mut open = tokio::task::JoinSet::new(); // WHAT: the connections being served. WHY: any still open after the drain are ended with the set
+    let polite = hyper_util::server::graceful::GracefulShutdown::new(); // WHAT: every connection, told when the server stops. WHY: idle ones close at once; busy ones finish their request
+    let from_here = Arc::new(tokio::sync::Semaphore::new(MOST_FROM_HERE)); // WHAT: the slots this machine itself may hold. WHY: the office's computers always find one free
+    let slots = Arc::new(tokio::sync::Semaphore::new(MOST_CONNECTIONS)); // WHAT: the open-connection slots. WHY: the cap above
+    let per_address = Shares::default(); // WHAT: connections per address. WHY: the per-machine cap
+    let mut shutdown = std::pin::pin!(shutdown);
+    loop {
+        while open.try_join_next().is_some() {} // WHAT: finished connections forgotten. WHY: the set never grows with every connection ever served
+        let accepted = tokio::select! {
+            () = &mut shutdown => break, // WHAT: stop accepting. WHY: the server is stopping
+            a = listener.accept() => a,
+        };
+        let Ok((tcp, peer)) = accepted else {
+            continue; // WHAT: a failed accept is skipped. WHY: one bad connection never stops the server
+        };
+        let here = peer.ip().to_canonical().is_loopback(); // WHAT: this machine itself, IPv4 written as IPv6 included. WHY: the tunnel connector may reach the server either way
+        let (share, local) = if here {
+            match from_here.clone().try_acquire_owned() {
+                Ok(local) => (None, Some(local)), // WHAT: one of this machine's slots. WHY: never capped per machine (every remote seat comes from here), but never all of them
+                Err(_) => continue, // WHAT: this machine already holds its share. WHY: the remaining slots are the office's own computers'
+            }
+        } else {
+            match Share::take(&per_address, machine(peer.ip())) {
+                Some(share) => (Some(share), None),
+                None => continue, // WHAT: past its machine's share, closed straight away. WHY: one machine can't take every slot
+            }
+        };
+        let slot = tokio::select! {
+            () = &mut shutdown => break, // WHAT: stop, even with every slot taken. WHY: a full server still stops when asked
+            s = slots.clone().acquire_owned() => s,
+        };
+        let Ok(slot) = slot else {
+            break; // WHAT: the slots are gone. WHY: only when stopping
+        };
+        let (acceptor, router, watcher) = (acceptor.clone(), router.clone(), polite.watcher());
+        open.spawn(async move {
+            let (_slot, _share, _local) = (slot, share, local); // WHAT: held for the connection's life. WHY: given back when it closes
+            let mut first = [0u8; 1];
+            let Ok(Ok(n)) = tokio::time::timeout(HANDSHAKE, tcp.peek(&mut first)).await else {
+                return; // WHAT: nothing sent in time, or a broken socket. WHY: dropped, its slot given back
+            };
+            if n == 1 && first[0] == TLS_HANDSHAKE {
+                let Ok(Ok(tls)) = tokio::time::timeout(HANDSHAKE, acceptor.accept(tcp)).await else {
+                    return; // WHAT: a failed or stalled handshake. WHY: dropped, its slot given back
+                };
+                answer(tls, peer, router, watcher).await; // WHAT: HTTPS. WHY: sign-ins and drawings encrypted
+            } else if plain == Plain::Everyone || here {
+                answer(tcp, peer, router, watcher).await; // WHAT: plain HTTP. WHY: a seat that hasn't moved yet, or an older one; or this machine itself
+            } else {
+                refuse_plain(tcp).await; // WHAT: plain HTTP from another computer, with HTTPS-only on. WHY: nothing it sends is read; it is told to use HTTPS (audit M5)
+            }
+        });
+    }
+    let _ = tokio::time::timeout(DRAIN, polite.shutdown()).await; // WHAT: every connection told to close once its request is done, given up to ten seconds. WHY: a save in flight when the service stops for an update lands, and idle seats don't hold the stop up
+    open.abort_all(); // WHAT: any still open, ended. WHY: the service stops on time
+}
+
+/// Tells a plain-HTTP connection to use HTTPS, and closes it. Nothing it sent is read.
+async fn refuse_plain(tcp: tokio::net::TcpStream) {
+    let _ = tokio::time::timeout(HANDSHAKE, async {
+        let mut rest = USE_HTTPS; // WHAT: what is still to send. WHY: a socket may take it in pieces
+        while !rest.is_empty() {
+            if tcp.writable().await.is_err() {
+                return; // WHAT: the socket broke. WHY: nothing more to say
+            }
+            match tcp.try_write(rest) {
+                Ok(0) => return, // WHAT: closed by the other side. WHY: done
+                Ok(n) => rest = &rest[n..], // WHAT: that much sent. WHY: the rest next
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {} // WHAT: not ready after all. WHY: wait again
+                Err(_) => return, // WHAT: any other error. WHY: nothing more to say
+            }
+        } // WHAT: the 426 and why. WHY: an old seat shows a reason
+    })
+    .await; // WHAT: at most ten seconds. WHY: a reader that never reads doesn't hold its slot
+    drop(tcp); // WHAT: closed from this side. WHY: nothing it sent is read
+}
+
+/// One connection's requests answered by `router`, over whatever it is.
+async fn answer<I>(io: I, peer: SocketAddr, router: axum::Router, watcher: hyper_util::server::graceful::Watcher)
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use tower::ServiceExt;
+    let service = hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
+        req.extensions_mut().insert(axum::extract::ConnectInfo::<SocketAddr>(peer)); // WHAT: the caller's address. WHY: the same as before for every handler
+        router.clone().oneshot(req)
+    });
+    let connection = hyper::server::conn::http1::Builder::new()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(Duration::from_secs(30)) // WHAT: headers within 30 seconds. WHY: a request trickled in to hold a slot is dropped
+        .serve_connection(hyper_util::rt::TokioIo::new(io), service);
+    let _ = tokio::time::timeout(CONNECTION, watcher.watch(connection)).await; // WHAT: the connection, up to its limit, closed politely when the server stops. WHY: none is kept forever
+}
+
+/// The machine an address belongs to, for the per-machine cap: an IPv4
+/// address itself, an IPv6 address's /64 network (one machine can hold many
+/// addresses in it).
+fn machine(ip: std::net::IpAddr) -> std::net::IpAddr {
+    match ip {
+        std::net::IpAddr::V6(v6) if v6.to_ipv4_mapped().is_none() => {
+            let s = v6.segments();
+            std::net::IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0)) // WHAT: the first 64 bits. WHY: a LAN machine picks addresses freely within its /64
+        }
+        std::net::IpAddr::V6(v6) => std::net::IpAddr::V4(v6.to_ipv4_mapped().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED)), // WHAT: an IPv4 address written as IPv6. WHY: the same machine as its IPv4 form
+        std::net::IpAddr::V4(v4) => std::net::IpAddr::V4(v4), // WHAT: an IPv4 address, itself. WHY: one address, one machine
+    }
+}
+
+type Shares = Arc<std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, usize>>>;
+
+/// One connection counted against its address, given back when it closes.
+struct Share {
+    counts: Shares,
+    ip: std::net::IpAddr,
+}
+
+impl Share {
+    fn take(counts: &Shares, ip: std::net::IpAddr) -> Option<Share> {
+        let mut map = counts.lock().unwrap_or_else(std::sync::PoisonError::into_inner); // WHAT: the counts. WHY: a poisoned lock still counts
+        let n = map.entry(ip).or_insert(0);
+        if *n >= MOST_FROM_ONE {
+            return None; // WHAT: this address has its share. WHY: the per-machine cap
+        }
+        *n += 1;
+        Some(Share { counts: counts.clone(), ip })
+    }
+}
+
+impl Drop for Share {
+    fn drop(&mut self) {
+        let mut map = self.counts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(n) = map.get_mut(&self.ip) {
+            *n -= 1; // WHAT: given back. WHY: the connection closed
+            if *n == 0 {
+                map.remove(&self.ip); // WHAT: forgotten at zero. WHY: the map never grows with every address ever seen
+            }
+        }
+    }
+}
+
+/// The certificate and key (PEM), made and saved if there aren't any yet.
+///
+/// # Errors
+///
+/// Refused, in words a person can act on, when it can't be done.
+pub fn load_or_make(data: &Path) -> Result<(String, String), String> {
+    use std::io::ErrorKind::NotFound;
+    let (cert_path, key_path) = (data.join(CERT), data.join(KEY));
+    let (cert, key) = (std::fs::read_to_string(&cert_path), std::fs::read_to_string(&key_path));
+    match (&cert, &key) {
+        (Ok(c), Ok(k)) => return Ok((c.clone(), k.clone())), // WHAT: both there. WHY: the server's identity, kept
+        (Err(a), Err(b)) if a.kind() == NotFound && b.kind() == NotFound => {} // WHAT: neither yet. WHY: made below
+        (Err(a), Ok(_)) if a.kind() == NotFound => remove(&key_path)?, // WHAT: a key without its certificate (a start cut short). WHY: both made again
+        (Ok(_), Err(b)) if b.kind() == NotFound => remove(&cert_path)?, // WHAT: a certificate without its key. WHY: the same
+        (Err(e), _) | (_, Err(e)) => {
+            return Err(format!("couldn't read the server's certificate or key in {}: {e}", data.display())); // WHAT: anything else stops here. WHY: the server's identity never changes by accident
+        }
+    }
+    let made = rcgen::generate_simple_self_signed(vec!["excalibur-office-server".to_string()]).map_err(|e| format!("making the server's certificate: {e}"))?; // WHAT: a fresh key and certificate. WHY: no authority is involved; the seats pin it
+    let (cert, key) = (made.cert.pem(), made.key_pair.serialize_pem());
+    write_private(&key_path, &key)?; // WHAT: the key first, private from the moment it exists. WHY: never readable by anyone else, even briefly
+    std::fs::write(&cert_path, &cert).map_err(|e| format!("saving the certificate: {e}"))?; // WHAT: the certificate. WHY: public, kept beside it
+    Ok((cert, key))
+}
+
+fn remove(path: &Path) -> Result<(), String> {
+    std::fs::remove_file(path).map_err(|e| format!("clearing {}: {e}", path.display())) // WHAT: a half-made pair's leftover. WHY: made again whole
+}
+
+/// The private key, readable by the server alone from the moment it exists
+/// (on Windows the data folder's own permissions do the same).
+fn write_private(path: &Path, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true); // WHAT: a new file only. WHY: never writes into one somebody put there
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o600); // WHAT: the owner only. WHY: private from creation
+    }
+    let mut file = open.open(path).map_err(|e| format!("saving the server's key: {e}"))?; // WHAT: the key's file, still empty. WHY: on Windows it is made private before anything is written to it
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const NO_WINDOW: u32 = 0x0800_0000; // WHAT: no console window. WHY: a service shows none
+        let system = std::env::var_os("SystemRoot").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+        let icacls = |service: bool| {
+            let mut c = std::process::Command::new(system.join("System32").join("icacls.exe")); // WHAT: Windows' own tool, by its full path. WHY: never one found on PATH
+            c.arg(path).args(["/inheritance:r", "/grant:r", "*S-1-3-4:F", "*S-1-5-18:F", "*S-1-5-32-544:F"]); // WHAT: its owner, SYSTEM and Administrators. WHY: nobody else reads the key
+            if service {
+                c.arg(format!(r"NT SERVICE\{}:R", SERVICE)); // WHAT: the service's own account, read only. WHY: it runs the server
+            }
+            c.arg("/Q").creation_flags(NO_WINDOW).status().map(|s| s.success()).unwrap_or(false)
+        };
+        if !(icacls(true) || icacls(false)) {
+            drop(file);
+            let _ = std::fs::remove_file(path); // WHAT: a key file that couldn't be made private is taken away. WHY: nothing was written to it, and it never will be
+            return Err("Windows wouldn't make the server's key private.".into());
+        }
+    }
+    file.write_all(text.as_bytes()).and_then(|()| file.sync_all()).map_err(|e| format!("saving the server's key: {e}"))?; // WHAT: the key, once only its owners can read the file. WHY: never readable by anyone else, even for a moment
+    Ok(())
+}
+
+/// The Windows service's name, whose account reads the key.
+#[cfg(windows)]
+const SERVICE: &str = "ExcaliburHyperviewServer"; // WHAT: the same as winsvc::NAME. WHY: the account Windows makes for the service
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_machine_is_one_share_however_many_addresses_it_uses() {
+        let a: std::net::IpAddr = "fe80::1:2:3:4".parse().unwrap();
+        let b: std::net::IpAddr = "fe80::9:9:9:9".parse().unwrap();
+        assert_eq!(machine(a), machine(b), "one /64, one machine");
+        assert_ne!(machine(a), machine("fe80:0:0:1::1".parse().unwrap()), "another /64, another machine");
+        assert_eq!(machine("::ffff:10.0.0.9".parse().unwrap()), "10.0.0.9".parse::<std::net::IpAddr>().unwrap(), "IPv4 written as IPv6 is IPv4");
+        assert_eq!(machine("10.0.0.9".parse().unwrap()), "10.0.0.9".parse::<std::net::IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn one_address_gets_its_share_of_connections_and_no_more() {
+        let counts = Shares::default();
+        let ip: std::net::IpAddr = [10, 0, 0, 9].into();
+        let held: Vec<Share> = (0..MOST_FROM_ONE).map(|_| Share::take(&counts, ip).unwrap()).collect();
+        assert!(Share::take(&counts, ip).is_none(), "the 17th is turned away until one closes");
+        assert!(Share::take(&counts, [10, 0, 0, 10].into()).is_some(), "another machine isn't held up");
+        drop(held);
+        assert!(Share::take(&counts, ip).is_some(), "closed ones are given back");
+    }
+
+    fn a_folder() -> std::path::PathBuf {
+        let n: u64 = rand::random();
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("hv-tls-{n:016x}")); // WHAT: under target, as tunnel's tests do. WHY: a key a test writes is never somewhere another account shares
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_certificate_is_made_once_and_kept() {
+        let data = a_folder();
+        let (cert, key) = load_or_make(&data).unwrap();
+        assert!(server_config(&cert, &key).is_ok(), "the pair made is a pair that serves");
+        let again = load_or_make(&data).unwrap();
+        assert_eq!(again, (cert.clone(), key), "the second start keeps the first's identity");
+        assert!(hub::pinned::is_pin(&pin(&cert).unwrap()));
+        let print = fingerprint(&cert).unwrap();
+        assert_eq!(print.len(), 64 + 15, "64 digits in 16 groups"); // WHAT: CAD's grouped form. WHY: compared by eye
+        assert!(print.chars().all(|c| c == ' ' || c.is_ascii_digit() || ('A'..='F').contains(&c)));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(data.join(KEY)).unwrap().permissions().mode() & 0o777, 0o600, "the key is the owner's alone");
+        }
+    }
+
+    #[test]
+    fn half_a_pair_is_made_whole_and_a_damaged_one_is_refused() {
+        let data = a_folder();
+        let (cert, _) = load_or_make(&data).unwrap();
+        std::fs::remove_file(data.join(KEY)).unwrap(); // WHAT: the key gone. WHY: a start cut short
+        let (fresh, _) = load_or_make(&data).unwrap();
+        assert_ne!(pin(&fresh).unwrap(), pin(&cert).unwrap(), "a new pair, not a certificate without its key");
+        assert!(server_config("not a certificate", "not a key").is_err());
+        let (_, other_key) = load_or_make(&a_folder()).unwrap();
+        assert!(server_config(&fresh, &other_key).is_err(), "a key that isn't the certificate's is refused at start");
+    }
+}

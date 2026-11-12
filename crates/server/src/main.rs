@@ -30,7 +30,8 @@ static BUILD_MARK: &str = hub::build_mark!();
 
 fn main() {
     std::hint::black_box(BUILD_MARK);
-    let first = std::env::args().nth(1).unwrap_or_default();
+    let given: Vec<String> = std::env::args().take(6).collect(); // WHAT: the program's name and its first five words, read once. WHY: the command, and the device code --make-admin takes, which may be typed as three groups
+    let first = given.get(1).cloned().unwrap_or_default();
     match first.as_str() {
         #[cfg(windows)]
         "--service" => {
@@ -70,10 +71,69 @@ fn main() {
             if std::env::var_os("HYPERVIEW_DATA").is_none() && hyperview_server::winsvc::data_folder().exists() { config.data = hyperview_server::winsvc::data_folder(); } // WHAT: the installed service's drawings. WHY: the service keeps them in ProgramData, not beside this program.
             std::process::exit(hyperview_server::offsite::main_from_args(&hyperview_server::offsite::VIEW, &config, VERSION, &args)); // WHAT: run it and end with its code. WHY: 0 good, 5 good with a warning, anything else says why.
         }
+        "--move-cad" => { // WHAT: Excalibur CAD's server's drawings moved into this server's cad part. WHY: one server for the office (docs/OFFICE-SERVER.md)
+            let Some(from) = std::env::args_os().nth(2) else {
+                eprintln!("  Say which folder: hyperview-server --move-cad \"C:\\ProgramData\\Excalibur CAD Server\\data\""); // WHAT: how to use it. WHY: a person types it
+                std::process::exit(2);
+            };
+            #[allow(unused_mut)] // WHAT: only Windows changes it. WHY: no warning elsewhere
+            let mut config = Config::from_environment(); // WHAT: this server's settings. WHY: its data folder
+            #[cfg(windows)]
+            if std::env::var_os("HYPERVIEW_DATA").is_none() && hyperview_server::winsvc::data_folder().exists() { config.data = hyperview_server::winsvc::data_folder(); } // WHAT: the installed service's data. WHY: the same folder the service serves
+            match hyperview_server::cad::move_from(std::path::Path::new(&from), &config.database(), &config.blobs()) {
+                Ok(m) => println!("  Moved {} drawings ({} versions, {} files). {} were checked out there and are checked in here. The old CAD server's folder was not changed.", m.drawings, m.versions, m.files, m.released), // WHAT: what came. WHY: a person checks it against the old server
+                Err(why) => {
+                    eprintln!("  {why}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "--move-archetype" => { // WHAT: Archetype's server's jobs moved into this server's archetype part. WHY: one server for the office (docs/OFFICE-SERVER.md)
+            let Some(from) = std::env::args_os().nth(2) else {
+                eprintln!("  Say which folder: hyperview-server --move-archetype \"C:\\ProgramData\\Excalibur Archetype\\Server\\data\""); // WHAT: how to use it. WHY: a person types it
+                std::process::exit(2);
+            };
+            #[allow(unused_mut)] // WHAT: only Windows changes it. WHY: no warning elsewhere
+            let mut config = Config::from_environment(); // WHAT: this server's settings. WHY: its data folder
+            #[cfg(windows)]
+            if std::env::var_os("HYPERVIEW_DATA").is_none() && hyperview_server::winsvc::data_folder().exists() { config.data = hyperview_server::winsvc::data_folder(); } // WHAT: the installed service's data. WHY: the same folder the service serves
+            match hyperview_server::archetype::move_from(std::path::Path::new(&from), &config.database(), &config.blobs()) {
+                Ok(m) => println!("  Moved {} jobs ({} check-ins, {} files). {} were checked out there and are given back here. The old Archetype server's folder was not changed.", m.jobs, m.checkins, m.files, m.released), // WHAT: what came. WHY: a person checks it against the old server
+                Err(why) => {
+                    eprintln!("  {why}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "--reopen-claim" | "--make-admin" | "--reset-admins" | "--retry-citadel-move" => device_console(&first, Some(given.get(2..).map(|rest| rest.join(" ")).unwrap_or_default().as_str()).filter(|code| !code.is_empty())), // WHAT: the device list's console commands. WHY: §3 and the security review's M3; on the server itself
         "--console" | "--serve" => console(),
         #[cfg(windows)]
         "" => front_door(),
         _ => console(),
+    }
+}
+
+/// The device list's commands, on the server itself: `--reopen-claim`,
+/// `--make-admin <device code or id>` and `--reset-admins`. Each needs the server's
+/// own data folder, so it runs only on the server, and each is written in
+/// the audit log.
+fn device_console(command: &str, id: Option<&str>) {
+    #[allow(unused_mut)] // WHAT: only Windows changes it. WHY: no warning elsewhere
+    let mut config = Config::from_environment(); // WHAT: this server's settings. WHY: its data folder
+    #[cfg(windows)]
+    if std::env::var_os("HYPERVIEW_DATA").is_none() && hyperview_server::winsvc::data_folder().exists() { config.data = hyperview_server::winsvc::data_folder(); } // WHAT: the installed service's data. WHY: the same folder the service serves
+    let done = Store::open(&config.database(), &config.blobs()).and_then(|store| match command {
+        "--reopen-claim" => hyperview_server::devices::reopen_claim(&store).map(|until| format!("  The first computer to ask, until {until}, becomes the office's admin.")), // WHAT: claiming open for a day. WHY: only while the office has no admin
+        "--retry-citadel-move" => hyperview_server::cellmove::retry(&store).map(|()| "  The failed Citadel move is cleared. Restart the Office Server service and it tries once more.".to_string()), // WHAT: a failure cleared. WHY: the console way to try the move again
+        "--make-admin" => hyperview_server::devices::make_admin_here(&store, id.unwrap_or_default()).map(|id| format!("  The computer {id} is approved, and an admin.")), // WHAT: one computer made an admin. WHY: the way back when every admin computer is lost
+        _ => hyperview_server::devices::reset_admins_here(&store).map(|until| format!("  No computer is an admin now. Until {until}, the next NEW computer to ask from the office network becomes the admin, whoever's it is.\n  To pick a computer you know instead, use: hyperview-server --make-admin <device code>, with the 12-digit code its Excalibur app shows (for example 29AC 6B9D EFA9).")), // WHAT: every admin unmade, claiming open, said plainly. WHY: audit: the next new computer to ask takes the office, so the safer way is named
+    });
+    match done {
+        Ok(said) => println!("{said}"), // WHAT: what was done. WHY: a person reads it
+        Err(why) => {
+            eprintln!("  {why}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -376,14 +436,49 @@ fn log_to_file(folder: &std::path::Path) {
     let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
         return;
     };
+    let path = path.clone(); // WHAT: kept for moving the file aside. WHY: `Rotating` reopens it
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "hyperview_server=info,tower_http=warn".into()),
         )
         .with_ansi(false)
-        .with_writer(std::sync::Mutex::new(file))
+        .with_writer(std::sync::Mutex::new(Rotating { file, path, written: 0 }))
         .init();
+}
+
+/// WHAT: the service's log file, moved aside to `.1` once it passes 10 MB while
+/// the server runs. WHY: it was only moved at start, so a flood of refusals
+/// between restarts could fill the disk (audit, 2026-11-11).
+#[cfg(windows)]
+struct Rotating {
+    file: std::fs::File,   // WHAT: the file written now. WHY: replaced when moved aside
+    path: std::path::PathBuf, // WHAT: where it lives. WHY: reopened there
+    written: u64,          // WHAT: bytes since the size was last looked at. WHY: looked at once a megabyte, not every line
+}
+
+#[cfg(windows)]
+impl std::io::Write for Rotating {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        use std::io::Write as _; // WHAT: the file's own write. WHY: called below
+        let n = self.file.write(bytes)?; // WHAT: written. WHY: the log line
+        self.written += n as u64; // WHAT: counted. WHY: as above
+        if self.written > 1024 * 1024 {
+            self.written = 0; // WHAT: counted afresh. WHY: the next look in a megabyte
+            if self.file.metadata().is_ok_and(|m| m.len() > 10 * 1024 * 1024) {
+                let _ = std::fs::rename(&self.path, self.path.with_extension("log.1")); // WHAT: moved aside, over the older one. WHY: one previous log kept, as at start
+                if let Ok(fresh) = std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
+                    self.file = fresh; // WHAT: a new file. WHY: the log goes on
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        use std::io::Write as _; // WHAT: as above. WHY: as above
+        self.file.flush() // WHAT: passed on. WHY: as the file does
+    }
 }
 
 /// What to try, in the cases a person can actually do something about.

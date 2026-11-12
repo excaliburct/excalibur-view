@@ -1,0 +1,55 @@
+{
+  "contract": "docs/OFFICE-ENROLLMENT.md sections 3 and 4",
+  "device_id": "29ac6b9dfea94459862660c7ee55eebd",
+  "enroll": {
+    "app": "latcon-estimating",
+    "machine": "DANA-LAPTOP",
+    "message": "excalibur-enroll/1\n3f2a91c0d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f\nA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=\nlatcon-estimating\nDANA-LAPTOP\ndana\n1794410000\n",
+    "os_user": "dana",
+    "proof": "US5Ef1iWsHiP5FfkjnwTDUYc2kma38ZXjlUyldqYWcBKivVEfojjgEWG/CtQzw2AkrAFaoCxNp++3Ql1P0xPBg==",
+    "server_pin": "3f2a91c0d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f",
+    "time": 1794410000
+  },
+  "notes": [
+    "The private key is the 32 bytes 0x00, 0x01 ... 0x1f (an Ed25519 seed, RFC 8032).",
+    "device_id = lowercase hex of the first 16 bytes of SHA-256(ASCII \"excalibur-device/1\\n\" followed by the raw 32-byte public key).",
+    "Keys and signatures are standard base64 with padding (44 and 88 characters).",
+    "Every signed line ends with \\n, the last one too. The enrol proof's server pin line is the 8714 SPKI SHA-256 in lowercase hex, or the word none when the server serves no HTTPS.",
+    "The body hash of a request with no body is the SHA-256 of no bytes.",
+    "excalibur-request/1 signs seven lines: the label, the server's pin (or none), the device id, the method, the target, the body hash and the time. The server pin line is the same one the enrol proof carries.",
+    "X-Excalibur-Body-SHA256 carries the body hash line, so the server checks the signature before reading the body. A request without it is read only up to 1 MiB."
+  ],
+  "private_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "public_key": "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+  "requests": [
+    {
+      "body": "",
+      "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "headers": {
+        "X-Excalibur-Body-SHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "X-Excalibur-Device": "29ac6b9dfea94459862660c7ee55eebd",
+        "X-Excalibur-Signature": "vonp65ouNO6GgTT5ZNAMhj39Z9agoa9J4Cmhgbj2HqYDLiEtwSsS/DBVzv66kt2waxvzCU8Lp1Xgt/eI2//IAA==",
+        "X-Excalibur-Time": "1794410000"
+      },
+      "message": "excalibur-request/1\n3f2a91c0d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f\n29ac6b9dfea94459862660c7ee55eebd\nGET\n/api/v1/devices/me\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n1794410000\n",
+      "method": "GET",
+      "target": "/api/v1/devices/me",
+      "time": 1794410000
+    },
+    {
+      "body": "{\"admin\":false}",
+      "body_sha256": "28319298113b03b033c00733c7817d293838265df33ea4fd82a770555f58ace0",
+      "headers": {
+        "X-Excalibur-Body-SHA256": "28319298113b03b033c00733c7817d293838265df33ea4fd82a770555f58ace0",
+        "X-Excalibur-Device": "29ac6b9dfea94459862660c7ee55eebd",
+        "X-Excalibur-Signature": "xkznFxVbvxmeH9oxPdmJpAVqZ13zpK5cqYTHIYdHCPRX/ek8lIaJvn8C3kPFfxWPq42NFZzpulxgWDxEBfLbCw==",
+        "X-Excalibur-Time": "1794410005"
+      },
+      "message": "excalibur-request/1\n3f2a91c0d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f\n29ac6b9dfea94459862660c7ee55eebd\nPOST\n/api/v1/devices/29ac6b9dfea94459862660c7ee55eebd/approve\n28319298113b03b033c00733c7817d293838265df33ea4fd82a770555f58ace0\n1794410005\n",
+      "method": "POST",
+      "target": "/api/v1/devices/29ac6b9dfea94459862660c7ee55eebd/approve",
+      "time": 1794410005
+    }
+  ],
+  "server_pin": "3f2a91c0d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f"
+}

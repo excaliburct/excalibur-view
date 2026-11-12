@@ -782,11 +782,16 @@ PRODUCTS = {
 
 def license_payload(lic, product="view"):
     lines = [PRODUCTS[product]["domain"]] + [f"{k}={lic[k]}" for k in LICENSE_FIELDS]
+    if lic.get("modules"):  # WHAT: the Office Server's parts, last, only when there are any. WHY: hub::license::License::signing_payload writes the same; an older license's text is unchanged
+        lines.append("modules=" + ",".join(lic["modules"]))
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+MODULE_NAME = re.compile(r"[a-z][a-z0-9-]{0,31}")  # WHAT: a part's name: plain lowercase. WHY: the names are joined by commas in the signed text, so none may hold a comma, "=" or a line break
+
+
 def make_license(key_path, company, product="view", edition=None, users=0, updates_through=None,
-                 years=1, founding=False, note=None, id=None, issued=None):
+                 years=1, founding=False, note=None, id=None, issued=None, modules=None):
     """Signs a license and hands it back. The one place a license is made:
     `sign-license` and the Square side both come through here."""
     import secrets
@@ -804,23 +809,31 @@ def make_license(key_path, company, product="view", edition=None, users=0, updat
             through = updates_through
         else:
             through = a_year_on(today, years)
-    if through != FOREVER:
-        datetime.date.fromisoformat(through)
-    for text in (company, note):
+    if through != FOREVER and not a_license_date(through):  # WHAT: YYYY-MM-DD and a real day, or forever. WHY: hub::license::is_date refuses anything else, so a file signed with "20271001" would be refused by every server
+        raise SystemExit(f"--updates-through is YYYY-MM-DD or forever, not {through}")
+    issued = issued or today.isoformat()  # WHAT: today, unless --issued says otherwise. WHY: the day it was signed
+    if not a_license_date(issued):  # WHAT: the same rule for the issue date. WHY: the server refuses a licence whose issue date is not one
+        raise SystemExit(f"--issued is YYYY-MM-DD, not {issued}")
+    for text in (company, note, id or ""):
         if "\n" in text or "\r" in text:
             raise SystemExit("a license cannot have a line break in it")
     if users < 0:
         raise SystemExit("--users is a number; 0 means no limit")
+    modules = [m.strip() for m in (modules or []) if m.strip()]  # WHAT: the parts asked for. WHY: --modules cad,citadel
+    if len(modules) > 16 or len(set(modules)) != len(modules) or not all(MODULE_NAME.fullmatch(m) for m in modules):
+        raise SystemExit("--modules is up to 16 plain lowercase names, each once: view's office server parts, e.g. cad,citadel")
     lic = {
         "id": id or kind["id"] + secrets.token_hex(6),
         "company": company.strip(),
         "edition": edition,
         "users": users,
         "updates_through": through,
-        "issued": issued or today.isoformat(),
+        "issued": issued,
         "note": note,
         "key": name,
     }
+    if modules:  # WHAT: written only when there are parts. WHY: a license without parts reads exactly as before
+        lic["modules"] = modules
     signed = license_payload(lic, product)
     signature = key.sign(signed)
     key.public_key().verify(signature, signed)
@@ -829,6 +842,18 @@ def make_license(key_path, company, product="view", edition=None, users=0, updat
 
 
 FOREVER = "forever"
+
+
+def a_license_date(text):
+    """Whether `text` is a date as a license writes one: YYYY-MM-DD, a real
+    day, from 2000 on. The same rule as `hub::license::is_date`, which every
+    server applies; Python's own date reader takes other shapes too."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text or "", re.ASCII):  # WHAT: exactly ten characters, dashes in place. WHY: "20271001" and "2027-W40-1" are dates to Python, not to the server
+        return False
+    try:
+        return datetime.date.fromisoformat(text).year >= 2000  # WHAT: a real day, 2000 or later. WHY: the server's rule
+    except ValueError:
+        return False  # WHAT: a 31st of a short month, a 13th month. WHY: not a day at all
 
 
 def a_year_on(day, years=1):
@@ -901,6 +926,7 @@ def cmd_sign_license(a):
         a.key, a.company, product=a.product, edition=a.edition, users=a.users,
         updates_through=a.updates_through, years=a.years, founding=a.founding,
         note=a.note, id=a.id, issued=a.issued,
+        modules=(a.modules or "").split(","),  # WHAT: the parts, comma separated. WHY: --modules cad,citadel
     )
     out = a.out or license_file_name(lic, a.product)
     write_license(lic, out)
@@ -1460,6 +1486,7 @@ def main():
     l.add_argument("--updates-through", help="YYYY-MM-DD, or forever")
     l.add_argument("--founding", action="store_true", help="every user, updates forever")
     l.add_argument("--note")
+    l.add_argument("--modules", help="the Office Server's parts besides View, comma separated: cad, archetype, citadel")
     l.add_argument("--id")
     l.add_argument("--issued")
     l.add_argument("--out")

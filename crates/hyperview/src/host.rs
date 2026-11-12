@@ -85,6 +85,7 @@ pub fn start_here(name: &str, folder: PathBuf, port: u16) -> Result<Hosting, Str
         name: name.trim().to_string(),
         listen: SocketAddr::from(([0, 0, 0, 0], port)),
         data: folder.clone(),
+        tls: true, // WHAT: HTTPS on, with its own certificate, as the Office Server. WHY: review: the other seats never send a password over plain HTTP to a 0.7.0 server, so this one serves HTTPS too
         ..Config::default()
     };
 

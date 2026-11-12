@@ -9,12 +9,21 @@ use std::path::PathBuf;
 /// other.
 pub const DEFAULT_PORT: u16 = 8714;
 
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// What the company calls this installation. It shows in the client, so
     /// nobody marks up a drawing on the wrong server.
     pub name: String,
     pub listen: SocketAddr,
+    /// Whether the API also answers HTTPS, on its own port, with the server's
+    /// own certificate. Off means plain HTTP only, which is how a test or a
+    /// server embedded in something else starts.
+    pub tls: bool, // WHAT: HTTPS on the API's port; HYPERVIEW_TLS=off turns it off. WHY: sign-ins and drawings encrypted, the seats pinning the certificate, with no new port to open
+    /// Whether plain HTTP from other computers is refused (`HYPERVIEW_HTTPS_ONLY=on`), once every seat in the office
+    /// has moved to HTTPS. This machine itself (the tunnel connector) may still use plain HTTP: it never leaves the box.
+    /// `Err` holds a value that isn't `on` or `off`, so the server refuses to start rather than guess.
+    pub https_only: Result<bool, String>, // WHAT: the switch, or the value that didn't read. WHY: a security switch typed wrong must not quietly stay off (audit M5)
     /// Everything the server keeps: the database and the drawings.
     pub data: PathBuf,
     /// Largest drawing set it will accept, in bytes.
@@ -49,6 +58,11 @@ pub struct Config {
     /// file, the command line or the environment — and set only by a test,
     /// which cannot hold the publisher's private key.
     pub plugin_keys_for_tests: Vec<(String, [u8; 32])>,
+    /// Keys a licence may be signed with besides the ones compiled in. The
+    /// same rule as `plugin_keys_for_tests`: never read from a file, the
+    /// command line or the environment, set only by a test, so a test can
+    /// switch Office Server parts on with a licence it really signed.
+    pub license_keys_for_tests: Vec<(String, [u8; 32])>, // WHAT: a test's own licence key. WHY: parts are switched on only by a signed licence, in tests too
     /// Where the nightly off-site backup goes: a folder, or
     /// `rclone:REMOTE:bucket/folder`. None means the backup is off.
     pub offsite_target: Option<String>, // WHAT: HYPERVIEW_OFFSITE_TARGET. WHY: a copy on the same machine is not a backup (crate::offsite).
@@ -57,6 +71,21 @@ pub struct Config {
     pub offsite_work: Option<String>, // WHAT: HYPERVIEW_OFFSITE_WORK. WHY: the programs and the bucket's settings live outside what is backed up.
     /// The time of night the server runs it, on its own clock, 24-hour.
     pub offsite_at: String, // WHAT: HYPERVIEW_OFFSITE_AT, "01:30" unless set. WHY: after the office has gone home, before anyone is back.
+    /// Whether View's API needs an approved device as well as a sign-in
+    /// (docs/OFFICE-ENROLLMENT.md §5). The device routes themselves always
+    /// check their device, whatever this says.
+    pub devices: Devices, // WHAT: required for a server started for real (from_environment), not by default. WHY: as `tls`: only the Office Server started for real requires them, and there is no way to turn that off there
+    /// Where the Office Server's own program folder is, holding
+    /// `citadel\Citadel Server.exe` when Citadel ships inside it.
+    pub program_folder: Option<PathBuf>, // WHAT: the installed program's folder, when there is one. WHY: the Citadel cell is started from beside it (crate::cell)
+}
+
+/// Whether View's API needs an approved device as well as a sign-in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Devices {
+    #[default]
+    NotRequired, // WHAT: a sign-in alone, as before 0.7.0. WHY: tests and the program's own "host the drawings here" server
+    Required, // WHAT: an approved device too. WHY: the Office Server started for real (docs/OFFICE-ENROLLMENT.md §5)
 }
 
 impl Default for Config {
@@ -64,6 +93,8 @@ impl Default for Config {
         Config {
             name: "Excalibur View".into(),
             listen: SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
+            tls: false, // WHAT: off by default. WHY: only a server started for real turns it on (from_environment)
+            https_only: Ok(false), // WHAT: plain HTTP still answered. WHY: seats older than 0.7.0 speak only plain HTTP; the office turns this on once they've all moved
             data: beside_the_program(),
             // Sixty drawing sets the size of a stamped structural package.
             largest_upload: 512 * 1024 * 1024,
@@ -76,9 +107,12 @@ impl Default for Config {
             check_for_updates: false,
             replace_self: false,
             plugin_keys_for_tests: Vec::new(),
+            license_keys_for_tests: Vec::new(), // WHAT: none. WHY: only the compiled-in keys sign a licence in a real server
             offsite_target: None, // WHAT: off. WHY: nothing leaves the box until someone sets it up.
             offsite_work: None, // WHAT: none. WHY: the same.
             offsite_at: "01:30".into(), // WHAT: half past one at night. WHY: the office is shut and the night's sync is done.
+            devices: Devices::NotRequired, // WHAT: off. WHY: only a server started for real requires devices
+            program_folder: None, // WHAT: none. WHY: only the installed service has one
         }
     }
 }
@@ -92,6 +126,7 @@ impl Default for Config {
 /// a different "start in". When the program's own folder cannot be written
 /// to, which is the ordinary case for `/usr/local/bin`, it falls back to the
 /// working directory and says so by simply using it.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn beside_the_program() -> PathBuf {
     let here = std::env::current_exe()
         .ok()
@@ -109,6 +144,7 @@ pub fn beside_the_program() -> PathBuf {
 impl Config {
     /// Reads the environment. Everything has a working default, so the first
     /// run needs no configuration at all.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn from_environment() -> Config {
         let mut config = Config::default();
         if let Ok(name) = std::env::var("HYPERVIEW_NAME") {
@@ -125,6 +161,8 @@ impl Config {
                 ),
             }
         }
+        config.tls = std::env::var("HYPERVIEW_TLS").map_or(true, |v| v.trim() != "off"); // WHAT: on, unless HYPERVIEW_TLS=off. WHY: every real server encrypts; off is the way out if something on a machine can't take it
+        config.https_only = https_only_from(non_empty("HYPERVIEW_HTTPS_ONLY").as_deref()); // WHAT: the HTTPS-only switch. WHY: read here, refused at start if it doesn't read
         if let Ok(data) = std::env::var("HYPERVIEW_DATA") {
             config.data = PathBuf::from(data);
         }
@@ -147,6 +185,7 @@ impl Config {
                 .filter(|o| !o.is_empty())
                 .collect();
         }
+        config.devices = Devices::Required; // WHAT: devices required. WHY: §5: every API call needs an approved device on the Office Server; there is deliberately no setting that turns it off
         config.offsite_target = non_empty("HYPERVIEW_OFFSITE_TARGET"); // WHAT: where the nightly backup goes. WHY: off when empty.
         config.offsite_work = non_empty("HYPERVIEW_OFFSITE_WORK"); // WHAT: the backup's own folder. WHY: its programs, key and log.
         if let Some(at) = non_empty("HYPERVIEW_OFFSITE_AT") {
@@ -155,18 +194,35 @@ impl Config {
         config
     }
 
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn database(&self) -> PathBuf {
         self.data.join("hyperview.sqlite")
     }
 
     /// Drawings and chests, kept by the digest of their contents so the same
     /// file uploaded twice is stored once.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn blobs(&self) -> PathBuf {
         self.data.join("files")
     }
 
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn releases(&self) -> PathBuf {
         self.data.join("releases")
+    }
+}
+
+/// `HYPERVIEW_HTTPS_ONLY` read: `on` or `off` in any case, unset meaning off; anything else is `Err` with the value.
+///
+/// # Errors
+///
+/// The value itself, when it is neither `on` nor `off`.
+pub fn https_only_from(value: Option<&str>) -> Result<bool, String> {
+    match value.map(|v| v.trim().to_ascii_lowercase()) {
+        None => Ok(false), // WHAT: not set. WHY: off, as every server before 0.7.0
+        Some(v) if v == "on" => Ok(true),
+        Some(v) if v == "off" => Ok(false),
+        Some(v) => Err(v), // WHAT: "yes", "true", a typo. WHY: refused at start; a switch that guards connections is never guessed
     }
 }
 
@@ -186,7 +242,7 @@ mod tests {
         // No browser may call it until somebody says which one, because the
         // clients are desktop programs and a wide-open origin list on a server
         // holding a company's drawings is nobody's idea of a default.
-        assert!(config.allow_origins.is_empty());
+        assert_eq!(config.allow_origins, Vec::<String>::new()); // WHAT: no browser origin allowed. WHY: a failure shows which one was
         // And no maintenance channel until somebody sets a key for one.
         assert!(config.maintenance_key.is_none());
     }

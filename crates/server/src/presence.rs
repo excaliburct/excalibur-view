@@ -108,9 +108,7 @@ pub async fn seen(
         .take(120)
         .collect::<String>();
     if let Some(token) = token {
-        let ip = connect
-            .map(|ConnectInfo(addr)| addr.ip().to_string())
-            .unwrap_or_else(|| "?".into());
+        let ip = connect.map_or_else(|| "?".into(), |ConnectInfo(addr)| addr.ip().to_string()); // WHAT: the seat's address, or "?". WHY: shown beside who is on
         record(&server, &token, &ip, &ua);
     }
     next.run(request).await
@@ -136,7 +134,7 @@ fn record(server: &crate::api::Server, token: &str, ip: &str, ua: &str) {
         let now_text = crate::api::now();
         server
             .store
-            .with(|db| crate::auth::whose(db, token, &now_text))
+            .with(|db| crate::auth::whose_still(db, token, &now_text)) // WHAT: whose session, without keeping it alive. WHY: watching who is connected must never make a session last longer (security review H2e)
             .ok()
             .flatten()
             .map(|who| who.name)
@@ -181,8 +179,7 @@ fn record(server: &crate::api::Server, token: &str, ip: &str, ua: &str) {
                 }
             }
         }
-        (None, None, true) => {}  // knocked with a token nobody recognises
-        (None, None, false) => {} // unreachable in practice; nothing to do
+        (None, None, _) => {} // WHAT: a token nobody recognises, or (unreachable in practice) none at all. WHY: nothing to do either way
     }
 }
 
@@ -227,6 +224,7 @@ fn rfc3339(t: SystemTime) -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn roster(company: &str) -> Roster {
     let Ok(ledger) = ledger().lock() else {
         return Roster {
@@ -257,7 +255,7 @@ pub fn roster(company: &str) -> Roster {
             )
         })
         .collect();
-    recent.sort_by(|a, b| b.0.cmp(&a.0));
+    recent.sort_by_key(|seat| std::cmp::Reverse(seat.0)); // WHAT: the most recently seen first. WHY: the same order as before, said as a key
     let cutoff = SystemTime::now()
         .checked_sub(NOW_WINDOW)
         .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -295,7 +293,7 @@ mod tests {
     static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
     fn alone() -> std::sync::MutexGuard<'static, ()> {
-        ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner())
+        ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner) // WHAT: the lock, even after a test panicked holding it. WHY: one test at a time, whatever the last did
     }
 
     fn put(key: &str, who: &str, age: Duration) {

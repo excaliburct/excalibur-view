@@ -18,15 +18,22 @@
 //! orchestration, and nothing that stops working when the machine reboots.
 
 pub mod api;
+pub mod archetype; // WHAT: Archetype's shared jobs, moved in. WHY: the Office Server's archetype part
 pub mod audit;
 pub mod auth;
+pub mod cad; // WHAT: Excalibur CAD's office drawings, moved in. WHY: the Office Server's cad part
+pub mod cellmove; // WHAT: Citadel Server 1.0's data moved into the cell once, before its first start. WHY: the restricted cell can't read the old folder itself
+pub mod cell; // WHAT: the Citadel cell, started, watched and answered over its pipe. WHY: Citadel runs inside the Office Server (docs/OFFICE-ENROLLMENT.md §6a)
+pub mod citadel; // WHAT: the Citadel cell's port, looked at by its pin. WHY: the Office Server's citadel part, kept blind; the cell is the only way Citadel runs (crate::cell)
 pub mod config;
+pub mod devices; // WHAT: the office's device list and the signed-request gate. WHY: codeless linking (docs/OFFICE-ENROLLMENT.md §3, §4)
 pub mod fleet;
 pub mod folders; // WHAT: groups, who sees which folder, and files that aren't drawings. WHY: the field and the shop see only the folders given to them.
 pub mod license;
 pub mod lockdown; // WHAT: the service folder made the service's own. WHY: ProgramData lets every account read it and add files.
 pub mod mcp;
 pub mod notices;
+pub mod office; // WHAT: the Office Server's parts and which are on. WHY: one server for every Excalibur part, switched on by the licence
 pub mod offsite; // WHAT: the nightly off-site backup and its restore drill. WHY: a copy on the same machine is not a backup.
 pub mod openapi;
 pub mod patience;
@@ -36,6 +43,7 @@ pub mod quantities;
 pub mod run;
 pub mod signoffs; // WHAT: signatures asked for on a set and signed on View. WHY: the shop signs travelers and shipping tickets on its iPads.
 pub mod store;
+pub mod tls; // WHAT: the server's own certificate and HTTPS. WHY: sign-ins and drawings encrypted, the seats pinning it
 pub mod tunnel;
 pub mod updates;
 pub mod winsvc;
@@ -55,6 +63,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// when it takes a release, and every seat checks it again before it runs one.
 /// An empty list refuses everything, which is how a build ships until a key is
 /// compiled into it.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn trusted() -> hub::update::Trusted {
     hub::update::Trusted::pinned(KEYS)
 }
@@ -65,6 +74,7 @@ pub fn trusted() -> hub::update::Trusted {
 /// Kept apart from [`trusted`] on purpose. A licence key lives where it can
 /// sign at three in the morning without anybody, and that is only safe because
 /// nothing but a licence is ever checked against it.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn license_trust() -> hub::update::Trusted {
     let mut trust = hub::update::Trusted::pinned(KEYS);
     trust.keys.extend(hub::update::Trusted::pinned(LICENSE_KEYS).keys);
@@ -74,6 +84,7 @@ pub fn license_trust() -> hub::update::Trusted {
 /// The keys a plugin may be signed with: every release key, and the keys made
 /// for plugins alone. The same pair a seat checks against, so a plugin the
 /// server takes is one every seat will load.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn plugin_trust() -> hub::update::Trusted {
     plugin_trust_from(KEYS, PLUGIN_KEYS)
 }

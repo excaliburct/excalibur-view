@@ -8,11 +8,12 @@ members = ["crates/annot", "crates/chest", "crates/pdf", "crates/hub", "crates/h
 exclude = ["plugins", "private"]
 
 [workspace.package]
-# WHAT: the version every crate in the program carries. WHY: 0.6.32 is a new
-# build (a text box on a sheet the PDF turns for showing reads upright, instead
-# of sideways), and two builds never share a version, because an install
-# refuses to put a version over itself.
-version = "0.6.32"
+# WHAT: the version every crate in the program carries. WHY: 0.7.0 is a new
+# build, the Excalibur Office Server: one program and one service carrying View,
+# CAD and Archetype as licensed parts and watching Citadel, HTTPS on the same
+# port 8714 with seats pinning its certificate; two builds never share a
+# version, because an install refuses to put a version over itself.
+version = "0.7.0"
 edition = "2021"
 # WHAT: the oldest Rust that builds it. WHY: 1.89 gives File::try_lock, the system-held lock the off-site
 # backup takes so a crashed run never blocks the next one; every build uses the newest stable.
@@ -22,6 +23,13 @@ rust-version = "1.89"
 opt-level = 3
 lto = "thin"
 codegen-units = 4
+# WHAT: no symbol names and no debug information in what ships. WHY: the
+# programs are machine code already; without function names in them, reading
+# one back is far slower work (Creede, 2026-11-11: make reverse engineering
+# nearly impossible). A crash report still names the version, which is what
+# finding a fault needs.
+strip = "symbols"
+debug = false
 # Unwinding rather than aborting. A little larger and a shade slower, and worth
 # both: the program tries more than one renderer at start-up and treats one that
 # blows up as a renderer to stop using. With `abort`, that attempt is not

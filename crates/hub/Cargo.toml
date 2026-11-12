@@ -13,6 +13,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 sha2 = "0.10"
+# WHAT: web addresses read the way the connection reads them. WHY: a seat's pins are kept per server, whatever spelling of its address; already in the build through ureq.
+url = "2"
 ed25519-dalek = "2"
 plugin-api = { path = "../plugin-api" }
 ureq = { version = "2", features = ["json", "tls"], optional = true }
@@ -27,8 +29,14 @@ default = ["client"]
 # The HTTP client. A server depends on this crate for the types alone and can
 # leave the client out.
 client = ["dep:ureq", "dep:rustls", "dep:webpki-roots", "dep:rustls-native-certs"]
+# WHAT: HTTPS test servers with made-up certificates. WHY: the server crate's tests check pinning end to end; never turned on in a build that ships.
+testing = ["client"]
 
 # Machine policy: the one registry value an administrator sets through Group
 # Policy to seal a computer. Read-only, HKLM\Software\Policies.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_System_Registry", "Win32_Foundation"] }
+windows = { version = "0.58", features = ["Win32_System_Registry", "Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem"] } # WHAT: with DPAPI, and MoveFileExW. WHY: the device key is sealed for this Windows user, as Citadel's DpapiDeviceKeyStore does, and on a disk without hard links it is moved in by a move that never replaces
+
+# WHAT: renameat2 with RENAME_NOREPLACE. WHY: a move that never replaces, for a new device key on a disk without hard links; libc is already in the build.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

@@ -60,6 +60,7 @@ enum Door {
     Person, // WHAT: a person signed in with a password, any role. WHY: their own keys and password.
     Admin,  // WHAT: an administrator signed in with a password. WHY: running the server.
     Folders, // WHAT: an administrator signed in, or a sync key. WHY: deciding who sees a folder.
+    Device, // WHAT: a device's signature and nothing else; no session or key opens it. WHY: the office's device list (docs/OFFICE-ENROLLMENT.md); proven by devices_by_the_contract
 }
 
 /// One route: its method, its path as the router names it, its door, and
@@ -442,6 +443,158 @@ const TABLE: &[Route] = &[
     },
     Route {
         method: "GET",
+        path: "/cad/drawings",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/cad/drawings",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "GET",
+        path: "/cad/drawings/{id}",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "GET",
+        path: "/cad/drawings/{id}/file",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "PUT",
+        path: "/cad/drawings/{id}/file",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/cad/drawings/{id}/lock",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "DELETE",
+        path: "/cad/drawings/{id}/lock",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "GET",
+        path: "/cad/drawings/{id}/versions",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/cad/drawings/{id}/restore",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/cad/drawings/{id}/archive",
+        door: Door::Admin,
+        sync: false,
+    }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/admin/citadel/forget-pin",
+        door: Door::Admin,
+        sync: false,
+    }, // WHAT: Citadel's pin forgotten. WHY: an administrator signed in decides which certificate is believed
+    Route {
+        method: "GET",
+        path: "/archetype/jobs",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/archetype/jobs",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "GET",
+        path: "/archetype/jobs/{id}",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "GET",
+        path: "/archetype/jobs/{id}/files",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "GET",
+        path: "/archetype/jobs/{id}/history",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/archetype/jobs/{id}/checkout",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/archetype/jobs/{id}/checkin",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/archetype/jobs/{id}/release",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/archetype/jobs/{id}/takeback",
+        door: Door::Admin,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "POST",
+        path: "/archetype/files/missing",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "PUT",
+        path: "/archetype/files/{digest}",
+        door: Door::Writer,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "GET",
+        path: "/archetype/files/{digest}",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
+    Route {
+        method: "GET",
+        path: "/office",
+        door: Door::Signed,
+        sync: false,
+    }, // WHAT: the Office Server's parts. WHY: anybody signed in, like the licence's standing
+    Route { method: "GET", path: "/office/identity", door: Door::Public, sync: false }, // WHAT: the office certificate. WHY: read before anything is trusted
+    Route { method: "POST", path: "/devices/request", door: Door::Public, sync: false }, // WHAT: asking to be let in. WHY: held by its own checks (local, rate-limited, proven)
+    Route { method: "GET", path: "/devices/me", door: Door::Device, sync: false }, // WHAT: how a device stands. WHY: its own signature only
+    Route { method: "GET", path: "/devices", door: Door::Device, sync: false }, // WHAT: the list. WHY: an admin device's signature only
+    Route { method: "POST", path: "/devices/{id}/approve", door: Door::Device, sync: false }, // WHAT: approve. WHY: likewise
+    Route { method: "POST", path: "/devices/{id}/refuse", door: Door::Device, sync: false }, // WHAT: refuse. WHY: likewise
+    Route { method: "POST", path: "/devices/{id}/remove", door: Door::Device, sync: false }, // WHAT: remove. WHY: likewise
+    Route { method: "POST", path: "/devices/{id}/admin", door: Door::Device, sync: false }, // WHAT: admin on or off. WHY: likewise
+    Route {
+        method: "GET",
         path: "/audit",
         door: Door::Admin,
         sync: false,
@@ -601,8 +754,8 @@ fn let_in(route: &Route, knock: Knock) -> bool {
             Knock::Estimator | Knock::Admin | Knock::Integration | Knock::DemotedProgram
         ), // WHAT: anybody who may change drawings. WHY: a viewer reads only.
         Door::Person => matches!(knock, Knock::Viewer | Knock::Estimator | Knock::Admin), // WHAT: a person signed in. WHY: a key can't make keys, change a password or sign out.
-        Door::Admin => knock == Knock::Admin, // WHAT: an administrator with a password. WHY: no key runs the server.
-        Door::Folders => knock == Knock::Admin, // WHAT: an administrator; the sync key is let in by the list above. WHY: who sees a folder is theirs to say.
+        Door::Admin | Door::Folders => knock == Knock::Admin, // WHAT: an administrator with a password; for folders the sync key is let in by the list above. WHY: no key runs the server, and who sees a folder is theirs to say.
+        Door::Device => false, // WHAT: nobody here holds a device key. WHY: a session or a key never stands in for one
     }
 }
 
@@ -633,6 +786,32 @@ struct Office {
     _runtime: tokio::runtime::Runtime, // WHAT: the runtime serving it. WHY: dropped, the server stops.
 }
 
+const LICENSE_KEY: &str = "probe-2026"; // WHAT: the test licence key's name. WHY: named in the licence it signs
+
+/// The test's own licence signing key, from a made-up seed.
+fn licensing() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]) // WHAT: never a real key. WHY: only this test's server trusts it
+}
+
+/// A licence switching the cad and archetype parts on, signed as the publishing script signs one.
+fn a_license_with_cad() -> String {
+    use ed25519_dalek::Signer;
+    let mut license = hub::license::License {
+        id: "evl_probe".into(),
+        company: "Probe Steel".into(),
+        edition: hub::license::Edition::Office,
+        users: 0,
+        updates_through: "2099-12-31".into(),
+        issued: "2026-11-10".into(),
+        note: String::new(),
+        modules: vec!["cad".into(), "archetype".into()],
+        key: LICENSE_KEY.into(),
+        signature: String::new(),
+    }; // WHAT: an office licence with CAD. WHY: the probe's office runs it
+    license.signature = hub::update::hex(&licensing().sign(&license.signing_payload()).to_bytes()); // WHAT: signed. WHY: unsigned, it switches nothing on
+    serde_json::to_string(&license).unwrap()
+}
+
 const ADMIN: &str = "usr_admin"; // WHAT: the administrator's id. WHY: keys and sessions are made for them.
 const ESTIMATOR: &str = "usr_estimator"; // WHAT: the estimator's id. WHY: likewise.
 const VIEWER: &str = "usr_viewer"; // WHAT: the viewer's id. WHY: likewise.
@@ -644,6 +823,7 @@ fn an_office() -> Office {
         data: scratch.0.clone(),    // WHAT: its folder. WHY: the scratch one.
         listen: "127.0.0.1:0".parse().unwrap(), // WHAT: any free port here. WHY: tests run side by side.
         maintenance_key: Some(MAINTENANCE.into()), // WHAT: Fleet's doors are open to this key. WHY: so they can be probed.
+        license_keys_for_tests: vec![(LICENSE_KEY.into(), licensing().verifying_key().to_bytes())], // WHAT: this test's own licence key. WHY: the cad part is switched on by a licence it really signs
         ..Config::default() // WHAT: everything else as shipped. WHY: the server an office runs.
     };
     let store = Store::open(&config.database(), &config.blobs()).expect("a store"); // WHAT: the database. WHY: the people go in it.
@@ -664,6 +844,10 @@ fn an_office() -> Office {
         })
         .expect("three people"); // WHAT: all in. WHY: every knock is one of them.
     let server = Arc::new(Server::new(store, config.clone())); // WHAT: the server's state. WHY: kept, to write sessions and keys into.
+    hyperview_server::license::install(&server, &a_license_with_cad()).expect("the licence with CAD"); // WHAT: CAD switched on. WHY: its doors are probed like every other
+    let mut cad = hyperview_server::cad::Store::open(&config.database(), &config.blobs()).expect("CAD's drawings"); // WHAT: CAD's store. WHY: a real drawing to knock on
+    assert_eq!(cad.create("Probe", "Plate.excad", b"v1", "sam@example.com"), Ok(1)); // WHAT: drawing 1. WHY: the id the CAD routes are asked with
+    server.store.with(|db| { db.execute("INSERT INTO arch_jobs (id, name, created, created_by) VALUES ('job_probe', 'Probe job', '2026-11-10T00:00:00Z', 'Sam')", [])?; Ok(()) }).expect("an Archetype job"); // WHAT: a real job. WHY: the id the Archetype routes are asked with
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -900,6 +1084,7 @@ fn things(office: &Office) -> Things {
 
 /// The path and body for one route, made fresh: a person to remove, a key
 /// to take back, an invitation to drop.
+#[allow(clippy::too_many_lines)] // WHAT: the body each route is knocked with, one arm per route. WHY: a table; split, a route would have to be looked for in two places
 fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Body) {
     let fresh_person = || {
         let id = format!("usr_probe_{n}"); // WHAT: a throwaway person. WHY: a removal or role change must not touch the people knocking.
@@ -935,9 +1120,13 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
                 p if p.starts_with("/people/") => fresh_person(),
                 p if p.starts_with("/keys/") => key(office, ADMIN, "assistant", None).1,
                 p if p.starts_with("/signoffs/") => fresh_signoff(), // WHAT: a line of its own. WHY: a signature is final, so each knock signs a fresh one.
+                p if p.starts_with("/cad/drawings/") => "1".to_string(), // WHAT: the probe's CAD drawing. WHY: a real one, so the door is what answers
+                p if p.starts_with("/archetype/jobs/") => "job_probe".to_string(), // WHAT: the probe's Archetype job. WHY: a real one, so the door is what answers
+                p if p.starts_with("/archetype/files/") => "a".repeat(64), // WHAT: a fingerprint. WHY: the door answers before the file is looked for
                 _ => "nothing_by_that_id".to_string(),
             },
         )
+        .replace("{digest}", &"a".repeat(64))
         .replace("{version}", "9.9.9")
         .replace("{code}", "beam-beam-beam-beam-beam-1234"); // WHAT: the ids put in. WHY: real ones where the thing exists, a missing one where it doesn't matter.
     let unique = format!("probe{n}"); // WHAT: a name used once. WHY: emails and job numbers mustn't clash.
@@ -951,7 +1140,7 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
         ("POST", "/join") => Body::Json(
             json!({"code": things.join, "name": "Joiner", "email": format!("{unique}@example.com"), "password": PASSWORD}),
         ),
-        ("POST", "/admin/joining") => Body::Json(json!({})),
+        ("POST", "/admin/joining" | "/sets/{id}/copy") => Body::Json(json!({})), // WHAT: an empty object. WHY: both routes take one with nothing in it
         ("POST", "/admin/invites") => {
             Body::Json(json!({"email": format!("{unique}@example.com"), "role": "viewer"}))
         }
@@ -963,7 +1152,7 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
             Body::Json(json!({"token": "short", "hostname": "drawings.example.com"}))
         }
         ("POST", "/projects") => Body::Json(json!({"number": unique, "name": "Probe"})),
-        ("POST", "/projects/{id}/people") => Body::Json(json!({"person": VIEWER, "on": false})),
+        ("POST", "/projects/{id}/people" | "/groups/{id}/people") => Body::Json(json!({"person": VIEWER, "on": false})), // WHAT: the viewer taken off. WHY: both routes take a person and on or off
         ("POST", "/projects/{id}/archive") => Body::Json(json!({"archived": false})),
         ("POST", "/projects/{id}/place") => Body::Json(json!({"place": ""})),
         ("POST", "/sets") => form(
@@ -971,12 +1160,11 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
             Some(("S-101.pdf", &a_drawing())),
         ),
         ("POST", "/sets/{id}/markups") => Body::Json(json!([])),
-        ("POST", "/sets/{id}/copy") => Body::Json(json!({})),
         ("POST", "/people") => Body::Json(
             json!({"name": "New", "email": format!("{unique}@example.com"), "password": PASSWORD, "role": "viewer"}),
         ),
         ("POST", "/people/{id}/role") => Body::Json(json!({"role": "estimator"})),
-        ("POST", "/chests") => form(&[], None),
+        ("POST", "/chests" | "/admin/releases") => form(&[], None), // WHAT: an empty form. WHY: both routes take a multipart form
         ("POST", "/plugins") => {
             Body::Raw("application/octet-stream".into(), b"not a plugin".to_vec())
         }
@@ -984,10 +1172,8 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
         ("POST", "/notices") => Body::Json(json!({"url": "http://127.0.0.1:9/hook"})),
         ("POST", "/license") => Body::Json(json!({"license": "not a license"})),
         ("POST", "/admin/pin") => Body::Json(json!({"version": ""})),
-        ("POST", "/admin/releases") => form(&[], None),
         ("POST", "/admin/releases/{version}/ready") => Body::Json(json!({"ready": false})),
         ("POST", "/groups") => Body::Json(json!({"name": "Field"})),
-        ("POST", "/groups/{id}/people") => Body::Json(json!({"person": VIEWER, "on": false})),
         ("POST", "/projects/{id}/folders") => Body::Json(json!({"folders": ["Probe"]})),
         ("POST", "/files") => form(
             &[("project", &things.project)],
@@ -999,10 +1185,16 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
         ("POST", "/signoffs/{id}/sign") => {
             Body::Json(json!({"name": "Knock", "strokes": [[[1.0, 1.0], [9.0, 9.0]]]}))
         }
-        ("POST", "/files/{id}/folder") | ("POST", "/sets/{id}/folder") => {
+        ("POST", "/files/{id}/folder" | "/sets/{id}/folder") => { // WHAT: a folder to move to. WHY: both routes take one
             Body::Json(json!({"folder": null}))
         }
-        ("POST", _) | ("DELETE", _) => Body::Raw("application/json".into(), Vec::new()), // WHAT: nothing in the body. WHY: the routes that take none.
+        ("POST", "/cad/drawings") | ("PUT", "/cad/drawings/{id}/file") => Body::Raw("application/octet-stream".into(), b"a drawing".to_vec()), // WHAT: a drawing's bytes. WHY: what CAD sends
+        ("POST", "/archetype/jobs") => Body::Json(json!({"name": format!("Probe {unique}"), "machine": "PROBE"})), // WHAT: a new job, named once. WHY: two knocks never clash
+        ("POST", "/archetype/jobs/{id}/checkout") => Body::Json(json!({"machine": "PROBE"})),
+        ("POST", "/archetype/jobs/{id}/checkin") => Body::Json(json!({"base_revision": 0, "files": [], "machine": "PROBE"})),
+        ("POST", "/archetype/files/missing") => Body::Json(json!({"digests": []})),
+        ("PUT", "/archetype/files/{digest}") => Body::Raw("application/octet-stream".into(), b"x".to_vec()),
+        ("POST" | "DELETE", _) => Body::Raw("application/json".into(), Vec::new()), // WHAT: nothing in the body. WHY: the routes that take none.
         _ => Body::None,
     };
     (format!("/api/v1{path}"), body)
@@ -1029,16 +1221,16 @@ fn every_route_lets_in_exactly_the_callers_its_door_is_for() {
     );
 
     // WHAT: the sync column is the server's own list. WHY: two lists that disagree are a door left open.
-    let sync_here: BTreeSet<String> = TABLE
+    let sync_in_table: BTreeSet<String> = TABLE // WHAT: the routes the table lets a sync key through. WHY: compared with the server's own list
         .iter()
         .filter(|r| r.sync)
         .map(|r| format!("{} {}", r.method, r.path.replace("{id}", ":id")))
         .collect();
-    let sync_there: BTreeSet<String> = api::SYNC_ROUTES
+    let sync_in_server: BTreeSet<String> = api::SYNC_ROUTES // WHAT: the server's own list of them. WHY: likewise
         .iter()
         .map(|(m, p)| format!("{m} {p}"))
         .collect();
-    assert_eq!(sync_here, sync_there, "the sync key's list");
+    assert_eq!(sync_in_table, sync_in_server, "the sync key's list"); // WHAT: the two lists agree. WHY: two lists that disagree are a door left open
 
     let mut wrong = Vec::new(); // WHAT: every door that let in the wrong caller or shut out the right one. WHY: all reported at once.
     let mut fell_over = Vec::new(); // WHAT: every answer of 500 or more. WHY: a broken door is a finding too.
@@ -1148,4 +1340,51 @@ fn fleet_doors_open_to_the_maintenance_key_and_to_nothing_any_person_or_program_
     }
     let (status, _) = send(&office, "GET", "/api/version", None, &Body::None); // WHAT: the version, asked by nobody. WHY: Fleet's contract keeps it public.
     assert_eq!(status, 200);
+}
+
+
+/// The rows in the audit log. WHAT: counted straight from the store. WHY: a refusal must not grow it without limit.
+fn audit_rows(office: &Office) -> i64 {
+    office.server.store.with(|db| Ok(db.query_row("SELECT COUNT(*) FROM audit", [], |r| r.get(0))?)).unwrap()
+}
+
+#[test]
+fn a_sign_in_with_an_enormous_address_is_refused_and_writes_nothing() {
+    // WHAT: audit, 2026-11-11, H1: a megabyte "email" a try filled the disk. WHY: proven closed.
+    let office = an_office();
+    let before = audit_rows(&office);
+    let (status, _) = send(&office, "POST", "/api/v1/auth/token", None, &Body::Json(json!({"email": "x".repeat(500_000), "password": "x"})));
+    assert_eq!(status, 401); // WHAT: refused as any wrong sign-in. WHY: nothing told
+    assert_eq!(audit_rows(&office), before); // WHAT: no line written. WHY: refused before anything is kept
+}
+
+#[test]
+fn a_web_page_from_elsewhere_is_refused_before_any_door_and_programs_are_not() {
+    // WHAT: audit, 2026-11-11, M3: DNS rebinding. WHY: proven closed.
+    let office = an_office();
+    let url = format!("{}/api/v1/auth/token", office.base);
+    let from_a_page = ureq::post(&url).set("Origin", "https://evil.example").send_json(json!({"email": "a@b.c", "password": "x"}));
+    assert!(matches!(from_a_page, Err(ureq::Error::Status(403, _))), "{from_a_page:?}"); // WHAT: a browser page from elsewhere. WHY: refused before the route
+    let (status, _) = send(&office, "POST", "/api/v1/auth/token", None, &Body::Json(json!({"email": "a@b.c", "password": "x"})));
+    assert_eq!(status, 401); // WHAT: a program sends no Origin. WHY: reaches the route as before
+}
+
+#[test]
+fn wrong_maintenance_keys_are_limited_and_a_request_without_one_is_not_counted() {
+    // WHAT: audit, 2026-11-11, L3. WHY: proven closed.
+    let office = an_office();
+    let url = format!("{}/api/admin/ops", office.base);
+    for _ in 0..10 {
+        let (status, _) = send(&office, "GET", "/api/admin/ops", None, &Body::None); // WHAT: no key at all. WHY: never counted
+        assert_eq!(status, 401);
+    }
+    let mut refused_for_a_while = false;
+    for _ in 0..8 {
+        match ureq::get(&url).set("x-av-update-key", "wrong-key-wrong-key-wrong-key-0000").call() {
+            Err(ureq::Error::Status(429, _)) => refused_for_a_while = true, // WHAT: told to wait. WHY: the limit
+            Err(ureq::Error::Status(401, _)) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(refused_for_a_while, "eight wrong keys from one place are limited");
 }

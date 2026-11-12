@@ -2099,6 +2099,7 @@ impl eframe::App for App {
         self.reword_window(ctx);
         self.prefs_dialog(ctx);
         self.sign_in_dialog(ctx);
+        self.approval_window(ctx); // WHAT: the waiting-for-approval screen, when this computer waits. WHY: §3
         self.print_dialog(ctx);
         self.document_dialog(ctx);
         self.compare_dialog(ctx);
