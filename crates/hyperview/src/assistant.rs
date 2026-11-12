@@ -322,6 +322,7 @@ fn office_agent(pin: Option<&str>) -> hub::web::ureq::Agent {
         None => hub::web::agent(), // WHAT: authorities, as before. WHY: plain HTTP, or a tunnel's address
     };
     builder
+        .redirects(0) // WHAT: no redirect followed. WHY: review: the assistant's key is never sent on to another host
         .timeout_connect(Duration::from_secs(8))
         .timeout_read(Duration::from_secs(120))
         .max_idle_connections(0)

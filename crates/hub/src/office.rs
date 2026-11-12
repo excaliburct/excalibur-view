@@ -40,6 +40,9 @@ pub fn shared_file() -> Option<PathBuf> {
     base.map(|b| b.join("Excalibur").join("office.json")) // WHAT: `Excalibur\office.json`. WHY: §2.3
 }
 
+/// The most the shared file may be.
+const MOST_BYTES: u64 = 16 * 1024; // WHAT: 16 KiB. WHY: an address and a pin are a few hundred bytes
+
 /// The shared file, read: `Ok(None)` when there is none, `Err` when it is
 /// there but doesn't read (which never means "no pin").
 ///
@@ -47,8 +50,15 @@ pub fn shared_file() -> Option<PathBuf> {
 ///
 /// When the file is there and damaged.
 pub fn read(path: &Path) -> Result<Option<Shared>, String> {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > MOST_BYTES => return Err("the office server's shared record is damaged".into()), // WHAT: far too big, by its size alone. WHY: review: never read into memory first
+        Ok(meta) if !meta.is_file() => return Err("the office server's shared record isn't a file".into()), // WHAT: a folder or a device in its place. WHY: never read
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None), // WHAT: none yet. WHY: no app on this PC has linked
+        Err(_) => return Err("the office server's shared record can't be read".into()), // WHAT: there, unreadable. WHY: the same as damaged
+    }
     match std::fs::read(path) {
-        Ok(bytes) if bytes.len() > 16 * 1024 => Err("the office server's shared record is damaged".into()), // WHAT: far too big. WHY: never read
+        Ok(bytes) if bytes.len() as u64 > MOST_BYTES => Err("the office server's shared record is damaged".into()), // WHAT: grew since it was looked at. WHY: never trusted
         Ok(bytes) => serde_json::from_slice::<Shared>(&bytes)
             .map_err(|_| "the office server's shared record is damaged".to_string())
             .and_then(|s| if crate::pinned::is_pin(&s.pin) { Ok(Some(s)) } else { Err("the office server's shared record holds no pin".to_string()) }), // WHAT: read, with a real pin. WHY: a damaged one is said, never a first contact
@@ -88,10 +98,7 @@ pub fn server_of(address: &str) -> Option<String> {
 /// `fc00::/7`, `fe80::/10` or loopback (§2.2).
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn is_local(ip: IpAddr) -> bool {
-    match ip.to_canonical() {
-        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(), // WHAT: 10/8, 172.16/12, 192.168/16, 127/8, 169.254/16. WHY: §2.2's private ranges, and the address Windows gives itself without a router
-        IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80, // WHAT: ::1, fc00::/7, fe80::/10. WHY: §2.2
-    }
+    crate::discover::is_local(ip) // WHAT: the one rule, kept beside discovery. WHY: discovery is built without the client and needs it too
 }
 
 /// Whether `host:port` is on a local network: every address it resolves to
@@ -201,5 +208,17 @@ mod tests {
         assert_eq!(checked.citadel_pin, None);
         assert!(check_certificate(&text, &[]).is_none(), "no built-in key, never verified");
         assert!(check_certificate(&text.replace("LatCon", "Other"), &[("office-2026", &public)]).is_none(), "changed, never verified");
+    }
+
+    #[test]
+    fn review_an_oversized_shared_record_is_refused_by_its_size() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("big-office-{n}.json"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut big = format!("{{\"address\":\"https://192.168.1.10:8714\",\"pin\":\"{}\",\"verified\":false}}", "a".repeat(64)).into_bytes(); // WHAT: a good record. WHY: only its size is wrong
+        big.extend(vec![b' '; 20 * 1024]); // WHAT: padded past 16 KiB with spaces JSON allows. WHY: refused by its size, never parsed
+        std::fs::write(&path, big).unwrap();
+        assert!(read(&path).is_err());
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -119,6 +119,30 @@ pub fn look(how_long: Duration) -> Vec<Found> {
     gather(&socket, how_long)
 }
 
+/// Whether an IP address is on a local network: a private IPv4 range,
+/// `fc00::/7`, `fe80::/10` or loopback (docs/OFFICE-ENROLLMENT.md §2.2).
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn is_local(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(), // WHAT: 10/8, 172.16/12, 192.168/16, 127/8, 169.254/16. WHY: §2.2's private ranges, and the address Windows gives itself without a router
+        IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80, // WHAT: ::1, fc00::/7, fe80::/10. WHY: §2.2
+    }
+}
+
+/// Whether an answer's address is the machine that sent it, and on a local
+/// network: the host written in `url` is exactly the UDP sender's address,
+/// or, for an answer from this very computer over loopback, one of the
+/// office network's addresses.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn speaks_for_itself(url: &str, from: IpAddr) -> bool {
+    let Ok(parsed) = url::Url::parse(url.trim()) else { return false }; // WHAT: the address, read. WHY: one that doesn't read is never offered
+    let host = parsed.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']'); // WHAT: its host, an IPv6 one without brackets. WHY: compared as an address
+    let Ok(said) = host.parse::<IpAddr>() else { return false }; // WHAT: a name rather than an address. WHY: a server answers with its own address; a name could point anywhere
+    let itself = said.to_canonical() == from.to_canonical(); // WHAT: the sender's own address. WHY: an answer can't send this computer to a third machine
+    let this_machine = from.to_canonical().is_loopback(); // WHAT: answered by this very computer, over loopback. WHY: the server sitting here may name its own network address, the one others use
+    (itself || this_machine) && is_local(said) && is_local(from) // WHAT: on the office network, both. WHY: never the internet
+}
+
 /// Collects answers until the time is up, keeping one per address.
 pub fn gather(socket: &UdpSocket, how_long: Duration) -> Vec<Found> {
     let until = Instant::now() + how_long;
@@ -133,6 +157,9 @@ pub fn gather(socket: &UdpSocket, how_long: Duration) -> Vec<Found> {
         };
         if answer.url.trim().is_empty() {
             continue;
+        }
+        if !speaks_for_itself(&answer.url, from.ip()) {
+            continue; // WHAT: an answer naming some other machine, or one off the office network. WHY: review: only the machine that answered, on a local network, is ever offered
         }
         // The same server heard twice — over broadcast and directly — is one
         // server, not two.
@@ -429,5 +456,17 @@ mod tests {
         let found = ask(&[], Duration::from_millis(300));
         assert!(found.is_empty());
         assert!(began.elapsed() < Duration::from_secs(2), "it has to give up");
+    }
+
+    #[test]
+    fn review_an_answer_counts_only_for_the_machine_that_sent_it_on_the_office_network() {
+        let here: IpAddr = "192.168.1.40".parse().unwrap();
+        assert!(speaks_for_itself("http://192.168.1.40:8714", here));
+        assert!(!speaks_for_itself("http://192.168.1.41:8714", here), "another machine named");
+        assert!(speaks_for_itself("http://192.168.1.40:8714", "127.0.0.1".parse().unwrap()), "this computer naming its own network address");
+        assert!(!speaks_for_itself("http://8.8.8.8:8714", "127.0.0.1".parse().unwrap()), "but never one off the office network");
+        assert!(!speaks_for_itself("http://office.example.com:8714", here), "a name, not the sender");
+        assert!(!speaks_for_itself("http://8.8.8.8:8714", "8.8.8.8".parse().unwrap()), "off the office network");
+        assert!(speaks_for_itself("http://127.0.0.1:8714", "127.0.0.1".parse().unwrap()), "this machine itself");
     }
 }

@@ -125,6 +125,56 @@ pub fn is_pinned(base: &str, book: &PinBook) -> bool {
 pub struct Also<'a> {
     pub shared: Option<&'a std::path::Path>, // WHAT: the shared office.json, when the app uses it. WHY: §2.3: the second app on a PC never asks again
     pub office_keys: &'a [(&'a str, &'a str)], // WHAT: the office certificate keys built in. WHY: §2.4; empty until certificates are signed
+    pub allow_plain: bool, // WHAT: the person confirmed this server is an old, unencrypted one. WHY: review: never plain HTTP without that, and never for an Office Server
+    pub replace_shared: bool, // WHAT: the person confirmed this is a different office server from the one the other apps know. WHY: review: the shared record is never swapped quietly
+}
+
+/// The code a refusal carries when the person must confirm an old,
+/// unencrypted server before anything is sent to it.
+pub const CONFIRM_UNENCRYPTED: &str = "confirm_unencrypted"; // WHAT: the refusal's name. WHY: the app shows the warning and a button
+
+/// The code a refusal carries when the server isn't the one the other apps
+/// on this computer know, and the person must confirm the change.
+pub const CONFIRM_OTHER_SERVER: &str = "confirm_other_server"; // WHAT: the refusal's name. WHY: the app shows both short pins and a button
+
+/// Every address `host` looks up to, once, and whether all are local.
+fn looked_up(host: &str) -> (Vec<std::net::IpAddr>, bool) {
+    let bare = host.trim_start_matches('[').trim_end_matches(']'); // WHAT: an IPv6 address without its brackets. WHY: parsed as an address
+    let ips: Vec<std::net::IpAddr> = match bare.parse::<std::net::IpAddr>() {
+        Ok(ip) => vec![ip], // WHAT: an address as typed. WHY: nothing to look up
+        Err(_) => std::net::ToSocketAddrs::to_socket_addrs(&(bare, 0)).map(|a| a.map(|s| s.ip()).collect()).unwrap_or_default(), // WHAT: looked up once. WHY: review: the same addresses are checked and connected to
+    };
+    let local = !ips.is_empty() && ips.iter().all(|ip| crate::office::is_local(*ip)); // WHAT: every one on a local network. WHY: §2.2
+    (ips, local)
+}
+
+/// Whether a health answer says it is an Office Server (0.7.0 or later),
+/// which always serves HTTPS.
+fn is_office_server(health: &crate::model::Health) -> bool {
+    health.product == "excalibur-office" || crate::update::compare(&health.version, "0.7.0") != std::cmp::Ordering::Less // WHAT: the product word, or a version from 0.7.0 on. WHY: review: such a server is never reached over plain HTTP
+}
+
+/// The refusal for an old, unencrypted server the person hasn't confirmed.
+fn unencrypted(host: &str, local: bool) -> Trouble {
+    if !local {
+        return Trouble::Unreadable(format!("{host} doesn't offer an encrypted connection and isn't on the office network, so this computer won't connect to it.")); // WHAT: refused for good. WHY: a password is never sent unencrypted across the internet
+    }
+    Trouble::Refused(crate::model::Problem::new(
+        CONFIRM_UNENCRYPTED,
+        "This server doesn't offer an encrypted connection. It may be an old Excalibur View server (before 0.7.0), or someone pretending to be the office server. Your password would be sent unencrypted. Only go on if you know this server is old, or ask whoever looks after it to update it.",
+    )) // WHAT: refused until confirmed. WHY: review: an explicit warning before any password is sent
+}
+
+/// The refusal for a server that isn't the one the other apps know.
+fn other_server(kept: &str, seen: &str) -> Trouble {
+    Trouble::Refused(crate::model::Problem::new(
+        CONFIRM_OTHER_SERVER,
+        format!(
+            "This computer's other Excalibur programs know a different office server (certificate {}) from this one (certificate {}). If the office really has a new server, confirm it; otherwise someone may be pretending to be the server. Ask whoever looks after it.",
+            crate::pinned::short(kept),
+            crate::pinned::short(seen)
+        ),
+    )) // WHAT: refused until confirmed, both short pins shown. WHY: review: the shared record is never swapped quietly
 }
 
 /// The client a seat should use for `base`: the server's HTTPS by its kept pin
@@ -161,38 +211,48 @@ pub fn open_with(base: &str, book: &PinBook, also: Also<'_>) -> Result<Client, T
     if damaged {
         return Err(Trouble::Unreadable("this computer's record of the office server's certificate doesn't read. Ask whoever looks after the server for its fingerprint before connecting again.".into())); // WHAT: refused. WHY: a damaged book never means "no pins"
     }
-    let shared = match also.shared.map(crate::office::read) {
+    let shared_any = match also.shared.map(crate::office::read) {
         Some(Err(why)) => return Err(Trouble::Unreadable(format!("{why}. Ask whoever looks after the server before connecting again."))), // WHAT: refused. WHY: a damaged shared record never means "no pin"
-        Some(Ok(found)) => found.filter(|s| crate::office::server_of(&s.address).as_deref() == Some(server.as_str())), // WHAT: the shared record, if it is for this server. WHY: another office's pin is never used here
+        Some(Ok(found)) => found, // WHAT: the shared record, whichever address it names. WHY: compared by pin below
         None => None,
     };
+    let shared = shared_any.clone().filter(|s| crate::office::server_of(&s.address).as_deref() == Some(server.as_str())); // WHAT: the shared record, if it names this address. WHY: its pin is this server's
     let kept = book.pin(&server).or_else(|| shared.as_ref().map(|s| s.pin.clone())); // WHAT: this app's pin, or the one another app on this PC kept. WHY: §2.3
     let held = book.holds(&server) || shared.is_some(); // WHAT: whether any pin is held for it. WHY: then plain HTTP is never fallen back to
-    let offered = Client::new(&plain).health().ok().and_then(|h| h.secure_port); // WHAT: where the server says HTTPS is. WHY: only the port is taken from plain HTTP, never the pin
-    let port = match (offered, held) {
-        (Some(port), _) => port,
-        (None, false) => return Ok(Client::new(&plain)), // WHAT: an older server, never pinned. WHY: reached as before
-        (None, true) => {
-            return Err(Trouble::Unreachable("this server's encrypted connection didn't answer. It was encrypted before, so this computer won't fall back to an unencrypted one. Check the server, or ask whoever looks after it.".into())); // WHAT: refused. WHY: blocking HTTPS must never push a seat back to plain HTTP
+    let (ips, local) = looked_up(&host); // WHAT: the host's addresses, looked up once. WHY: review: checked and connected to as one
+    let health = Client::plain_at(&plain, ips.clone()).health().ok(); // WHAT: the plain health answer, from those addresses. WHY: only where HTTPS is is taken from it
+    let office = health.as_ref().is_some_and(is_office_server); // WHAT: whether it says it is an Office Server. WHY: then it is never reached over plain HTTP
+    let plain_allowed = || -> Result<Client, Trouble> {
+        if office || held || !local || !also.allow_plain {
+            return Err(if office || held { Trouble::Unreachable("this server's encrypted connection didn't answer, so this computer won't fall back to an unencrypted one. Check the server, or ask whoever looks after it.".into()) } else { unencrypted(&host, local) }); // WHAT: refused. WHY: review: plain HTTP only for an old, local server the person confirmed
         }
+        Ok(Client::plain_at(&plain, ips.clone())) // WHAT: plain HTTP, to the checked addresses only. WHY: an old server the person knows is old
+    };
+    let Some(port) = health.as_ref().and_then(|h| h.secure_port) else {
+        if health.is_none() && !held {
+            return Err(Trouble::Unreachable("nothing answered at that address. The server may be off, or the address wrong.".into())); // WHAT: no answer. WHY: never a client to nowhere
+        }
+        return plain_allowed(); // WHAT: no HTTPS offered. WHY: refused unless an old, local, confirmed server
     };
     let secure = format!("https://{host}:{port}"); // WHAT: the same host, its HTTPS port. WHY: the server said where
     let client = match kept {
         Some(pin) => Client::pinned(&secure, &pin).and_then(|c| c.health().map(|_| c)).map_err(|e| changed_or(e, &secure, &pin))?, // WHAT: the kept pin, checked by answering. WHY: guard 5: a changed certificate is refused with words, never accepted
         None if held => return Err(Trouble::Unreadable("this computer's record of the server's certificate is damaged. Ask whoever looks after the server for its fingerprint before connecting again.".into())), // WHAT: a damaged entry. WHY: never treated as a first connection
         None => {
-            if !crate::office::host_is_local(&host, port) {
+            if !local {
                 return Err(Trouble::Unreadable(format!("{host} isn't on the office network, so this computer won't take its certificate on trust. Link this computer to the office server once from inside the office."))); // WHAT: refused. WHY: §2.2: a first contact pins only on a local address
             }
             let (agent, check) = crate::pinned::agent(None).map_err(Trouble::Unreadable)?; // WHAT: a first connection, no pin yet. WHY: the pin is kept from this handshake
-            let answered = agent.timeout_connect(std::time::Duration::from_secs(8)).build().get(&format!("{secure}{}/health", crate::API_ROOT)).call(); // WHAT: the health answer, over HTTPS. WHY: proves the server answers there before its pin is kept
-            let seen = check.seen();
-            match (answered, seen) {
+            let answered = agent.resolver(crate::client::fixed(ips.clone())).timeout_connect(std::time::Duration::from_secs(8)).build().get(&format!("{secure}{}/health", crate::API_ROOT)).call(); // WHAT: the health answer, over HTTPS, from the addresses checked as local. WHY: review: a name can't look up to the office network for the check and elsewhere for the connection
+            match (answered, check.seen()) {
                 (Ok(_), Some(pin)) => {
+                    if let Some(other) = shared_any.as_ref().filter(|s| s.pin != pin && !also.replace_shared) {
+                        return Err(other_server(&other.pin, &pin)); // WHAT: refused before anything is kept. WHY: review: another name for the server, or another server, never re-pins the computer quietly
+                    }
                     book.keep(&server, &pin).map_err(|e| Trouble::Unreadable(format!("couldn't keep the server's certificate: {e}")))?; // WHAT: kept. WHY: every connection after must show this certificate
                     Client::pinned(&secure, &pin)?
                 }
-                _ => return Ok(Client::new(&plain)), // WHAT: HTTPS offered but not answering, never pinned. WHY: a first connection may still use plain HTTP; once pinned it never will
+                _ => return plain_allowed(), // WHAT: HTTPS offered but not answering. WHY: refused unless an old, local, confirmed server; an Office Server never
             }
         }
     };
@@ -201,7 +261,8 @@ pub fn open_with(base: &str, book: &PinBook, also: Also<'_>) -> Result<Client, T
         Ok(Some(text)) => crate::office::check_certificate(&text, also.office_keys).is_some_and(|c| c.pin == pin), // WHAT: a valid certificate for this very pin. WHY: §2.4: then the server is verified
         _ => false, // WHAT: none, or none that reads. WHY: unverified
     };
-    let was_verified = shared.as_ref().is_some_and(|s| s.verified); // WHAT: whether this server was ever seen verified on this PC. WHY: guard 6
+    let same_server = shared_any.as_ref().filter(|s| s.pin == pin); // WHAT: the shared record, when it is this very server, under whatever name. WHY: compared by pin (review)
+    let was_verified = same_server.is_some_and(|s| s.verified); // WHAT: whether this server was ever seen verified on this PC. WHY: guard 6, whatever name it was reached by
     if was_verified && !verified {
         return Err(Trouble::Refused(crate::model::Problem::new(
             "office_unverified",
@@ -209,9 +270,12 @@ pub fn open_with(base: &str, book: &PinBook, also: Also<'_>) -> Result<Client, T
         ))); // WHAT: refused. WHY: guard 6: once verified, never accepted unverified
     }
     if let Some(path) = also.shared {
-        let record = crate::office::Shared { address: secure.clone(), pin: pin.clone(), verified: verified || was_verified }; // WHAT: this server's address, pin, and whether verified. WHY: the next app on this PC reads it
-        if shared.as_ref() != Some(&record) {
-            let _ = crate::office::write(path, &record); // WHAT: kept for the other apps. WHY: §2.3; a failure to share never stops this app connecting
+        let record = match same_server {
+            Some(known) => crate::office::Shared { verified: known.verified || verified, ..known.clone() }, // WHAT: the record as the other apps wrote it, verified kept or gained. WHY: review: never cleared, never re-addressed by an alias
+            None => crate::office::Shared { address: secure.clone(), pin: pin.clone(), verified }, // WHAT: a new record, for a first server or one the person confirmed. WHY: the next app on this PC reads it
+        };
+        if shared_any.as_ref() != Some(&record) && (shared_any.is_none() || same_server.is_some() || also.replace_shared) {
+            let _ = crate::office::write(path, &record); // WHAT: kept for the other apps. WHY: §2.3; another server's record is replaced only when confirmed
         }
     }
     Ok(client)
@@ -297,7 +361,88 @@ mod tests {
         let shared = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("shared-{n}.json"));
         std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
         std::fs::write(&shared, b"{trunc").unwrap();
-        assert!(open_with("http://127.0.0.1:1", &book, Also { shared: Some(&shared), office_keys: &[] }).is_err());
+        assert!(open_with("http://127.0.0.1:1", &book, Also { shared: Some(&shared), office_keys: &[], ..Also::default() }).is_err());
         let _ = std::fs::remove_file(&shared);
+    }
+
+    /// A plain-HTTP server on this machine that answers every request with
+    /// `body` (or `status` and `extra` headers), and keeps what it was sent.
+    fn plain_server(status: &'static str, extra: String, body: String) -> (u16, std::sync::Arc<std::sync::Mutex<String>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let log = heard.clone();
+        std::thread::spawn(move || {
+            for mut tcp in listener.incoming().flatten() {
+                let _ = tcp.set_read_timeout(Some(std::time::Duration::from_millis(300))); // WHAT: a short wait for more. WHY: the body can come in a second packet
+                let mut buf = vec![0u8; 65536];
+                let mut all = String::new(); // WHAT: this connection's request. WHY: measured on its own
+                while let Ok(n) = tcp.read(&mut buf) {
+                    if n == 0 {
+                        break; // WHAT: the caller stopped sending. WHY: all of it heard
+                    }
+                    all.push_str(&String::from_utf8_lossy(&buf[..n])); // WHAT: this request so far. WHY: its length is checked
+                    log.lock().unwrap().push_str(&String::from_utf8_lossy(&buf[..n])); // WHAT: kept. WHY: the test reads what was sent
+                    if let Some(head) = all.find("\r\n\r\n") {
+                        let length = all[..head].lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0))).unwrap_or(0);
+                        if all.len() >= head + 4 + length {
+                            break; // WHAT: the whole request. WHY: answered once read
+                        }
+                    }
+                }
+                let _ = write!(tcp, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        (port, heard)
+    }
+
+    fn health(version: &str, product: &str, secure_port: Option<u16>) -> String {
+        let port = secure_port.map_or("null".to_string(), |p| p.to_string());
+        format!("{{\"ok\":true,\"api_version\":{},\"version\":\"{version}\",\"name\":\"x\",\"claimed\":true,\"joining\":\"code\",\"product\":\"{product}\",\"secure_port\":{port}}}", crate::API_VERSION)
+    }
+
+    #[test]
+    fn review_an_office_server_offering_no_https_never_gets_a_password_in_the_clear() {
+        let (port, heard) = plain_server("200 OK", String::new(), health("0.7.0", "excalibur-office", None)); // WHAT: an Office Server's answer with its HTTPS port taken out. WHY: the attack
+        let refused = open_with(&format!("http://127.0.0.1:{port}"), &a_book(), Also { allow_plain: true, ..Also::default() }); // WHAT: even with plain allowed. WHY: an Office Server never
+        assert!(refused.is_err(), "never plain to an Office Server");
+        let (gone, _) = plain_server("200 OK", String::new(), health("0.7.0", "excalibur-office", Some(1))); // WHAT: HTTPS offered on a port where nothing answers. WHY: the other way the old code fell back
+        assert!(open_with(&format!("http://127.0.0.1:{gone}"), &a_book(), Also { allow_plain: true, ..Also::default() }).is_err(), "a first contact whose HTTPS fails never falls back");
+        assert!(!heard.lock().unwrap().contains("hunter2"), "no password was ever sent");
+    }
+
+    #[test]
+    fn review_an_old_plain_server_needs_the_person_to_confirm_before_anything_is_sent() {
+        let (port, heard) = plain_server("200 OK", String::new(), health("0.6.31", "hyperview", None)); // WHAT: an old View server, plain only. WHY: the one plain path kept
+        let base = format!("http://127.0.0.1:{port}");
+        match open_with(&base, &a_book(), Also::default()) {
+            Err(Trouble::Refused(p)) => assert_eq!(p.error, CONFIRM_UNENCRYPTED, "{}", p.message),
+            other => panic!("not asked to confirm: {:?}", other.map(|c| c.base().to_string())),
+        }
+        let mut client = open_with(&base, &a_book(), Also { allow_plain: true, ..Also::default() }).expect("confirmed, it connects");
+        assert!(client.pin().is_none());
+        let _ = client.sign_in("dana@example.com", "hunter2-confirmed");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(heard.lock().unwrap().contains("hunter2-confirmed"), "only once the person confirmed");
+    }
+
+    #[test]
+    fn review_a_redirect_is_never_followed() {
+        let (elsewhere, seen_there) = plain_server("200 OK", String::new(), "{}".into()); // WHAT: another host. WHY: the redirect's target
+        let (port, _) = plain_server("302 Found", format!("Location: http://127.0.0.1:{elsewhere}/api/v1/health\r\n"), String::new()); // WHAT: a server that sends callers on. WHY: the attack
+        assert!(Client::new(&format!("http://127.0.0.1:{port}")).health().is_err(), "the redirect is an answer, never followed");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(seen_there.lock().unwrap().is_empty(), "nothing reached the other host");
+    }
+
+    #[test]
+    fn review_a_plain_client_connects_only_to_the_addresses_checked() {
+        let (port, heard) = plain_server("200 OK", String::new(), health("0.6.31", "hyperview", None));
+        let client = Client::plain_at(&format!("http://no-such-host.invalid:{port}"), vec!["127.0.0.1".parse().unwrap()]); // WHAT: a name that looks up to nothing, held to 127.0.0.1. WHY: the addresses checked are the ones connected to
+        assert!(client.health().is_ok(), "reached the checked address, never a fresh look-up");
+        assert!(!heard.lock().unwrap().is_empty());
+        let (_, local) = looked_up("192.0.2.1");
+        assert!(!local, "a public address is never local");
     }
 }

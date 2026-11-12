@@ -57,19 +57,27 @@ fn keep(path: &Path, key: &DeviceKey) -> Result<(), String> {
     let sealed = seal(&secret); // WHAT: sealed for this user. WHY: DPAPI, or as it is in a 0600 file
     secret.fill(0); // WHAT: cleared. WHY: as above
     let sealed = sealed?;
-    let part = path.with_extension("saving"); // WHAT: a file beside it. WHY: moved into place whole
+    let mut fresh = [0u8; 8]; // WHAT: room for a random name. WHY: the part file's name can't be guessed and planted first
+    rustls::crypto::ring::default_provider().secure_random.fill(&mut fresh).map_err(|_| "this computer couldn't give random numbers for its key".to_string())?; // WHAT: random bytes. WHY: a name nobody else picks
+    let part = path.with_extension(format!("saving-{}", crate::update::hex(&fresh))); // WHAT: a fresh file beside it. WHY: moved into place whole
     write_private(&part, &sealed).map_err(|e| e.to_string())?;
     std::fs::rename(&part, path).map_err(|e| {
         let _ = std::fs::remove_file(&part); // WHAT: the leftover. WHY: never a stray copy of a key
         e.to_string()
-    })
+    })?;
+    let back = std::fs::read(path).map_err(|e| e.to_string())?; // WHAT: the key file, read again. WHY: review: what is kept must be what was written, not something swapped in between
+    let again = open(&back)?; // WHAT: opened. WHY: compared with the key
+    if DeviceKey::from_secret(&again).id() != key.id() {
+        return Err("this computer's office server key didn't read back as written; nothing was kept".into()); // WHAT: refused. WHY: a key file changed under us is never used
+    }
+    Ok(())
 }
 
 /// Writes `bytes` to a new file only its owner may read (0600 on Unix).
 fn write_private(path: &PathBuf, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new(); // WHAT: how it is opened. WHY: made new, with its permissions from the start
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true); // WHAT: a file that must not already be there. WHY: review: never written into a file, or a link, someone else made
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -168,6 +176,20 @@ mod tests {
         std::fs::write(dir.join(FILE), b"short").unwrap();
         assert!(load_or_make(&dir).is_err());
         assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), b"short", "left as it was");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn review_a_key_is_never_written_into_a_file_someone_else_made() {
+        let dir = folder();
+        std::fs::create_dir_all(&dir).unwrap();
+        let planted = dir.join("planted");
+        std::fs::write(&planted, b"theirs").unwrap();
+        assert!(write_private(&planted, b"ours").is_err(), "an existing file is never written into");
+        assert_eq!(std::fs::read(&planted).unwrap(), b"theirs");
+        std::fs::write(dir.join("device.saving"), b"stale").unwrap(); // WHAT: a part file under the old fixed name. WHY: never used now
+        let key = load_or_make(&dir).unwrap();
+        assert_eq!(load_or_make(&dir).unwrap().id(), key.id());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

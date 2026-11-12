@@ -79,6 +79,8 @@ pub struct SigningIn {
     /// Nothing answered, so say so rather than leaving an empty box.
     pub looked: bool,
     pub error: Option<String>,
+    /// A warning the person must confirm before connecting: (address, what, words).
+    pub confirm: Option<(String, String, String)>, // WHAT: the question and its words. WHY: an old unencrypted server, or another office server
     pub waiting: bool,
     /// Set once a server has been claimed: the code to hand round, and what
     /// hosting it on this computer actually got them.
@@ -636,6 +638,14 @@ impl App {
                     self.office.changing_rule = None; // WHAT: the rule picker closed. WHY: the change went.
                     self.status = said; // WHAT: the sentence. WHY: on the status line.
                 }
+                Told::Confirm { base, what, words } => {
+                    if let Some(signing) = self.signing_in.as_mut() {
+                        signing.waiting = false; // WHAT: the spinner stops. WHY: the question is shown instead
+                        signing.confirm = Some((base, what, words)); // WHAT: the question. WHY: shown with its two buttons
+                    } else {
+                        self.error = Some(words); // WHAT: said. WHY: without the sign-in window there is nowhere to confirm; signing in again asks
+                    }
+                }
                 Told::Trouble(message) => {
                     self.standing.busy = None;
                     // The server says sharing is paused: find out where the
@@ -821,6 +831,7 @@ impl App {
         let mut look = false;
         let mut host_here = false;
         let mut pick: Option<String> = None;
+        let mut confirmed_now: Option<(String, String)> = None; // WHAT: a warning confirmed this frame. WHY: told to the worker once the window is drawn
 
         egui::Window::new("Connect to a server")
             .collapsible(false)
@@ -956,6 +967,28 @@ impl App {
                     ui.add_space(8.0);
                     ui.colored_label(Color32::from_rgb(235, 120, 120), error);
                 }
+                let mut answered = None; // WHAT: the person's answer to a warning, this frame. WHY: acted on after the window is drawn
+                if let Some((_, what, words)) = &signing.confirm {
+                    ui.add_space(8.0);
+                    ui.colored_label(theme.warn, words); // WHAT: the warning, in full. WHY: the person decides having read it
+                    ui.horizontal(|ui| {
+                        let go = if what == hub::secure::CONFIRM_UNENCRYPTED { "It's an old server: connect without encryption" } else { "It's the office's new server: use it" }; // WHAT: what the button does, plainly. WHY: never a bare "OK"
+                        if ui.button(go).clicked() {
+                            answered = Some(true);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            answered = Some(false);
+                        }
+                    });
+                }
+                if let Some(yes) = answered {
+                    if let Some((base, what, _)) = signing.confirm.take() {
+                        if yes {
+                            confirmed_now = Some((base, what)); // WHAT: kept for this run. WHY: the next connection goes on
+                            signing.error = Some("Confirmed. Press the button below again to connect.".into()); // WHAT: what to do next. WHY: plain words
+                        }
+                    }
+                }
 
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
@@ -1005,6 +1038,9 @@ impl App {
                 });
             });
 
+        if let Some((base, what)) = confirmed_now {
+            self.ask(Ask::Confirmed { base, what }); // WHAT: the confirmation, to the worker. WHY: the next connection to that server goes on
+        }
         if let Some(base) = pick {
             signing.base = base;
             signing.found = None;

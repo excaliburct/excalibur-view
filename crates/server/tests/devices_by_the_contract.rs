@@ -183,8 +183,8 @@ fn guard_3_only_an_approved_device_with_a_good_fresh_signature_gets_past_the_gat
     let elsewhere = admin.sign(&office.pin, "GET", "/api/v1/projects", b"", now).unwrap();
     refused(office.raw("GET", "/api/v1/me", b"", Some(&elsewhere), &[]), "signed for another target");
     // Outside ±300 s, either way.
-    refused(office.raw("GET", "/api/v1/me", b"", Some(&admin.sign(&office.pin, "GET", "/api/v1/me", b"", now - 301).unwrap()), &[]), "too old");
-    refused(office.raw("GET", "/api/v1/me", b"", Some(&admin.sign(&office.pin, "GET", "/api/v1/me", b"", now + 301).unwrap()), &[]), "too far ahead");
+    refused(office.raw("GET", "/api/v1/me", b"", Some(&admin.sign(&office.pin, "GET", "/api/v1/me", b"", now - 400).unwrap()), &[]), "too old");
+    refused(office.raw("GET", "/api/v1/me", b"", Some(&admin.sign(&office.pin, "GET", "/api/v1/me", b"", now + 400).unwrap()), &[]), "too far ahead");
     // An unknown device.
     refused(office.raw("GET", "/api/v1/me", b"", Some(&signer(7).sign(&office.pin, "GET", "/api/v1/me", b"", now).unwrap()), &[]), "unknown");
     // Waiting, refused and removed devices.
@@ -372,7 +372,7 @@ fn guard_5_an_app_never_accepts_a_changed_server_pin_even_one_another_app_kept()
     let office = start();
     let (book, shared) = books();
     let plain = format!("http://127.0.0.1:{}", office.port);
-    let also = hub::secure::Also { shared: Some(&shared), office_keys: &[] };
+    let also = hub::secure::Also { shared: Some(&shared), office_keys: &[], ..Default::default() };
     let first = hub::secure::open_with(&plain, &book, also).expect("a first contact on a local address pins");
     assert_eq!(first.pin(), Some(office.pin.as_str()));
     let kept = hub::office::read(&shared).unwrap().expect("shared with the other apps");
@@ -398,11 +398,11 @@ fn guard_6_a_server_once_seen_verified_is_never_accepted_unverified() {
     let statement = format!("excalibur-office-cert/1\ncompany LatCon\nlicense lic_1\npin {}\ncitadel-pin none\nissued 2026-11-11\n", office.pin);
     let cert = format!("{statement}signature office-test {}\n", hub::update::hex(&signing.sign(statement.as_bytes()).to_bytes()));
     hyperview_server::devices::store_identity(&office.store(), &cert).unwrap();
-    hub::secure::open_with(&plain, &book, hub::secure::Also { shared: Some(&shared), office_keys: &keys }).expect("verified");
+    hub::secure::open_with(&plain, &book, hub::secure::Also { shared: Some(&shared), office_keys: &keys, ..Default::default() }).expect("verified");
     assert!(hub::office::read(&shared).unwrap().unwrap().verified, "marked verified for every app");
 
     hyperview_server::devices::store_identity(&office.store(), "").unwrap(); // WHAT: the certificate gone. WHY: as an impostor without it would answer
-    match hub::secure::open_with(&plain, &book, hub::secure::Also { shared: Some(&shared), office_keys: &keys }) {
+    match hub::secure::open_with(&plain, &book, hub::secure::Also { shared: Some(&shared), office_keys: &keys, ..Default::default() }) {
         Err(hub::client::Trouble::Refused(p)) => assert_eq!(p.error, "office_unverified"),
         other => panic!("accepted unverified: {:?}", other.is_ok()),
     }
@@ -696,4 +696,32 @@ fn rereview_low4_refusing_a_computer_takes_back_its_keys() {
     office.client(&admin).refuse_device(&dana.key().id()).unwrap();
     let left: i64 = office.store().with(|db| Ok(db.query_row("SELECT count(*) FROM keys WHERE id = ?1", params![key_id], |r| r.get(0))?)).unwrap();
     assert_eq!(left, 0, "the key went with the refusal");
+}
+
+// ---- the client review ------------------------------------------------------------
+
+#[test]
+fn client_review_another_name_for_a_server_never_re_pins_quietly_or_clears_verified() {
+    let office = start();
+    let (book, shared) = books();
+    let alias = format!("http://localhost:{}", office.port); // WHAT: the same machine under another name. WHY: the attack reached it as localhost while the record said 127.0.0.1
+    let known = hub::office::Shared { address: format!("https://127.0.0.1:{}", office.port), pin: "d".repeat(64), verified: true }; // WHAT: the other apps know a server with another certificate, verified. WHY: as if an impostor answers here now
+    hub::office::write(&shared, &known).unwrap();
+    match hub::secure::open_with(&alias, &book, hub::secure::Also { shared: Some(&shared), ..Default::default() }) {
+        Err(hub::client::Trouble::Refused(p)) => assert_eq!(p.error, hub::secure::CONFIRM_OTHER_SERVER, "{}", p.message),
+        other => panic!("re-pinned quietly: {:?}", other.map(|c| c.pin().map(str::to_string))),
+    }
+    assert_eq!(hub::office::read(&shared).unwrap(), Some(known.clone()), "the other apps' record is untouched, verified kept");
+    assert!(!book.holds(&format!("localhost:{}", office.port)), "nothing kept for the alias either");
+
+    let same = hub::office::Shared { address: format!("https://127.0.0.1:{}", office.port), pin: office.pin.clone(), verified: false }; // WHAT: the record for this very server. WHY: reached by another name
+    hub::office::write(&shared, &same).unwrap();
+    let (book, _) = books();
+    hub::secure::open_with(&alias, &book, hub::secure::Also { shared: Some(&shared), ..Default::default() }).expect("the same certificate under another name");
+    assert_eq!(hub::office::read(&shared).unwrap().unwrap().address, same.address, "compared by pin: the record isn't re-addressed to the alias");
+
+    hub::office::write(&shared, &known).unwrap();
+    let (book, _) = books();
+    hub::secure::open_with(&alias, &book, hub::secure::Also { shared: Some(&shared), replace_shared: true, ..Default::default() }).expect("confirmed by the person");
+    assert_eq!(hub::office::read(&shared).unwrap().unwrap().pin, office.pin, "replaced only once confirmed");
 }

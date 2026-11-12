@@ -205,6 +205,8 @@ pub enum Ask {
     /// How this computer stands on the office's device list, asked every
     /// 5 s while the waiting screen is open.
     Standing, // WHAT: GET /devices/me for the computer waiting. WHY: §3: the app checks every 5 s
+    /// The person confirmed a warning about a server.
+    Confirmed { base: String, what: String }, // WHAT: the server and what was confirmed. WHY: the next connection may go on
     /// The waiting screen closed without waiting longer.
     StopWaiting, // WHAT: forget what was waiting to be done. WHY: the person gave up
     /// The office's computers, for an admin.
@@ -239,6 +241,8 @@ pub enum ComputerChange {
 pub enum Told {
     /// This computer has asked to be let in and waits for an admin.
     Waiting { device: String }, // WHAT: its device id. WHY: the waiting screen opens
+    /// Something the person must confirm before this computer connects.
+    Confirm { base: String, what: String, words: String }, // WHAT: the server, the question's name and its words. WHY: an old unencrypted server, or another office server than the one the other apps know
     /// How this computer stands now.
     Standing(hub::device::Me), // WHAT: its state. WHY: the waiting screen closes once approved, or says it was refused
     /// The office's computers, or `None` when this computer isn't an admin's.
@@ -454,12 +458,37 @@ fn device() -> Option<std::sync::Arc<hub::device::Signer>> {
 /// signed by this computer's device key.
 fn open(base: &str) -> Result<Client, hub::client::Trouble> {
     let shared = hub::office::shared_file(); // WHAT: the office.json every app shares. WHY: §2.3
-    let also = hub::secure::Also { shared: shared.as_deref(), office_keys: crate::trust::OFFICE_KEYS }; // WHAT: the shared file and the office keys. WHY: guards 5 and 6
+    let also = hub::secure::Also {
+        shared: shared.as_deref(),
+        office_keys: crate::trust::OFFICE_KEYS,
+        allow_plain: confirmed(base, hub::secure::CONFIRM_UNENCRYPTED), // WHAT: the person said this server is old and unencrypted. WHY: never plain HTTP otherwise
+        replace_shared: confirmed(base, hub::secure::CONFIRM_OTHER_SERVER), // WHAT: the person said this is the office's new server. WHY: the other apps' record is never swapped otherwise
+    }; // WHAT: the shared file, the office keys, and what the person confirmed. WHY: guards 5 and 6, and the client review
     let client = hub::secure::open_with(base, &pin_book(), also)?; // WHAT: moved to HTTPS and kept there. WHY: sign-ins and drawings encrypted on the office network
     Ok(match device() {
         Some(key) => client.with_device(key), // WHAT: signed. WHY: §4
         None => client,
     })
+}
+
+/// What the person confirmed for a server this run: (address, what).
+fn confirmations() -> &'static std::sync::Mutex<std::collections::HashSet<(String, String)>> {
+    static SAID: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<(String, String)>>> = std::sync::OnceLock::new(); // WHAT: kept for this run only. WHY: a warning is confirmed again each time the program starts
+    SAID.get_or_init(Default::default)
+}
+
+/// Whether the person confirmed `what` for `base` this run.
+fn confirmed(base: &str, what: &str) -> bool {
+    confirmations().lock().is_ok_and(|said| said.contains(&(base.to_string(), what.to_string()))) // WHAT: looked up. WHY: a poisoned lock confirms nothing
+}
+
+/// A failure to connect, as the window is told it: something to confirm,
+/// with its words, or the trouble itself.
+fn refusal(base: &str, e: hub::client::Trouble) -> Told {
+    match e {
+        hub::client::Trouble::Refused(p) if p.error == hub::secure::CONFIRM_UNENCRYPTED || p.error == hub::secure::CONFIRM_OTHER_SERVER => Told::Confirm { base: base.to_string(), what: p.error, words: p.message }, // WHAT: a question for the person. WHY: they decide, having read why
+        other => Told::Trouble(other.to_string()), // WHAT: the trouble. WHY: said as always
+    }
 }
 
 /// Whether this computer may go on, as the office's device list says.
@@ -559,7 +588,7 @@ pub fn start(repaint: egui::Context) -> Link {
                         let mut fresh = match open(&base) {
                             Ok(c) => c,
                             Err(e) => {
-                                say(&told, Told::Trouble(e.to_string())); // WHAT: why it can't connect safely. WHY: a changed certificate is never connected to
+                                say(&told, refusal(&base, e)); // WHAT: why it can't connect safely, or what the person must confirm first. WHY: a changed certificate is never connected to
                                 continue;
                             }
                         };
@@ -597,7 +626,7 @@ pub fn start(repaint: egui::Context) -> Link {
                         let mut fresh = match open(&base) {
                             Ok(c) => c,
                             Err(e) => {
-                                say(&told, Told::Trouble(e.to_string())); // WHAT: why it can't connect safely. WHY: a changed certificate is never connected to
+                                say(&told, refusal(&base, e)); // WHAT: why it can't connect safely, or what the person must confirm first. WHY: a changed certificate is never connected to
                                 continue;
                             }
                         };
@@ -636,7 +665,7 @@ pub fn start(repaint: egui::Context) -> Link {
                         let mut fresh = match open(&base) {
                             Ok(c) => c,
                             Err(e) => {
-                                say(&told, Told::Trouble(e.to_string())); // WHAT: why it can't connect safely. WHY: a changed certificate is never connected to
+                                say(&told, refusal(&base, e)); // WHAT: why it can't connect safely, or what the person must confirm first. WHY: a changed certificate is never connected to
                                 continue;
                             }
                         };
@@ -1349,6 +1378,11 @@ pub fn start(repaint: egui::Context) -> Link {
                         } // WHAT: no answer this time is asked again in 5 s. WHY: a server busy for a moment never ends the wait
                     }
                     Ask::StopWaiting => waiting = None, // WHAT: forgotten. WHY: the person closed the screen
+                    Ask::Confirmed { base, what } => {
+                        if let Ok(mut said) = confirmations().lock() {
+                            said.insert((base, what)); // WHAT: kept for this run. WHY: the next connection to it goes on
+                        }
+                    }
                     Ask::Computers => {
                         if let Ok(client) = connected(&client) {
                             computers_now(client, &told, None); // WHAT: the list, quietly. WHY: a computer that isn't an admin's simply has no such section
