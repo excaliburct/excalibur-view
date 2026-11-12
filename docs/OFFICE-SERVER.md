@@ -28,7 +28,11 @@ A module that isn't licensed isn't served: its routes answer 404, as if it didn'
 
 - **Signed licence decides the modules.** The licence gains an optional `modules` line, signed with the rest. A licence
   without one (every licence today) means View only, so old licences keep working and still verify.
-- **One update channel, signed on the YubiKey,** with the rollback the parts already have. Nothing updates without a
+- **One update channel, signed with the release key** (`mesafab-2026`, the one key in
+  `crates/hyperview/src/trust.rs`): today a key file on the release PC (`release_now.py --key`), and the same key on
+  a YubiKey once it is moved there (`release_now.py --prepare --slot`, then `--finish`); the key file is retired
+  then. Either way the signature is byte for byte the same. The server and its Citadel cell are one release under
+  that signature, and the version before an update is kept a day for a rollback (below). Nothing updates without a
   version Creede signed.
 - **Each part in its own limited account.** The Citadel cell runs under a restricted token with its own SID and its own
   locked data folder (`ProgramData\Excalibur Office\citadel`); the Office Server starts it, restarts it and answers its
@@ -62,7 +66,7 @@ Every separate server is **moved in, then retired**. Nothing is retired until th
 | Mesa Fab's View server | the next server update (Fleet push), in place: it *becomes* the Office Server | nothing to retire |
 | Mesa Fab's Archetype server | `hyperview-server --move-archetype "<old Archetype data folder>"` on the Office Server's machine | once the moved jobs are checked in Archetype: stop the old Archetype server's service, then remove it (`sc stop` / `sc delete`, or its own uninstaller); keep its data folder until the next verified backup |
 | A separate Excalibur CAD server | `hyperview-server --move-cad "<old CAD data folder>"` (below) | once the moved drawings are checked in CAD: stop the old CAD server's service, then remove it; keep its data folder until the next verified backup |
-| An office's Citadel Server 1.0.x | the Office Server's update carries `citadel\Citadel Server.exe`; on its first start over the old Citadel data the cell sends its paired computers to the Office Server once (`migrate`), approved, with who paired them | once LatCon Estimating links to the Office Server and the computers show approved: stop the old Citadel Server service and remove it, so only the cell answers on 47110 |
+| An office's Citadel Server 1.0.x | the Office Server's release carries `citadel\Citadel Server.exe`; before the cell's first start the Office Server finds the 1.0 service and records where, stops and disables it, and runs `--move-from` as the system; the cell then sends its paired computers to the Office Server once (`migrate`), approved, with who paired them | nothing by hand: after a good move the Office Server uninstalls the 1.0 service, its 03:30 update task and its firewall rule, and leaves `C:\Program Files\Citadel Server` and the renamed old data folder as they are (the log and `/office` say so). After a failed move it starts 1.0 again, so estimating carries on, and holds the cell with an alarm until `--retry-citadel-move` |
 
 ## How every part stays up to date
 
@@ -125,10 +129,39 @@ Independent security review (2026-11-10): one high (CAD read drawings before its
 fallback address could take its sign-in after HTTPS was blocked) and nine lows, all fixed on this branch with tests;
 see the commit "Review fixes".
 
+## Deploying at an office
+
+- **The program and the service.** The Office Server installs itself as
+  `C:\ProgramData\Excalibur Hyperview\Server\Hyperview-Server.exe`, run by the Windows service
+  "Excalibur Hyperview Server" (`ExcaliburHyperviewServer`), with its data in `...\Server\hyperview-data`.
+- **The Citadel cell.** `citadel\Citadel Server.exe` beside it. The USB kit carries a `citadel\` folder beside
+  `ExcaliburView-Server.exe` (made by `python3 tools/citadel_cell.py kit`); installing checks every file in it
+  against the cell pinned in `packaging/citadel-cell.json`, which the server is built with, and refuses anything
+  else. An update brings the cell with the server, signed together; the new server checks it against its own pin and
+  puts it in place before the cell starts. A cell program whose SHA-256 isn't the pinned one is never run, for the
+  move or as the cell. A build whose pin lists no files carries no cell, and the cell doesn't start.
+- **Ports.** TCP 8714 and UDP 8715 for the Office Server, and TCP 47110 for the cell: a rule
+  "Excalibur Office Server (Citadel cell)" for the cell's program only, on every profile, from the local subnet
+  only, added at install and again at the cell's first start if it is missing. "Local subnet" is the server's own
+  network segment: estimating computers on another VLAN or subnet can't reach the cell until the office's IT adds a
+  rule (or widens this one's remote addresses) for that network.
+- **Backups.** The nightly off-site backup carries the Citadel cell's newest own backup (from
+  `ProgramData\Excalibur Office\citadel\Backups`) inside the same encrypted catalog, and the drill checks it.
+- **Fleet's key on 47110.** Before every start of the cell, the Office Server writes its own maintenance key's
+  fingerprint into the cell's settings (or none, when the Office Server has no key), so a key set on Citadel 1.0
+  never opens the cell's admin routes.
+- **Remote access.** The office's Cloudflare tunnel carries the Office Server's API (8714) only. LatCon Estimating
+  reaches the cell on 47110 inside the office only; it has no way to reach the cell through the tunnel yet.
+- **Rolling back.** The version before an update (`Hyperview-Server.old` and `citadel.old`, beside the program) is
+  kept until the new version has run for a day, or the next update arrives. In an administrator's Command Prompt,
+  `"C:\ProgramData\Excalibur Hyperview\Server\Hyperview-Server.exe" --roll-back` stops the service, puts the
+  server and its cell back together, starts it again, and holds the office there: it won't update itself to the
+  version it was rolled back from, only to a newer one. A rollback to a server older than 0.7.0 is refused.
+
 ### Moving an Archetype server in
 1. Stop the old Archetype server's service.
 2. On the server, in an administrator's Command Prompt:
-   `"C:\Program Files\Excalibur View Server\hyperview-server.exe" --move-archetype "C:\ProgramData\Excalibur Archetype\Server\data"`
+   `"C:\ProgramData\Excalibur Hyperview\Server\Hyperview-Server.exe" --move-archetype "C:\ProgramData\Excalibur Archetype\Server\data"`
 3. It says how many jobs, check-ins and files came. The old folder isn't changed.
 4. Once the jobs are checked in Archetype, Creede removes the old service (see the table above).
 
@@ -136,7 +169,7 @@ see the commit "Review fixes".
 1. Stop the old Excalibur CAD server's service. (On Linux, run step 2 as the account the Office Server runs as,
    so the copied files are the server's.)
 2. On the server, in an administrator's Command Prompt:
-   `"C:\Program Files\Excalibur View Server\hyperview-server.exe" --move-cad "C:\ProgramData\Excalibur CAD Server\data"`
+   `"C:\ProgramData\Excalibur Hyperview\Server\Hyperview-Server.exe" --move-cad "C:\ProgramData\Excalibur CAD Server\data"`
    (the paths as installed there).
 3. It says how many drawings, versions and files came. The old folder isn't changed, so the old server can be
    started again if anything looks wrong.

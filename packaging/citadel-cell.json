@@ -1,0 +1,9 @@
+{
+  "_readme": "The Citadel cell this Office Server build carries, pinned. tools/citadel_cell.py fetches 'source.url', checks it against 'source.sha256', takes out every file in 'files', checks each against its SHA-256, and makes the signed release's cell bundle from them. The server is built with this file inside it and runs a cell program only when its SHA-256 is the one here. An empty 'files' means this build carries no cell: the cell never starts and the release has no cell part. Fill in all four at once, in one commit, from a LatCon Estimating release that has been tested end to end.",
+  "version": "",
+  "source": {
+    "url": "",
+    "sha256": ""
+  },
+  "files": {}
+}

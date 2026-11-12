@@ -18,7 +18,8 @@ use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescripto
 use windows_sys::Win32::Security::{CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, PSID, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY};
 use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
 use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT};
-use windows_sys::Win32::System::Threading::{CreateProcessAsUserW, GetCurrentProcess, OpenProcessToken, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION, STARTUPINFOW};
+use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
+use windows_sys::Win32::System::Threading::{CreateProcessAsUserW, GetCurrentProcess, OpenProcessToken, ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION, STARTUPINFOW};
 
 use crate::api::Shared;
 
@@ -46,9 +47,32 @@ pub fn start(server: Shared) {
     let program_data = std::env::var_os("ProgramData").map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from); // WHAT: ProgramData. WHY: the cell's data lives there
     let data = super::data_folder(&program_data); // WHAT: `ProgramData\Excalibur Office\citadel`. WHY: §6
     let (program, args) = super::command(&folder, &install, &data); // WHAT: what to start. WHY: §6a
+    let pin = crate::cellbundle::pinned(); // WHAT: the cell this build was made with. WHY: only that program is ever run
+    if let Ok(pin) = &pin {
+        let until = Instant::now() + std::time::Duration::from_secs(10); // WHAT: up to ten seconds. WHY: review low 1: the last server's cell may still be ending (its job is killed when that server exits)
+        loop {
+            match crate::cellbundle::swap_staged(&folder, pin) {
+                Ok(true) => tracing::warn!("the Citadel cell {} that came with this update was checked and put in place", pin.version), // WHAT: said. WHY: the cell updates with the server
+                Ok(false) => {} // WHAT: nothing waiting. WHY: the ordinary start
+                Err(why) if why.starts_with(crate::cellbundle::BUSY) && Instant::now() < until => {
+                    std::thread::sleep(std::time::Duration::from_millis(500)); // WHAT: a moment. WHY: a running program's folder can't be renamed until it ends
+                    continue; // WHAT: tried again. WHY: within the ten seconds
+                }
+                Err(why) => tracing::error!("ALARM: {why}"), // WHAT: the alarm; nothing was half swapped. WHY: the cell before stays whole, but an admin should know
+            }
+            break; // WHAT: done. WHY: put in place, nothing waiting, or the alarm
+        }
+    }
     if !super::should_start(&crate::office::licensed(&server), program.is_file()) {
         return; // WHAT: no licence for it, or no program. WHY: §6: the cell runs only then
     }
+    let pin = match pin.and_then(|pin| crate::cellbundle::check_program(&program, &pin).map(|()| pin)) {
+        Ok(pin) => pin, // WHAT: the pinned program is there. WHY: it may run
+        Err(why) => {
+            tracing::error!("ALARM: the Citadel cell was not started: {why}"); // WHAT: the alarm. WHY: risk 8: never run a cell that didn't come from the signed bundle
+            return;
+        }
+    };
     let spawned = std::thread::Builder::new().name("citadel-cell".into()).spawn(move || {
         let sid = super::cell_sid(&install); // WHAT: the cell's own SID. WHY: the pipe, its data and its program grant it
         if let Some(office) = data.parent() {
@@ -57,6 +81,10 @@ pub fn start(server: Shared) {
         }
         let _ = std::fs::create_dir_all(&data); // WHAT: the cell's data folder. WHY: made once
         let old = crate::cellmove::old_folder(&program_data); // WHAT: Citadel Server 1.0's folder. WHY: moved in before the cell's first start
+        if let Err(why) = crate::cellbundle::check_program(&program, &pin) {
+            tracing::error!("ALARM: the Citadel move was not run: {why}"); // WHAT: checked again just before it runs as the system. WHY: risk 8
+            return;
+        }
         if !crate::cellmove::before_first_start(&server.store, &OldCitadel, &crate::cellmove::Run, &program, &old, &data) {
             return; // WHAT: the move failed: the cell is not started. WHY: a cell started empty would make a new certificate; /api/v1/office shows the alarm
         }
@@ -64,7 +92,13 @@ pub fn start(server: Shared) {
         if let Some(own) = program.parent() {
             icacls(&super::program_steps(own, &sid)); // WHAT: the cell may read and run its program. WHY: the service's folder is locked to the system and administrators
         }
-        let mut launcher = Cell { server: server.clone(), program, line: String::new(), args, pipe: format!(r"\\.\pipe\{}", super::pipe_name(&install)), sid, process: None, serving: None, next: None };
+        crate::winsvc::cell_firewall(&program); // WHAT: TCP 47110 open for the cell's program, when it isn't yet. WHY: critical 2: an office installed before the rule existed gets it here
+        crate::cellmove::tidy_old_task(&server.store, &OldTask); // WHAT: 1.0's update task removed, or the alarm kept and tried again. WHY: review low 2
+        let unpack = super::extract_folder(&folder, true); // WHAT: the cell's own unpacking folder. WHY: review low 3: never C:\Windows\Temp
+        let _ = std::fs::create_dir_all(&unpack); // WHAT: made; it inherits the locked service folder's ACL. WHY: the system and administrators only
+        icacls(&super::extract_steps(&unpack, &sid)); // WHAT: the cell may use it too. WHY: a restricted token unpacks there
+        let environment = super::environment_block(std::env::vars_os(), super::EXTRACT_VARIABLE, unpack.as_os_str()); // WHAT: this server's environment, with .NET's unpacking folder set. WHY: review low 3
+        let mut launcher = Cell { server: server.clone(), program, line: String::new(), args, pipe: format!(r"\\.\pipe\{}", super::pipe_name(&install)), sid, process: None, serving: None, next: None, pin, data, environment };
         launcher.line = super::command_line(&launcher.program, &launcher.args); // WHAT: the command line. WHY: written once
         super::supervise(&mut launcher, &server.cell, &std::thread::sleep, &Instant::now, usize::MAX); // WHAT: run and restarted. WHY: §6a
     });
@@ -97,17 +131,22 @@ struct Cell {
     process: Option<Raw>, // WHAT: the running cell. WHY: waited for
     serving: Option<std::thread::JoinHandle<std::fs::File>>, // WHAT: the thread answering its pipe, which hands the pipe back when done. WHY: the old instance is held until the next exists
     next: Option<std::fs::File>, // WHAT: the next pipe instance, made before the old one closed. WHY: security review L4: the name is never free during the restart wait
+    pin: crate::cellbundle::Pin, // WHAT: the cell this build was made with. WHY: checked before every start
+    data: PathBuf, // WHAT: the cell's data folder. WHY: its settings get the Office Server's maintenance key before every start
+    environment: Vec<std::ffi::OsString>, // WHAT: the cell's environment. WHY: .NET's unpacking folder set in it
 }
 
 impl super::Launcher for Cell {
     fn start(&mut self) -> std::io::Result<()> {
+        crate::cellbundle::check_program(&self.program, &self.pin).map_err(std::io::Error::other)?; // WHAT: the pinned program, or not started. WHY: risk 8: checked before every start, a restart too
+        super::give_the_cell_the_office_key(&self.data, self.server.config.maintenance_key.as_deref()).inspect_err(|e| tracing::error!("ALARM: the Citadel cell was not started: {e}"))?; // WHAT: only the Office Server's maintenance key opens the cell's admin routes; a link on the way stops the start. WHY: a key set on 1.0 moved in with its settings; review medium: never written through a link
         let pipe = match self.next.take() {
             Some(pipe) => pipe, // WHAT: the instance made while the last one was still held. WHY: the name was never free
             None => make_pipe(&self.pipe, &self.sid, true)?, // WHAT: the first instance, made only if nobody made it first. WHY: a name somebody else holds is an alarm (AddrInUse), not a restart
         };
         let server = self.server.clone(); // WHAT: the server, for the thread. WHY: its answers
         self.serving = Some(std::thread::Builder::new().name("citadel-pipe".into()).spawn(move || serve(pipe, &server))?); // WHAT: the pipe answered on its own thread. WHY: the supervisor waits on the process meanwhile
-        match restricted_process(&self.program, &self.line, &self.sid) {
+        match restricted_process(&self.program, &self.line, &self.sid, &self.environment) {
             Ok(process) => {
                 self.process = Some(process); // WHAT: kept. WHY: waited for
                 Ok(())
@@ -211,7 +250,10 @@ fn serve(pipe: std::fs::File, server: &crate::api::Server) -> std::fs::File {
 /// Starts `program` under a restricted copy of this service's token: every
 /// privilege dropped, Administrators deny-only, and a second check against
 /// the cell's SID and the everyday groups (`super::restricting_sids`).
-fn restricted_process(program: &Path, line: &str, sid: &str) -> std::io::Result<Raw> {
+fn restricted_process(program: &Path, line: &str, sid: &str, environment: &[std::ffi::OsString]) -> std::io::Result<Raw> {
+    let job = job()?; // WHAT: the job the cell runs in. WHY: review low 1: it dies with the Office Server, and is ended before an update swaps its folder
+    let mut block: Vec<u16> = environment.iter().flat_map(|v| v.encode_wide().chain(std::iter::once(0))).collect(); // WHAT: each variable, ended by a zero. WHY: a Unicode environment block
+    block.push(0); // WHAT: the block's end. WHY: as CreateProcess reads it
     let texts: Vec<Vec<u16>> = super::restricting_sids(sid).iter().map(String::as_str).chain(std::iter::once("S-1-5-32-544")).map(|t| wide(OsStr::new(t))).collect(); // WHAT: the restricting SIDs, then Administrators last. WHY: made into SIDs below
     let application = wide(program.as_os_str()); // WHAT: the program, by its full path. WHY: never looked for on the PATH
     let mut command = wide(OsStr::new(line)); // WHAT: the command line, writable. WHY: CreateProcess may write to it
@@ -262,8 +304,8 @@ fn restricted_process(program: &Path, line: &str, sid: &str) -> std::io::Result<
             std::ptr::null(),
             std::ptr::null(),
             0, // WHAT: no handles inherited. WHY: the cell reaches us only through the pipe
-            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, // WHAT: no window. WHY: §6a: no Manager window
-            std::ptr::null(),
+            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED, // WHAT: no window, and held until it is in the job. WHY: §6a; nothing it starts escapes the job
+            block.as_ptr().cast(), // WHAT: its environment, with .NET's unpacking folder. WHY: review low 3
             folder.as_ref().map_or(std::ptr::null(), |f| f.as_ptr()),
             &startup,
             &mut info,
@@ -273,6 +315,14 @@ fn restricted_process(program: &Path, line: &str, sid: &str) -> std::io::Result<
         if started == 0 {
             return Err(start_error);
         }
+        if AssignProcessToJobObject(job.handle(), info.hProcess) == 0 {
+            let why = std::io::Error::last_os_error(); // WHAT: why. WHY: read before anything else changes it
+            TerminateProcess(info.hProcess, 1); // WHAT: never run outside the job. WHY: it wouldn't die with the server
+            CloseHandle(info.hThread);
+            CloseHandle(info.hProcess);
+            return Err(why);
+        }
+        ResumeThread(info.hThread); // WHAT: let it run, now inside the job. WHY: started suspended for that
         CloseHandle(info.hThread); // WHAT: the thread's handle let go. WHY: only the process is waited for
         Ok(Raw(info.hProcess as usize))
     }
@@ -291,23 +341,122 @@ impl OldCitadel {
     }
 }
 
+impl OldCitadel {
+    /// Runs `sc.exe config <name> start= <how>` on whichever name the 1.0
+    /// service has; whether it worked.
+    fn start_type(how: &str) -> bool {
+        crate::cellmove::OLD_SERVICES.iter().any(|name| crate::winsvc::system_tool("sc.exe", &["config".into(), (*name).into(), "start=".into(), how.into()])) // WHAT: its start type changed. WHY: disabled for the move, automatic again after a failure
+    }
+}
+
 impl crate::cellmove::OldService for OldCitadel {
-    fn present(&self) -> bool {
-        Self::open(windows_service::service::ServiceAccess::QUERY_STATUS).is_some() // WHAT: whether it opens. WHY: installed or not
+    fn found(&self) -> Option<String> {
+        let service = Self::open(windows_service::service::ServiceAccess::QUERY_CONFIG)?; // WHAT: the 1.0 service, if installed. WHY: its program's path is recorded
+        let config = service.query_config().ok()?; // WHAT: its configuration. WHY: the path
+        Some(config.executable_path.display().to_string()) // WHAT: its program, as the service manager has it. WHY: recorded as "1.0 service found at <path>"
     }
 
-    fn stop_and_remove(&self) -> Result<(), String> {
+    fn stop_and_disable(&self) -> Result<(), String> {
         use windows_service::service::{ServiceAccess, ServiceState};
-        let service = Self::open(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE).ok_or("it couldn't be opened to stop it")?; // WHAT: the 1.0 service. WHY: to stop and uninstall it
+        let Some(service) = Self::open(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP) else {
+            return Ok(()); // WHAT: no longer installed. WHY: nothing running holds the port or the files
+        };
+        if !Self::start_type("disabled") {
+            return Err("it couldn't be disabled".into()); // WHAT: refused. WHY: it could start again in the middle of the move
+        }
         let _ = service.stop(); // WHAT: asked to stop. WHY: it holds port 47110 and its files
         let deadline = Instant::now() + std::time::Duration::from_secs(60); // WHAT: a minute. WHY: a service shutting down cleanly
         loop {
             match service.query_status().map(|s| s.current_state) {
-                Ok(ServiceState::Stopped) => break, // WHAT: stopped. WHY: done
+                Ok(ServiceState::Stopped) => return Ok(()), // WHAT: stopped and disabled, still installed. WHY: critical 1: never uninstalled before the move
                 _ if Instant::now() >= deadline => return Err("it didn't stop within a minute".into()), // WHAT: refused. WHY: the move never runs beside it
                 _ => std::thread::sleep(std::time::Duration::from_millis(300)), // WHAT: waited. WHY: asked again shortly
             }
         }
-        service.delete().map_err(|e| format!("it stopped, but couldn't be uninstalled ({e})")) // WHAT: uninstalled. WHY: the .NET side's move runs only once it is gone, so it can never take the port back
+    }
+
+    fn restore(&self) -> Result<(), String> {
+        use windows_service::service::ServiceAccess;
+        let service = Self::open(ServiceAccess::QUERY_STATUS | ServiceAccess::START).ok_or("it is no longer installed")?; // WHAT: the 1.0 service. WHY: started again
+        if !Self::start_type("auto") {
+            return Err("it couldn't be set to start with Windows again".into()); // WHAT: said. WHY: someone must act
+        }
+        service.start::<&str>(&[]).map_err(|e| format!("it couldn't be started ({e})")) // WHAT: running again. WHY: critical 1: the office keeps estimating after a failed move
+    }
+
+    fn remove(&self) -> Result<String, String> {
+        use windows_service::service::ServiceAccess;
+        let mut said = Vec::new(); // WHAT: what was done. WHY: said in the log and on /office
+        if let Some(service) = Self::open(ServiceAccess::QUERY_STATUS | ServiceAccess::DELETE) {
+            service.delete().map_err(|e| format!("it couldn't be uninstalled ({e})"))?; // WHAT: uninstalled. WHY: step 5, only after the data moved
+            said.push("Citadel Server 1.0's service was uninstalled"); // WHAT: noted. WHY: said
+        }
+        for (tool, args) in super::old_leftover_steps() {
+            if crate::winsvc::system_tool(tool, &args) {
+                said.push(if tool == "schtasks.exe" { "its 03:30 update task was removed" } else { "its firewall rule was removed" }); // WHAT: noted. WHY: said
+            }
+        }
+        Ok(if said.is_empty() { "nothing of Citadel Server 1.0 was left to remove".to_string() } else { said.join(", ") }) // WHAT: what was done, in words. WHY: high 5
+    }
+}
+
+/// The job object every cell runs in, made once: killed when the Office
+/// Server's last handle to it closes, which is when the server exits.
+fn job() -> std::io::Result<Raw> {
+    static JOB: std::sync::OnceLock<Result<Raw, i32>> = std::sync::OnceLock::new(); // WHAT: made once. WHY: one job for every start of the cell
+    JOB.get_or_init(|| {
+        // SAFETY: no attributes and no name are passed; the limit structure is a zeroed local of the right size, read by
+        // Windows during the call; the job's handle is kept for the life of the process, which is the point.
+        unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: the cell's job object
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null()); // WHAT: a new job. WHY: below
+            if job.is_null() {
+                return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0)); // WHAT: refused. WHY: the cell never runs outside a job
+            }
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed(); // WHAT: the limits. WHY: one flag set
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE; // WHAT: everything in it dies when the job's last handle closes. WHY: the cell never outlives the server
+            if SetInformationJobObject(job, JobObjectExtendedLimitInformation, (&raw const limits).cast(), u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).unwrap_or(0)) == 0 {
+                let why = std::io::Error::last_os_error().raw_os_error().unwrap_or(0); // WHAT: why. WHY: said
+                CloseHandle(job);
+                return Err(why); // WHAT: refused. WHY: likewise
+            }
+            Ok(Raw(job as usize))
+        }
+    })
+    .clone()
+    .map_err(std::io::Error::from_raw_os_error)
+}
+
+/// Ends the cell before an update swaps its folder, waiting up to `within`
+/// for it to be gone. Whether it is gone (true when it never ran).
+pub fn end_the_cell(within: std::time::Duration) -> bool {
+    let Ok(job) = job() else { return true }; // WHAT: the cell's job. WHY: no job, no cell
+    let until = Instant::now() + within; // WHAT: the limit. WHY: review low 1: ten seconds
+    // SAFETY: the job handle lives for the process; the accounting structure is a zeroed local of the right size.
+    unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: ending the cell's job and counting what is left
+        TerminateJobObject(job.handle(), 1); // WHAT: every process in the job ended. WHY: its folder is about to be replaced
+        loop {
+            let mut counted: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = std::mem::zeroed(); // WHAT: the job's counts. WHY: how many still run
+            let asked = QueryInformationJobObject(job.handle(), JobObjectBasicAccountingInformation, (&raw mut counted).cast(), u32::try_from(std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>()).unwrap_or(0), std::ptr::null_mut()); // WHAT: asked. WHY: below
+            if asked != 0 && counted.ActiveProcesses == 0 {
+                return true; // WHAT: gone. WHY: the folder may be swapped
+            }
+            if Instant::now() >= until {
+                return false; // WHAT: still there. WHY: the caller raises the alarm
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100)); // WHAT: a moment. WHY: asked again
+        }
+    }
+}
+
+/// Citadel Server 1.0's nightly update task, through `schtasks`.
+struct OldTask;
+
+impl crate::cellmove::OldTask for OldTask {
+    fn there(&self) -> bool {
+        crate::winsvc::system_tool("schtasks.exe", &["/Query".into(), "/TN".into(), super::OLD_UPDATE_TASK.into()]) // WHAT: asked by name. WHY: schtasks exits 1 when there is no such task
+    }
+    fn remove(&self) -> bool {
+        let (tool, args) = &super::old_leftover_steps()[0]; // WHAT: the task's removal. WHY: the same step as after the move
+        crate::winsvc::system_tool(tool, args) // WHAT: removed, or not. WHY: the alarm follows
     }
 }

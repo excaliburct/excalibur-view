@@ -445,6 +445,263 @@ pub fn restricting_sids(cell_sid: &str) -> Vec<String> {
     ] // WHAT: never Administrators or SYSTEM. WHY: the Office Server's own data grants only those, so the cell can't reach it
 }
 
+/// The cell's own inbound firewall rule's name.
+pub const FIREWALL_RULE: &str = "Excalibur Office Server (Citadel cell)"; // WHAT: the rule's name. WHY: found, replaced and removed by it
+
+/// Citadel Server 1.0's firewall rule, taken away after a good move.
+pub const OLD_FIREWALL_RULE: &str = "Citadel Server"; // WHAT: the name 1.0's installer gave it (WindowsSetup.FirewallRule). WHY: it opened 47110 for 1.0's program, which is gone
+
+/// Citadel Server 1.0's nightly update task, taken away after a good move.
+pub const OLD_UPDATE_TASK: &str = "Citadel Server updates"; // WHAT: the task 1.0 made, 03:30 as the system (ServerUpdateCheck.TaskName). WHY: it would try to update a program that no longer runs
+
+/// The `netsh` arguments that let the office network reach the cell on
+/// 47110: TCP, for the cell's own program only, on every profile and from
+/// the local subnet only, as the Office Server's own 8714 rule.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn firewall_rule(program: &Path) -> Vec<String> {
+    vec![
+        "advfirewall".into(),
+        "firewall".into(),
+        "add".into(),
+        "rule".into(),
+        format!("name={FIREWALL_RULE}"), // WHAT: its name. WHY: found again by it
+        "dir=in".into(), // WHAT: inbound. WHY: the estimating computers connect to it
+        "action=allow".into(), // WHAT: let in. WHY: nothing else opens 47110
+        "protocol=TCP".into(), // WHAT: TCP. WHY: the cell's HTTPS
+        format!("localport={PORT}"), // WHAT: 47110. WHY: §6
+        format!("program={}", program.display()), // WHAT: the cell's own program only. WHY: no other program may answer on the port through this rule
+        "profile=any".into(), // WHAT: every network profile. WHY: as 8714: a new network is "Public" until someone says otherwise
+        "remoteip=localsubnet".into(), // WHAT: the office network only. WHY: as 8714
+    ]
+}
+
+/// The `netsh` arguments that ask whether the cell's rule is there.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn firewall_rule_shown() -> Vec<String> {
+    vec!["advfirewall".into(), "firewall".into(), "show".into(), "rule".into(), format!("name={FIREWALL_RULE}")] // WHAT: shown by name. WHY: netsh exits 1 when there is no such rule
+}
+
+/// The steps that take away 1.0's leftovers after a good move, each as a
+/// program in `System32` and its arguments: its update task and its firewall
+/// rule. The service itself is uninstalled through the service manager.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn old_leftover_steps() -> Vec<(&'static str, Vec<String>)> {
+    vec![
+        ("schtasks.exe", vec!["/Delete".into(), "/F".into(), "/TN".into(), OLD_UPDATE_TASK.into()]), // WHAT: the nightly update task gone. WHY: high 5
+        ("netsh.exe", vec!["advfirewall".into(), "firewall".into(), "delete".into(), "rule".into(), format!("name={OLD_FIREWALL_RULE}")]), // WHAT: 1.0's firewall rule gone. WHY: critical 2: only the cell's own rule opens 47110
+    ]
+}
+
+/// The cell's settings file, inside its data folder (Citadel's
+/// `ServerPaths.Settings`).
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn settings_file(data: &Path) -> PathBuf {
+    data.join("state").join("settings.json") // WHAT: `state\settings.json`. WHY: where Citadel keeps its port, its copy-to folder and Fleet's key
+}
+
+/// The cell's settings, as JSON, with Fleet's maintenance key made the
+/// Office Server's own: its SHA-256 (lower-case hex, as Citadel's
+/// `ServerState.HashKey` makes it), or none when the Office Server has no
+/// key. Every other setting is kept as it was. `text` is the file as it is,
+/// if it reads as an object.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn settings_with_office_key(text: Option<&str>, key: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut settings = text.and_then(|t| serde_json::from_str::<serde_json::Map<String, Value>>(t).ok()).unwrap_or_default(); // WHAT: the settings as they are, or none. WHY: only the key is changed
+    match key {
+        Some(key) => {
+            settings.insert("fleetKeySha256".into(), Value::String(hub::update::hex(&Sha256::digest(key.as_bytes())))); // WHAT: the Office Server's key, as Citadel keeps one. WHY: only the Office Server's maintenance key opens the cell's admin routes
+        }
+        None => {
+            settings.remove("fleetKeySha256"); // WHAT: no key at all. WHY: a key set on 1.0 never opens the cell; Citadel then answers 503 not configured
+        }
+    }
+    serde_json::to_string_pretty(&Value::Object(settings)).unwrap_or_else(|_| "{}".into()) // WHAT: written as Citadel writes it. WHY: it reads it strictly
+}
+
+/// Writes the Office Server's maintenance key into the cell's settings,
+/// before every start of the cell, the file and Citadel's `.previous` copy of
+/// it alike, so a key carried over from 1.0 never opens the cell's admin
+/// routes on 47110.
+///
+/// The cell can change its own data folder, and this runs as the system, so
+/// nothing here follows a link: the data folder and `state\` must be plain
+/// folders (no symbolic link, no junction or other reparse point), each held
+/// open while the files are written so it can't be swapped (Windows: without
+/// delete sharing, checked on that handle); the two settings files must be
+/// plain files or absent; each new copy is made beside them with
+/// `create_new` (never through anything already there) and renamed over the
+/// old one, which replaces the name itself and never writes through a link.
+/// The .NET cell doesn't read the key over its pipe, so the file is the way.
+///
+/// # Errors
+///
+/// When anything on the way is a link (the cell must then not be started),
+/// or a file can't be written.
+pub fn give_the_cell_the_office_key(data: &Path, key: Option<&str>) -> std::io::Result<()> {
+    let state = data.join("state"); // WHAT: `state\`. WHY: the settings are in it
+    let _data_held = plain_folder(data)?; // WHAT: the data folder, checked and held. WHY: never written through a link the cell made
+    match std::fs::symlink_metadata(&state) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(&state)?, // WHAT: made, not followed. WHY: a fresh cell has none yet
+        _ => {} // WHAT: there already. WHY: checked next
+    }
+    let _state_held = plain_folder(&state)?; // WHAT: `state\`, checked and held. WHY: review: the cell could swap it for a junction
+    let file = settings_file(data); // WHAT: the settings. WHY: rewritten
+    let previous = state.join("settings.json.previous"); // WHAT: Citadel's fallback copy (SafeFile.Previous). WHY: read when the file itself doesn't; it must never hold the old key
+    let mut there = Vec::new(); // WHAT: which of the two exist. WHY: only those are rewritten, the file always
+    for path in [&file, &previous] {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if !plain_file(&meta) => return Err(refused(path)), // WHAT: a link or anything but a plain file. WHY: never read or written through
+            Ok(_) => there.push(path.clone()), // WHAT: a plain file. WHY: read and rewritten
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // WHAT: absent. WHY: the file is written new; no fallback copy is made
+            Err(e) => return Err(e), // WHAT: can't be looked at. WHY: never guessed
+        }
+    }
+    let read = |p: &Path| std::fs::read_to_string(p).ok().filter(|t| serde_json::from_str::<serde_json::Map<String, Value>>(t).is_ok()); // WHAT: a copy that reads as settings. WHY: the base for the new one
+    let base = there.iter().find_map(|p| read(p)); // WHAT: the settings as they are, the file first. WHY: everything but the key kept
+    let text = settings_with_office_key(base.as_deref(), key); // WHAT: with the office's key. WHY: as above
+    for path in std::iter::once(&file).chain(there.iter().filter(|p| **p == previous)) {
+        let part = state.join(format!("settings.office-{}-{}", std::process::id(), rand::random::<u32>())); // WHAT: a new name beside it, this run's own. WHY: create_new never opens what is already there
+        write_new(&part, text.as_bytes())?; // WHAT: written whole, new. WHY: never through a link
+        if let Err(e) = std::fs::rename(&part, path) {
+            let _ = std::fs::remove_file(&part); // WHAT: the copy gone. WHY: never a stray file
+            return Err(e); // WHAT: said. WHY: the cell isn't started
+        }
+    }
+    Ok(())
+}
+
+/// The refusal for a link where a plain folder or file must be.
+fn refused(path: &Path) -> std::io::Error {
+    std::io::Error::other(format!("{} is a link or junction, not a plain folder or file, so the cell's settings were not written and the cell was not started", path.display())) // WHAT: said. WHY: the alarm names it
+}
+
+/// Whether metadata (never followed) is a plain file: not a link, and on
+/// Windows not any reparse point.
+fn plain_file(meta: &std::fs::Metadata) -> bool {
+    meta.file_type().is_file() && !reparse(meta) // WHAT: a regular file only. WHY: a link is never read or written as the system
+}
+
+/// Whether metadata carries a reparse point (a junction, a mount point or a
+/// link of any kind). Never on Unix, where links are their own file type.
+fn reparse(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _; // WHAT: Windows' file attributes. WHY: a junction isn't always a "symlink" to std
+        meta.file_attributes() & 0x400 != 0 // WHAT: FILE_ATTRIBUTE_REPARSE_POINT. WHY: any kind of link
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = meta; // WHAT: unused here. WHY: a Unix link is its own file type
+        false
+    }
+}
+
+/// Checks that `folder` is a plain folder and holds it open while the caller
+/// writes in it. On Windows it is opened without following a reparse point,
+/// checked on that same handle, and held without delete sharing, so it can't
+/// be renamed or swapped until the handle is dropped.
+///
+/// # Errors
+///
+/// When it is a link or not a folder.
+fn plain_folder(folder: &Path) -> std::io::Result<Option<std::fs::File>> {
+    let meta = std::fs::symlink_metadata(folder)?; // WHAT: never followed. WHY: a link is refused, not used
+    if !meta.file_type().is_dir() || reparse(&meta) {
+        return Err(refused(folder)); // WHAT: refused. WHY: review: SYSTEM must never write where a cell's link points
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _; // WHAT: Windows' open options. WHY: flags and sharing
+        let held = std::fs::OpenOptions::new()
+            .access_mode(0x0080) // WHAT: FILE_READ_ATTRIBUTES. WHY: enough to hold and check it
+            .share_mode(0x0000_0001 | 0x0000_0002) // WHAT: read and write sharing, never delete. WHY: nobody can rename or remove it while held
+            .custom_flags(0x0200_0000 | 0x0020_0000) // WHAT: FILE_FLAG_BACKUP_SEMANTICS and FILE_FLAG_OPEN_REPARSE_POINT. WHY: a folder, and the link itself if it is one, never its target
+            .open(folder)?; // WHAT: opened. WHY: checked and held
+        let on_handle = held.metadata()?; // WHAT: the attributes of what was opened. WHY: no gap between the check and the write
+        if !on_handle.is_dir() || reparse(&on_handle) {
+            return Err(refused(folder)); // WHAT: refused. WHY: swapped between the two looks
+        }
+        Ok(Some(held))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(None) // WHAT: checked; nothing held. WHY: the cell runs only on Windows
+    }
+}
+
+/// Writes `bytes` to a file that must not exist yet, never through a link.
+fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _; // WHAT: the file's write. WHY: below
+    let mut options = std::fs::OpenOptions::new(); // WHAT: how it is opened. WHY: new only
+    options.write(true).create_new(true); // WHAT: a new file, never one already there. WHY: a planted link fails here
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _; // WHAT: Windows' open options. WHY: the flag below
+        options.custom_flags(0x0020_0000); // WHAT: FILE_FLAG_OPEN_REPARSE_POINT. WHY: never through a link, even one made in the moment between
+    }
+    let mut file = options.open(path)?; // WHAT: made. WHY: written next
+    if reparse(&file.metadata()?) {
+        drop(file); // WHAT: closed. WHY: removed next
+        let _ = std::fs::remove_file(path); // WHAT: gone. WHY: never left
+        return Err(refused(path)); // WHAT: refused. WHY: checked on the handle written through
+    }
+    file.write_all(bytes)?; // WHAT: the settings. WHY: the new copy
+    file.sync_all() // WHAT: on the disk. WHY: before it is renamed into place
+}
+
+/// Where a self-extracting .NET program unpacks itself, inside the
+/// service's own folder (locked to the system and administrators): one
+/// folder for the move, run as the system, and one for the cell, which the
+/// cell's SID may also change. Never `C:\Windows\Temp`, where any account can
+/// plant a DLL for it to load.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn extract_folder(home: &Path, for_the_cell: bool) -> PathBuf {
+    home.join("dotnet-extract").join(if for_the_cell { "cell" } else { "move" }) // WHAT: the two folders. WHY: review low 3
+}
+
+/// The variable that points .NET's single-file bundle at that folder.
+pub const EXTRACT_VARIABLE: &str = "DOTNET_BUNDLE_EXTRACT_BASE_DIR"; // WHAT: .NET's own setting. WHY: harmless when the bundle doesn't extract
+
+/// The `icacls` run that lets the cell use its own unpacking folder: added to
+/// what it inherits from the locked service folder.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn extract_steps(folder: &Path, cell_sid: &str) -> Vec<Vec<std::ffi::OsString>> {
+    let os = |a: &str| std::ffi::OsString::from(a); // WHAT: one argument. WHY: icacls takes them as they are
+    vec![vec![folder.as_os_str().to_os_string(), os("/grant:r"), os(&format!("*{cell_sid}:(OI)(CI)M")), os("/C"), os("/Q")]] // WHAT: the cell may unpack there. WHY: nobody else but the system and administrators can
+}
+
+/// A Windows environment block (`name=value` pairs, each ended by a zero,
+/// and a zero after the last) from this process's own environment, with
+/// `name` set to `value` in place of any it had.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn environment_block(vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>, name: &str, value: &std::ffi::OsStr) -> Vec<std::ffi::OsString> {
+    let mut out: Vec<std::ffi::OsString> = vars.filter(|(k, _)| !k.to_string_lossy().eq_ignore_ascii_case(name)).map(|(mut k, v)| {
+        k.push("="); // WHAT: name=. WHY: the block's form
+        k.push(v); // WHAT: its value. WHY: likewise
+        k
+    }).collect(); // WHAT: every variable but `name`. WHY: Windows names are matched without case, so an older one never wins
+    let mut set = std::ffi::OsString::from(name); // WHAT: the variable. WHY: added
+    set.push("="); // WHAT: name=. WHY: the block's form
+    set.push(value); // WHAT: its value. WHY: the folder
+    out.push(set); // WHAT: added. WHY: the cell sees it
+    out // WHAT: one entry each; the caller ends each and the block with zeros. WHY: as CreateProcess takes it
+}
+
+/// Ends the running cell before an update, waiting up to ten seconds;
+/// whether it is gone. True where there is no cell.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn end_for_update() -> bool {
+    #[cfg(windows)]
+    {
+        windows::end_the_cell(Duration::from_secs(10)) // WHAT: the cell's job ended and waited for. WHY: review low 1: its folder is swapped at the next start
+    }
+    #[cfg(not(windows))]
+    {
+        true // WHAT: no cell. WHY: the cell is a Windows program
+    }
+}
+
 #[cfg(windows)]
 pub mod windows;
 
@@ -459,6 +716,64 @@ pub fn start(server: &crate::api::Shared) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_cell_unpacks_into_its_own_folder_never_windows_temp() {
+        let home = Path::new(r"C:\ProgramData\Excalibur Hyperview\Server"); // WHAT: the service's folder. WHY: locked to the system and administrators
+        assert!(super::extract_folder(home, true).starts_with(home) && super::extract_folder(home, false).starts_with(home), "inside the service's folder"); // WHAT: inside. WHY: review low 3
+        assert_ne!(super::extract_folder(home, true), super::extract_folder(home, false), "the cell's and the move's apart"); // WHAT: apart. WHY: only the cell's grants the cell
+        let vars = vec![("Path".into(), "C:\\Windows".into()), ("dotnet_bundle_extract_base_dir".into(), r"C:\Windows\Temp".into())].into_iter(); // WHAT: an environment that already names Windows' temp, in other case. WHY: never kept
+        let block = super::environment_block(vars, super::EXTRACT_VARIABLE, std::ffi::OsStr::new(r"C:\x\cell")); // WHAT: the block. WHY: passed to CreateProcess
+        let texts: Vec<String> = block.iter().map(|v| v.to_string_lossy().into_owned()).collect(); // WHAT: as text. WHY: compared
+        assert!(texts.contains(&format!(r"{}=C:\x\cell", super::EXTRACT_VARIABLE)), "{texts:?}"); // WHAT: set. WHY: the folder
+        assert!(!texts.iter().any(|t| t.to_ascii_lowercase().contains("windows\\temp")), "the old value is gone: {texts:?}"); // WHAT: replaced. WHY: never Windows' temp
+        assert!(texts.iter().any(|t| t.starts_with("Path=")), "everything else kept"); // WHAT: kept. WHY: the cell needs its environment
+        assert!(super::extract_steps(Path::new("x"), "S-1-5-80-1").last().unwrap().iter().any(|a| a.to_string_lossy() == "*S-1-5-80-1:(OI)(CI)M"), "the cell may use its own"); // WHAT: granted. WHY: it unpacks there
+    }
+
+    #[test]
+    fn a_maintenance_key_from_1_0_never_opens_the_cell() {
+        let old = r#"{"port":47110,"copyTo":"D:\\Backups","fleetKeySha256":"1111111111111111111111111111111111111111111111111111111111111111","minFreeBytes":5}"#; // WHAT: 1.0's settings, moved in, with 1.0's key. WHY: the case asked about
+        let mine: serde_json::Value = serde_json::from_str(&super::settings_with_office_key(Some(old), Some("office-key"))).unwrap(); // WHAT: rewritten with the Office Server's key. WHY: the cell's admin routes open only to it
+        let want = { use sha2::Digest; hub::update::hex(&sha2::Sha256::digest(b"office-key")) }; // WHAT: the SHA-256 of the office's key. WHY: as Citadel keeps one
+        assert_eq!(mine["fleetKeySha256"], want.as_str(), "the office's key"); // WHAT: the office's. WHY: never 1.0's
+        assert_eq!(mine["port"], 47110); // WHAT: kept. WHY: only the key changes
+        assert_eq!(mine["copyTo"], r"D:\Backups"); // WHAT: kept. WHY: likewise
+        let none: serde_json::Value = serde_json::from_str(&super::settings_with_office_key(Some(old), None)).unwrap(); // WHAT: an Office Server with no key. WHY: then the cell has none
+        assert!(none.get("fleetKeySha256").is_none(), "1.0's key removed"); // WHAT: gone. WHY: never 1.0's
+    }
+
+    #[test]
+    fn the_office_key_is_written_to_the_cell_s_settings_and_its_fallback_copy() {
+        let n: u64 = rand::random(); // WHAT: a fresh name. WHY: tests run side by side
+        let data = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("cellkey-{n:016x}")); // WHAT: a cell's data folder. WHY: never a shared temporary folder
+        std::fs::create_dir_all(data.join("state")).unwrap(); // WHAT: its state folder. WHY: the settings are there
+        let old = r#"{"port":47110,"fleetKeySha256":"1111111111111111111111111111111111111111111111111111111111111111"}"#; // WHAT: 1.0's settings. WHY: moved in
+        std::fs::write(super::settings_file(&data), old).unwrap(); // WHAT: the file. WHY: rewritten
+        std::fs::write(data.join("state").join("settings.json.previous"), old).unwrap(); // WHAT: its fallback copy. WHY: must not keep 1.0's key either
+        super::give_the_cell_the_office_key(&data, Some("office-key")).unwrap(); // WHAT: rewritten. WHY: before the cell starts
+        for name in ["settings.json", "settings.json.previous"] {
+            let text = std::fs::read_to_string(data.join("state").join(name)).unwrap(); // WHAT: each copy. WHY: both are read by Citadel
+            assert!(!text.contains("1111111111"), "{name} no longer holds 1.0's key"); // WHAT: gone. WHY: only the office's key
+        }
+        let _ = std::fs::remove_dir_all(&data); // WHAT: tidied. WHY: a test leaves nothing
+    }
+
+    #[test]
+    fn the_cell_s_firewall_rule_is_tcp_47110_for_its_program_on_the_office_network_only() {
+        let rule = super::firewall_rule(Path::new(r"C:\ProgramData\Excalibur Hyperview\Server\citadel\Citadel Server.exe")); // WHAT: the rule for the installed cell. WHY: as added at install and at the cell's first start
+        for word in ["dir=in", "action=allow", "protocol=TCP", "localport=47110", "profile=any", "remoteip=localsubnet", r"program=C:\ProgramData\Excalibur Hyperview\Server\citadel\Citadel Server.exe"] {
+            assert!(rule.iter().any(|a| a == word), "{word} in {rule:?}"); // WHAT: each part. WHY: the same scope as 8714, and for the cell's program only
+        }
+        assert!(super::firewall_rule_shown().last().unwrap().ends_with(super::FIREWALL_RULE)); // WHAT: asked by the same name. WHY: added only when missing
+    }
+
+    #[test]
+    fn the_1_0_leftovers_are_its_update_task_and_its_firewall_rule() {
+        let steps = super::old_leftover_steps(); // WHAT: the steps. WHY: run after a good move
+        assert!(steps.iter().any(|(tool, args)| *tool == "schtasks.exe" && args.iter().any(|a| a == "Citadel Server updates")), "the 03:30 task"); // WHAT: the task. WHY: high 5
+        assert!(steps.iter().any(|(tool, args)| *tool == "netsh.exe" && args.iter().any(|a| a == "name=Citadel Server") && args.iter().any(|a| a == "delete")), "1.0's rule"); // WHAT: the rule. WHY: likewise
+    }
     use super::*;
     use std::cell::RefCell;
 

@@ -109,11 +109,17 @@ fn an_office_from_an_empty_folder_to_two_linked_computers_and_the_citadel_cell()
 struct OldService;
 
 impl hyperview_server::cellmove::OldService for OldService {
-    fn present(&self) -> bool {
-        true // WHAT: installed. WHY: LatCon's 1.0 server
+    fn found(&self) -> Option<String> {
+        Some(r"C:\Program Files\Citadel Server\Citadel Server.exe".to_string()) // WHAT: installed, at its usual place. WHY: LatCon's 1.0 server
     }
-    fn stop_and_remove(&self) -> Result<(), String> {
-        Ok(()) // WHAT: stopped and uninstalled. WHY: before the move
+    fn stop_and_disable(&self) -> Result<(), String> {
+        Ok(()) // WHAT: stopped and disabled. WHY: before the move
+    }
+    fn restore(&self) -> Result<(), String> {
+        Ok(()) // WHAT: started again. WHY: only after a failed move
+    }
+    fn remove(&self) -> Result<String, String> {
+        Ok("the 1.0 service was removed".to_string()) // WHAT: uninstalled. WHY: after the good move
     }
 }
 

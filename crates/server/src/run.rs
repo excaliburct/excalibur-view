@@ -134,6 +134,10 @@ pub async fn serve(
     if server.config.check_for_updates {
         tokio::spawn(crate::updates::keep_up_to_date(Arc::clone(&server)));
     }
+    #[cfg(windows)]
+    if server.config.replace_self {
+        tokio::spawn(keep_the_version_before(Arc::clone(&server))); // WHAT: the version before kept a day, then let go. WHY: critical 4: a rollback needs it, and it was deleted at every start
+    }
     tokio::spawn(crate::citadel::watch(Arc::clone(&server))); // WHAT: looks at the Citadel cell's port every five minutes. WHY: only while the licence switches the citadel part on; its version and pin
     crate::cell::start(&server); // WHAT: the Citadel cell started and watched, when the licence lists it and its program is here. WHY: Citadel runs inside the Office Server (docs/OFFICE-ENROLLMENT.md §6a)
     if server.config.offsite_target.is_some() {
@@ -279,5 +283,17 @@ mod tests {
             claimed: true,
         };
         assert_eq!(serving.url(), "http://192.168.1.40:8714");
+    }
+}
+
+/// Lets the version before the last update go once this one has run a day,
+/// looking at the start and every hour after. Windows only: only the
+/// Windows service replaces itself.
+#[cfg(windows)]
+async fn keep_the_version_before(server: Arc<crate::api::Server>) {
+    loop {
+        let program = crate::winsvc::installed_program(); // WHAT: the installed program, by its known place. WHY: the kept copy is beside it; never a path the running program reports about itself
+        crate::kept::tidy(&server.store, &program, crate::VERSION, time::OffsetDateTime::now_utc()); // WHAT: kept, or let go after a day. WHY: crate::kept
+        tokio::time::sleep(std::time::Duration::from_secs(60 * 60)).await; // WHAT: an hour. WHY: the day ends while the server runs
     }
 }

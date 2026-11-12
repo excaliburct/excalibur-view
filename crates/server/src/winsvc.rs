@@ -130,6 +130,15 @@ pub fn install() -> Result<(), String> {
         .map_err(|e| format!("could not put the server in {}: {e}", home.display()))?;
     }
 
+    // The Citadel cell, from the `citadel\` folder the USB kit carries beside
+    // this program: checked file by file against the pin this program was
+    // built with, and put in place. Without that folder an installed cell is
+    // left as it is (an update brings the cell with the server).
+    if let Some(kit) = me.parent().map(|d| d.join(crate::cellbundle::FOLDER)).filter(|kit| kit.is_dir() && !same_file(kit, &home.join(crate::cellbundle::FOLDER))) {
+        let pin = crate::cellbundle::pinned().map_err(|why| format!("a citadel folder is beside this program, but {why}; nothing was installed"))?; // WHAT: this build's pin. WHY: critical 3: only the pinned cell is installed
+        crate::cellbundle::place_from(&kit, &home, &pin).map_err(|why| format!("the Citadel cell couldn't be installed: {why}"))?; // WHAT: checked and put in place. WHY: critical 3: install puts the cell in place
+    }
+
     // Somebody may have run the plain program first and already set up an
     // office on it. Those drawings come along rather than being left behind
     // beside a copy of the program nobody will look at again.
@@ -227,10 +236,33 @@ pub fn uninstall() -> Result<(), String> {
         stop_and_wait(&service);
         service.delete().map_err(|e| format!("could not remove the service: {e}"))?;
     }
-    for rule in [FIREWALL_TCP, FIREWALL_UDP] {
-        let _ = netsh(&["advfirewall", "firewall", "delete", "rule", &format!("name={rule}")]);
+    for rule in [FIREWALL_TCP, FIREWALL_UDP, crate::cell::FIREWALL_RULE] {
+        let _ = netsh(&["advfirewall", "firewall", "delete", "rule", &format!("name={rule}")]); // WHAT: each of this server's rules, the cell's too. WHY: nothing left open
     }
     Ok(())
+}
+
+/// `hyperview-server --roll-back`: stops the service, puts the version
+/// before the last update back (the server and its Citadel cell, together;
+/// `crate::kept::roll_back`), and starts it again. Needs administrator
+/// rights. What was done, in words.
+///
+/// # Errors
+///
+/// When the service can't be stopped, nothing is kept, or the rollback is
+/// refused; the service is started again whatever happened.
+pub fn roll_back() -> Result<String, String> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).map_err(|e| format!("Windows would not let this reach the service manager ({e}); run it as an administrator"))?; // WHAT: the service manager. WHY: the service is stopped first
+    let service = manager.open_service(NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::START).map_err(|e| format!("the Office Server's service couldn't be opened ({e}); run this as an administrator"))?; // WHAT: the service. WHY: stopped and started
+    stop_and_wait(&service); // WHAT: stopped. WHY: its program and the cell's are swapped
+    let config = crate::Config { data: data_folder(), ..crate::Config::default() }; // WHAT: the installed service's data. WHY: the rollback is written in its store
+    let done = crate::Store::open(&config.database(), &config.blobs()).map_err(|e| e.to_string()).and_then(|store| crate::kept::roll_back(&store, &installed_program())); // WHAT: put back. WHY: crate::kept
+    let started = service.start::<&str>(&[]); // WHAT: started again, as whichever version is now in place. WHY: the office is never left without its server
+    match (done, started) {
+        (Ok(said), Ok(())) => Ok(said), // WHAT: done and running. WHY: said
+        (Ok(said), Err(e)) => Err(format!("{said}, but the service didn't start again ({e}); start \"{DISPLAY}\" in Services")), // WHAT: said. WHY: someone must act
+        (Err(why), _) => Err(why), // WHAT: refused or failed; the service started again as it was. WHY: said
+    }
 }
 
 fn stop_and_wait(service: &windows_service::service::Service) {
@@ -277,7 +309,37 @@ fn open_firewall() -> Result<(), String> {
             return Err(format!("the firewall would not let {protocol} {number} in"));
         }
     }
+    let cell = crate::cellbundle::program_in(&home()); // WHAT: the cell's program, where it is installed. WHY: its rule is for it alone
+    let _ = netsh(&["advfirewall", "firewall", "delete", "rule", &format!("name={}", crate::cell::FIREWALL_RULE)]); // WHAT: an older copy of the rule gone. WHY: added fresh, as the two above
+    let rule = crate::cell::firewall_rule(&cell); // WHAT: TCP 47110 for the cell's program, office network only. WHY: critical 2: nothing opened 47110 for the cell
+    if !netsh(&rule.iter().map(String::as_str).collect::<Vec<_>>())? {
+        return Err(format!("the firewall would not let TCP {} in for the Citadel cell", crate::cell::PORT)); // WHAT: said. WHY: estimating couldn't reach the cell
+    }
     Ok(())
+}
+
+/// Adds the cell's firewall rule when it is missing, at the cell's first
+/// start: an office installed before the rule existed gets it from its
+/// update.
+pub fn cell_firewall(program: &Path) {
+    let shown = crate::cell::firewall_rule_shown(); // WHAT: asked for by name. WHY: added only when missing
+    if matches!(netsh(&shown.iter().map(String::as_str).collect::<Vec<_>>()), Ok(true)) {
+        return; // WHAT: already there. WHY: nothing to do
+    }
+    let rule = crate::cell::firewall_rule(program); // WHAT: the rule. WHY: critical 2
+    match netsh(&rule.iter().map(String::as_str).collect::<Vec<_>>()) {
+        Ok(true) => tracing::warn!("the firewall now lets the office network reach the Citadel cell on TCP {}", crate::cell::PORT), // WHAT: said. WHY: whoever looks after the server can see it
+        _ => tracing::error!("the firewall would not let TCP {} in for the Citadel cell; estimating computers can't reach it", crate::cell::PORT), // WHAT: the alarm. WHY: someone must act
+    }
+}
+
+/// Runs a program from `System32` with arguments, without a window; whether
+/// it succeeded.
+pub fn system_tool(tool: &str, args: &[String]) -> bool {
+    use std::os::windows::process::CommandExt; // WHAT: Windows-only process options. WHY: no console window
+    const NO_WINDOW: u32 = 0x0800_0000; // WHAT: CREATE_NO_WINDOW. WHY: a service shows no windows
+    let system = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from); // WHAT: Windows' folder. WHY: the tool by its full path
+    std::process::Command::new(system.join("System32").join(tool)).args(args).creation_flags(NO_WINDOW).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success()) // WHAT: run and waited for. WHY: never one found on the PATH
 }
 
 fn netsh(args: &[&str]) -> Result<bool, String> {
@@ -360,7 +422,7 @@ fn serve_as_service() -> Result<(), String> {
     };
     report(ServiceState::Running, 0);
 
-    hub::update::tidy_after_update(&installed_program());
+    let _ = std::fs::remove_file(installed_program().with_extension("new")); // WHAT: a half-written update gone. WHY: the version before (.old) is kept a day for a rollback (crate::kept), never deleted here
     let mut config = crate::Config::from_environment();
     config.data = data_folder();
     config.check_for_updates = true;
