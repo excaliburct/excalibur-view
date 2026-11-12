@@ -42,8 +42,6 @@ pub mod settings {
     pub const CLAIM_UNTIL: &str = "device_claim_until"; // WHAT: the end of the 24-hour claiming window. WHY: §3; kept so a restart never reopens it
     /// When the Citadel cell carried its paired computers over (RFC 3339).
     pub const CITADEL_MIGRATED: &str = "citadel_migrated"; // WHAT: the cell's one migration. WHY: §6a says it is sent once; a second is refused
-    /// When the Citadel cell first said hello (RFC 3339).
-    pub const CITADEL_HELLO: &str = "citadel_first_hello"; // WHAT: the first hello ever. WHY: migrate is taken only on that first connection
     /// The office certificate, as it was stored, served at
     /// `GET /api/v1/office/identity` (§2.4).
     pub const OFFICE_CERT: &str = "office_cert"; // WHAT: the setting's name. WHY: the contract names it
@@ -161,7 +159,7 @@ pub fn find(db: &Connection, id: &str) -> rusqlite::Result<Option<Device>> {
 
 /// How many approved admin devices there are.
 fn admins(db: &Connection) -> rusqlite::Result<i64> {
-    db.query_row("SELECT count(*) FROM devices WHERE state = 'approved' AND admin = 1", [], |r| r.get(0)) // WHAT: the count. WHY: the last one can't be lost
+    db.query_row("SELECT count(*) FROM devices WHERE state = 'approved' AND admin = 1 AND scope = 'all'", [], |r| r.get(0)) // WHAT: the count of admins approved for every app. WHY: the last one can't be lost; a computer approved for the Citadel cell only never holds the admin seat
 }
 
 // ---- the clock and the claiming window -------------------------------------
@@ -332,6 +330,8 @@ impl Replays {
 pub enum Refusal {
     Missing, // WHAT: no or malformed headers. WHY: told apart in tests only
     Time, // WHAT: outside ±300 s. WHY: likewise
+    BeforeStart, // WHAT: dated before this server started. WHY: said plainly: the computer's clock is behind the server's
+    Body, // WHAT: a body sent without its declared hash, or on a GET or HEAD. WHY: never read unproven
     Unknown, // WHAT: no such device. WHY: likewise
     NotApproved, // WHAT: waiting, refused or removed. WHY: likewise
     Signature, // WHAT: the signature doesn't verify. WHY: likewise
@@ -368,8 +368,11 @@ fn headers_of(headers: &HeaderMap) -> Option<Headers> {
 /// is never read.
 fn before_the_body(server: &Server, headers: &HeaderMap, any_state: bool, now: i64) -> Result<(Headers, Device), Refusal> {
     let signed = headers_of(headers).ok_or(Refusal::Missing)?; // WHAT: the headers. WHY: none, none further
-    if (now - signed.time).abs() > wire::WINDOW_SECONDS || signed.time < server.started {
-        return Err(Refusal::Time); // WHAT: outside ±300 s, or signed before this server started. WHY: §4; the replay cache starts empty, so nothing from before a restart is taken
+    if (now - signed.time).abs() > wire::WINDOW_SECONDS {
+        return Err(Refusal::Time); // WHAT: outside ±300 s. WHY: §4
+    }
+    if signed.time < server.started {
+        return Err(Refusal::BeforeStart); // WHAT: signed before this server started. WHY: the replay cache starts empty, so nothing from before a restart is taken; replays matter more than a slow clock
     }
     let device = server.store.with(|db| Ok(find(db, &signed.device)?)).map_err(|_| Refusal::Unknown)?.ok_or(Refusal::Unknown)?; // WHAT: the device, or refused; a database failure refuses too. WHY: failing closed
     if !any_state && (device.state != state::APPROVED || device.scope != scope::ALL) {
@@ -447,6 +450,12 @@ pub fn door(method: &str, route: &str) -> Door {
     }
 }
 
+/// The most connections held at once while an empty body is seen to end.
+fn empty_turn() -> &'static tokio::sync::Semaphore {
+    static TURNS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new(); // WHAT: one limit for the gate. WHY: review M2: a global bound on reads not yet finished
+    TURNS.get_or_init(|| tokio::sync::Semaphore::new(256)) // WHAT: 256 at a time, never waited for. WHY: far more than an office's computers; past it, a busy answer rather than a queue
+}
+
 /// The most large signed bodies read at once.
 fn body_turn() -> &'static tokio::sync::Semaphore {
     static TURNS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new(); // WHAT: one limit for the gate. WHY: apart from the routes' own, so the two can never wait on each other
@@ -481,25 +490,31 @@ pub(crate) async fn gate(State(server): State<Shared>, request: axum::extract::R
         .get::<axum::extract::OriginalUri>()
         .and_then(|u| u.0.path_and_query().map(|p| p.as_str().to_string()))
         .unwrap_or_else(|| parts.uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default()); // WHAT: the path and query exactly as sent, before the router took /api/v1 off. WHY: §4's target line
-    let bytes = if let Some(declared) = signed.body.clone() {
-        if let Err(why) = proven_signature(&server, &signed, &device, &method, &target, &declared, now) {
-            return refused(&server, &parts.headers, why, body).await; // WHAT: refused before a byte of the body is read. WHY: an unproven request never holds the server's memory or its upload turns
-        }
-        let limit = body_limit(&server, &method, &route); // WHAT: this route's own most. WHY: never more than the route itself takes
+    let quiet = matches!(method.as_str(), "GET" | "HEAD"); // WHAT: a request that never has a body. WHY: never accepted with one
+    let declared = signed.body.clone().unwrap_or_else(|| wire::body_hash(b"")); // WHAT: the declared body hash, or no body at all when none is declared. WHY: a body is never read before its request is proven
+    if (quiet || signed.body.is_none()) && (declared != wire::body_hash(b"") || says_it_has_a_body(&parts.headers)) {
+        return refused(&server, &parts.headers, Refusal::Body, body).await; // WHAT: a body on a GET or HEAD, or one sent without its hash. WHY: review M2: every client declares its body's hash; nothing unproven is read
+    }
+    if let Err(why) = proven_signature(&server, &signed, &device, &method, &target, &declared, now) {
+        return refused(&server, &parts.headers, why, body).await; // WHAT: refused before a byte of the body is read. WHY: an unproven request never holds the server's memory or its upload turns
+    }
+    let approved = device.state == state::APPROVED && device.scope == scope::ALL; // WHAT: let in for every app. WHY: only such a device's body is worth more than nothing
+    let limit = if approved { body_limit(&server, &method, &route) } else { 0 }; // WHAT: the route's own most, or no body at all for a device not let in. WHY: a waiting computer only asks how it stands
+    let bytes = if declared == wire::body_hash(b"") {
+        let Ok(_turn) = empty_turn().try_acquire() else {
+            return Denied::new(StatusCode::SERVICE_UNAVAILABLE, Problem::new("busy", "The office server is busy. Try again in a moment.")).into_response(); // WHAT: 503. WHY: review M2: a bounded number of connections are held while an empty body is seen to end
+        };
+        let Some(bytes) = read_within(body, 0, EMPTY_BODY_TIME).await else {
+            return too_large(); // WHAT: bytes where none were declared. WHY: the body isn't the one signed
+        };
+        bytes
+    } else {
         let _turn = if limit > api::SMALL_BODY { body_turn().acquire().await.ok() } else { None }; // WHAT: a turn for a big body, taken only once proven. WHY: a few big uploads at once can't hold gigabytes
-        let Some(bytes) = read_within(body, limit, BIG_BODY_TIME).await else {
-            return too_large(); // WHAT: 413. WHY: past the route's limit, or never finished arriving
+        let Some(bytes) = read_within(body, limit, read_time(limit)).await else {
+            return too_large(); // WHAT: 413. WHY: past the route's limit, or never finished arriving in the time its size allows
         };
         if wire::body_hash(&bytes) != declared {
             return refused(&server, &parts.headers, Refusal::Signature, Body::empty()).await; // WHAT: the body isn't the one signed. WHY: §4
-        }
-        bytes
-    } else {
-        let Some(bytes) = read_within(body, api::SMALL_BODY, SMALL_BODY_TIME).await else {
-            return too_large(); // WHAT: 413. WHY: a body past 1 MiB comes with its hash declared, or not at all
-        };
-        if let Err(why) = after_the_body(&server, &signed, &device, &method, &target, &bytes, now) {
-            return refused(&server, &parts.headers, why, Body::empty()).await; // WHAT: refused. WHY: the signature or a replay
         }
         bytes
     };
@@ -514,10 +529,21 @@ pub(crate) async fn gate(State(server): State<Shared>, request: axum::extract::R
     next.run(axum::extract::Request::from_parts(parts, Body::from(bytes))).await // WHAT: on, with the body read. WHY: the routes read it as always
 }
 
-/// How long a body without a declared hash may take to arrive.
-const SMALL_BODY_TIME: std::time::Duration = std::time::Duration::from_secs(30); // WHAT: thirty seconds for at most 1 MiB. WHY: a slow sender can't hold a connection open with an unproven body
-/// How long a proven body may take to arrive.
-const BIG_BODY_TIME: std::time::Duration = std::time::Duration::from_secs(60 * 60); // WHAT: an hour. WHY: a stamped structural set over a slow link; already proven, so only the office's own computers get it
+/// How long an empty body may take to be seen to end.
+const EMPTY_BODY_TIME: std::time::Duration = std::time::Duration::from_secs(5); // WHAT: five seconds. WHY: nothing to wait for
+
+/// How long a proven body of up to `limit` bytes may take to arrive: half a
+/// minute, and a second for each 256 KiB the route allows, at most an hour.
+fn read_time(limit: usize) -> std::time::Duration {
+    let seconds = 30 + limit / (256 * 1024); // WHAT: the time its size allows over a slow office link. WHY: review M2: never an hour for a small route
+    std::time::Duration::from_secs(u64::try_from(seconds).unwrap_or(u64::MAX).min(60 * 60)) // WHAT: at most an hour. WHY: the biggest upload over a slow link
+}
+
+/// Whether the request says it carries a body: a non-zero length, or a
+/// transfer encoding.
+fn says_it_has_a_body(headers: &HeaderMap) -> bool {
+    headers.contains_key(header::TRANSFER_ENCODING) || headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).is_some_and(|v| v.trim() != "0") // WHAT: chunked, or a length other than nothing. WHY: such a request declares its body's hash or isn't read
+}
 
 /// The most a route takes, as its handler reads it: the upload limit for
 /// the routes that take a whole file, CAD's own for its drawings, the middle
@@ -562,7 +588,17 @@ async fn refused(server: &Server, headers: &HeaderMap, why: Refusal, body: Body)
     if api::refusal_worth_a_line(server, &format!("device {from}")) {
         api::record(server, Entry::new(action::REFUSED_REQUEST, "").saying(format!("{why:?}")).from(from)); // WHAT: one line. WHY: an admin can see a computer being turned away
     }
-    api::turned_away(body, unknown()).await // WHAT: 401 device_unknown, with a little of the body read. WHY: §4's one answer
+    let answer = if why == Refusal::BeforeStart { clock_behind() } else { unknown() }; // WHAT: the clock's own words, or §4's one answer. WHY: a computer whose clock runs slow is told what to do, not that it is a stranger
+    api::turned_away(body, answer).await // WHAT: 401, with a little of the body read. WHY: as every refusal
+}
+
+/// The answer for a request dated before this server started: 401
+/// `clock_behind`, in words a person can act on.
+pub(crate) fn clock_behind() -> Denied {
+    Denied::new(
+        StatusCode::UNAUTHORIZED,
+        Problem::new("clock_behind", "This computer's clock is behind the office server's, and the server has just restarted. It will work again in a few minutes, or set this computer's time correctly now."),
+    ) // WHAT: said plainly. WHY: review: a slow clock right after a restart is refused, so the person is told why and what fixes it
 }
 
 // ---- asking to be let in ----------------------------------------------------------
@@ -861,7 +897,7 @@ fn change(db: &Connection, id: &str, what: Change, by: &str) -> rusqlite::Result
     let Some(target) = find(db, id)? else {
         return Ok(Err(Denied::missing("computer"))); // WHAT: 404. WHY: nothing to change
     };
-    let is_admin_now = target.state == state::APPROVED && target.admin; // WHAT: whether it counts as an admin now. WHY: only those can be the last
+    let is_admin_now = target.state == state::APPROVED && target.admin && target.scope == scope::ALL; // WHAT: whether it counts as an admin now. WHY: only those can be the last, as `admins` counts them
     let loses_admin = match what {
         Change::Approve { admin } => !admin, // WHAT: approved without admin. WHY: an approved admin approved again as not one is unmade
         Change::Refuse | Change::Remove => true, // WHAT: no longer anything. WHY: it stops being an admin
@@ -880,6 +916,7 @@ fn change(db: &Connection, id: &str, what: Change, by: &str) -> rusqlite::Result
         }
         Change::Refuse => {
             db.execute("UPDATE devices SET state = 'refused', admin = 0, changed = ?2 WHERE id = ?1", params![id, now])?; // WHAT: refused. WHY: turned down
+            db.execute("DELETE FROM keys WHERE device = ?1", params![id])?; // WHAT: every key made from it, taken back. WHY: as Remove does: a computer turned away leaves nothing behind that still works
         }
         Change::Remove => {
             db.execute("UPDATE devices SET state = 'removed', admin = 0, approved_by = NULL, approved_at = NULL, changed = ?2 WHERE id = ?1", params![id, now])?; // WHAT: removed. WHY: only an admin's approval brings it back
@@ -889,7 +926,7 @@ fn change(db: &Connection, id: &str, what: Change, by: &str) -> rusqlite::Result
             if target.state != state::APPROVED {
                 return Ok(Err(Denied::new(StatusCode::CONFLICT, Problem::new("not_approved", "Approve this computer first, then make it an admin.")))); // WHAT: 409. WHY: an admin that isn't let in makes no sense
             }
-            db.execute("UPDATE devices SET admin = ?2, changed = ?3 WHERE id = ?1", params![id, i64::from(on), now])?; // WHAT: made or unmade. WHY: §3
+            db.execute("UPDATE devices SET admin = ?2, scope = CASE WHEN ?2 = 1 THEN 'all' ELSE scope END, changed = ?3 WHERE id = ?1", params![id, i64::from(on), now])?; // WHAT: made or unmade; made an admin, it is approved for every app. WHY: §3; as Approve does, an admin's decision widens a computer carried over from Citadel
         }
     }
     Ok(Ok(target))
@@ -989,15 +1026,16 @@ pub struct Paired {
     pub paired_by: String, // WHAT: who paired it. WHY: §5: recorded
 }
 
-/// Notes the cell's hello: true only for the very first hello this server
-/// has ever had, the one connection in which `migrate` is taken.
+/// Whether the cell's migration is still to come: no `migrate` has yet
+/// succeeded (an empty one included, which is how a cell with nothing to
+/// carry over says so). A cell that stops between its hello and its migrate
+/// can still migrate on its next connection.
 ///
 /// # Errors
 ///
-/// When the database can't be written.
-pub fn first_hello(store: &crate::Store) -> anyhow::Result<bool> {
-    let now = rfc3339(time::OffsetDateTime::now_utc()); // WHAT: now. WHY: written once
-    Ok(store.with(|db| Ok(db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)", params![settings::CITADEL_HELLO, now])?))? == 1) // WHAT: written only if never written. WHY: security review M1: migrate is sealed after the first cell's first connection
+/// When the database can't be read.
+pub fn migration_pending(store: &crate::Store) -> anyhow::Result<bool> {
+    Ok(store.setting(settings::CITADEL_MIGRATED)?.is_none()) // WHAT: not yet sealed. WHY: review: sealed by a successful migrate, never by a hello alone
 }
 
 /// Brings an old Citadel Server's paired computers into the device list,
@@ -1048,6 +1086,13 @@ mod tests {
         assert!(replays.first_time("d", "a", 100, 100));
         assert!(!replays.first_time("d", "a", 100, 101), "the same signature again");
         assert!(replays.first_time("d", "b", 100, 101));
+    }
+
+    #[test]
+    fn a_proven_read_gets_the_time_its_size_allows_and_no_more() {
+        assert_eq!(read_time(1024 * 1024), std::time::Duration::from_secs(34), "1 MiB: half a minute and four seconds");
+        assert_eq!(read_time(0), std::time::Duration::from_secs(30));
+        assert_eq!(read_time(usize::MAX), std::time::Duration::from_secs(3600), "never more than an hour");
     }
 
     #[test]

@@ -528,9 +528,11 @@ fn review_m1_the_cell_migrates_only_on_its_first_connection_after_its_first_hell
     let paired = vec![hyperview_server::devices::Paired { public_key: key(55).public_key_text(), name: "Old".into(), machine: "PC".into(), paired_at: String::new(), paired_by: String::new() }];
     let before_hello = hyperview_server::cell::Answering::new(&server);
     assert_eq!(before_hello.migrate(&paired)["error"], "migrate_sealed", "never before the first hello");
+    let crashed = hyperview_server::cell::Answering::new(&server);
+    let _ = crashed.hello("1.1.0"); // WHAT: a hello, then the cell stops before migrating. WHY: review L5: the migration must not be lost
     let first = hyperview_server::cell::Answering::new(&server);
     let _ = first.hello("1.1.0");
-    assert_eq!(first.migrate(&paired)["ok"], true, "the first connection after the first hello migrates");
+    assert_eq!(first.migrate(&paired)["ok"], true, "the next connection after a hello still migrates");
     let later = hyperview_server::cell::Answering::new(&server);
     let _ = later.hello("1.1.0");
     assert_eq!(later.migrate(&paired)["error"], "migrate_sealed", "a later connection never does");
@@ -546,7 +548,7 @@ fn review_m2_an_unproven_body_is_never_read_past_a_small_one() {
     let declared = office.raw_body("POST", "/api/v1/sets", &big, &bogus, true);
     assert!(declared == (401, "device_unknown".into()) || declared.0 == 0, "a declared hash with a bad signature is refused before the body is read: {declared:?}");
     let undeclared = office.raw_body("POST", "/api/v1/sets", &big, &bogus, false);
-    assert!(undeclared.0 == 413 || undeclared.0 == 0, "without a declared hash, no more than 1 MiB is read, never the whole body: {undeclared:?}");
+    assert!(undeclared == (401, "device_unknown".into()) || undeclared.0 == 0, "a body without its declared hash is refused, never read: {undeclared:?}");
     let good = admin.sign(&office.pin, "PUT", "/api/v1/cad/drawings/1/file", &big, device::unix_now()).unwrap();
     let proven = office.raw_body("PUT", "/api/v1/cad/drawings/1/file", &big, &good, true);
     assert!(proven.0 != 0 && proven.0 != 413 && proven.1 != "device_unknown", "a proven big body is read whole and passes the gate to the route's own checks: {proven:?}");
@@ -605,7 +607,7 @@ fn review_l3_a_signature_is_bound_to_this_server_and_to_this_start() {
     assert_eq!((status, said["error"].as_str()), (401, Some("device_unknown")), "signed for another server's pin");
     let old = admin.sign(&office.pin, "GET", "/api/v1/me", b"", before).unwrap();
     let (status, said) = office.raw("GET", "/api/v1/me", b"", Some(&old), &[]);
-    assert_eq!((status, said["error"].as_str()), (401, Some("device_unknown")), "signed before this server started");
+    assert_eq!((status, said["error"].as_str()), (401, Some("clock_behind")), "signed before this server started: refused, and said why");
 }
 
 #[test]
@@ -630,5 +632,68 @@ fn review_l5_removing_a_computer_takes_back_the_keys_made_from_it() {
     let call = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_projects","arguments":{}}});
     let (status, said) = office.raw("POST", "/mcp", &serde_json::to_vec(&call).unwrap(), None, &[("Authorization", &format!("Bearer {key}"))]);
     assert!(status == 401 || said.get("error").is_some(), "the key went with the computer: {status} {said}");
-    assert_eq!(device::short_id("29ac6b9dfea94459862660c7ee55eebd"), "29AC 6B9D", "the code a person compares");
+    assert_eq!(device::short_id("29ac6b9dfea94459862660c7ee55eebd"), "29AC 6B9D FEA9", "the code a person compares: twelve digits");
+}
+
+
+// ---- the re-review's findings ---------------------------------------------------
+
+#[test]
+fn rereview_m2_no_body_is_read_unproven_and_none_on_a_get() {
+    let office = start();
+    let admin = first_admin(&office);
+    let waiting = signer(100);
+    office.client(&waiting).ask_to_be_let_in("view", "Dana").unwrap();
+    let body = vec![b'x'; 512 * 1024];
+    let on_get = waiting.sign(&office.pin, "GET", "/api/v1/devices/me", &body, device::unix_now()).unwrap();
+    let answer = office.raw_body("GET", "/api/v1/devices/me", &body, &on_get, true);
+    assert!(answer == (401, "device_unknown".into()) || answer.0 == 0, "a waiting computer's GET with a body is refused unread: {answer:?}");
+    let admin_get = admin.sign(&office.pin, "GET", "/api/v1/devices", &body, device::unix_now()).unwrap();
+    let answer = office.raw_body("GET", "/api/v1/devices", &body, &admin_get, true);
+    assert!(answer == (401, "device_unknown".into()) || answer.0 == 0, "no body on a GET, even an admin's: {answer:?}");
+    let small = br#"{"admin":false}"#;
+    let post = admin.sign(&office.pin, "POST", &format!("/api/v1/devices/{}/approve", waiting.key().id()), small, device::unix_now()).unwrap();
+    let undeclared = office.raw_body("POST", &format!("/api/v1/devices/{}/approve", waiting.key().id()), small, &post, false);
+    assert_eq!(undeclared, (401, "device_unknown".into()), "a body without its hash is refused, however small");
+    let declared = office.raw_body("POST", &format!("/api/v1/devices/{}/approve", waiting.key().id()), small, &admin.sign(&office.pin, "POST", &format!("/api/v1/devices/{}/approve", waiting.key().id()), small, device::unix_now() + 1).unwrap(), true);
+    assert_eq!(declared.0, 200, "the same body, declared, is taken: {declared:?}");
+}
+
+#[test]
+fn rereview_low1_a_citadel_only_computer_never_holds_the_admin_seat() {
+    let office = start();
+    let paired = vec![hyperview_server::devices::Paired { public_key: key(110).public_key_text(), name: "Old".into(), machine: "PC".into(), paired_at: String::new(), paired_by: String::new() }];
+    hyperview_server::devices::from_citadel(&office.store(), &paired).unwrap();
+    office.store().with(|db| Ok(db.execute("UPDATE devices SET admin = 1 WHERE id = ?1", params![key(110).id()])?)).unwrap(); // WHAT: a Citadel-only computer marked admin. WHY: it must still not count
+    let mark = office.raw("POST", "/api/v1/devices/request", &office.ask(&key(111), "view"), None, &[]);
+    assert_eq!(mark.1["state"], "approved", "the office still counts as having no admin: {}", mark.1);
+    let mark = signer(111);
+    office.client(&mark).device_admin(&key(110).id(), true).unwrap();
+    let list = office.client(&mark).devices().unwrap();
+    let old = list.iter().find(|d| d.id == key(110).id()).unwrap();
+    assert_eq!(old.scope, "all", "made an admin, it is approved for every app");
+}
+
+#[test]
+fn rereview_low3_a_slow_clock_after_a_restart_is_told_so() {
+    let before = device::unix_now() - 2;
+    let office = start();
+    let admin = first_admin(&office);
+    let old = admin.sign(&office.pin, "GET", "/api/v1/me", b"", before).unwrap();
+    let (status, said) = office.raw("GET", "/api/v1/me", b"", Some(&old), &[]);
+    assert_eq!((status, said["error"].as_str()), (401, Some("clock_behind")), "{said}");
+    assert!(said["message"].as_str().unwrap_or_default().contains("clock is behind"), "said plainly: {said}");
+}
+
+#[test]
+fn rereview_low4_refusing_a_computer_takes_back_its_keys() {
+    let office = start();
+    let admin = first_admin(&office);
+    let dana = signer(120);
+    office.client(&dana).ask_to_be_let_in("view", "Dana").unwrap();
+    office.client(&admin).approve_device(&dana.key().id(), false).unwrap();
+    let (_, key_id) = assistant_key(&office, Some(&dana.key().id()));
+    office.client(&admin).refuse_device(&dana.key().id()).unwrap();
+    let left: i64 = office.store().with(|db| Ok(db.query_row("SELECT count(*) FROM keys WHERE id = ?1", params![key_id], |r| r.get(0))?)).unwrap();
+    assert_eq!(left, 0, "the key went with the refusal");
 }

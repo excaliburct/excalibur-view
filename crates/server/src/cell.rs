@@ -321,7 +321,7 @@ pub fn serve_lines(reader: &mut dyn BufRead, writer: &mut dyn Write, office: &dy
 /// The Office Server answering the cell, for one connection.
 pub struct Answering<'a> {
     pub server: &'a crate::api::Server, // WHAT: the server. WHY: its device list, its name and its licence
-    pub migrate_open: std::sync::atomic::AtomicBool, // WHAT: whether this connection may migrate. WHY: only the first cell's first connection, after its first hello
+    pub migrate_open: std::sync::atomic::AtomicBool, // WHAT: whether this connection may migrate. WHY: only after its hello, and only until a migrate has succeeded
 }
 
 impl<'a> Answering<'a> {
@@ -340,8 +340,8 @@ impl Office for Answering<'_> {
     fn hello(&self, version: &str) -> Value {
         let version = version.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+')).take(32).collect::<String>(); // WHAT: a plain version, at most 32 characters. WHY: shown on /api/v1/office as it is
         self.server.cell.set(State::Running { version }); // WHAT: running, its version. WHY: /api/v1/office reports it
-        if crate::devices::first_hello(&self.server.store).unwrap_or(false) {
-            self.migrate_open.store(true, std::sync::atomic::Ordering::SeqCst); // WHAT: this connection may migrate. WHY: it is the first cell's first, over an old Citadel Server's data
+        if crate::devices::migration_pending(&self.server.store).unwrap_or(false) {
+            self.migrate_open.store(true, std::sync::atomic::Ordering::SeqCst); // WHAT: this connection may migrate, after its hello. WHY: no migrate has succeeded yet; a successful one, empty or not, seals it for good
         }
         let modules: Vec<&str> = crate::office::licensed(self.server).iter().map(|m| m.name()).collect(); // WHAT: the licence's parts. WHY: §6a
         json!({ "ok": true, "office": crate::api::installation_name(self.server), "modules": modules })

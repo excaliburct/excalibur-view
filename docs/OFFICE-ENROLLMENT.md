@@ -91,7 +91,7 @@ Binding the request to the server's pin means a request made to an impostor can'
 When the server has **no approved device** yet, it is unclaimed. The first local request is then **approved as an admin** at once. That is Mark at LatCon, or the person who sets the server up.
 
 - To stop a stranger racing the owner, claiming is open only for **24 hours after the service first starts**.
-- "Unclaimed" means **no admin device**: computers carried over from Citadel Server never count.
+- "Unclaimed" means **no admin device approved for every app**: computers carried over from Citadel Server never count, and making one an admin approves it for every app.
 - A request showing any sign of a proxy (`Forwarded`, `X-Forwarded-For`, `X-Real-IP`, `Via`) is treated as outside, and never claims.
 - On the server PC itself: `hyperview-server --reopen-claim` (only while there is no admin), `--make-admin <device id>`, and `--reset-admins` (every admin unmade, claiming open for a day). All three are in the audit log.
 
@@ -132,7 +132,7 @@ Where the approval screen appears:
 - in the server's Manager window;
 - in Fleet.
 
-A badge or notice tells admins that someone is waiting.
+A badge or notice tells admins that someone is waiting. Both the asking computer and the admin's list show the computer's code, the first twelve hex digits of its device id in three groups of four ("29AC 6B9D FEA9"), so a person can match them.
 
 ## 4. Signed requests
 
@@ -157,11 +157,11 @@ excalibur-request/1
 <time>
 ```
 
-`X-Excalibur-Body-SHA256` repeats the body line, so the server checks the signature **before it reads the body**, then holds the body to that hash. A request without the header is read only up to 1 MiB. `docs/office-enrollment-vectors.json` has worked examples.
+`X-Excalibur-Body-SHA256` repeats the body line, so the server checks the signature **before it reads the body**, then holds the body to that hash. **A request with a body must send it**; without it, or on a GET or HEAD, any body is refused unread. A computer not yet approved never has a body read at all, and a proven body is given the time its size allows (half a minute, plus a second per 256 KiB the route takes, at most an hour). `docs/office-enrollment-vectors.json` has worked examples.
 
 The server checks each of these, and **401 `device_unknown`** answers any failure:
 
-- the time is within ±300 s, and not before the server's process started (so a restart opens no replay window);
+- the time is within ±300 s, and not before the server's process started (so a restart opens no replay window; that refusal is 401 `clock_behind`, saying the computer's clock is behind and it will work in a few minutes);
 - the signature is not one already seen inside that window (a replay cache, with a share per device);
 - the device is approved for every app (a computer carried over from Citadel Server is approved for the cell only, until an admin approves it);
 - the signature verifies, for this server's pin.
@@ -225,7 +225,7 @@ The messages:
 - Cell to server: `{"op":"migrate","devices":[{"public_key":"...","name":"...","machine":"...","paired_at":"...","paired_by":"..."}]}`
   - Server to cell: `{"ok":true,"added":N}`, or `{"ok":false,"error":"migrate_sealed"}`
   - Sent once, on the first start of a cell over an old Citadel Server's data. It brings its paired computers into the device list, approved **for the cell only**.
-  - Taken only on the cell's very first connection, after its first `hello`, and never again.
+  - Taken only after a `hello`, until a `migrate` has succeeded; then never again. A cell with nothing to carry over sends `{"op":"migrate","devices":[]}` to say so. A cell that stops between its hello and its migrate migrates on its next connection.
 
 **Device ids for Citadel traffic:** the cell takes the Office Server's answer for the public key and works out Citadel's own id from it (`citadel-device/1` label). Both ids name the same key.
 

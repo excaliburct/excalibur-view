@@ -480,13 +480,15 @@ pub struct Info {
     pub scope: String, // WHAT: "all", or "citadel" for a computer approved for the Citadel cell only. WHY: an admin widens it with Approve
 }
 
-/// A device id as a person compares it: its first eight hex digits in two
-/// groups of four, upper case ("29AC 6B9D").
+/// A device id as a person compares it: its first twelve hex digits in
+/// three groups of four, upper case ("29AC 6B9D EFA9").
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn short_id(id: &str) -> String {
-    let head: String = id.chars().take(8).collect::<String>().to_uppercase(); // WHAT: the first eight digits. WHY: enough to tell two computers apart by eye
-    if head.len() < 8 { return head; } // WHAT: too short to group. WHY: shown as it is
-    format!("{} {}", &head[..4], &head[4..]) // WHAT: two groups of four. WHY: easy to read out over the phone
+    let head: String = id.chars().take(12).collect::<String>().to_uppercase(); // WHAT: the first twelve digits, 48 bits. WHY: review: 32 bits were too few to be sure two computers differ
+    if head.len() < 12 || !head.is_ascii() {
+        return head; // WHAT: too short to group. WHY: shown as it is
+    }
+    format!("{} {} {}", &head[..4], &head[4..8], &head[8..]) // WHAT: three groups of four. WHY: easy to read out over the phone
 }
 
 /// The app's name for people, as an admin's list says it.
