@@ -747,7 +747,7 @@ fn a_working_plugin() -> Vec<u8> {
         m = escape(manifest),
         a = escape(answer),
         ml = manifest.len(),
-        packed = (2048i64 << 32) | answer.len() as i64,
+        packed = (2048i64 << 32) | i64::try_from(answer.len()).unwrap(), // WHAT: the answer's place and length in one number. WHY: how the plugin hands it back
     );
     wat::parse_str(text).unwrap()
 }

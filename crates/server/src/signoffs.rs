@@ -112,7 +112,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<SignOff> {
         label: r.get(2)?,
         group: r.get(3)?,
         reference: r.get(4)?,
-        page: r.get::<_, Option<i64>>(5)?.map(|p| p as u32), // WHAT: the page, checked under 10,000 when asked. WHY: fits.
+        page: r.get::<_, Option<u32>>(5)?, // WHAT: the page, checked under 10,000 when asked. WHY: fits.
         status: match (&signed, withdrawn) {
             (Some(_), _) => "signed", // WHAT: signed wins. WHY: a signature is never undone.
             (None, true) => "withdrawn", // WHAT: taken back. WHY: no longer to be signed.
@@ -218,7 +218,7 @@ fn asked_for(
                 tx.execute(
                     "INSERT INTO signoffs (id, set_id, label, grp, ref, page, asked_by, asked, withdrawn, seq)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)",
-                    params![id, set, label, group, reference, page.map(|p| p as i64), who.id, now, seq],
+                    params![id, set, label, group, reference, page.map(i64::from), who.id, now, seq], // WHAT: the line's values, the page widened. WHY: a u32 always fits SQLite's 64 bits
                 )?; // WHAT: the line. WHY: open until signed.
             }
             tx.commit()?; // WHAT: kept. WHY: all at once.
@@ -442,7 +442,7 @@ pub async fn changes(
                 "SELECT {COLUMNS} FROM signoffs WHERE seq > ?1 ORDER BY seq LIMIT ?2"
             ))?; // WHAT: changes after `since`, oldest first. WHY: applied in order.
             let lines = q
-                .query_map(params![since.since.max(0), (CHANGES_PAGE * 4) as i64], row)?
+                .query_map(params![since.since.max(0), crate::store::int::of_index(CHANGES_PAGE * 4)], row)? // WHAT: changes after `since`, four pages at most. WHY: the limit written as SQLite keeps it
                 .collect::<rusqlite::Result<Vec<_>>>()?; // WHAT: read. WHY: a page, with room for lines this caller may not reach.
             Ok(lines)
         })
@@ -514,17 +514,25 @@ pub async fn picture(
 
 // ---- the picture: strokes drawn on the pad, as a PNG ------------------------
 
+/// A distance on the pad as a whole number of pixels, cut toward zero.
+#[allow(clippy::cast_possible_truncation)] // WHAT: a float cut to a whole number by a cast. WHY: no conversion without a cast exists for a float; Rust's cast saturates and reads NaN as nought, and every point is checked to lie on the pad before it is drawn
+fn pixel(v: f64) -> i32 {
+    v as i32 // WHAT: the whole pixels. WHY: the same number each cast in `drawn` gave before
+}
+
 /// The signature drawn, as a PNG: 400 by 140, one grey byte a pixel.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn drawn(strokes: &[Vec<[f64; 2]>]) -> Vec<u8> {
-    let (w, h) = (PAD.0 as usize, PAD.1 as usize); // WHAT: the pad's size in pixels. WHY: one unit, one pixel.
+    let (w, h) = (usize::try_from(pixel(PAD.0)).unwrap_or(0), usize::try_from(pixel(PAD.1)).unwrap_or(0)); // WHAT: the pad's size in pixels. WHY: one unit, one pixel.
     let mut ink = vec![255u8; w * h]; // WHAT: white. WHY: black ink goes on it.
     let mut dot = |x: f64, y: f64| {
         for dy in -1i32..=1 {
             for dx in -1i32..=1 {
-                let (px, py) = (x.round() as i32 + dx, y.round() as i32 + dy); // WHAT: a 3-pixel pen. WHY: a finger's line, readable printed small.
-                if px >= 0 && py >= 0 && (px as usize) < w && (py as usize) < h {
-                    ink[py as usize * w + px as usize] = 0; // WHAT: inked. WHY: inside the pad only.
+                let (px, py) = (pixel(x.round()) + dx, pixel(y.round()) + dy); // WHAT: a 3-pixel pen. WHY: a finger's line, readable printed small.
+                if let (Ok(px), Ok(py)) = (usize::try_from(px), usize::try_from(py)) { // WHAT: only a pixel at or past the pad's corner. WHY: a negative one is off the pad, as the `>= 0` checks said
+                    if px < w && py < h {
+                        ink[py * w + px] = 0; // WHAT: inked. WHY: inside the pad only.
+                    }
                 }
             }
         }
@@ -532,9 +540,9 @@ pub fn drawn(strokes: &[Vec<[f64; 2]>]) -> Vec<u8> {
     for stroke in strokes {
         for pair in stroke.windows(2) {
             let ([x0, y0], [x1, y1]) = (pair[0], pair[1]); // WHAT: one segment. WHY: drawn as dots close together.
-            let steps = ((x1 - x0).abs().max((y1 - y0).abs()).ceil() as usize).clamp(1, 1000); // WHAT: a dot a pixel. WHY: no gaps; a segment is at most the pad's size.
+            let steps = pixel((x1 - x0).abs().max((y1 - y0).abs()).ceil()).clamp(1, 1000); // WHAT: a dot a pixel. WHY: no gaps; a segment is at most the pad's size.
             for k in 0..=steps {
-                let t = k as f64 / steps as f64; // WHAT: along the segment. WHY: evenly.
+                let t = f64::from(k) / f64::from(steps); // WHAT: along the segment. WHY: evenly.
                 dot(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
             }
         }
@@ -557,8 +565,8 @@ pub fn png_gray(w: usize, h: usize, pixels: &[u8]) -> Vec<u8> {
     let mut zlib = vec![0x78, 0x01]; // WHAT: zlib's header, no compression level claimed. WHY: the data is stored.
     for (k, block) in raw.chunks(65_535).enumerate() {
         let last = (k + 1) * 65_535 >= raw.len(); // WHAT: whether this is the last block. WHY: deflate marks it.
-        zlib.push(last as u8); // WHAT: a stored block, last or not. WHY: deflate's simplest block.
-        let n = block.len() as u16; // WHAT: its length. WHY: stored blocks say it, and its complement.
+        zlib.push(u8::from(last)); // WHAT: a stored block, last or not. WHY: deflate's simplest block.
+        let n = u16::try_from(block.len()).unwrap_or(u16::MAX); // WHAT: its length. WHY: stored blocks say it, and its complement; a block is at most 65,535 bytes, so it always fits
         zlib.extend_from_slice(&n.to_le_bytes());
         zlib.extend_from_slice(&(!n).to_le_bytes());
         zlib.extend_from_slice(block);
@@ -566,8 +574,8 @@ pub fn png_gray(w: usize, h: usize, pixels: &[u8]) -> Vec<u8> {
     zlib.extend_from_slice(&adler32(&raw).to_be_bytes()); // WHAT: zlib's checksum. WHY: readers check it.
     let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]; // WHAT: PNG's signature. WHY: every PNG starts so.
     let mut header = Vec::with_capacity(13); // WHAT: the IHDR chunk's data. WHY: size and kind.
-    header.extend_from_slice(&(w as u32).to_be_bytes());
-    header.extend_from_slice(&(h as u32).to_be_bytes());
+    header.extend_from_slice(&u32::try_from(w).unwrap_or(u32::MAX).to_be_bytes()); // WHAT: the width. WHY: PNG writes it in four bytes; a signature is 400 wide
+    header.extend_from_slice(&u32::try_from(h).unwrap_or(u32::MAX).to_be_bytes()); // WHAT: the height. WHY: likewise; 140 high
     header.extend_from_slice(&[8, 0, 0, 0, 0]); // WHAT: 8-bit grey, deflate, adaptive filters, no interlace. WHY: the plainest PNG.
     chunk(&mut out, b"IHDR", &header);
     chunk(&mut out, b"IDAT", &zlib);
@@ -576,7 +584,7 @@ pub fn png_gray(w: usize, h: usize, pixels: &[u8]) -> Vec<u8> {
 }
 
 fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-    out.extend_from_slice(&(data.len() as u32).to_be_bytes()); // WHAT: its length. WHY: PNG's chunk layout.
+    out.extend_from_slice(&u32::try_from(data.len()).unwrap_or(u32::MAX).to_be_bytes()); // WHAT: its length. WHY: PNG's chunk layout; a signature's data is far under 4 GB
     out.extend_from_slice(kind);
     out.extend_from_slice(data);
     let mut crc_of = kind.to_vec(); // WHAT: the kind and data. WHY: the CRC covers both.
@@ -587,7 +595,7 @@ fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32; // WHAT: the standard start. WHY: PNG's CRC is the usual one.
     for &b in data {
-        crc ^= b as u32;
+        crc ^= u32::from(b); // WHAT: the next byte in. WHY: the CRC's rule
         for _ in 0..8 {
             crc = if crc & 1 != 0 {
                 (crc >> 1) ^ 0xEDB8_8320
@@ -602,7 +610,7 @@ fn crc32(data: &[u8]) -> u32 {
 fn adler32(data: &[u8]) -> u32 {
     let (mut a, mut b) = (1u32, 0u32); // WHAT: the standard start. WHY: zlib's checksum.
     for &x in data {
-        a = (a + x as u32) % 65_521;
+        a = (a + u32::from(x)) % 65_521; // WHAT: the running sum. WHY: Adler-32's rule
         b = (b + a) % 65_521;
     }
     (b << 16) | a

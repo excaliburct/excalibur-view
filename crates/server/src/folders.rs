@@ -799,7 +799,7 @@ fn file_from_row(r: &rusqlite::Row) -> rusqlite::Result<ProjectFile> {
         folder: r.get(2)?,
         name: r.get(3)?,
         digest: r.get(4)?,
-        bytes: r.get::<_, i64>(5)? as u64,
+        bytes: crate::store::int::unsigned(r.get(5)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
         modified: r.get(6)?,
         uploaded: r.get(7)?,
         uploaded_by: r.get(8)?,
@@ -971,7 +971,7 @@ pub async fn upload_file(
             db.execute(
                 "INSERT INTO files (id, project, folder, name, digest, bytes, modified, uploaded, uploaded_by, replaces)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![file.id, file.project, file.folder, file.name, file.digest, file.bytes as i64, file.modified, file.uploaded, file.uploaded_by, file.replaces],
+                params![file.id, file.project, file.folder, file.name, file.digest, crate::store::int::signed(file.bytes), file.modified, file.uploaded, file.uploaded_by, file.replaces], // WHAT: the file's row, its size written as SQLite keeps it. WHY: read back the same by int::unsigned
             )?; // WHAT: kept. WHY: listed in its folder.
             if let Some(before) = &before {
                 db.execute("UPDATE files SET replaced_by = ?1 WHERE id = ?2", params![file.id, before.id])?; // WHAT: the old one marked. WHY: kept, but no longer the current one.

@@ -215,7 +215,7 @@ fn set_scale(server: &Running, set: &str, page: usize, scale: Option<&str>) {
     let db = rusqlite::Connection::open(path).unwrap();
     db.execute(
         "UPDATE sheets SET scale = ?1 WHERE set_id = ?2 AND page = ?3",
-        params![scale, set, page as i64],
+        params![scale, set, i64::try_from(page).unwrap()], // WHAT: the scale, set and page. WHY: the page as SQLite keeps it
     )
     .unwrap();
 }

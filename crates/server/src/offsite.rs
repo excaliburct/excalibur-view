@@ -135,9 +135,10 @@ pub fn parse_name(product: &str, name: &str) -> Option<time::OffsetDateTime> {
         return None;
     } // WHAT: exactly yyyymmdd-hhmmss. WHY: nothing else is ours.
     let n = |a: usize, z: usize| rest[a..z].parse::<u32>().ok(); // WHAT: a number from the name. WHY: each field below.
-    let month = time::Month::try_from(n(4, 6)? as u8).ok()?; // WHAT: the month. WHY: a 13th month is refused.
-    let date = time::Date::from_calendar_date(n(0, 4)? as i32, month, n(6, 8)? as u8).ok()?; // WHAT: the day. WHY: a 32nd day is refused, not rolled over.
-    let t = time::Time::from_hms(n(9, 11)? as u8, n(11, 13)? as u8, n(13, 15)? as u8).ok()?; // WHAT: the time. WHY: the same.
+    let byte = |a: usize, z: usize| u8::try_from(n(a, z)?).ok(); // WHAT: a two-digit field as a byte. WHY: two digits always fit, so nothing is cut as the cast could
+    let month = time::Month::try_from(byte(4, 6)?).ok()?; // WHAT: the month. WHY: a 13th month is refused.
+    let date = time::Date::from_calendar_date(i32::try_from(n(0, 4)?).ok()?, month, byte(6, 8)?).ok()?; // WHAT: the day, in its four-digit year. WHY: a 32nd day is refused, not rolled over.
+    let t = time::Time::from_hms(byte(9, 11)?, byte(11, 13)?, byte(13, 15)?).ok()?; // WHAT: the time. WHY: the same.
     Some(time::PrimitiveDateTime::new(date, t).assume_utc()) // WHAT: the moment. WHY: names are written in UTC.
 }
 
@@ -936,7 +937,7 @@ impl Target {
                     serde_json::from_str(if text.trim().is_empty() { "[]" } else { &text })?; // WHAT: read the JSON. WHY: an empty answer is no objects.
                 Ok(items
                     .into_iter()
-                    .map(|i| (i.name, i.size.max(0) as u64))
+                    .map(|i| (i.name, u64::try_from(i.size).unwrap_or(0))) // WHAT: name and size, a negative size read as nought. WHY: exactly what `.max(0) as u64` gave
                     .collect()) // WHAT: name and size. WHY: the size confirms an upload.
             }
         }
@@ -1305,7 +1306,7 @@ impl TarOut<'_> {
         h[257..263].copy_from_slice(b"ustar\0");
         h[263..265].copy_from_slice(b"00"); // WHAT: the format marker. WHY: any tar reads it.
         h[148..156].copy_from_slice(b"        "); // WHAT: blanks while summing. WHY: the checksum's rule.
-        let sum: u32 = h.iter().map(|&b| b as u32).sum(); // WHAT: the checksum. WHY: readers check it.
+        let sum: u32 = h.iter().map(|&b| u32::from(b)).sum(); // WHAT: the checksum. WHY: readers check it.
         h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes()); // WHAT: write it. WHY: ustar's form.
         self.w.write_all(&h)?; // WHAT: the header. WHY: before its bytes.
         let copied = std::io::copy(&mut body.take(size), self.w)?; // WHAT: the file's bytes. WHY: streamed.
@@ -1343,7 +1344,7 @@ fn untar(r: &mut dyn Read, into: &Path, limit: u64, expect: &[(&str, u64)]) -> R
             .ok_or_else(|| anyhow!("a damaged archive header"))?; // WHAT: the header's own checksum. WHY: a damaged header is refused.
         let mut blank = h;
         blank[148..156].copy_from_slice(b"        "); // WHAT: blanks where the sum goes. WHY: the rule it was made with.
-        if blank.iter().map(|&b| b as u32).sum::<u32>() != stored {
+        if blank.iter().map(|&b| u32::from(b)).sum::<u32>() != stored { // WHAT: the header summed, each byte widened. WHY: compared with the checksum it carries
             bail!("a damaged archive header");
         } // WHAT: compare. WHY: never act on a damaged header.
         if h[156] != b'0' && h[156] != 0 {
@@ -1542,7 +1543,7 @@ impl Target {
                 let text = self.rclone(&["lsjson", remote, "--files-only"])?; // WHAT: the top level only (lsjson doesn't recurse by default). WHY: the marker sits there.
                 let items: Vec<Item> =
                     serde_json::from_str(if text.trim().is_empty() { "[]" } else { &text })?;
-                Ok(items.into_iter().map(|i| (i.name, i.size.max(0) as u64)).collect())
+                Ok(items.into_iter().map(|i| (i.name, u64::try_from(i.size).unwrap_or(0))).collect()) // WHAT: name and size, a negative size read as nought. WHY: exactly what `.max(0) as u64` gave
             }
         }
     }
@@ -2013,7 +2014,7 @@ impl Job<'_> {
         self.log(&format!(
             "files: {} in all, {sent} new sent ({:.1} MB), every one read back",
             on_disk.len(),
-            sent_bytes as f64 / 1048576.0
+            megabytes(sent_bytes)
         )); // WHAT: the tally. WHY: upload time and cost follow from it.
 
         // 3. the catalog: database and manifest, packed, gzipped and locked
@@ -2350,6 +2351,12 @@ fn salt(own: &Path) -> Result<String> {
 fn read_sizes(path: &Path) -> Result<BTreeMap<String, u64>> {
     match std::fs::read(path) { Ok(b) => serde_json::from_slice(&b).with_context(|| format!("{} is damaged; move it and name-salt.txt aside and the next run sends every file again", path.display())), Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()), Err(e) => Err(anyhow!("reading {}: {e}", path.display())) }
     // WHAT: read it. WHY: never silently replaced.
+}
+
+/// A size in megabytes, for a log line.
+#[allow(clippy::cast_precision_loss)] // WHAT: a byte count widened to a float. WHY: shown to a tenth of a megabyte; a float holds every size below 8 PB exactly, and no conversion without a cast exists from a 64-bit number
+fn megabytes(bytes: u64) -> f64 {
+    bytes as f64 / 1_048_576.0 // WHAT: bytes to megabytes. WHY: the same tally the log has always shown
 }
 
 fn hex(b: &[u8]) -> String {

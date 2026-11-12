@@ -440,11 +440,11 @@ async fn update(
                 push.release.platform,
                 push.release.published,
                 push.release.notes,
-                push.release.bytes as i64,
+                crate::store::int::signed(push.release.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                 digest,
                 push.release.signature,
                 push.release.key,
-                push.release.minimum_api_version as i64,
+                i64::from(push.release.minimum_api_version), // WHAT: widened, never cut. WHY: every one of these fits a 64-bit number
                 if push.ready { 1 } else { 0 }
             ],
         )?;
@@ -495,7 +495,7 @@ async fn read_push(headers: &HeaderMap, mut body: Body) -> Result<Vec<u8>, No> {
         read_past(&mut body, budget).await; // WHAT: reads that much into nothing. WHY: so a caller still sending is listening when the 413 comes.
         return Err(No(StatusCode::PAYLOAD_TOO_LARGE, TOO_BIG)); // WHAT: refused for its size. WHY: a clear answer that says what is wrong.
     }
-    let mut kept = Vec::with_capacity(declared.unwrap_or(0) as usize); // WHAT: room for what it says it is sending. WHY: under the limit, by the check above, so one allocation instead of many.
+    let mut kept = Vec::with_capacity(usize::try_from(declared.unwrap_or(0)).unwrap_or(0)); // WHAT: room for what it says it is sending. WHY: under the limit, by the check above, so one allocation instead of many.
     while let Some(chunk) = next_chunk(&mut body).await {
         let Ok(chunk) = chunk else {
             return Err(No(StatusCode::BAD_REQUEST, "the push did not arrive whole")); // WHAT: a body that broke off. WHY: half an installer is never taken.

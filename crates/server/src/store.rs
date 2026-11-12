@@ -711,7 +711,7 @@ impl Store {
                  ORDER BY at DESC, id DESC
                  LIMIT ?2",
             )?;
-            let rows = statement.query_map(params![since, limit as i64], |r| {
+            let rows = statement.query_map(params![since, int::of_index(limit)], |r| { // WHAT: the rows, the limit written as SQLite keeps it. WHY: exactly as the cast it replaces
                 Ok(crate::audit::Entry {
                     at: r.get(0)?,
                     person: r.get(1)?,
@@ -753,7 +753,7 @@ impl Store {
             params![set],
             |r| r.get(0),
         )?;
-        Ok(revision as u64)
+        Ok(int::unsigned(revision)) // WHAT: the revision. WHY: read back as the unsigned number it was written as
     }
 
     /// # Errors
@@ -819,6 +819,37 @@ fn add_column(db: &Connection, table: &str, column: &str, declaration: &str) -> 
         db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {declaration}"))?;
     }
     Ok(())
+}
+
+/// Whole numbers between the program and `SQLite`, which keeps every integer as
+/// a signed 64-bit one. Each gives exactly what the plain `as` cast it replaces
+/// gave on the 64-bit computers the server runs on; the name says which way
+/// the number is going, so the strict lint has nothing left to guess at.
+pub mod int {
+    /// A size, count or revision read back. It was written from an unsigned
+    /// number, so it is never negative.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+    pub fn unsigned(n: i64) -> u64 {
+        n.cast_unsigned() // WHAT: the same 64 bits, read as unsigned. WHY: exactly what `as u64` did
+    }
+
+    /// A count or page read back, as a length or an index.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+    pub fn index(n: i64) -> usize {
+        usize::try_from(n.cast_unsigned()).unwrap_or(usize::MAX) // WHAT: the same bits as a length. WHY: exactly `as usize` on a 64-bit computer; held at the most on a smaller one rather than cut short
+    }
+
+    /// A size or revision, to be written.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+    pub fn signed(n: u64) -> i64 {
+        n.cast_signed() // WHAT: the same 64 bits, read as signed. WHY: exactly what `as i64` did, and read back by `unsigned`
+    }
+
+    /// A count, page or length, to be written.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+    pub fn of_index(n: usize) -> i64 {
+        signed(u64::try_from(n).unwrap_or(u64::MAX)) // WHAT: the length as 64 bits, then signed. WHY: exactly `as i64` on a 64-bit computer, where a length always fits 64 bits
+    }
 }
 
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake

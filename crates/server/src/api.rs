@@ -19,7 +19,7 @@ use serde::Deserialize;
 
 use crate::auth::{self, Who};
 use crate::quantities::{self, SheetScale, Stored};
-use crate::store::{is_digest, Store};
+use crate::store::{int, is_digest, Store}; // WHAT: the store, its digest check and its whole-number conversions. WHY: SQLite keeps every integer signed
 use crate::{Config, VERSION};
 
 /// What a client sent with a request whose handler has no use for it. Reading
@@ -454,7 +454,7 @@ pub fn fresh_id(prefix: &str) -> String {
 // ---- the routes -----------------------------------------------------------
 
 pub fn router(server: Shared) -> Router {
-    let limit = server.config.largest_upload as usize; // WHAT: the largest drawing or file the office takes. WHY: only the routes that take a whole file are given it.
+    let limit = usize::try_from(server.config.largest_upload).unwrap_or(usize::MAX); // WHAT: the largest drawing or file the office takes. WHY: only the routes that take a whole file are given it.
     let uploads = DefaultBodyLimit::max(limit); // WHAT: the upload limit, as a layer. WHY: put on each upload route below, and nowhere else.
     let api = Router::new()
         .route("/health", get(health))
@@ -1315,11 +1315,11 @@ pub(crate) fn set_from_row(r: &rusqlite::Row) -> rusqlite::Result<DrawingSet> {
         name: r.get(2)?,
         filename: r.get(3)?,
         digest: r.get(4)?,
-        bytes: r.get::<_, i64>(5)? as u64,
-        sheets: r.get::<_, i64>(6)? as usize,
+        bytes: int::unsigned(r.get(5)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
+        sheets: int::index(r.get(6)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
         uploaded: r.get(7)?,
         uploaded_by: r.get(8)?,
-        revision: r.get::<_, i64>(9)? as u64,
+        revision: int::unsigned(r.get(9)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
         supersedes: r.get(10)?,
         superseded_by: r.get(11)?,
         already_here: false,
@@ -1600,8 +1600,8 @@ async fn upload_set(
                     set.name,
                     set.filename,
                     set.digest,
-                    set.bytes as i64,
-                    set.sheets as i64,
+                    int::signed(set.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
+                    int::of_index(set.sheets), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     set.uploaded,
                     set.uploaded_by,
                     set.supersedes,
@@ -1614,12 +1614,12 @@ async fn upload_set(
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         set.id,
-                        sheet.page as i64,
+                        int::of_index(sheet.page), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                         sheet.number,
                         sheet.title,
                         sheet.width,
                         sheet.height,
-                        sheet.rotation as i64,
+                        i64::from(sheet.rotation), // WHAT: widened, never cut. WHY: every one of these fits a 64-bit number
                         sheet.scale
                     ],
                 )?;
@@ -1741,12 +1741,12 @@ pub(crate) fn sheets_for(db: &Connection, set: &str) -> rusqlite::Result<Vec<She
     let rows: Vec<Sheet> = statement
         .query_map(params![set], |r| {
             Ok(Sheet {
-                page: r.get::<_, i64>(0)? as usize,
+                page: int::index(r.get(0)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                 number: r.get(1)?,
                 title: r.get(2)?,
                 width: r.get(3)?,
                 height: r.get(4)?,
-                rotation: r.get::<_, i64>(5)? as i32,
+                rotation: r.get::<_, i32>(5)?, // WHAT: read as the 32-bit number it was written from. WHY: SQLite refuses to hand back one that doesn't fit, where the cast cut it short
                 scale: r.get(6)?,
             })
         })?
@@ -1793,11 +1793,11 @@ fn markups_since(db: &Connection, set: &str, since: u64) -> rusqlite::Result<Vec
          FROM markups WHERE set_id = ?1 AND revision > ?2 ORDER BY revision, id",
     )?;
     let rows: Vec<hub::Markup> = statement
-        .query_map(params![set, since as i64], |r| {
+        .query_map(params![set, int::signed(since)], |r| { // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
             let bytes: Vec<u8> = r.get(8)?;
             Ok(hub::Markup {
                 id: r.get(0)?,
-                page: r.get::<_, i64>(1)? as usize,
+                page: int::index(r.get(1)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                 subject: r.get(2)?,
                 kind: r.get(3)?,
                 caption: r.get(4)?,
@@ -1805,7 +1805,7 @@ fn markups_since(db: &Connection, set: &str, since: u64) -> rusqlite::Result<Vec
                 colour: r.get(6)?,
                 created: r.get(7)?,
                 dictionary: base64::engine::general_purpose::STANDARD.encode(&bytes),
-                revision: r.get::<_, i64>(9)? as u64,
+                revision: int::unsigned(r.get(9)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                 removed: r.get::<_, i64>(10)? != 0,
             })
         })?
@@ -1889,7 +1889,7 @@ fn markups_added(server: &Shared, who: &Who, id: &str, incoming: Vec<NewMarkup>)
                     db.execute(
                         "UPDATE markups SET removed = 1, revision = ?1
                          WHERE id = ?2 AND set_id = ?3",
-                        params![revision as i64, old, id],
+                        params![int::signed(revision), old, id], // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     )?;
                 }
                 let scale = sheets
@@ -1911,20 +1911,20 @@ fn markups_added(server: &Shared, who: &Who, id: &str, incoming: Vec<NewMarkup>)
                     params![
                         fresh_id("mk"),
                         id,
-                        one.page as i64,
+                        int::of_index(one.page), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                         markup.subject(),
                         markup.kind().name(),
                         caption,
                         who.name,
                         format!(
                             "#{:02X}{:02X}{:02X}",
-                            (colour[0] * 255.0) as u8,
-                            (colour[1] * 255.0) as u8,
-                            (colour[2] * 255.0) as u8
+                            colour_byte(colour[0]), // WHAT: red as a byte. WHY: the stored colour is #RRGGBB
+                            colour_byte(colour[1]), // WHAT: green as a byte. WHY: likewise
+                            colour_byte(colour[2]) // WHAT: blue as a byte. WHY: likewise
                         ),
                         now_text,
                         bytes,
-                        revision as i64
+                        int::signed(revision) // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     ],
                 )?;
             }
@@ -2082,7 +2082,7 @@ fn gather(server: &Server, id: &str) -> Answer<(u64, Vec<Stored>, Vec<SheetScale
                 .query_map(params![id], |r| {
                     Ok(Stored {
                         id: r.get(0)?,
-                        page: r.get::<_, i64>(1)? as usize,
+                        page: int::index(r.get(1)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                         dictionary: r.get(2)?,
                         author: r.get(3)?,
                     })
@@ -2414,8 +2414,8 @@ fn markuplist_of(server: &Server, id: &str, user: &[takeoff::user::UserColumn]) 
             };
             let carried_forward = carried.contains(markup);
             let needs_check = row.status == crate::projects::CARRIED;
-            brought += carried_forward as usize;
-            unchecked += needs_check as usize;
+            brought += usize::from(carried_forward); // WHAT: one more when this markup was carried forward. WHY: the count the reply gives
+            unchecked += usize::from(needs_check); // WHAT: one more when it still needs checking. WHY: likewise
             entry["MarkupId"] = serde_json::json!(markup);
             entry["Hyperview"] = serde_json::json!({
                 "MarkupId": markup,
@@ -2542,9 +2542,9 @@ async fn chests(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json
                         name: r.get(1)?,
                         filename: r.get(2)?,
                         digest: r.get(3)?,
-                        bytes: r.get::<_, i64>(4)? as u64,
-                        tools: r.get::<_, i64>(5)? as usize,
-                        sets: r.get::<_, i64>(6)? as usize,
+                        bytes: int::unsigned(r.get(4)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
+                        tools: int::index(r.get(5)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
+                        sets: int::index(r.get(6)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                         uploaded: r.get(7)?,
                         shared: r.get::<_, i64>(8)? != 0,
                     })
@@ -2608,7 +2608,7 @@ async fn plugins(State(server): State<Shared>, headers: HeaderMap) -> Answer<Jso
                         name: r.get(1)?,
                         version: r.get(2)?,
                         digest: r.get(3)?,
-                        bytes: r.get::<_, i64>(4)? as u64,
+                        bytes: int::unsigned(r.get(4)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                         uploaded: r.get(5)?,
                         uploaded_by: r.get(6)?,
                         key: r.get(7)?,
@@ -2746,7 +2746,7 @@ async fn add_plugin(
         Err(denied) => return turned_away(body, denied).await, // WHAT: refused before the file is read. WHY: as above.
     };
     let _turn = big_turn().await; // WHAT: one of four big reads at a time. WHY: a plugin file can be as large as any upload (audit, 2026-11-11)
-    let body = match body_once_let_in(body, server.config.largest_upload as usize).await {
+    let body = match body_once_let_in(body, usize::try_from(server.config.largest_upload).unwrap_or(usize::MAX)).await {
         Ok(body) => body, // WHAT: the plugin file. WHY: checked below.
         Err(denied) => return denied.into_response(), // WHAT: bigger than any upload. WHY: said plainly.
     };
@@ -2791,7 +2791,7 @@ fn plugin_added(server: &Shared, who: Who, body: axum::body::Bytes) -> Answer<Js
                     plugin.name,
                     plugin.version,
                     plugin.digest,
-                    plugin.bytes as i64,
+                    int::signed(plugin.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     plugin.key,
                     plugin.uploaded,
                     plugin.uploaded_by
@@ -2911,11 +2911,11 @@ async fn update_latest(
                         published: r.get(3)?,
                         notes: r.get(4)?,
                         download: String::new(),
-                        bytes: r.get::<_, i64>(5)? as u64,
+                        bytes: int::unsigned(r.get(5)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                         digest: r.get(6)?,
                         signature: r.get(7)?,
                         key: r.get(8)?,
-                        minimum_api_version: r.get::<_, i64>(9)? as u32,
+                        minimum_api_version: r.get::<_, u32>(9)?, // WHAT: read as the 32-bit number it was written from. WHY: SQLite refuses to hand back one that doesn't fit, where the cast cut it short
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -3380,8 +3380,8 @@ async fn copy_set(
                     copy.name,
                     copy.filename,
                     copy.digest,
-                    copy.bytes as i64,
-                    copy.sheets as i64,
+                    int::signed(copy.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
+                    int::of_index(copy.sheets), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     copy.uploaded,
                     copy.uploaded_by,
                     copy.folder,
@@ -4298,11 +4298,11 @@ async fn upload_release(
                     release.platform,
                     release.published,
                     release.notes,
-                    release.bytes as i64,
+                    int::signed(release.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     release.digest.to_lowercase(),
                     release.signature,
                     release.key,
-                    release.minimum_api_version as i64
+                    i64::from(release.minimum_api_version) // WHAT: widened, never cut. WHY: every one of these fits a 64-bit number
                 ],
             )?;
             Ok(())
@@ -4345,7 +4345,7 @@ async fn release_ready(
         .with(|db| {
             Ok(db.execute(
                 "UPDATE releases SET ready = ?1 WHERE version = ?2 AND platform = ?3",
-                params![body.ready as i64, version, platform],
+                params![i64::from(body.ready), version, platform], // WHAT: ready as 1 or 0. WHY: SQLite has no true or false
             )?)
         })
         .map_err(|e| Denied::broke("change that release", e))?;
@@ -4436,9 +4436,9 @@ async fn upload_chest(
                     chest.name,
                     chest.filename,
                     chest.digest,
-                    chest.bytes as i64,
-                    chest.tools as i64,
-                    chest.sets as i64,
+                    int::signed(chest.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
+                    int::of_index(chest.tools), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
+                    int::of_index(chest.sets), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     chest.uploaded
                 ],
             )?;
@@ -4473,6 +4473,12 @@ pub fn mcp_caller(server: &Server, headers: &HeaderMap) -> Result<Who, ()> {
         &[auth::purpose::ASSISTANT, auth::purpose::INTEGRATION],
     )
     .map_err(|_| ())
+}
+
+/// One channel of a colour, 0 to 1, as the byte `#RRGGBB` writes.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // WHAT: a fraction scaled to a byte by a float-to-int cast. WHY: Rust's cast saturates, so 0..1 lands in 0..255 and anything outside is held at the ends; no conversion without a cast exists for a float
+fn colour_byte(channel: f32) -> u8 {
+    (channel * 255.0) as u8 // WHAT: the byte, cut toward zero as before. WHY: the same colour text the markups have always been stored with
 }
 
 fn broke(what: &str, e: impl std::fmt::Display) -> String {
@@ -4513,7 +4519,7 @@ pub fn mcp_projects(server: &Server, who: &Who) -> Result<String, String> {
             if !crate::folders::is_office(who) {
                 for row in &mut rows {
                     let sight = crate::folders::sight_of(db, &row.0, who)?; // WHAT: what this person sees of the job. WHY: its count of sets is only theirs.
-                    row.3 = crate::folders::current_sets_seen(db, &row.0, &sight)? as i64; // WHAT: the sets they can read. WHY: a hidden folder is not even counted for an assistant.
+                    row.3 = int::of_index(crate::folders::current_sets_seen(db, &row.0, &sight)?); // WHAT: the sets they can read. WHY: a hidden folder is not even counted for an assistant.
                 }
             }
             Ok(rows)

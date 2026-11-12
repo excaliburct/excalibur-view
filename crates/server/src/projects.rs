@@ -90,7 +90,7 @@ fn project_from_row(r: &rusqlite::Row) -> rusqlite::Result<Project> {
         number: r.get(1)?,
         name: r.get(2)?,
         created: r.get(3)?,
-        sets: r.get::<_, i64>(4)? as usize,
+        sets: crate::store::int::index(r.get(4)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
         reference: r.get(5)?,
         archived: r.get(6)?,
         place: r.get(7)?,
@@ -519,8 +519,8 @@ pub(crate) fn stamp_seen(db: &Connection, id: &str, sight: &crate::folders::Sigh
         stamp,
         sets: current.len(),
         superseded: sets.len() - current.len(),
-        markups: markups as usize,
-        carried_forward: carried as usize,
+        markups: crate::store::int::index(markups), // WHAT: the count, as a length. WHY: count(*) is never negative
+        carried_forward: crate::store::int::index(carried), // WHAT: likewise. WHY: likewise
         archived: project.archived,
     }))
 }
@@ -674,7 +674,7 @@ pub(crate) fn carry_forward(
     let mut carried = 0usize;
     let mut left: Vec<usize> = Vec::new();
     for (id, page, subject, kind, caption, author, colour, dictionary) in old {
-        let page_index = page as usize;
+        let page_index = crate::store::int::index(page); // WHAT: the page as an index. WHY: written from one
         let paper_matches = match (from_sheets.get(page_index), to_sheets.get(page_index)) {
             (Some(a), Some(b)) => same_paper(a, b),
             _ => false,
@@ -703,7 +703,7 @@ pub(crate) fn carry_forward(
                 colour,
                 when,
                 bytes,
-                revision as i64,
+                crate::store::int::signed(revision), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                 id
             ],
         )?;

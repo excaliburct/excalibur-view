@@ -242,9 +242,9 @@ fn moments(clicks: usize) -> String {
     let mut m = annot::Markup::new(annot::Subtype::Polygon);
     m.set("IT", pdf::Object::name("PolygonCount"));
     m.set_subject("Moment Conn");
-    let points: Vec<[f64; 2]> = (0..clicks).map(|i| [200.0 + 20.0 * i as f64, 300.0]).collect();
+    let points: Vec<[f64; 2]> = (0..u32::try_from(clicks).unwrap()).map(|i| [200.0 + 20.0 * f64::from(i), 300.0]).collect(); // WHAT: one point a click, 20 apart. WHY: a count markup's vertices
     m.set_vertices(&points);
-    m.set("NumCounts", pdf::Object::Int(clicks as i64));
+    m.set("NumCounts", pdf::Object::Int(i64::try_from(clicks).unwrap())); // WHAT: the count it says. WHY: as the viewer writes it
     encoded(m)
 }
 

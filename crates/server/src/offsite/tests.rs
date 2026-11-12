@@ -266,7 +266,7 @@ fn tar_of(entries: &[(&[u8; 100], u8, &[u8])]) -> Vec<u8> {
         h[156] = *kind;
         h[257..263].copy_from_slice(b"ustar\0");
         h[148..156].copy_from_slice(b"        ");
-        let s: u32 = h.iter().map(|&b| b as u32).sum();
+        let s: u32 = h.iter().map(|&b| u32::from(b)).sum(); // WHAT: the header's checksum, each byte widened. WHY: as ustar sums it
         h[148..156].copy_from_slice(format!("{s:06o}\0 ").as_bytes());
         out.extend_from_slice(&h);
         out.extend_from_slice(body);
@@ -1105,7 +1105,7 @@ fn a_planted_manifest_or_an_oversized_sidecar_is_refused_before_it_steers_anythi
         ),
     ];
     for (i, (why, edit, pad)) in cases.into_iter().enumerate() {
-        let n = soon(10 + i as i64);
+        let n = soon(10 + i64::try_from(i).unwrap()); // WHAT: a minute apart for each case. WHY: each planted name is its own
         plant(&w, &n, edit, pad);
         let e = drill(&w, &w.id, &format!("s-plant{i}")).run();
         assert_eq!(e.code, 2, "{why}: {e:?}");
@@ -1784,7 +1784,7 @@ fn a_target_that_cant_be_read_or_has_a_broken_marker_is_never_adopted() {
     assert_eq!(e.code, 2, "{e:?}");
     assert!(e.why.contains("owner-view.json"), "{}", e.why);
     assert!(!w.bucket.join("daily").exists(), "nothing sent"); // WHAT: refused first. WHY: the guard runs before the upload
-    std::fs::write(w.bucket.join("owner-view.json"), vec![b' '; (OWNER_CAP + 1) as usize]).unwrap(); // WHAT: a giant one. WHY: refused unfetched
+    std::fs::write(w.bucket.join("owner-view.json"), vec![b' '; usize::try_from(OWNER_CAP + 1).unwrap()]).unwrap(); // WHAT: a giant one. WHY: refused unfetched
     let e = job(&w).backup();
     assert_eq!(e.code, 2, "{e:?}");
     assert!(e.why.contains("over the"), "{}", e.why);

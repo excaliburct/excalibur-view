@@ -349,11 +349,11 @@ fn take(
                     release.platform,
                     release.published,
                     release.notes,
-                    release.bytes as i64,
+                    crate::store::int::signed(release.bytes), // WHAT: written as SQLite keeps it, a signed 64-bit number. WHY: read back the same by int::unsigned or int::index
                     release.digest.to_lowercase(),
                     release.signature,
                     release.key,
-                    release.minimum_api_version as i64
+                    i64::from(release.minimum_api_version) // WHAT: widened, never cut. WHY: every one of these fits a 64-bit number
                 ],
             )?;
             Ok(())

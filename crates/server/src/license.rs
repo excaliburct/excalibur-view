@@ -433,7 +433,7 @@ fn days_left(began: &str, now: &str) -> u32 {
         time::OffsetDateTime::parse(began, &Rfc3339),
         time::OffsetDateTime::parse(now, &Rfc3339),
     ) else {
-        return TRIAL_DAYS as u32;
+        return u32::try_from(TRIAL_DAYS).unwrap_or(u32::MAX); // WHAT: the full trial. WHY: a clock that can't be read never ends it early; thirty always fits
     };
     let ends = began + time::Duration::days(TRIAL_DAYS);
     if now >= ends {
@@ -441,14 +441,14 @@ fn days_left(began: &str, now: &str) -> u32 {
     }
     let left = (ends - now).whole_seconds();
     let days = (left + 86_399) / 86_400;
-    days.clamp(1, TRIAL_DAYS) as u32
+    u32::try_from(days.clamp(1, TRIAL_DAYS)).unwrap_or(1) // WHAT: the days left, one at least. WHY: held between one and the trial just above, so it always fits; the fallback is never reached
 }
 
 fn people(server: &Server) -> u32 {
     server
         .store
         .with(|db| Ok(db.query_row("SELECT count(*) FROM people", [], |r| r.get::<_, i64>(0))?))
-        .unwrap_or(0) as u32
+        .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX)) // WHAT: the people counted, nought when the count can't be read. WHY: as before; a count past four billion is held at the most, so it never wraps round to look like room on the license
 }
 
 /// Where the office stands, as the program shows it. Administrators see the
@@ -470,8 +470,8 @@ fn days_until(day: &str, now: &str) -> Option<i64> {
         return None;
     }
     let number = |range: std::ops::Range<usize>| day[range].parse::<i32>().ok();
-    let month = time::Month::try_from(number(5..7)? as u8).ok()?;
-    let end = time::Date::from_calendar_date(number(0..4)?, month, number(8..10)? as u8).ok()?;
+    let month = time::Month::try_from(u8::try_from(number(5..7)?).ok()?).ok()?; // WHAT: the month. WHY: two digits, checked by is_date, so it always fits a byte
+    let end = time::Date::from_calendar_date(number(0..4)?, month, u8::try_from(number(8..10)?).ok()?).ok()?; // WHAT: the last day. WHY: likewise; a 32nd day is still refused by the date itself
     let now = time::OffsetDateTime::parse(now, &Rfc3339).ok()?.date();
     Some((end - now).whole_days())
 }
