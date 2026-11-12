@@ -334,7 +334,8 @@ CREATE TABLE IF NOT EXISTS devices (
     approved_at TEXT,
     person      TEXT,
     how         TEXT NOT NULL DEFAULT 'asked',
-    changed     TEXT NOT NULL
+    changed     TEXT NOT NULL,
+    scope       TEXT NOT NULL DEFAULT 'all'
 );
 CREATE INDEX IF NOT EXISTS devices_by_state ON devices(state, asked);
 "#;
@@ -723,6 +724,9 @@ fn upgrade(db: &Connection) -> Result<()> {
     // When a key stops working, for a key given an end. None is never, which
     // is every key made before keys could end, so none of them is broken.
     add_column(db, "keys", "expires", "TEXT")?; // WHAT: the optional end of a key. WHY: a key for a program can be made to run out on its own.
+    add_column(db, "keys", "device", "TEXT")?; // WHAT: the computer a key was made from. WHY: removing the computer takes its keys back (security review L5)
+    add_column(db, "sessions", "migrated_device", "TEXT")?; // WHAT: the device a session carried over, once. WHY: a session from before 0.7.0 carries exactly one seat over (security review H2a)
+    add_column(db, "devices", "scope", "TEXT NOT NULL DEFAULT 'all'")?; // WHAT: every app, or the Citadel cell only. WHY: a computer carried over from Citadel reaches nothing else (security review M1)
     db.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS projects_by_reference
              ON projects(reference) WHERE reference IS NOT NULL;

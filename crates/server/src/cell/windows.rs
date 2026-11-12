@@ -12,10 +12,11 @@ use std::os::windows::io::FromRawHandle;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::System::IO::CancelSynchronousIo;
 use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, SDDL_REVISION_1};
 use windows_sys::Win32::Security::{CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, PSID, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY};
-use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX};
+use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
 use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT};
 use windows_sys::Win32::System::Threading::{CreateProcessAsUserW, GetCurrentProcess, OpenProcessToken, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION, STARTUPINFOW};
 
@@ -59,7 +60,7 @@ pub fn start(server: Shared) {
         if let Some(own) = program.parent() {
             icacls(&super::program_steps(own, &sid)); // WHAT: the cell may read and run its program. WHY: the service's folder is locked to the system and administrators
         }
-        let mut launcher = Cell { server: server.clone(), program, line: String::new(), args, pipe: format!(r"\\.\pipe\{}", super::pipe_name(&install)), sid, process: None, serving: None };
+        let mut launcher = Cell { server: server.clone(), program, line: String::new(), args, pipe: format!(r"\\.\pipe\{}", super::pipe_name(&install)), sid, process: None, serving: None, next: None };
         launcher.line = super::command_line(&launcher.program, &launcher.args); // WHAT: the command line. WHY: written once
         super::supervise(&mut launcher, &server.cell, &std::thread::sleep, &Instant::now); // WHAT: run and restarted. WHY: §6a
     });
@@ -90,12 +91,16 @@ struct Cell {
     pipe: String, // WHAT: `\\.\pipe\excalibur-office-<install id>`. WHY: §6a
     sid: String, // WHAT: the cell's SID. WHY: the pipe and the token
     process: Option<Raw>, // WHAT: the running cell. WHY: waited for
-    serving: Option<std::thread::JoinHandle<()>>, // WHAT: the thread answering its pipe. WHY: ended when the cell stops
+    serving: Option<std::thread::JoinHandle<std::fs::File>>, // WHAT: the thread answering its pipe, which hands the pipe back when done. WHY: the old instance is held until the next exists
+    next: Option<std::fs::File>, // WHAT: the next pipe instance, made before the old one closed. WHY: security review L4: the name is never free during the restart wait
 }
 
 impl super::Launcher for Cell {
     fn start(&mut self) -> std::io::Result<()> {
-        let pipe = make_pipe(&self.pipe, &self.sid)?; // WHAT: the pipe, made first and only by us. WHY: the cell connects to it as it starts; nobody can make it before us
+        let pipe = match self.next.take() {
+            Some(pipe) => pipe, // WHAT: the instance made while the last one was still held. WHY: the name was never free
+            None => make_pipe(&self.pipe, &self.sid, true)?, // WHAT: the first instance, made only if nobody made it first. WHY: a name somebody else holds is an alarm (AddrInUse), not a restart
+        };
         let server = self.server.clone(); // WHAT: the server, for the thread. WHY: its answers
         self.serving = Some(std::thread::Builder::new().name("citadel-pipe".into()).spawn(move || serve(pipe, &server))?); // WHAT: the pipe answered on its own thread. WHY: the supervisor waits on the process meanwhile
         match restricted_process(&self.program, &self.line, &self.sid) {
@@ -104,7 +109,7 @@ impl super::Launcher for Cell {
                 Ok(())
             }
             Err(e) => {
-                self.end_pipe(); // WHAT: the waiting pipe released. WHY: its thread would wait for a cell that never comes
+                self.end_pipe(); // WHAT: the waiting pipe released, the next made first. WHY: its thread would wait for a cell that never comes
                 Err(e)
             }
         }
@@ -118,34 +123,42 @@ impl super::Launcher for Cell {
                 CloseHandle(process.handle()); // WHAT: let go. WHY: no handle kept for a stopped process
             }
         }
-        self.end_pipe(); // WHAT: the pipe's thread ended. WHY: the next start makes a new pipe
+        self.end_pipe(); // WHAT: the next instance made, then the old one's thread ended. WHY: the next start uses it
     }
 }
 
 impl Cell {
-    /// Ends the pipe's thread: if it is still waiting for the cell to
-    /// connect, it is connected to and closed, so it returns.
+    /// Makes the next pipe instance while the old one is still held, then
+    /// ends the old one's thread (cancelling its wait if the cell never
+    /// connected) and lets the old instance go.
     fn end_pipe(&mut self) {
-        let name = wide(OsStr::new(&self.pipe)); // WHAT: the pipe's name. WHY: opened once by us
-        // SAFETY: `name` is a zero-ended UTF-16 string that outlives the call; the handle opened is closed at once.
-        unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: opening and closing our own pipe once
-            let opened = CreateFileW(name.as_ptr(), GENERIC_READ | GENERIC_WRITE, 0, std::ptr::null(), OPEN_EXISTING, 0, std::ptr::null_mut()); // WHAT: our own connection, as the system. WHY: wakes a thread still waiting on ConnectNamedPipe
-            if opened != INVALID_HANDLE_VALUE {
-                CloseHandle(opened); // WHAT: closed at once. WHY: the thread reads the end and returns
-            }
+        match make_pipe(&self.pipe, &self.sid, false) {
+            Ok(next) => self.next = Some(next), // WHAT: held for the next start. WHY: the name is ours throughout
+            Err(e) => tracing::error!("the Citadel cell's next pipe could not be made: {e}"), // WHAT: said. WHY: the next start makes it fresh, and refuses a name someone else took
         }
         if let Some(thread) = self.serving.take() {
-            let _ = thread.join(); // WHAT: waited for. WHY: one pipe at a time
+            use std::os::windows::io::AsRawHandle;
+            for _ in 0..50 {
+                if thread.is_finished() {
+                    break; // WHAT: it has handed the pipe back. WHY: nothing to cancel
+                }
+                // SAFETY: the handle is the live thread's own, borrowed from its JoinHandle for this call only.
+                unsafe { CancelSynchronousIo(thread.as_raw_handle() as HANDLE) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: cancelling our own thread's wait for the cell
+                std::thread::sleep(std::time::Duration::from_millis(20)); // WHAT: a moment. WHY: for the cancel to land
+            }
+            let _ = thread.join(); // WHAT: waited for; the old instance it hands back is dropped here. WHY: only once the next one exists
         }
     }
 }
 
-/// Makes the pipe, the first and only instance, local clients only, with the
-/// system and the cell's SID allowed and nobody else.
-fn make_pipe(name: &str, sid: &str) -> std::io::Result<std::fs::File> {
+/// Makes a pipe instance, local clients only, with the system and the
+/// cell's SID allowed and nobody else; `first` makes it only if nobody holds
+/// the name. At most two instances: the one in use and the next.
+fn make_pipe(name: &str, sid: &str, first: bool) -> std::io::Result<std::fs::File> {
     let sddl = wide(OsStr::new(&super::pipe_sddl(sid))); // WHAT: the permissions. WHY: §6a
     let path = wide(OsStr::new(name)); // WHAT: the pipe's name. WHY: §6a
     let out = super::LONGEST_LINE as u32 * 2; // WHAT: room for two lines each way. WHY: requests and answers are short
+    let open = if first { PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE } else { PIPE_ACCESS_DUPLEX }; // WHAT: both ways; the first only if nobody made it. WHY: a pipe someone else made would be theirs
     // SAFETY: every pointer passed is to a live local (zero-ended UTF-16 strings, the attributes struct); the descriptor
     // Windows allocates is freed once, after the pipe has taken its own copy; the handle returned is owned by the File.
     unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: the pipe made with its permissions
@@ -156,9 +169,9 @@ fn make_pipe(name: &str, sid: &str) -> std::io::Result<std::fs::File> {
         let attributes = SECURITY_ATTRIBUTES { nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(0), lpSecurityDescriptor: descriptor, bInheritHandle: 0 }; // WHAT: the descriptor, not inherited. WHY: the cell gets no handle of ours
         let handle = CreateNamedPipeW(
             path.as_ptr(),
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, // WHAT: both ways, and only if nobody made it first. WHY: a pipe someone else made would be theirs
+            open,
             PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, // WHAT: bytes, blocking, this computer only. WHY: lines of JSON, never from another machine
-            1, // WHAT: one instance. WHY: one cell
+            2, // WHAT: two instances at most. WHY: the one in use and the next, so the name is never free
             out,
             out,
             0, // WHAT: the default wait. WHY: unused
@@ -167,26 +180,28 @@ fn make_pipe(name: &str, sid: &str) -> std::io::Result<std::fs::File> {
         let made = std::io::Error::last_os_error(); // WHAT: why, if it failed. WHY: read before LocalFree can change it
         LocalFree(descriptor); // WHAT: the descriptor let go. WHY: the pipe keeps its own copy
         if handle == INVALID_HANDLE_VALUE {
-            return Err(made); // WHAT: refused. WHY: said, and counted as a stop
+            let taken = first && matches!(made.raw_os_error(), Some(5 | 231)); // WHAT: access denied or all instances busy on a first instance: someone else holds the name. WHY: told apart from any other failure
+            return Err(if taken { std::io::Error::new(std::io::ErrorKind::AddrInUse, format!("the pipe {name} is held by another program")) } else { made }); // WHAT: refused. WHY: a taken name is an alarm (security review L4)
         }
         Ok(std::fs::File::from_raw_handle(handle)) // WHAT: the pipe as a file. WHY: read and written with the standard calls, closed when dropped
     }
 }
 
-/// Waits for the cell to connect, then answers it until it closes.
-fn serve(pipe: std::fs::File, server: &crate::api::Server) {
+/// Waits for the cell to connect, then answers it until it closes; hands the
+/// pipe back, still open.
+fn serve(pipe: std::fs::File, server: &crate::api::Server) -> std::fs::File {
     use std::os::windows::io::AsRawHandle;
     // SAFETY: the handle is the pipe this File owns, alive for the whole call; no overlapped structure is used.
     let connected = unsafe { ConnectNamedPipe(pipe.as_raw_handle() as HANDLE, std::ptr::null_mut()) != 0 || GetLastError() == ERROR_PIPE_CONNECTED }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: waiting for the cell on our own pipe
-    if !connected {
-        return; // WHAT: no connection. WHY: the supervisor makes a new pipe next time
+    if connected {
+        let office = super::Answering::new(server); // WHAT: the answers for this connection. WHY: the pure part
+        let mut reader = BufReader::new(&pipe); // WHAT: lines in. WHY: one JSON object each
+        let mut writer = &pipe; // WHAT: lines out. WHY: one answer each
+        if let Err(e) = super::serve_lines(&mut reader, &mut writer, &office) {
+            tracing::debug!("the Citadel cell's pipe closed: {e}"); // WHAT: noted. WHY: a stopping cell closes it
+        }
     }
-    let office = super::Answering { server }; // WHAT: the answers. WHY: the pure part
-    let mut reader = BufReader::new(&pipe); // WHAT: lines in. WHY: one JSON object each
-    let mut writer = &pipe; // WHAT: lines out. WHY: one answer each
-    if let Err(e) = super::serve_lines(&mut reader, &mut writer, &office) {
-        tracing::debug!("the Citadel cell's pipe closed: {e}"); // WHAT: noted. WHY: a stopping cell closes it
-    }
+    pipe // WHAT: handed back open. WHY: closed only once the next instance exists
 }
 
 /// Starts `program` under a restricted copy of this service's token: every

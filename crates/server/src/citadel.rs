@@ -42,6 +42,7 @@ pub enum Seen {
     NotFound, // WHAT: nothing listening on Citadel's port. WHY: not installed here, or stopped
     NotAnswering, // WHAT: something there, but no good answer. WHY: starting, stuck, or not Citadel
     CertificateChanged { seen: String }, // WHAT: another certificate than the pinned one. WHY: never believed; a person decides
+    PipeTaken, // WHAT: another program holds the cell's pipe name. WHY: an alarm (crate::cell)
 }
 
 impl Seen {
@@ -53,6 +54,7 @@ impl Seen {
             Seen::NotFound => "not-found",
             Seen::NotAnswering => "not-answering",
             Seen::CertificateChanged { .. } => "certificate-changed",
+            Seen::PipeTaken => "pipe-taken",
         }
     }
 

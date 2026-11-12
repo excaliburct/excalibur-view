@@ -36,6 +36,10 @@ pub const HEADER_DEVICE: &str = "X-Excalibur-Device"; // WHAT: §4's header. WHY
 pub const HEADER_TIME: &str = "X-Excalibur-Time"; // WHAT: §4's header. WHY: checked within ±300 s
 /// The header carrying the base64 Ed25519 signature.
 pub const HEADER_SIGNATURE: &str = "X-Excalibur-Signature"; // WHAT: §4's header. WHY: the signature itself
+/// The header carrying the body's SHA-256, the same 64 hex digits the
+/// signature's body line holds. With it the server checks the signature
+/// before it reads a byte of the body, then holds the body to it.
+pub const HEADER_BODY: &str = "X-Excalibur-Body-SHA256"; // WHAT: the declared body hash. WHY: a body is read only for a request already proven; without it, the server reads at most a small body
 
 /// How far a signed time may be from the server's clock, either way.
 pub const WINDOW_SECONDS: i64 = 300; // WHAT: ±300 s. WHY: §4; a signature older than this is refused, and the replay cache need keep no longer
@@ -171,6 +175,7 @@ impl Enroll<'_> {
 /// What a request signature signs (§4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request<'a> {
+    pub server_pin: &'a str, // WHAT: the server's 8714 pin, or "none". WHY: a request signed for one server is never good at another, even the same device's
     pub device_id: &'a str, // WHAT: the signing device's id. WHY: the key is found by it
     pub method: &'a str, // WHAT: GET, POST... WHY: a signed GET is never a POST
     pub target: &'a str, // WHAT: the path and query exactly as sent. WHY: a signature for one route is never another's
@@ -179,20 +184,22 @@ pub struct Request<'a> {
 }
 
 impl Request<'_> {
-    /// Exactly the bytes signed: six lines, each ended by `\n`.
+    /// Exactly the bytes signed: seven lines, each ended by `\n`: the label,
+    /// the server's pin, the device id, the method, the target, the body's
+    /// SHA-256 and the time.
     ///
     /// # Errors
     ///
     /// When a field isn't well formed, so it can't be signed or checked.
     pub fn message(&self) -> Result<Vec<u8>, String> {
-        if !is_device_id(self.device_id) || !is_method(self.method) || !is_target(self.target) || !is_hex64(self.body_sha256) || self.time < 0 {
+        if !is_pin_line(self.server_pin) || !is_device_id(self.device_id) || !is_method(self.method) || !is_target(self.target) || !is_hex64(self.body_sha256) || self.time < 0 {
             return Err("a request field isn't well formed, so it can't be signed or checked".into()); // WHAT: refused whole. WHY: Citadel's rule; hostile headers only ever make it refuse
         }
         Ok(format!(
-            "{REQUEST_LABEL}\n{}\n{}\n{}\n{}\n{}\n",
-            self.device_id, self.method, self.target, self.body_sha256, self.time
+            "{REQUEST_LABEL}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+            self.server_pin, self.device_id, self.method, self.target, self.body_sha256, self.time
         )
-        .into_bytes()) // WHAT: the six lines, ASCII. WHY: §4 exactly
+        .into_bytes()) // WHAT: the seven lines, ASCII. WHY: §4, with the pin line the security review asked for
     }
 }
 
@@ -224,6 +231,7 @@ pub struct Signed {
     pub device: String, // WHAT: X-Excalibur-Device. WHY: §4
     pub time: String, // WHAT: X-Excalibur-Time. WHY: §4
     pub signature: String, // WHAT: X-Excalibur-Signature. WHY: §4
+    pub body: String, // WHAT: X-Excalibur-Body-SHA256, the body line's hash. WHY: the signature is checked before the body is read
 }
 
 /// A device key: the private half, kept on this computer, and what it signs.
@@ -309,11 +317,11 @@ impl DeviceKey {
     /// # Errors
     ///
     /// When the method or target isn't well formed.
-    pub fn sign_request(&self, method: &str, target: &str, body: &[u8], time: i64) -> Result<Signed, String> {
-        let id = self.id(); // WHAT: this key's id. WHY: the first field and the first header
-        let hash = body_hash(body); // WHAT: the body's digest. WHY: the fifth line
-        let message = Request { device_id: &id, method, target, body_sha256: &hash, time }.message()?; // WHAT: the six lines. WHY: §4
-        Ok(Signed { device: id, time: time.to_string(), signature: self.sign(&message) }) // WHAT: the headers. WHY: put on the request
+    pub fn sign_request(&self, server_pin: &str, method: &str, target: &str, body: &[u8], time: i64) -> Result<Signed, String> {
+        let id = self.id(); // WHAT: this key's id. WHY: a field and the first header
+        let hash = body_hash(body); // WHAT: the body's digest. WHY: the body line, and its own header
+        let message = Request { server_pin, device_id: &id, method, target, body_sha256: &hash, time }.message()?; // WHAT: the seven lines. WHY: §4
+        Ok(Signed { device: id, time: time.to_string(), signature: self.sign(&message), body: hash }) // WHAT: the headers. WHY: put on the request
     }
 }
 
@@ -354,7 +362,7 @@ impl Signer {
     /// # Errors
     ///
     /// When the method or target isn't well formed.
-    pub fn sign(&self, method: &str, target: &str, body: &[u8], now: i64) -> Result<Signed, String> {
+    pub fn sign(&self, server_pin: &str, method: &str, target: &str, body: &[u8], now: i64) -> Result<Signed, String> {
         let what = format!("{method} {target} {}", body_hash(body)); // WHAT: the request, less its time. WHY: what makes two signatures the same
         let mut time = now; // WHAT: the second to sign at. WHY: moved on only when taken
         if let Ok(mut recent) = self.recent.lock() {
@@ -369,7 +377,7 @@ impl Signer {
                 recent.pop_front(); // WHAT: bounded. WHY: a long burst can't grow it without end
             }
         }
-        self.key.sign_request(method, target, body, time) // WHAT: signed. WHY: §4
+        self.key.sign_request(server_pin, method, target, body, time) // WHAT: signed. WHY: §4
     }
 }
 
@@ -468,6 +476,17 @@ pub struct Info {
     pub approved_at: Option<String>, // WHAT: when. WHY: shown
     #[serde(default)]
     pub how: String, // WHAT: asked, claimed, migrated, joined or citadel. WHY: how it came in, for whoever reads the list later
+    #[serde(default)]
+    pub scope: String, // WHAT: "all", or "citadel" for a computer approved for the Citadel cell only. WHY: an admin widens it with Approve
+}
+
+/// A device id as a person compares it: its first eight hex digits in two
+/// groups of four, upper case ("29AC 6B9D").
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn short_id(id: &str) -> String {
+    let head: String = id.chars().take(8).collect::<String>().to_uppercase(); // WHAT: the first eight digits. WHY: enough to tell two computers apart by eye
+    if head.len() < 8 { return head; } // WHAT: too short to group. WHY: shown as it is
+    format!("{} {}", &head[..4], &head[4..]) // WHAT: two groups of four. WHY: easy to read out over the phone
 }
 
 /// The app's name for people, as an admin's list says it.
@@ -575,12 +594,12 @@ mod tests {
         let public = key.public_key_text();
         let enroll = Enroll { server_pin: PIN, public_key: &public, app: "latcon-estimating", machine: "DANA-LAPTOP", os_user: "dana", time: 1_794_410_000 };
         let enroll_message = String::from_utf8(enroll.message().unwrap()).unwrap();
-        let get = key.sign_request("GET", "/api/v1/devices/me", b"", 1_794_410_000).unwrap();
+        let get = key.sign_request(PIN, "GET", "/api/v1/devices/me", b"", 1_794_410_000).unwrap();
         let body = br#"{"admin":false}"#;
         let post_target = format!("/api/v1/devices/{}/approve", key.id());
-        let post = key.sign_request("POST", &post_target, body, 1_794_410_005).unwrap();
-        let get_message = String::from_utf8(Request { device_id: &key.id(), method: "GET", target: "/api/v1/devices/me", body_sha256: &body_hash(b""), time: 1_794_410_000 }.message().unwrap()).unwrap();
-        let post_message = String::from_utf8(Request { device_id: &key.id(), method: "POST", target: &post_target, body_sha256: &body_hash(body), time: 1_794_410_005 }.message().unwrap()).unwrap();
+        let post = key.sign_request(PIN, "POST", &post_target, body, 1_794_410_005).unwrap();
+        let get_message = String::from_utf8(Request { server_pin: PIN, device_id: &key.id(), method: "GET", target: "/api/v1/devices/me", body_sha256: &body_hash(b""), time: 1_794_410_000 }.message().unwrap()).unwrap();
+        let post_message = String::from_utf8(Request { server_pin: PIN, device_id: &key.id(), method: "POST", target: &post_target, body_sha256: &body_hash(body), time: 1_794_410_005 }.message().unwrap()).unwrap();
         serde_json::json!({
             "contract": "docs/OFFICE-ENROLLMENT.md sections 3 and 4",
             "notes": [
@@ -588,7 +607,9 @@ mod tests {
                 "device_id = lowercase hex of the first 16 bytes of SHA-256(ASCII \"excalibur-device/1\\n\" followed by the raw 32-byte public key).",
                 "Keys and signatures are standard base64 with padding (44 and 88 characters).",
                 "Every signed line ends with \\n, the last one too. The enrol proof's server pin line is the 8714 SPKI SHA-256 in lowercase hex, or the word none when the server serves no HTTPS.",
-                "The body hash of a request with no body is the SHA-256 of no bytes."
+                "The body hash of a request with no body is the SHA-256 of no bytes.",
+                "excalibur-request/1 signs seven lines: the label, the server's pin (or none), the device id, the method, the target, the body hash and the time. The server pin line is the same one the enrol proof carries.",
+                "X-Excalibur-Body-SHA256 carries the body hash line, so the server checks the signature before reading the body. A request without it is read only up to 1 MiB."
             ],
             "private_key_hex": crate::update::hex(&key.secret()),
             "public_key": public,
@@ -598,11 +619,12 @@ mod tests {
                 "message": enroll_message,
                 "proof": key.enroll_proof(&enroll).unwrap()
             },
+            "server_pin": PIN,
             "requests": [
                 { "method": "GET", "target": "/api/v1/devices/me", "body": "", "body_sha256": body_hash(b""), "time": 1_794_410_000, "message": get_message,
-                  "headers": { HEADER_DEVICE: get.device, HEADER_TIME: get.time, HEADER_SIGNATURE: get.signature } },
+                  "headers": { HEADER_DEVICE: get.device, HEADER_TIME: get.time, HEADER_SIGNATURE: get.signature, HEADER_BODY: get.body } },
                 { "method": "POST", "target": post_target, "body": String::from_utf8(body.to_vec()).unwrap(), "body_sha256": body_hash(body), "time": 1_794_410_005, "message": post_message,
-                  "headers": { HEADER_DEVICE: post.device, HEADER_TIME: post.time, HEADER_SIGNATURE: post.signature } }
+                  "headers": { HEADER_DEVICE: post.device, HEADER_TIME: post.time, HEADER_SIGNATURE: post.signature, HEADER_BODY: post.body } }
             ]
         })
     }
@@ -656,9 +678,9 @@ mod tests {
         assert!(Enroll { app: "word", ..good.clone() }.message().is_err());
         assert!(Enroll { server_pin: "ABC", ..good.clone() }.message().is_err());
         assert!(Enroll { server_pin: NO_PIN, ..good.clone() }.message().is_ok(), "a server without HTTPS signs the word none");
-        assert!(key.sign_request("GET", "/a b", b"", 1).is_err(), "a space in the target");
-        assert!(key.sign_request("get", "/a", b"", 1).is_err(), "a method in lower case");
-        assert!(key.sign_request("GET", "a", b"", 1).is_err(), "a target without its slash");
+        assert!(key.sign_request(PIN, "GET", "/a b", b"", 1).is_err(), "a space in the target");
+        assert!(key.sign_request(PIN, "get", "/a", b"", 1).is_err(), "a method in lower case");
+        assert!(key.sign_request(PIN, "GET", "a", b"", 1).is_err(), "a target without its slash");
     }
 
     #[test]
@@ -672,21 +694,21 @@ mod tests {
     #[test]
     fn the_same_request_twice_in_one_second_is_signed_twice_apart() {
         let signer = Signer::new(fixed());
-        let first = signer.sign("GET", "/api/v1/devices/me", b"", 1000).unwrap();
-        let second = signer.sign("GET", "/api/v1/devices/me", b"", 1000).unwrap();
+        let first = signer.sign(PIN, "GET", "/api/v1/devices/me", b"", 1000).unwrap();
+        let second = signer.sign(PIN, "GET", "/api/v1/devices/me", b"", 1000).unwrap();
         assert_ne!(first.signature, second.signature, "never one signature twice");
         assert_eq!(second.time, "1001");
-        let other = signer.sign("GET", "/api/v1/projects", b"", 1000).unwrap();
+        let other = signer.sign(PIN, "GET", "/api/v1/projects", b"", 1000).unwrap();
         assert_eq!(other.time, "1000", "another request keeps its own second");
     }
 
     #[test]
     fn a_signature_verifies_only_for_its_own_message() {
         let key = fixed();
-        let signed = key.sign_request("POST", "/api/v1/x?y=1", b"{}", 100).unwrap();
-        let message = Request { device_id: &key.id(), method: "POST", target: "/api/v1/x?y=1", body_sha256: &body_hash(b"{}"), time: 100 }.message().unwrap();
+        let signed = key.sign_request(PIN, "POST", "/api/v1/x?y=1", b"{}", 100).unwrap();
+        let message = Request { server_pin: PIN, device_id: &key.id(), method: "POST", target: "/api/v1/x?y=1", body_sha256: &body_hash(b"{}"), time: 100 }.message().unwrap();
         assert!(verify(&key.public_key(), &message, &signed.signature));
-        let other = Request { device_id: &key.id(), method: "POST", target: "/api/v1/x?y=2", body_sha256: &body_hash(b"{}"), time: 100 }.message().unwrap();
+        let other = Request { server_pin: PIN, device_id: &key.id(), method: "POST", target: "/api/v1/x?y=2", body_sha256: &body_hash(b"{}"), time: 100 }.message().unwrap();
         assert!(!verify(&key.public_key(), &other, &signed.signature), "another query");
         assert!(!verify(&key.public_key(), &message, "not a signature"));
     }

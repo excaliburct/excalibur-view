@@ -469,18 +469,35 @@ enum Admission {
     Outside, // WHAT: asked from outside the office. WHY: a join code or invitation is the way in from there
 }
 
-/// Asks the server to let this computer in (the session the client holds
-/// goes with it, so a seat signed in before 0.7.0 comes over approved).
+/// Whether this computer is on the office's list, and if not, asks to be
+/// let in (the session the client holds goes with it, so a seat signed in
+/// before 0.7.0 comes over approved). A computer already listed asks how it
+/// stands instead of asking again: every ask is counted by the server.
 fn admitted(client: &Client) -> Result<Admission, String> {
     if client.device().is_none() {
         return Ok(Admission::In); // WHAT: no key. WHY: the server says no itself if it needs one
     }
+    match client.device_me() {
+        Ok(me) => return standing(&me, client.device().map(|d| d.key().id()).unwrap_or_default()), // WHAT: already on the list. WHY: answered as it stands
+        Err(hub::client::Trouble::Refused(p)) if p.error == "device_unknown" => {} // WHAT: not on the list. WHY: ask below
+        Err(hub::client::Trouble::Refused(p)) if p.error == "not_found" || p.error == "http_error" => return Ok(Admission::In), // WHAT: an older server. WHY: nothing to ask
+        Err(e) => return Err(e.to_string()),
+    }
     match client.ask_to_be_let_in("view", &hub::device::os_user()) {
         Ok(None) => Ok(Admission::In), // WHAT: an older server. WHY: nothing to ask
-        Ok(Some(answer)) if answer.state == "approved" => Ok(Admission::In), // WHAT: let in. WHY: carry on
-        Ok(Some(answer)) => Ok(Admission::Waiting(answer.device_id)), // WHAT: waiting. WHY: an admin decides
+        Ok(Some(answer)) => standing(&hub::device::Me { state: answer.state, ..hub::device::Me::default() }, answer.device_id), // WHAT: how the ask came out. WHY: the same words as /devices/me
         Err(hub::client::Trouble::Refused(p)) if p.error == "not_on_the_office_network" => Ok(Admission::Outside), // WHAT: from outside. WHY: told apart
         Err(e) => Err(e.to_string()),
+    }
+}
+
+/// What a device's state means for carrying on.
+fn standing(me: &hub::device::Me, id: String) -> Result<Admission, String> {
+    match me.state.as_str() {
+        "approved" => Ok(Admission::In), // WHAT: let in. WHY: carry on
+        "waiting" => Ok(Admission::Waiting(id)), // WHAT: waiting. WHY: an admin decides
+        "refused" => Err("An admin turned this computer away. Ask them to approve it in Studio, Office, Computers.".into()), // WHAT: said plainly. WHY: only an admin brings it back
+        _ => Err("This computer was taken off the office's list. Ask an admin to approve it again in Studio, Office, Computers.".into()), // WHAT: removed. WHY: likewise
     }
 }
 

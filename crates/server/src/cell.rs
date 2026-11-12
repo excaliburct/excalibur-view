@@ -160,6 +160,7 @@ pub enum State {
     Starting, // WHAT: started, not yet said hello. WHY: shown as looking
     Running { version: String }, // WHAT: said hello with its version. WHY: shown as running
     NotAnswering, // WHAT: given up after too many restarts, or couldn't be started. WHY: §6a
+    PipeTaken, // WHAT: another program holds the cell's pipe name. WHY: security review L4: an alarm, never a quiet restart
 }
 
 /// The supervisor's last word on the cell. Empty when there is no cell to
@@ -194,6 +195,7 @@ impl Watch {
             State::Starting => None, // WHAT: no word yet. WHY: the look at its port, or "looking"
             State::Running { version } => Some(crate::citadel::Seen::Running { version }), // WHAT: running, its version. WHY: Fleet compares it with the shelf
             State::NotAnswering => Some(crate::citadel::Seen::NotAnswering), // WHAT: not answering. WHY: §6a
+            State::PipeTaken => Some(crate::citadel::Seen::PipeTaken), // WHAT: the pipe's name taken. WHY: shown as an alarm
         }
     }
 }
@@ -220,6 +222,11 @@ pub fn supervise(launcher: &mut dyn Launcher, watch: &Watch, sleep: &dyn Fn(Dura
         watch.set(State::Starting); // WHAT: starting. WHY: shown until it says hello
         match launcher.start() {
             Ok(()) => launcher.wait(), // WHAT: run until it stops. WHY: then the rule decides
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                tracing::error!("ALARM: another program holds the Citadel cell's pipe ({e}); the cell is not started until the Office Server restarts"); // WHAT: written in the log as an alarm. WHY: something on this machine is pretending to be the Office Server to the cell
+                watch.set(State::PipeTaken); // WHAT: shown on /api/v1/office. WHY: an admin and Fleet see it
+                return;
+            }
             Err(e) => tracing::warn!("the Citadel cell could not be started: {e}"), // WHAT: said. WHY: counted as a stop
         }
         match restarts.after_exit(now()) {
@@ -311,9 +318,18 @@ pub fn serve_lines(reader: &mut dyn BufRead, writer: &mut dyn Write, office: &dy
     }
 }
 
-/// The Office Server answering the cell.
+/// The Office Server answering the cell, for one connection.
 pub struct Answering<'a> {
     pub server: &'a crate::api::Server, // WHAT: the server. WHY: its device list, its name and its licence
+    pub migrate_open: std::sync::atomic::AtomicBool, // WHAT: whether this connection may migrate. WHY: only the first cell's first connection, after its first hello
+}
+
+impl<'a> Answering<'a> {
+    /// The answers for a new connection from the cell.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+    pub fn new(server: &'a crate::api::Server) -> Answering<'a> {
+        Answering { server, migrate_open: std::sync::atomic::AtomicBool::new(false) } // WHAT: closed until the first hello ever opens it. WHY: security review M1
+    }
 }
 
 impl Office for Answering<'_> {
@@ -324,11 +340,17 @@ impl Office for Answering<'_> {
     fn hello(&self, version: &str) -> Value {
         let version = version.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+')).take(32).collect::<String>(); // WHAT: a plain version, at most 32 characters. WHY: shown on /api/v1/office as it is
         self.server.cell.set(State::Running { version }); // WHAT: running, its version. WHY: /api/v1/office reports it
+        if crate::devices::first_hello(&self.server.store).unwrap_or(false) {
+            self.migrate_open.store(true, std::sync::atomic::Ordering::SeqCst); // WHAT: this connection may migrate. WHY: it is the first cell's first, over an old Citadel Server's data
+        }
         let modules: Vec<&str> = crate::office::licensed(self.server).iter().map(|m| m.name()).collect(); // WHAT: the licence's parts. WHY: §6a
         json!({ "ok": true, "office": crate::api::installation_name(self.server), "modules": modules })
     }
 
     fn migrate(&self, devices: &[crate::devices::Paired]) -> Value {
+        if !self.migrate_open.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return refusal("migrate_sealed"); // WHAT: refused. WHY: security review M1: only the first connection after the first hello ever, and only once in it
+        }
         match crate::devices::from_citadel(&self.server.store, devices) {
             Ok(Some(added)) => json!({ "ok": true, "added": added }), // WHAT: how many came in. WHY: §6a
             Ok(None) => refusal("already_migrated"), // WHAT: done before. WHY: §6a: sent once
@@ -359,7 +381,7 @@ pub fn cell_sid(install_id: &str) -> String {
 /// else, and nothing inherited.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn pipe_sddl(cell_sid: &str) -> String {
-    format!("D:P(A;;GA;;;SY)(A;;GRGW;;;{cell_sid})") // WHAT: SYSTEM full, the cell read and write. WHY: §6a: "SYSTEM, plus the cell's own SID. Nobody else may connect."
+    format!("D:P(A;;GA;;;SY)(A;;0x12008b;;;{cell_sid})") // WHAT: SYSTEM full; the cell reads and writes data only (FILE_GENERIC_READ and FILE_WRITE_DATA), never FILE_CREATE_PIPE_INSTANCE. WHY: §6a: "SYSTEM, plus the cell's own SID. Nobody else may connect"; and the cell can never make an instance of the pipe itself
 }
 
 /// The `icacls` runs that make the cell's data folder its own: nothing
@@ -541,6 +563,30 @@ mod tests {
         fn wait(&mut self) {}
     }
 
+    /// A pipe name somebody else holds.
+    struct Squatted {
+        starts: usize,
+    }
+
+    impl Launcher for Squatted {
+        fn start(&mut self) -> std::io::Result<()> {
+            self.starts += 1;
+            Err(std::io::Error::new(std::io::ErrorKind::AddrInUse, "taken"))
+        }
+        fn wait(&mut self) {}
+    }
+
+    #[test]
+    fn a_taken_pipe_name_is_an_alarm_and_never_a_restart() {
+        let watch = Watch::default();
+        let mut cell = Squatted { starts: 0 };
+        let start = Instant::now();
+        supervise(&mut cell, &watch, &|_| {}, &|| start);
+        assert_eq!(cell.starts, 1, "never tried again on a name someone else holds");
+        assert_eq!(watch.get(), Some(State::PipeTaken));
+        assert_eq!(watch.seen().map(|s| s.state()), Some("pipe-taken"));
+    }
+
     #[test]
     fn a_cell_that_keeps_stopping_is_given_up_on_and_shown_not_answering() {
         let watch = Watch::default();
@@ -560,7 +606,7 @@ mod tests {
         assert!(sid.starts_with("S-1-5-80-") && sid.split('-').count() == 9, "S, 1, 5, 80 and five sub-authorities: {sid}");
         assert_eq!(sid, cell_sid("inst_1"), "the same every start");
         assert_ne!(sid, cell_sid("inst_2"), "another installation, another SID");
-        assert_eq!(pipe_sddl(&sid), format!("D:P(A;;GA;;;SY)(A;;GRGW;;;{sid})"));
+        assert_eq!(pipe_sddl(&sid), format!("D:P(A;;GA;;;SY)(A;;0x12008b;;;{sid})"), "the cell may read and write, never make an instance");
         let steps = data_steps(Path::new(r"C:\ProgramData\Excalibur Office\citadel"), &sid);
         let grant: Vec<String> = steps[1].iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(grant.contains(&"/inheritance:r".to_string()));

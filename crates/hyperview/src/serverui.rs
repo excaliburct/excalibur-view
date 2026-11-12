@@ -795,7 +795,8 @@ impl App {
                     }
                 }
                 ui.add_space(6.0);
-                ui.label(RichText::new(format!("This computer: {} ({})", hub::device::machine_name(), &approval.device[..8.min(approval.device.len())])).color(theme.faint).size(10.0)); // WHAT: which computer, and the start of its id. WHY: an admin can match it
+                ui.label(RichText::new(format!("This computer: {}. Its code: {}", hub::device::machine_name(), hub::device::short_id(&approval.device))).size(12.0)); // WHAT: which computer, and its code. WHY: security review L5: the admin sees the same code beside its name
+                ui.label(RichText::new("Tell the admin this code, so they approve the right computer.").color(theme.faint).size(10.0)); // WHAT: what the code is for. WHY: plain words
                 if ui.button(if approval.said.is_some() { "Close" } else { "Stop waiting" }).clicked() {
                     close = true; // WHAT: closed. WHY: the person gave up
                 }
@@ -2837,6 +2838,7 @@ fn computers_section(ui: &mut egui::Ui, theme: ui::chrome::Theme, office: &mut O
     let Some(computers) = office.computers.as_ref() else { return }; // WHAT: not an admin's computer. WHY: nothing to show
     let waiting: Vec<&hub::device::Info> = computers.iter().filter(|c| c.state == "waiting").collect(); // WHAT: who waits. WHY: first, and the notice
     let approved: Vec<&hub::device::Info> = computers.iter().filter(|c| c.state == "approved").collect(); // WHAT: who is in. WHY: the second list
+    let away: Vec<&hub::device::Info> = computers.iter().filter(|c| c.state == "refused" || c.state == "removed").collect(); // WHAT: who was turned away or taken off. WHY: only an admin's Approve brings one back
     let title = if waiting.is_empty() { "Computers".to_string() } else { format!("Computers  ({} waiting)", waiting.len()) }; // WHAT: the heading, with the count. WHY: a notice when someone is waiting
     ui.add_space(8.0);
     if !waiting.is_empty() {
@@ -2845,6 +2847,7 @@ fn computers_section(ui: &mut egui::Ui, theme: ui::chrome::Theme, office: &mut O
     egui::CollapsingHeader::new(RichText::new(title).color(theme.faint).size(11.0)).id_salt("computers").default_open(!waiting.is_empty()).show(ui, |ui| {
         for c in &waiting {
             ui.label(RichText::new(waiting_sentence(c)).size(11.5)); // WHAT: who, which computer, which app, when, from where. WHY: §3's wording
+            ui.label(RichText::new(format!("Its code: {}. It shows the same code on its own screen.", hub::device::short_id(&c.id))).color(theme.faint).size(10.5)); // WHAT: the device id's first digits. WHY: security review L5: the admin matches it with the computer asking
             let name = if c.display_name.is_empty() { c.machine.clone() } else { c.display_name.clone() }; // WHAT: how the sentence after names it. WHY: plain
             ui.horizontal(|ui| {
                 if ui.button("Approve").clicked() {
@@ -2868,7 +2871,10 @@ fn computers_section(ui: &mut egui::Ui, theme: ui::chrome::Theme, office: &mut O
             let who = if c.display_name.is_empty() { c.os_user.as_str() } else { c.display_name.as_str() }; // WHAT: the person. WHY: named first
             let name = format!("{who} ({})", c.machine); // WHAT: "Dana (DANA-LAPTOP)". WHY: what an admin recognises
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{name}, {}{}", hub::device::app_title(&c.app), if c.admin { ", admin" } else { "" })).size(11.0)); // WHAT: who, the app, and whether an admin. WHY: one line each
+                ui.label(RichText::new(format!("{name}, {}{}{}  ({})", hub::device::app_title(&c.app), if c.admin { ", admin" } else { "" }, if c.scope == "citadel" { ", LatCon Estimating only" } else { "" }, hub::device::short_id(&c.id))).size(11.0)); // WHAT: who, the app, whether an admin, whether for the estimating program only, and its code. WHY: one line each
+                if c.scope == "citadel" && ui.small_button("Let it use every app").on_hover_text("It came over from the old Citadel Server, approved for estimating only.").clicked() {
+                    actions.computer = Some((c.id.clone(), ComputerChange::Approve, name.clone())); // WHAT: approved for every app. WHY: security review M1: an admin widens it
+                }
                 if ui.small_button("Remove").on_hover_text("This computer has to ask again to come back.").clicked() {
                     actions.computer = Some((c.id.clone(), ComputerChange::Remove, name.clone())); // WHAT: taken off. WHY: §3
                 }
@@ -2877,6 +2883,20 @@ fn computers_section(ui: &mut egui::Ui, theme: ui::chrome::Theme, office: &mut O
                     actions.computer = Some((c.id.clone(), change, name.clone()));
                 }
             });
+        }
+        if !away.is_empty() {
+            ui.add_space(4.0);
+            ui.label(RichText::new("Turned away or taken off").strong().size(11.5)); // WHAT: the third list. WHY: such a computer can't come back by asking; an admin brings it back here
+            for c in &away {
+                let who = if c.display_name.is_empty() { c.os_user.as_str() } else { c.display_name.as_str() }; // WHAT: the person. WHY: named first
+                let name = format!("{who} ({})", c.machine); // WHAT: "Dana (DANA-LAPTOP)". WHY: what an admin recognises
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{name}, {}, {}  ({})", hub::device::app_title(&c.app), c.state, hub::device::short_id(&c.id))).color(theme.faint).size(11.0)); // WHAT: who, which app, why, its code. WHY: one line each
+                    if ui.small_button("Approve").clicked() {
+                        actions.computer = Some((c.id.clone(), ComputerChange::Approve, name.clone())); // WHAT: let back in. WHY: only an admin can
+                    }
+                });
+            }
         }
         if let Some(note) = office.computers_note.as_ref() {
             ui.label(RichText::new(note).color(theme.faint).size(10.5)); // WHAT: what was just done, or why not. WHY: "Make someone else an admin first" is read here

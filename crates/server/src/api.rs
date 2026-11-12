@@ -53,6 +53,9 @@ pub struct Server {
     pub pin: std::sync::OnceLock<String>, // WHAT: the 8714 certificate's SPKI SHA-256. WHY: device requests are bound to it (crate::devices)
     /// Signatures already seen inside the ±300 s window (`crate::devices`).
     pub replays: crate::devices::Replays, // WHAT: the replay cache. WHY: a signed request is accepted once
+    /// When this process started, in Unix seconds: a signature dated before it
+    /// is refused, so a restart's empty replay cache opens no window.
+    pub started: i64, // WHAT: the start time. WHY: security review L3
     /// The Citadel cell, as its supervisor last saw it (`crate::cell`).
     pub cell: crate::cell::Watch, // WHAT: the cell's state. WHY: /api/v1/office reports it
 }
@@ -71,6 +74,7 @@ impl Server {
             secure_port: Default::default(), // WHAT: no HTTPS yet. WHY: set by run::serve once it listens
             pin: std::sync::OnceLock::default(), // WHAT: no certificate yet. WHY: set by run::serve with HTTPS
             replays: crate::devices::Replays::default(), // WHAT: nothing seen yet. WHY: empty on every start; a signature older than five minutes is refused by its time anyway
+            started: hub::device::unix_now(), // WHAT: now. WHY: nothing signed before this start is taken
             cell: crate::cell::Watch::default(), // WHAT: no cell yet. WHY: started by run::serve when the licence and the files allow
         };
         crate::license::begin(&server);
@@ -179,6 +183,18 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
         .strip_prefix("Bearer ")
         .or_else(|| value.strip_prefix("bearer "))
         .map(|t| t.trim().to_string())
+}
+
+/// [`caller`] for a door open to seats that can't sign: a session is
+/// looked up without being kept alive.
+fn caller_still(server: &Server, headers: &HeaderMap) -> Answer<Who> {
+    let token = bearer(headers).ok_or_else(Denied::unauthorised)?; // WHAT: the token. WHY: none, nobody
+    let now = now(); // WHAT: the time. WHY: a session past its end is nobody
+    let found = server
+        .store
+        .with(|db| if token.starts_with(auth::KEY_PREFIX) { auth::whose_key(db, &token, &[auth::purpose::INTEGRATION, auth::purpose::SYNC], &now) } else { auth::whose_still(db, &token, &now) })
+        .map_err(|e| Denied::broke("check who you are", e))?; // WHAT: the person, the session left exactly as it was. WHY: security review H2e
+    found.ok_or_else(Denied::unauthorised)
 }
 
 pub(crate) fn caller(server: &Server, headers: &HeaderMap) -> Answer<Who> {
@@ -560,7 +576,7 @@ pub fn router(server: Shared) -> Router {
         .merge(crate::fleet::router(server.clone()))
         // Where an assistant asks about the quantities. Same token as the
         // API, and read-only: see the note at the top of `crate::mcp`.
-        .merge(crate::mcp::router(server.clone()))
+        .merge(crate::mcp::router(server.clone()).route_layer(axum::middleware::from_fn_with_state(server.clone(), crate::devices::gate))) // WHAT: the assistant's door held by the device gate too. WHY: security review H1: a session from anywhere read the takeoffs here with no device; an assistant's own key still passes, as a key does
         .layer(axum::middleware::from_fn_with_state(server, origin_checked)) // WHAT: a browser page from anywhere else refused. WHY: DNS rebinding let a web page someone in the office opened claim an unclaimed server or join an open one (audit, 2026-11-11)
         .layer(axum::middleware::from_fn(marked)) // WHAT: every answer marked not to be kept, sniffed or framed. WHY: the API said none of it, so a proxy or a browser was left to guess.
 }
@@ -2158,9 +2174,11 @@ async fn takeoff_csv(
 async fn make_key(
     State(server): State<Shared>,
     headers: HeaderMap,
+    device: Option<axum::Extension<crate::devices::Device>>,
     Json(asked): Json<hub::NewKey>,
 ) -> Answer<Json<hub::ApiKey>> {
     let who = person(&server, &headers)?;
+    let made_from = device.map(|axum::Extension(d)| d.id); // WHAT: the computer the key is made from, when the gate checked one. WHY: removing that computer takes the key back
     let purpose = match asked.purpose.trim() {
         p if p == auth::purpose::ASSISTANT => auth::purpose::ASSISTANT,
         p if p == auth::purpose::INTEGRATION => {
@@ -2207,8 +2225,8 @@ async fn make_key(
                 params![who.id, purpose, name],
             )?;
             db.execute(
-                "INSERT INTO keys (id, digest, person, purpose, name, made, expires) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", // WHAT: the new key, with its end if it has one. WHY: the end is checked on every use.
-                params![id, digest, who.id, purpose, name, made, expires],
+                "INSERT INTO keys (id, digest, person, purpose, name, made, expires, device) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", // WHAT: the new key, with its end if it has one, and the computer it came from. WHY: the end is checked on every use; the computer's removal takes it back
+                params![id, digest, who.id, purpose, name, made, expires, made_from],
             )?;
             Ok(())
         })
@@ -2829,7 +2847,7 @@ async fn update_latest(
     headers: HeaderMap,
     Query(asking): Query<Asking>,
 ) -> Answer<Json<UpdateOffer>> {
-    caller(&server, &headers)?;
+    caller_still(&server, &headers)?; // WHAT: who is asking, without keeping their session alive. WHY: security review H2e: this door is open to seats that can't sign, so it must never make an old session last for ever
     // A seat asking is a reason to look at the publisher's feed, when the last
     // look was a while ago: the office hears about a fix within minutes of
     // somebody opening Hyperview, not at the server's next turn. Somebody who
@@ -2946,7 +2964,7 @@ async fn update_download(
     Path(version): Path<String>,
     Query(asking): Query<Asking>,
 ) -> Answer<Response> {
-    caller(&server, &headers)?;
+    caller_still(&server, &headers)?; // WHAT: who is asking, their session untouched. WHY: security review H2e
     let platform = if asking.platform.trim().is_empty() {
         hub::feed::ASSUMED_PLATFORM.to_string()
     } else {

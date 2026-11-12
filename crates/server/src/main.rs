@@ -30,7 +30,8 @@ static BUILD_MARK: &str = hub::build_mark!();
 
 fn main() {
     std::hint::black_box(BUILD_MARK);
-    let first = std::env::args().nth(1).unwrap_or_default();
+    let given: Vec<String> = std::env::args().take(3).collect(); // WHAT: the program's name and its first two words, read once. WHY: the command, and the device id --make-admin takes
+    let first = given.get(1).cloned().unwrap_or_default();
     match first.as_str() {
         #[cfg(windows)]
         "--service" => {
@@ -104,23 +105,34 @@ fn main() {
                 }
             }
         }
-        "--reopen-claim" => { // WHAT: claiming the office server opened again for a day. WHY: §3: the Manager window, on the server PC, can reopen it
-            #[allow(unused_mut)] // WHAT: only Windows changes it. WHY: no warning elsewhere
-            let mut config = Config::from_environment(); // WHAT: this server's settings. WHY: its data folder
-            #[cfg(windows)]
-            if std::env::var_os("HYPERVIEW_DATA").is_none() && hyperview_server::winsvc::data_folder().exists() { config.data = hyperview_server::winsvc::data_folder(); } // WHAT: the installed service's data. WHY: the same folder the service serves
-            match Store::open(&config.database(), &config.blobs()).and_then(|store| hyperview_server::devices::reopen_claim(&store)) {
-                Ok(until) => println!("  The first computer to ask, until {until}, becomes the office's admin, if no computer is approved yet."), // WHAT: what was done. WHY: a person reads it
-                Err(why) => {
-                    eprintln!("  {why}");
-                    std::process::exit(1);
-                }
-            }
-        }
+        "--reopen-claim" | "--make-admin" | "--reset-admins" => device_console(&first, given.get(2).map(String::as_str)), // WHAT: the device list's console commands. WHY: §3 and the security review's M3; on the server itself
         "--console" | "--serve" => console(),
         #[cfg(windows)]
         "" => front_door(),
         _ => console(),
+    }
+}
+
+/// The device list's commands, on the server itself: `--reopen-claim`,
+/// `--make-admin <device id>` and `--reset-admins`. Each needs the server's
+/// own data folder, so it runs only on the server, and each is written in
+/// the audit log.
+fn device_console(command: &str, id: Option<&str>) {
+    #[allow(unused_mut)] // WHAT: only Windows changes it. WHY: no warning elsewhere
+    let mut config = Config::from_environment(); // WHAT: this server's settings. WHY: its data folder
+    #[cfg(windows)]
+    if std::env::var_os("HYPERVIEW_DATA").is_none() && hyperview_server::winsvc::data_folder().exists() { config.data = hyperview_server::winsvc::data_folder(); } // WHAT: the installed service's data. WHY: the same folder the service serves
+    let done = Store::open(&config.database(), &config.blobs()).and_then(|store| match command {
+        "--reopen-claim" => hyperview_server::devices::reopen_claim(&store).map(|until| format!("  The first computer to ask, until {until}, becomes the office's admin.")), // WHAT: claiming open for a day. WHY: only while the office has no admin
+        "--make-admin" => hyperview_server::devices::make_admin_here(&store, id.unwrap_or_default()).map(|id| format!("  The computer {id} is approved, and an admin.")), // WHAT: one computer made an admin. WHY: the way back when every admin computer is lost
+        _ => hyperview_server::devices::reset_admins_here(&store).map(|until| format!("  No computer is an admin now. The first computer on the office network to ask, until {until}, becomes the admin.")), // WHAT: every admin unmade, claiming open. WHY: the same
+    });
+    match done {
+        Ok(said) => println!("{said}"), // WHAT: what was done. WHY: a person reads it
+        Err(why) => {
+            eprintln!("  {why}");
+            std::process::exit(1);
+        }
     }
 }
 

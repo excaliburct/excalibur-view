@@ -668,6 +668,7 @@ mod tests {
                 secure_port: Default::default(), // WHAT: no HTTPS. WHY: a test server
                 pin: std::sync::OnceLock::default(), // WHAT: no certificate. WHY: a test server
                 replays: crate::devices::Replays::default(), // WHAT: nothing seen. WHY: a test server
+                started: 0, // WHAT: the dawn of time. WHY: a test server takes any signature time
                 cell: crate::cell::Watch::default(), // WHAT: no cell. WHY: a test server
             },
             dir,

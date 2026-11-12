@@ -156,6 +156,26 @@ pub fn role_name(role: Role) -> &'static str {
 /// was just used, keeps it alive a while longer.
 pub fn whose(db: &Connection, token: &str, now: &str) -> Result<Option<Who>> {
     let hash = token_hash(token);
+    let Some((who, expires)) = whose_and_when(db, &hash, now)? else {
+        return Ok(None);
+    };
+    keep_alive(db, &hash, &expires, now)?;
+    Ok(Some(who))
+}
+
+/// [`whose`], leaving the session exactly as it was: never kept alive. For
+/// doors open to callers that can't sign (the update routes).
+///
+/// # Errors
+///
+/// When the database can't be read.
+pub fn whose_still(db: &Connection, token: &str, now: &str) -> Result<Option<Who>> {
+    Ok(whose_and_when(db, &token_hash(token), now)?.map(|(who, _)| who)) // WHAT: who, and nothing written. WHY: security review H2e
+}
+
+/// The person a session's digest belongs to, and when it ends, if it is
+/// still good.
+fn whose_and_when(db: &Connection, hash: &str, now: &str) -> Result<Option<(Who, String)>> {
     let found = db
         .query_row(
             "SELECT people.id, people.name, people.email, people.role, sessions.expires
@@ -176,11 +196,7 @@ pub fn whose(db: &Connection, token: &str, now: &str) -> Result<Option<Who>> {
             },
         )
         .optional()?;
-    let Some((who, expires)) = found else {
-        return Ok(None);
-    };
-    keep_alive(db, &hash, &expires, now)?;
-    Ok(Some(who))
+    Ok(found) // WHAT: the person and the session's end. WHY: the caller decides whether to keep it alive
 }
 
 /// Pushes a session's expiry back out to the full span, now that it has been

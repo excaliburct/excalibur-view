@@ -42,6 +42,8 @@ pub mod settings {
     pub const CLAIM_UNTIL: &str = "device_claim_until"; // WHAT: the end of the 24-hour claiming window. WHY: §3; kept so a restart never reopens it
     /// When the Citadel cell carried its paired computers over (RFC 3339).
     pub const CITADEL_MIGRATED: &str = "citadel_migrated"; // WHAT: the cell's one migration. WHY: §6a says it is sent once; a second is refused
+    /// When the Citadel cell first said hello (RFC 3339).
+    pub const CITADEL_HELLO: &str = "citadel_first_hello"; // WHAT: the first hello ever. WHY: migrate is taken only on that first connection
     /// The office certificate, as it was stored, served at
     /// `GET /api/v1/office/identity` (§2.4).
     pub const OFFICE_CERT: &str = "office_cert"; // WHAT: the setting's name. WHY: the contract names it
@@ -50,6 +52,10 @@ pub mod settings {
 /// The `YubiKey` slot the office certificate will be signed from (§2.4). A
 /// placeholder until that signing exists: nothing is signed with it yet.
 pub const OFFICE_KEY_SLOT: &str = "office"; // WHAT: the slot's name. WHY: the later step that signs certificates fills it in; the apps' built-in keys are `OFFICE_KEYS` in trust.rs
+
+/// How long after the device list began a seat may still be carried over
+/// with a session from before it.
+pub const MIGRATION_DAYS: i64 = 30; // WHAT: thirty days. WHY: every seat that is in use comes back within a month; after that an old session is only a stolen one
 
 /// How long after the service's first start the first computer may claim it.
 pub const CLAIM_HOURS: i64 = 24; // WHAT: one day. WHY: §3; a stranger can't race the owner a week later
@@ -97,6 +103,13 @@ pub struct Device {
     pub display_name: String, // WHAT: the person's name. WHY: likewise
     pub approved_by: Option<String>, // WHAT: who approved it. WHY: /devices/me says it
     pub approved_at: Option<String>, // WHAT: when. WHY: likewise
+    pub scope: String, // WHAT: "all", or "citadel" for a computer carried over from Citadel Server. WHY: a Citadel computer is approved for the cell only until an admin widens it
+}
+
+/// The scopes a device can be approved for.
+pub mod scope {
+    pub const ALL: &str = "all"; // WHAT: every app on the Office Server. WHY: what an admin's approval gives
+    pub const CITADEL: &str = "citadel"; // WHAT: the Citadel cell only. WHY: computers carried over from Citadel Server were never approved for anything else
 }
 
 impl Device {
@@ -114,7 +127,7 @@ fn label(display_name: &str, os_user: &str, machine: &str) -> String {
 }
 
 /// The columns read for a device, in order.
-const COLUMNS: &str = "id, public_key, state, admin, app, machine, os_user, display_name, approved_by, approved_at"; // WHAT: one list. WHY: every read builds a Device the same way
+const COLUMNS: &str = "id, public_key, state, admin, app, machine, os_user, display_name, approved_by, approved_at, scope"; // WHAT: one list. WHY: every read builds a Device the same way
 
 fn device_from(r: &rusqlite::Row) -> rusqlite::Result<Option<Device>> {
     let text: String = r.get(1)?; // WHAT: the key as stored, base64. WHY: read back into bytes
@@ -130,6 +143,7 @@ fn device_from(r: &rusqlite::Row) -> rusqlite::Result<Option<Device>> {
         display_name: r.get(7)?,
         approved_by: r.get(8)?,
         approved_at: r.get(9)?,
+        scope: r.get(10)?,
     }))
 }
 
@@ -148,11 +162,6 @@ pub fn find(db: &Connection, id: &str) -> rusqlite::Result<Option<Device>> {
 /// How many approved admin devices there are.
 fn admins(db: &Connection) -> rusqlite::Result<i64> {
     db.query_row("SELECT count(*) FROM devices WHERE state = 'approved' AND admin = 1", [], |r| r.get(0)) // WHAT: the count. WHY: the last one can't be lost
-}
-
-/// How many devices are approved at all.
-fn approved(db: &Connection) -> rusqlite::Result<i64> {
-    db.query_row("SELECT count(*) FROM devices WHERE state = 'approved'", [], |r| r.get(0)) // WHAT: the count. WHY: none means the server is unclaimed
 }
 
 // ---- the clock and the claiming window -------------------------------------
@@ -193,23 +202,67 @@ pub fn begin(server: &Server) {
 }
 
 /// Opens claiming again for a day, from now: the Manager's "reopen", on the
-/// server PC itself (`hyperview-server --reopen-claim`).
+/// server PC itself (`hyperview-server --reopen-claim`). Only while the
+/// office has no admin computer: with one, it approves the next.
 ///
 /// # Errors
 ///
-/// When the setting can't be written.
+/// When the office already has an admin computer, or the setting can't be
+/// written.
 pub fn reopen_claim(store: &crate::Store) -> anyhow::Result<String> {
+    let have = store.with(|db| Ok(admins(db)?))?; // WHAT: how many admin computers there are. WHY: claiming is for an office with none
+    if have > 0 {
+        anyhow::bail!("this office already has an admin computer; that admin approves the next one (or use --make-admin)"); // WHAT: refused. WHY: reopening must never let a stranger take over an office that has an admin
+    }
     let until = rfc3339(time::OffsetDateTime::now_utc() + time::Duration::hours(CLAIM_HOURS)); // WHAT: a day from now. WHY: the same window as at first
     store.set_setting(settings::CLAIM_UNTIL, &until)?; // WHAT: kept. WHY: read by the next request
     let _ = store.audit(&Entry::new(action::REOPENED_CLAIM, "").saying(format!("until {until}"))); // WHAT: written. WHY: every call is in the audit log
     Ok(until)
 }
 
-/// Whether the first computer to ask would be made the admin now: no device
-/// is approved, and the claiming window is open.
+/// Whether the first computer to ask would be made the admin now: no
+/// approved admin computer, and the claiming window is open.
 fn claimable(db: &Connection, until: Option<&str>, now: time::OffsetDateTime) -> rusqlite::Result<bool> {
     let open = until.and_then(parse).is_some_and(|until| now < until); // WHAT: inside the window. WHY: guard 2; a window that doesn't read is shut
-    Ok(open && approved(db)? == 0) // WHAT: and unclaimed. WHY: guard 2
+    Ok(open && admins(db)? == 0) // WHAT: and no admin yet. WHY: guard 2; counting admins, not approvals, so computers carried over from Citadel never leave an office with nobody to approve anyone
+}
+
+/// Makes one device an approved admin, from the server's own console
+/// (`hyperview-server --make-admin <device id>`): the way back for an office
+/// whose admin computers are all lost.
+///
+/// # Errors
+///
+/// When there is no such device, or the database can't be written.
+pub fn make_admin_here(store: &crate::Store, id: &str) -> anyhow::Result<String> {
+    let now = rfc3339(time::OffsetDateTime::now_utc()); // WHAT: now. WHY: written on the row
+    let done = store.with(|db| {
+        Ok(db.execute(
+            "UPDATE devices SET state = 'approved', admin = 1, scope = 'all', approved_by = 'the server console', approved_at = ?2, changed = ?2 WHERE id = ?1",
+            params![id.trim(), now],
+        )?)
+    })?; // WHAT: approved, as an admin, for every app. WHY: someone at the server itself decided
+    if done == 0 {
+        anyhow::bail!("there is no computer with the id {id} on this server's list"); // WHAT: said. WHY: a typo is never silent
+    }
+    let _ = store.audit(&Entry::new(action::MADE_ADMIN, "the server console").about(id.trim().to_string()).saying("made an admin at the server")); // WHAT: written. WHY: every change is in the audit log
+    Ok(id.trim().to_string())
+}
+
+/// Takes admin away from every computer and opens claiming for a day, from
+/// the server's own console (`hyperview-server --reset-admins`): the next
+/// computer on the office network to ask becomes the admin.
+///
+/// # Errors
+///
+/// When the database can't be written.
+pub fn reset_admins_here(store: &crate::Store) -> anyhow::Result<String> {
+    let now = time::OffsetDateTime::now_utc(); // WHAT: now. WHY: the window starts from it
+    let until = rfc3339(now + time::Duration::hours(CLAIM_HOURS)); // WHAT: a day from now. WHY: the same window as at first
+    let unmade = store.with(|db| Ok(db.execute("UPDATE devices SET admin = 0, changed = ?1 WHERE admin = 1", params![rfc3339(now)])?))?; // WHAT: no admins left. WHY: claiming is for an office with none
+    store.set_setting(settings::CLAIM_UNTIL, &until)?; // WHAT: claiming open. WHY: the next computer to ask becomes the admin
+    let _ = store.audit(&Entry::new(action::REOPENED_CLAIM, "the server console").saying(format!("{unmade} admin computers unmade; claiming open until {until}"))); // WHAT: written. WHY: every change is in the audit log
+    Ok(until)
 }
 
 /// The pin line this server's enrol proofs are bound to.
@@ -222,25 +275,53 @@ pub fn pin_line(server: &Server) -> String {
 /// Signatures already seen inside the ±300 s window.
 #[derive(Default)]
 pub struct Replays {
-    seen: Mutex<HashMap<String, i64>>, // WHAT: each signature and when it may be forgotten (Unix seconds). WHY: §4: a replay is refused
+    seen: Mutex<Seen>, // WHAT: the signatures, and how many each device holds. WHY: §4: a replay is refused
+}
+
+/// What the replay cache holds.
+#[derive(Default)]
+struct Seen {
+    signatures: HashMap<String, (i64, String)>, // WHAT: each signature, when it may be forgotten (Unix seconds) and whose it is. WHY: refused if seen again
+    per_device: HashMap<String, usize>, // WHAT: how many each device holds. WHY: one device can't fill the cache and lock everyone else out
 }
 
 /// The most signatures held at once.
 const MOST_REPLAYS: usize = 200_000; // WHAT: two hundred thousand. WHY: ten minutes of a busy office several times over; past it, requests are refused rather than replays let through
 
+/// The most signatures one device holds at once.
+pub const MOST_PER_DEVICE: usize = 20_000; // WHAT: twenty thousand. WHY: over thirty requests a second for ten minutes; past it only that device is refused
+
+impl Seen {
+    /// Forgets every signature whose window has passed.
+    fn forget(&mut self, now: i64) {
+        self.signatures.retain(|_, (forget, _)| *forget >= now); // WHAT: what is past the window goes. WHY: those can't be replayed anyway
+        self.per_device.clear(); // WHAT: the counts, made again. WHY: from what is left
+        for (_, device) in self.signatures.values() {
+            *self.per_device.entry(device.clone()).or_default() += 1;
+        }
+    }
+}
+
 impl Replays {
-    /// True the first time `signature` is offered; false for a replay, or
-    /// when the cache is full even after forgetting what has run out.
-    pub fn first_time(&self, signature: &str, signed_at: i64, now: i64) -> bool {
+    /// True the first time `signature` is offered by `device`; false for a
+    /// replay, or when the cache (or that device's share of it) is full even
+    /// after forgetting what has run out.
+    pub fn first_time(&self, device: &str, signature: &str, signed_at: i64, now: i64) -> bool {
         let Ok(mut seen) = self.seen.lock() else { return false }; // WHAT: a poisoned lock refuses. WHY: failing closed: a replay must never get through
-        if seen.len() >= MOST_REPLAYS {
-            seen.retain(|_, forget| *forget >= now); // WHAT: forget what is past the window. WHY: those can't be replayed anyway
-            if seen.len() >= MOST_REPLAYS {
-                return false; // WHAT: still full. WHY: refusing is the safe way round
+        let full = |seen: &Seen| seen.signatures.len() >= MOST_REPLAYS || seen.per_device.get(device).is_some_and(|n| *n >= MOST_PER_DEVICE); // WHAT: no room, overall or for this device. WHY: checked before and after forgetting
+        if full(&seen) {
+            seen.forget(now); // WHAT: room made. WHY: only what is past the window
+            if full(&seen) {
+                return false; // WHAT: still full. WHY: refusing is the safe way round, and only this device is refused when it is its own share
             }
         }
+        if seen.signatures.contains_key(signature) {
+            return false; // WHAT: seen before. WHY: §4
+        }
         let forget = signed_at.max(now) + wire::WINDOW_SECONDS; // WHAT: kept until its time leaves the window. WHY: after that the window check refuses it
-        seen.insert(signature.to_string(), forget).is_none() // WHAT: inserted, and whether it was new. WHY: one lock, so two copies sent together can't both pass
+        seen.signatures.insert(signature.to_string(), (forget, device.to_string())); // WHAT: kept. WHY: one lock, so two copies sent together can't both pass
+        *seen.per_device.entry(device.to_string()).or_default() += 1; // WHAT: counted to its device. WHY: its share
+        true
     }
 }
 
@@ -262,6 +343,7 @@ struct Headers {
     device: String, // WHAT: the device id. WHY: the key is found by it
     time: i64, // WHAT: when it was signed. WHY: the window
     signature: String, // WHAT: the base64 signature. WHY: checked
+    body: Option<String>, // WHAT: the declared body hash, when sent. WHY: the signature is checked before the body is read
 }
 
 /// Reads the three headers, or `None` when any is missing or malformed.
@@ -273,7 +355,12 @@ fn headers_of(headers: &HeaderMap) -> Option<Headers> {
     if !wire::is_device_id(device) || time.is_empty() || time.len() > 12 || !time.bytes().all(|b| b.is_ascii_digit()) || signature.len() != 88 {
         return None; // WHAT: malformed. WHY: hostile headers only ever make it refuse
     }
-    Some(Headers { device: device.to_string(), time: time.parse().ok()?, signature: signature.to_string() })
+    let body = match get(wire::HEADER_BODY) {
+        Some(hash) if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) => Some(hash.to_string()), // WHAT: a body hash. WHY: checked against the signature first, the body after
+        Some(_) => return None, // WHAT: one that isn't a hash. WHY: refused, never ignored
+        None => None, // WHAT: none sent. WHY: the body is then read, at most a small one, before the signature is checked
+    };
+    Some(Headers { device: device.to_string(), time: time.parse().ok()?, signature: signature.to_string(), body })
 }
 
 /// The first half of the check, before the body is read: the headers, the
@@ -281,12 +368,12 @@ fn headers_of(headers: &HeaderMap) -> Option<Headers> {
 /// is never read.
 fn before_the_body(server: &Server, headers: &HeaderMap, any_state: bool, now: i64) -> Result<(Headers, Device), Refusal> {
     let signed = headers_of(headers).ok_or(Refusal::Missing)?; // WHAT: the headers. WHY: none, none further
-    if (now - signed.time).abs() > wire::WINDOW_SECONDS {
-        return Err(Refusal::Time); // WHAT: outside ±300 s. WHY: §4
+    if (now - signed.time).abs() > wire::WINDOW_SECONDS || signed.time < server.started {
+        return Err(Refusal::Time); // WHAT: outside ±300 s, or signed before this server started. WHY: §4; the replay cache starts empty, so nothing from before a restart is taken
     }
     let device = server.store.with(|db| Ok(find(db, &signed.device)?)).map_err(|_| Refusal::Unknown)?.ok_or(Refusal::Unknown)?; // WHAT: the device, or refused; a database failure refuses too. WHY: failing closed
-    if !any_state && device.state != state::APPROVED {
-        return Err(Refusal::NotApproved); // WHAT: not approved. WHY: §4, guard 3
+    if !any_state && (device.state != state::APPROVED || device.scope != scope::ALL) {
+        return Err(Refusal::NotApproved); // WHAT: not approved, or approved for the Citadel cell only. WHY: §4, guard 3; a computer carried over from Citadel reaches nothing else until an admin widens it
     }
     Ok((signed, device))
 }
@@ -294,12 +381,19 @@ fn before_the_body(server: &Server, headers: &HeaderMap, any_state: bool, now: i
 /// The second half: the signature over the method, target and body, and the
 /// replay cache.
 fn after_the_body(server: &Server, signed: &Headers, device: &Device, method: &str, target: &str, body: &[u8], now: i64) -> Result<(), Refusal> {
-    let hash = wire::body_hash(body); // WHAT: the body's digest. WHY: the fifth line
-    let message = wire::Request { device_id: &signed.device, method, target, body_sha256: &hash, time: signed.time }.message().map_err(|_| Refusal::Signature)?; // WHAT: the six lines. WHY: a target that can't be signed can't verify
+    let hash = wire::body_hash(body); // WHAT: the body's digest. WHY: the body line
+    proven_signature(server, signed, device, method, target, &hash, now) // WHAT: the signature over it, and the replay cache. WHY: §4
+}
+
+/// The signature over a request whose body hash is `hash`, and the replay
+/// cache: checked before the body is read when the hash was declared.
+fn proven_signature(server: &Server, signed: &Headers, device: &Device, method: &str, target: &str, hash: &str, now: i64) -> Result<(), Refusal> {
+    let pin = pin_line(server); // WHAT: this server's pin line. WHY: a request signed for another server never passes here
+    let message = wire::Request { server_pin: &pin, device_id: &signed.device, method, target, body_sha256: hash, time: signed.time }.message().map_err(|_| Refusal::Signature)?; // WHAT: the seven lines. WHY: a target that can't be signed can't verify
     if !wire::verify(&device.public_key, &message, &signed.signature) {
         return Err(Refusal::Signature); // WHAT: not this device's signature. WHY: §4, guard 3
     }
-    if !server.replays.first_time(&signed.signature, signed.time, now) {
+    if !server.replays.first_time(&signed.device, &signed.signature, signed.time, now) {
         return Err(Refusal::Replay); // WHAT: seen before. WHY: §4, guard 3
     }
     Ok(())
@@ -339,6 +433,7 @@ pub enum Door {
 /// Which door a route is, by its method and its pattern inside `/api/v1`.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn door(method: &str, route: &str) -> Door {
+    let method = if method == "HEAD" { "GET" } else { method }; // WHAT: a HEAD is held as its GET. WHY: the router answers HEAD with the GET handler, so it must meet the GET's door
     match (method, route) {
         // WHAT: is it there; the office certificate; asking to be let in; the office's update.
         // WHY: health is kept open as it is now; the certificate is read before anything is trusted; the request is held by
@@ -378,23 +473,36 @@ pub(crate) async fn gate(State(server): State<Shared>, request: axum::extract::R
     let now = wire::unix_now(); // WHAT: the time, once. WHY: the window and the cache read the same clock
     let (mut parts, body) = request.into_parts(); // WHAT: the request in halves. WHY: the body is read only once the headers pass
     let (signed, device) = match before_the_body(&server, &parts.headers, door == Door::Me, now) {
-        Ok(found) => found, // WHAT: a device that may pass. WHY: its body is worth reading now
+        Ok(found) => found, // WHAT: a device that may pass. WHY: its body is worth looking at now
         Err(why) => return refused(&server, &parts.headers, why, body).await, // WHAT: refused unread. WHY: a stranger's body is never read
-    };
-    let large = parts.headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()).is_none_or(|n| n > api::SMALL_BODY as u64); // WHAT: a body that says it is big, or doesn't say. WHY: those take a turn
-    let _turn = if large { body_turn().acquire().await.ok() } else { None }; // WHAT: a turn for a big body. WHY: a few big uploads at once can't hold gigabytes
-    let limit = usize::try_from(server.config.largest_upload).unwrap_or(usize::MAX).saturating_add(1024 * 1024); // WHAT: the upload limit, and a little for the form around it. WHY: the routes' own limits still apply after
-    let Ok(bytes) = axum::body::to_bytes(body, limit).await else {
-        return Denied::new(StatusCode::PAYLOAD_TOO_LARGE, Problem::new("too_large", "That is more than this server takes in one request.")).into_response(); // WHAT: 413. WHY: past any route's limit
     };
     let target = parts
         .extensions
         .get::<axum::extract::OriginalUri>()
         .and_then(|u| u.0.path_and_query().map(|p| p.as_str().to_string()))
-        .unwrap_or_else(|| parts.uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default()); // WHAT: the path and query exactly as sent, before the router took /api/v1 off. WHY: §4's fourth line
-    if let Err(why) = after_the_body(&server, &signed, &device, &method, &target, &bytes, now) {
-        return refused(&server, &parts.headers, why, Body::empty()).await; // WHAT: refused. WHY: the signature or a replay
-    }
+        .unwrap_or_else(|| parts.uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default()); // WHAT: the path and query exactly as sent, before the router took /api/v1 off. WHY: §4's target line
+    let bytes = if let Some(declared) = signed.body.clone() {
+        if let Err(why) = proven_signature(&server, &signed, &device, &method, &target, &declared, now) {
+            return refused(&server, &parts.headers, why, body).await; // WHAT: refused before a byte of the body is read. WHY: an unproven request never holds the server's memory or its upload turns
+        }
+        let limit = body_limit(&server, &method, &route); // WHAT: this route's own most. WHY: never more than the route itself takes
+        let _turn = if limit > api::SMALL_BODY { body_turn().acquire().await.ok() } else { None }; // WHAT: a turn for a big body, taken only once proven. WHY: a few big uploads at once can't hold gigabytes
+        let Some(bytes) = read_within(body, limit, BIG_BODY_TIME).await else {
+            return too_large(); // WHAT: 413. WHY: past the route's limit, or never finished arriving
+        };
+        if wire::body_hash(&bytes) != declared {
+            return refused(&server, &parts.headers, Refusal::Signature, Body::empty()).await; // WHAT: the body isn't the one signed. WHY: §4
+        }
+        bytes
+    } else {
+        let Some(bytes) = read_within(body, api::SMALL_BODY, SMALL_BODY_TIME).await else {
+            return too_large(); // WHAT: 413. WHY: a body past 1 MiB comes with its hash declared, or not at all
+        };
+        if let Err(why) = after_the_body(&server, &signed, &device, &method, &target, &bytes, now) {
+            return refused(&server, &parts.headers, why, Body::empty()).await; // WHAT: refused. WHY: the signature or a replay
+        }
+        bytes
+    };
     if door == Door::Admin && !(device.admin && device.state == state::APPROVED) {
         return Denied::new(
             StatusCode::FORBIDDEN,
@@ -404,6 +512,36 @@ pub(crate) async fn gate(State(server): State<Shared>, request: axum::extract::R
     }
     parts.extensions.insert(device); // WHAT: the device, for the route. WHY: /devices/me and the admin routes read it
     next.run(axum::extract::Request::from_parts(parts, Body::from(bytes))).await // WHAT: on, with the body read. WHY: the routes read it as always
+}
+
+/// How long a body without a declared hash may take to arrive.
+const SMALL_BODY_TIME: std::time::Duration = std::time::Duration::from_secs(30); // WHAT: thirty seconds for at most 1 MiB. WHY: a slow sender can't hold a connection open with an unproven body
+/// How long a proven body may take to arrive.
+const BIG_BODY_TIME: std::time::Duration = std::time::Duration::from_secs(60 * 60); // WHAT: an hour. WHY: a stamped structural set over a slow link; already proven, so only the office's own computers get it
+
+/// The most a route takes, as its handler reads it: the upload limit for
+/// the routes that take a whole file, CAD's own for its drawings, the middle
+/// limit for big JSON, and 1 MiB for everything else.
+fn body_limit(server: &Server, method: &str, route: &str) -> usize {
+    let upload = usize::try_from(server.config.largest_upload).unwrap_or(usize::MAX).saturating_add(1024 * 1024); // WHAT: the office's upload limit, and room for the form around it. WHY: the routes that take a file
+    match (method, route) {
+        ("POST", "/sets" | "/chests" | "/files" | "/admin/releases" | "/plugins" | "/archetype/jobs/:id/checkin") | ("PUT", "/archetype/files/:digest") => upload, // WHAT: whole files. WHY: their handlers take up to the upload limit
+        ("POST", "/cad/drawings") | ("PUT", "/cad/drawings/:id/file") => crate::cad::MOST_BYTES.saturating_add(1024 * 1024), // WHAT: a CAD drawing. WHY: CAD's own 256 MB
+        ("POST", "/sets/:id/markups" | "/plugins/:id/run" | "/projects/:id/folders" | "/sets/:id/signoffs" | "/signoffs/:id/sign" | "/archetype/files/missing" | "/archetype/jobs") => api::MIDDLING_BODY, // WHAT: big JSON. WHY: their handlers read up to 64 MiB
+        _ => api::SMALL_BODY, // WHAT: everything else. WHY: a form or a setting
+    }
+}
+
+/// The body, read within `limit` bytes and `time`, or `None`.
+async fn read_within(body: Body, limit: usize, time: std::time::Duration) -> Option<axum::body::Bytes> {
+    tokio::time::timeout(time, axum::body::to_bytes(body, limit)).await.ok()?.ok() // WHAT: read, bounded both ways. WHY: neither a huge body nor a slow one holds the server
+}
+
+/// The answer for a body that is too big, or never finished arriving.
+fn too_large() -> Response {
+    let mut answer = Denied::new(StatusCode::PAYLOAD_TOO_LARGE, Problem::new("too_large", "That is more than this server takes in one request.")).into_response(); // WHAT: 413. WHY: said plainly
+    answer.headers_mut().insert(header::CONNECTION, header::HeaderValue::from_static("close")); // WHAT: the connection ends here. WHY: the rest of the body is never read
+    answer
 }
 
 /// Whether the bearer token is a program's live key.
@@ -429,9 +567,19 @@ async fn refused(server: &Server, headers: &HeaderMap, why: Refusal, body: Body)
 
 // ---- asking to be let in ----------------------------------------------------------
 
-/// A session from before the device list, still valid now: the person it
-/// belongs to. Only a session, never a key.
-fn migratable_session(db: &Connection, headers: &HeaderMap, began: Option<&str>, now: &str) -> rusqlite::Result<Option<(String, String, bool)>> {
+/// A session that may carry its seat over: one issued before the device
+/// list began, still valid now, never used to carry a seat over before, and
+/// presented within `MIGRATION_DAYS` of the beginning. Only a session, never
+/// a key.
+#[derive(Clone, Debug)]
+struct Carried {
+    person: String, // WHAT: the person's id. WHY: kept on the device's row
+    email: String, // WHAT: their email. WHY: who approved it, in the log
+    admin: bool, // WHAT: whether they are an administrator. WHY: §5: an administrator's seat becomes an admin device, from the office network only
+    token: String, // WHAT: the session's stored digest. WHY: marked used once it carries a seat over
+}
+
+fn migratable_session(db: &Connection, headers: &HeaderMap, began: Option<&str>, now: time::OffsetDateTime) -> rusqlite::Result<Option<Carried>> {
     let Some(token) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(str::trim) else {
         return Ok(None); // WHAT: no session sent. WHY: nothing to carry over
     };
@@ -439,18 +587,22 @@ fn migratable_session(db: &Connection, headers: &HeaderMap, began: Option<&str>,
         return Ok(None); // WHAT: a key. WHY: a key is a program, never a seat
     }
     let Some(began) = began.and_then(parse) else { return Ok(None) }; // WHAT: no beginning recorded. WHY: nothing can be shown to predate it
+    if now >= began + time::Duration::days(MIGRATION_DAYS) {
+        return Ok(None); // WHAT: the carrying-over has closed. WHY: an old session a month on is only somebody else's
+    }
+    let digest = crate::auth::token_hash(token); // WHAT: the session as stored. WHY: looked up and marked by it
     let found: Option<(String, String, String, String)> = db
         .query_row(
             "SELECT people.id, people.email, people.role, sessions.issued
              FROM sessions JOIN people ON people.id = sessions.person
-             WHERE sessions.token = ?1 AND sessions.expires > ?2",
-            params![crate::auth::token_hash(token), now],
+             WHERE sessions.token = ?1 AND sessions.expires > ?2 AND sessions.migrated_device IS NULL",
+            params![digest, rfc3339(now)],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
-        .optional()?; // WHAT: the session's person and when it was issued, only if it hasn't run out. WHY: guard 8: valid at the moment of migration
-    Ok(found.and_then(|(id, email, role, issued)| {
+        .optional()?; // WHAT: the session's person and when it was issued, only if it hasn't run out or carried a seat before. WHY: guard 8: valid at the moment of migration, and once only
+    Ok(found.and_then(|(person, email, role, issued)| {
         let before = parse(&issued).is_some_and(|issued| issued < began); // WHAT: issued before the device list began. WHY: a session made since was made on an approved device, or let in from outside, and never needs carrying over
-        before.then_some((id, email, role == "admin")) // WHAT: the person, and whether an administrator. WHY: §5: the office's View admins are made device admins
+        before.then_some(Carried { person, email, admin: role == "admin", token: digest }) // WHAT: the person, and whether an administrator. WHY: §5
     }))
 }
 
@@ -495,37 +647,40 @@ impl How {
 
 /// What came of a request to be let in.
 struct Outcome {
-    state: &'static str, // WHAT: waiting or approved. WHY: the answer
-    how: Option<How>, // WHAT: how a new or re-asking device came in; none when it was already known and nothing changed. WHY: what is written in the log
+    state: String, // WHAT: waiting, approved, refused or removed. WHY: the answer
+    how: Option<How>, // WHAT: how a new device came in; none when it was already known. WHY: what is written in the log
     approved_by: String, // WHAT: who let it in, when it was let in at once. WHY: the log and the list
-    known: bool, // WHAT: whether the device was already waiting or approved. WHY: a known device's ask isn't a stranger's guess
 }
 
 /// Keeps a device request, in one step: a known device answered as it
-/// stands, a refused or removed one put back to waiting, a new one carried
-/// over, claimed, or put to wait.
-fn keep(db: &Connection, ask: &Ask, id: &str, from: &str, session: Option<&(String, String, bool)>, joined: Option<&str>, claim_until: Option<&str>) -> rusqlite::Result<Result<Outcome, Denied>> {
+/// stands (a refused or removed one stays so: only an admin's approval
+/// brings it back), a new one carried over, claimed, or put to wait.
+fn keep(db: &Connection, ask: &Ask, id: &str, from: &str, session: Option<&Carried>, joined: Option<&str>, claim_until: Option<&str>) -> rusqlite::Result<Result<Outcome, Denied>> {
     let now_at = time::OffsetDateTime::now_utc(); // WHAT: now. WHY: written on the row
     let now = rfc3339(now_at); // WHAT: as text. WHY: likewise
     let existing = find(db, id)?; // WHAT: the device, if already known. WHY: asking twice is the same as asking once
     if let Some(device) = &existing {
-        if device.state == state::APPROVED {
-            return Ok(Ok(Outcome { state: state::APPROVED, how: None, approved_by: String::new(), known: true })); // WHAT: already in. WHY: nothing to change
-        }
-        if device.state == state::WAITING && session.is_none() && joined.is_none() {
-            db.execute(
-                "UPDATE devices SET app_version = ?2, display_name = ?3, platform = ?4, asked_from = ?5, changed = ?6 WHERE id = ?1",
-                params![id, ask.app_version, ask.display_name, ask.platform, from, now],
-            )?; // WHAT: the shown details refreshed. WHY: the admin sees what the computer says now
-            return Ok(Ok(Outcome { state: state::WAITING, how: None, approved_by: String::new(), known: true })); // WHAT: still waiting. WHY: an admin hasn't answered
+        let waiting = device.state == state::WAITING; // WHAT: still waiting. WHY: the only state a request can move on
+        if !waiting || (session.is_none() && joined.is_none()) {
+            if waiting {
+                db.execute(
+                    "UPDATE devices SET app_version = ?2, display_name = ?3, platform = ?4, asked_from = ?5, changed = ?6 WHERE id = ?1",
+                    params![id, ask.app_version, ask.display_name, ask.platform, from, now],
+                )?; // WHAT: the shown details refreshed. WHY: the admin sees what the computer says now
+            }
+            return Ok(Ok(Outcome { state: device.state.clone(), how: None, approved_by: String::new() })); // WHAT: as it stands. WHY: approved stays approved; refused and removed stay so (security review H2c); waiting waits
         }
     }
     let waiting: i64 = db.query_row("SELECT count(*) FROM devices WHERE state = 'waiting'", [], |r| r.get(0))?; // WHAT: how many wait now. WHY: the list is bounded
     if existing.is_none() && waiting >= MOST_WAITING {
         return Ok(Err(Denied::new(StatusCode::SERVICE_UNAVAILABLE, Problem::new("too_many_waiting", "Too many computers are waiting to be approved. Ask an admin to answer them first.")))); // WHAT: refused. WHY: a stranger can't fill the list without end
     }
-    let (state_now, admin, how, by) = if let Some((_, email, is_admin)) = session {
-        (state::APPROVED, *is_admin, How::Migrated, email.clone()) // WHAT: carried over, an administrator's seat as an admin device. WHY: §5
+    let carried = match session {
+        Some(carried) => db.execute("UPDATE sessions SET migrated_device = ?2 WHERE token = ?1 AND migrated_device IS NULL", params![carried.token, id])? == 1, // WHAT: the session marked used for this one device. WHY: security review H2a: a session carries exactly one seat over, once
+        None => false,
+    };
+    let (state_now, admin, how, by) = if let (true, Some(c)) = (carried, session) {
+        (state::APPROVED, c.admin, How::Migrated, c.email.clone()) // WHAT: carried over; an administrator's seat as an admin device (the caller has already made it not one from outside). WHY: §5
     } else if let Some(how_joined) = joined {
         (state::APPROVED, false, How::Joined, how_joined.to_string()) // WHAT: let in by the code or invitation it joined with. WHY: §5
     } else if claimable(db, claim_until, now_at)? {
@@ -535,16 +690,22 @@ fn keep(db: &Connection, ask: &Ask, id: &str, from: &str, session: Option<&(Stri
     };
     let approved_at = (state_now == state::APPROVED).then(|| now.clone()); // WHAT: when, if let in now. WHY: /devices/me says it
     let approved_by = (state_now == state::APPROVED).then(|| by.clone()); // WHAT: who, if let in now. WHY: likewise
-    let person = session.map(|(id, _, _)| id.clone()); // WHAT: the person it was carried over with. WHY: kept for whoever reads the list later
+    let person = session.filter(|_| carried).map(|c| c.person.clone()); // WHAT: the person it was carried over with. WHY: kept for whoever reads the list later
     db.execute(
-        "INSERT INTO devices (id, public_key, app, app_version, machine, os_user, display_name, platform, state, admin, asked, asked_from, approved_by, approved_at, person, how, changed)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?11)
+        "INSERT INTO devices (id, public_key, app, app_version, machine, os_user, display_name, platform, state, admin, asked, asked_from, approved_by, approved_at, person, how, changed, scope)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?11, 'all')
          ON CONFLICT(id) DO UPDATE SET app = excluded.app, app_version = excluded.app_version, machine = excluded.machine, os_user = excluded.os_user,
              display_name = excluded.display_name, platform = excluded.platform, state = excluded.state, admin = excluded.admin, asked = excluded.asked,
              asked_from = excluded.asked_from, approved_by = excluded.approved_by, approved_at = excluded.approved_at, person = excluded.person, how = excluded.how, changed = excluded.changed",
         params![id, ask.public_key, ask.app, ask.app_version, ask.machine, ask.os_user, ask.display_name, ask.platform, state_now, i64::from(admin), now, from, approved_by, approved_at, person, how.word()],
-    )?; // WHAT: the device, new or asking again. WHY: one row per key
-    Ok(Ok(Outcome { state: state_now, how: Some(how), approved_by: by, known: false }))
+    )?; // WHAT: the device, new or still waiting. WHY: one row per key
+    Ok(Ok(Outcome { state: state_now.to_string(), how: Some(how), approved_by: by }))
+}
+
+/// Whether a request carries any sign of having come through a proxy:
+/// `Forwarded`, `X-Forwarded-For`, `X-Real-IP` or `Via`.
+fn proxied(headers: &HeaderMap) -> bool {
+    ["forwarded", "x-forwarded-for", "x-real-ip", "via"].iter().any(|h| headers.contains_key(*h)) // WHAT: any of them. WHY: security review M3: a NAS's reverse proxy or a router's forward makes the internet look local; any sign of one counts as outside here
 }
 
 /// `POST /api/v1/devices/request` (§3): a computer asks to be let in.
@@ -556,13 +717,13 @@ pub(crate) async fn request(State(server): State<Shared>, headers: HeaderMap, bo
 }
 
 async fn asked(server: &Shared, headers: &HeaderMap, body: Body) -> Answer<wire::Answer> {
-    let now = api::now(); // WHAT: the time, as text. WHY: sessions are compared with it
     let began = server.store.setting(settings::BEGAN).ok().flatten(); // WHAT: when the device list began. WHY: the migration cut-off
+    let local = !api::from_outside(headers) && !proxied(headers) && api::seen_from(headers).parse::<std::net::IpAddr>().is_ok_and(hub::office::is_local); // WHAT: not marked as from the internet, no sign of a proxy, and the socket's address on a local network. WHY: §3; a router forwarding the port straight in, or a proxy, is not the office network
     let session = server
         .store
-        .with(|db| Ok(migratable_session(db, headers, began.as_deref(), &now)?))
-        .map_err(|e| Denied::broke("check that session", e))?; // WHAT: a session from before 0.7.0, if one came. WHY: §5's migration
-    let local = !api::from_outside(headers) && api::seen_from(headers).parse::<std::net::IpAddr>().is_ok_and(hub::office::is_local); // WHAT: not marked as from the internet, and the socket's address on a local network. WHY: §3; a router forwarding the port straight in is not the office network either, and no forwarded header alone decides
+        .with(|db| Ok(migratable_session(db, headers, began.as_deref(), time::OffsetDateTime::now_utc())?))
+        .map_err(|e| Denied::broke("check that session", e))?
+        .map(|c| Carried { admin: c.admin && local, ..c }); // WHAT: a session from before 0.7.0, if one came; an administrator's only from the office network. WHY: §5's migration; security review H2d: from outside it carries a seat over as an ordinary one
     if !local && session.is_none() {
         return Err(Denied::new(
             StatusCode::FORBIDDEN,
@@ -572,21 +733,21 @@ async fn asked(server: &Shared, headers: &HeaderMap, body: Body) -> Answer<wire:
     let from = api::seen_from(headers); // WHAT: where it came from. WHY: counted, and shown to the admin
     let counted = format!("device-ask {}", crate::patience::counted_as(&from)); // WHAT: the address as counted, apart from sign-ins and joins. WHY: one door's tries never cost another's
     if let Err(owed) = server.patience.begin(crate::patience::JOINING, &[counted.as_str()]) {
-        return Err(Denied::new(StatusCode::TOO_MANY_REQUESTS, Problem::new("too_many", crate::patience::refusal(owed)))); // WHAT: 429. WHY: §3: rate-limited per address with the JOINING rule
+        return Err(Denied::new(StatusCode::TOO_MANY_REQUESTS, Problem::new("too_many", crate::patience::refusal(owed)))); // WHAT: 429. WHY: §3: rate-limited per address with the JOINING rule; every ask counts (security review L2), and a computer already on the list asks how it stands with /devices/me instead
     }
     let ask: Ask = api::json_once_let_in(body, ASK_BODY).await?; // WHAT: the request, read only now. WHY: after the cheap checks
     let key = proven(server, &ask, wire::unix_now())?; // WHAT: the key, its proof checked. WHY: nothing is kept unproven
     let id = wire::device_id(&key); // WHAT: the id, worked out here. WHY: never taken from the asker
-    let until = server.store.setting(settings::CLAIM_UNTIL).ok().flatten(); // WHAT: the claiming window. WHY: guard 2
+    let until = if local { server.store.setting(settings::CLAIM_UNTIL).ok().flatten() } else { None }; // WHAT: the claiming window, only from the office network. WHY: guard 2; nobody outside ever claims the server
     let outcome = server
         .store
         .with(|db| Ok(keep(db, &ask, &id, &from, session.as_ref(), None, until.as_deref())?))
         .map_err(|e| Denied::broke("keep that request", e))??; // WHAT: kept, in one step. WHY: two computers asking together can't both claim the server
-    if outcome.known || outcome.state == state::APPROVED {
-        server.patience.right(&counted); // WHAT: a known computer asking again, or one let in at once (claimed, or carried over with its session). WHY: not a stranger's try; only a new computer left waiting is counted
+    if outcome.how.is_some() && outcome.state == state::APPROVED {
+        server.patience.right(&counted); // WHAT: a new computer let in at once (claimed, carried over with its own session, once). WHY: not a stranger's try; every other ask stays counted, a known computer's too (security review L2)
     }
     write_down(server, &ask, &id, &from, &outcome); // WHAT: the audit line. WHY: every call is written in the audit log
-    Ok(wire::Answer { device_id: id, state: outcome.state.to_string() })
+    Ok(wire::Answer { device_id: id, state: outcome.state })
 }
 
 /// The audit line for a request to be let in.
@@ -600,7 +761,7 @@ fn write_down(server: &Server, ask: &Ask, id: &str, from: &str, outcome: &Outcom
     }; // WHAT: which action. WHY: the log reads plainly
     let mut entry = Entry::new(what, &who).about(format!("{} on {}", wire::app_title(&ask.app), id)).from(from); // WHAT: who, which app, which device, where from. WHY: the line an auditor wants
     if outcome.approved_by.is_empty() {
-        entry = entry.saying(outcome.state.to_string()); // WHAT: waiting, or already approved. WHY: said
+        entry = entry.saying(outcome.state.clone()); // WHAT: waiting, or how it stands. WHY: said
     } else {
         entry = entry.saying(format!("approved by {}", outcome.approved_by)); // WHAT: who let it in. WHY: said
     }
@@ -640,7 +801,7 @@ pub(crate) async fn list(State(server): State<Shared>, Extension(_admin): Extens
         .store
         .with(|db| {
             let mut statement = db.prepare(
-                "SELECT id, app, app_version, machine, os_user, display_name, platform, state, admin, asked, asked_from, approved_by, approved_at, how
+                "SELECT id, app, app_version, machine, os_user, display_name, platform, state, admin, asked, asked_from, approved_by, approved_at, how, scope
                  FROM devices ORDER BY (state = 'waiting') DESC, asked DESC",
             )?; // WHAT: waiting first, newest first. WHY: §3
             let rows = statement.query_map([], |r| {
@@ -659,6 +820,7 @@ pub(crate) async fn list(State(server): State<Shared>, Extension(_admin): Extens
                     approved_by: r.get(11)?,
                     approved_at: r.get(12)?,
                     how: r.get(13)?,
+                    scope: r.get(14)?,
                 })
             })?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -712,15 +874,16 @@ fn change(db: &Connection, id: &str, what: Change, by: &str) -> rusqlite::Result
     match what {
         Change::Approve { admin } => {
             db.execute(
-                "UPDATE devices SET state = 'approved', admin = ?2, approved_by = ?3, approved_at = ?4, changed = ?4 WHERE id = ?1",
+                "UPDATE devices SET state = 'approved', admin = ?2, scope = 'all', approved_by = ?3, approved_at = ?4, changed = ?4 WHERE id = ?1",
                 params![id, i64::from(admin), by, now],
-            )?; // WHAT: approved. WHY: let in
+            )?; // WHAT: approved, for every app. WHY: let in; an admin's approval is what widens a computer carried over from Citadel
         }
         Change::Refuse => {
             db.execute("UPDATE devices SET state = 'refused', admin = 0, changed = ?2 WHERE id = ?1", params![id, now])?; // WHAT: refused. WHY: turned down
         }
         Change::Remove => {
-            db.execute("UPDATE devices SET state = 'removed', admin = 0, approved_by = NULL, approved_at = NULL, changed = ?2 WHERE id = ?1", params![id, now])?; // WHAT: removed. WHY: it must ask again
+            db.execute("UPDATE devices SET state = 'removed', admin = 0, approved_by = NULL, approved_at = NULL, changed = ?2 WHERE id = ?1", params![id, now])?; // WHAT: removed. WHY: only an admin's approval brings it back
+            db.execute("DELETE FROM keys WHERE device = ?1", params![id])?; // WHAT: every key for another program made from it, taken back. WHY: security review L5: a removed computer leaves nothing behind that still works
         }
         Change::Admin { on } => {
             if target.state != state::APPROVED {
@@ -826,8 +989,20 @@ pub struct Paired {
     pub paired_by: String, // WHAT: who paired it. WHY: §5: recorded
 }
 
+/// Notes the cell's hello: true only for the very first hello this server
+/// has ever had, the one connection in which `migrate` is taken.
+///
+/// # Errors
+///
+/// When the database can't be written.
+pub fn first_hello(store: &crate::Store) -> anyhow::Result<bool> {
+    let now = rfc3339(time::OffsetDateTime::now_utc()); // WHAT: now. WHY: written once
+    Ok(store.with(|db| Ok(db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)", params![settings::CITADEL_HELLO, now])?))? == 1) // WHAT: written only if never written. WHY: security review M1: migrate is sealed after the first cell's first connection
+}
+
 /// Brings an old Citadel Server's paired computers into the device list,
-/// approved, once. The number added; `None` when it was already done.
+/// approved for the Citadel cell only, once. The number added; `None` when
+/// it was already done.
 ///
 /// # Errors
 ///
@@ -849,10 +1024,10 @@ pub fn from_citadel(store: &crate::Store, paired: &[Paired]) -> anyhow::Result<O
             let at = if parse(&one.paired_at).is_some() { one.paired_at.clone() } else { now.clone() }; // WHAT: when it was paired, or now. WHY: a date that doesn't read isn't kept
             let by = if one.paired_by.trim().is_empty() { "Citadel Server".to_string() } else { one.paired_by.clone() }; // WHAT: who paired it. WHY: §5
             added += db.execute(
-                "INSERT OR IGNORE INTO devices (id, public_key, app, app_version, machine, os_user, display_name, platform, state, admin, asked, asked_from, approved_by, approved_at, person, how, changed)
-                 VALUES (?1, ?2, 'latcon-estimating', '', ?3, '', ?4, 'windows-x64', 'approved', 0, ?5, '', ?6, ?5, NULL, 'citadel', ?7)",
+                "INSERT OR IGNORE INTO devices (id, public_key, app, app_version, machine, os_user, display_name, platform, state, admin, asked, asked_from, approved_by, approved_at, person, how, changed, scope)
+                 VALUES (?1, ?2, 'latcon-estimating', '', ?3, '', ?4, 'windows-x64', 'approved', 0, ?5, '', ?6, ?5, NULL, 'citadel', ?7, 'citadel')",
                 params![id, one.public_key, one.machine, one.name, at, by, now],
-            )?; // WHAT: approved, unless the key is already listed. WHY: a computer already here keeps how it stands
+            )?; // WHAT: approved for the Citadel cell only, unless the key is already listed. WHY: security review M1: paired with Citadel Server means trusted by Citadel, nothing more, until an admin widens it
         }
         db.execute("INSERT INTO settings (key, value) VALUES (?1, ?2)", params![settings::CITADEL_MIGRATED, now])?; // WHAT: done. WHY: never again
         Ok(Some(added))
@@ -870,9 +1045,9 @@ mod tests {
     #[test]
     fn a_replay_is_refused_and_a_fresh_signature_is_not() {
         let replays = Replays::default();
-        assert!(replays.first_time("a", 100, 100));
-        assert!(!replays.first_time("a", 100, 101), "the same signature again");
-        assert!(replays.first_time("b", 100, 101));
+        assert!(replays.first_time("d", "a", 100, 100));
+        assert!(!replays.first_time("d", "a", 100, 101), "the same signature again");
+        assert!(replays.first_time("d", "b", 100, 101));
     }
 
     #[test]

@@ -19,9 +19,13 @@ struct Office {
 }
 
 fn start() -> Office {
-    let n: u64 = rand::random();
+    start_with(|_| {}, rand::random())
+}
+
+/// [`start`], with the configuration changed first.
+fn start_with(change: impl FnOnce(&mut Config), n: u64) -> Office {
     let data = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("devices-{n:016x}")); // WHAT: a fresh folder. WHY: tests run side by side
-    let config = Config {
+    let mut config = Config {
         name: "LatCon".into(),
         data: data.clone(),
         listen: "127.0.0.1:0".parse().unwrap(),
@@ -29,6 +33,7 @@ fn start() -> Office {
         devices: hyperview_server::config::Devices::Required, // WHAT: devices required. WHY: the thing under test
         ..Config::default()
     };
+    change(&mut config); // WHAT: the test's own settings. WHY: some tests need a bigger upload limit
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     let (told, heard) = std::sync::mpsc::channel();
     runtime.spawn(async move {
@@ -75,6 +80,25 @@ impl Office {
             Ok(r) => (r.status(), r.into_json().unwrap_or(serde_json::Value::Null)),
             Err(ureq::Error::Status(code, r)) => (code, r.into_json().unwrap_or(serde_json::Value::Null)),
             Err(e) => panic!("{e}"),
+        }
+    }
+
+    /// A raw request with a body, signed as given, the body hash declared or
+    /// not; its status and error word (0 and "" when the connection was
+    /// closed before an answer came).
+    fn raw_body(&self, method: &str, path: &str, body: &[u8], s: &device::Signed, declare: bool) -> (u16, String) {
+        let (agent, _) = hub::pinned::agent(Some(&self.pin)).unwrap();
+        let agent = agent.timeout(std::time::Duration::from_secs(30)).build();
+        let mut request = agent.request(method, &format!("{}{path}", self.base())).set(device::HEADER_DEVICE, &s.device).set(device::HEADER_TIME, &s.time).set(device::HEADER_SIGNATURE, &s.signature);
+        if declare {
+            request = request.set(device::HEADER_BODY, &s.body);
+        }
+        let answer = if body.is_empty() { request.call() } else { request.send_bytes(body) };
+        let word = |r: ureq::Response| r.into_json::<serde_json::Value>().ok().and_then(|v| v["error"].as_str().map(str::to_string)).unwrap_or_default(); // WHAT: the error's short name. WHY: tells the gate's refusal from View's own
+        match answer {
+            Ok(r) => (r.status(), word(r)),
+            Err(ureq::Error::Status(code, r)) => (code, word(r)),
+            Err(_) => (0, String::new()),
         }
     }
 
@@ -145,39 +169,39 @@ fn guard_3_only_an_approved_device_with_a_good_fresh_signature_gets_past_the_gat
     };
 
     // An approved device passes the gate (and meets View's own sign-in).
-    let good = admin.sign("GET", "/api/v1/me", b"", now).unwrap();
+    let good = admin.sign(&office.pin, "GET", "/api/v1/me", b"", now).unwrap();
     through(office.raw("GET", "/api/v1/me", b"", Some(&good), &[]), "approved");
     // The same signature again is a replay.
     refused(office.raw("GET", "/api/v1/me", b"", Some(&good), &[]), "a replay");
     // Nothing signed at all.
     refused(office.raw("GET", "/api/v1/me", b"", None, &[]), "unsigned");
     // A bad signature: another key's, under this device's id.
-    let mut forged = signer(9).sign("GET", "/api/v1/me", b"", now).unwrap();
+    let mut forged = signer(9).sign(&office.pin, "GET", "/api/v1/me", b"", now).unwrap();
     forged.device = admin.key().id();
     refused(office.raw("GET", "/api/v1/me", b"", Some(&forged), &[]), "a bad signature");
     // Signed for another path.
-    let elsewhere = admin.sign("GET", "/api/v1/projects", b"", now).unwrap();
+    let elsewhere = admin.sign(&office.pin, "GET", "/api/v1/projects", b"", now).unwrap();
     refused(office.raw("GET", "/api/v1/me", b"", Some(&elsewhere), &[]), "signed for another target");
     // Outside ±300 s, either way.
-    refused(office.raw("GET", "/api/v1/me", b"", Some(&admin.sign("GET", "/api/v1/me", b"", now - 301).unwrap()), &[]), "too old");
-    refused(office.raw("GET", "/api/v1/me", b"", Some(&admin.sign("GET", "/api/v1/me", b"", now + 301).unwrap()), &[]), "too far ahead");
+    refused(office.raw("GET", "/api/v1/me", b"", Some(&admin.sign(&office.pin, "GET", "/api/v1/me", b"", now - 301).unwrap()), &[]), "too old");
+    refused(office.raw("GET", "/api/v1/me", b"", Some(&admin.sign(&office.pin, "GET", "/api/v1/me", b"", now + 301).unwrap()), &[]), "too far ahead");
     // An unknown device.
-    refused(office.raw("GET", "/api/v1/me", b"", Some(&signer(7).sign("GET", "/api/v1/me", b"", now).unwrap()), &[]), "unknown");
+    refused(office.raw("GET", "/api/v1/me", b"", Some(&signer(7).sign(&office.pin, "GET", "/api/v1/me", b"", now).unwrap()), &[]), "unknown");
     // Waiting, refused and removed devices.
     let other = signer(4);
     let id = other.key().id();
     assert_eq!(office.client(&other).ask_to_be_let_in("view", "Dana").unwrap().unwrap().state, "waiting");
-    refused(office.raw("GET", "/api/v1/me", b"", Some(&other.sign("GET", "/api/v1/me", b"", now).unwrap()), &[]), "waiting");
+    refused(office.raw("GET", "/api/v1/me", b"", Some(&other.sign(&office.pin, "GET", "/api/v1/me", b"", now).unwrap()), &[]), "waiting");
     office.client(&admin).refuse_device(&id).unwrap();
-    refused(office.raw("GET", "/api/v1/me", b"", Some(&other.sign("GET", "/api/v1/me", b"", now + 1).unwrap()), &[]), "refused");
+    refused(office.raw("GET", "/api/v1/me", b"", Some(&other.sign(&office.pin, "GET", "/api/v1/me", b"", now + 1).unwrap()), &[]), "refused");
     office.client(&admin).approve_device(&id, false).unwrap();
-    through(office.raw("GET", "/api/v1/me", b"", Some(&other.sign("GET", "/api/v1/me", b"", now + 2).unwrap()), &[]), "approved after all");
+    through(office.raw("GET", "/api/v1/me", b"", Some(&other.sign(&office.pin, "GET", "/api/v1/me", b"", now + 2).unwrap()), &[]), "approved after all");
     office.client(&admin).remove_device(&id).unwrap();
-    refused(office.raw("GET", "/api/v1/me", b"", Some(&other.sign("GET", "/api/v1/me", b"", now + 3).unwrap()), &[]), "removed");
+    refused(office.raw("GET", "/api/v1/me", b"", Some(&other.sign(&office.pin, "GET", "/api/v1/me", b"", now + 3).unwrap()), &[]), "removed");
     assert_eq!(office.client(&other).device_me().unwrap().state, "removed", "a removed device is told so, and must ask again");
     // The body is signed: a changed body is refused.
     let body = br#"{"email":"a@b.test","password":"x"}"#;
-    let signed = admin.sign("POST", "/api/v1/auth/token", body, now + 4).unwrap();
+    let signed = admin.sign(&office.pin, "POST", "/api/v1/auth/token", body, now + 4).unwrap();
     refused(office.raw("POST", "/api/v1/auth/token", br#"{"email":"c@d.test","password":"x"}"#, Some(&signed), &[]), "a changed body");
 }
 
@@ -262,6 +286,14 @@ fn guard_8_a_seat_is_carried_over_only_with_a_session_from_before_that_is_still_
     let me = office.client(&signer(12)).device_me().unwrap();
     assert!(me.state == "approved" && !me.admin, "an estimator's seat as an ordinary device");
 
+    let again = office.raw("POST", "/api/v1/devices/request", &office.ask(&key(16), "view"), None, &[("Authorization", &format!("Bearer {admin_seat}"))]);
+    assert_eq!(again.1["state"], "waiting", "a session carries one seat over, once: {}", again.1);
+
+    let travelling = session(&office, "admin", "2026-01-01T00:00:00Z", "2099-01-01T00:00:00Z");
+    let from_outside = office.raw("POST", "/api/v1/devices/request", &office.ask(&key(15), "view"), None, &[("cf-connecting-ip", "203.0.113.9"), ("Authorization", &format!("Bearer {travelling}"))]);
+    assert_eq!(from_outside.1["state"], "approved", "a seat with a session from before comes over from outside too: {}", from_outside.1);
+    assert!(!office.client(&signer(15)).device_me().unwrap().admin, "but never as an admin from outside");
+
     let expired = session(&office, "admin", "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z");
     let stale = office.client(&signer(13)).with_token(&expired).ask_to_be_let_in("view", "Old").unwrap().unwrap();
     assert_eq!(stale.state, "waiting", "a session that has run out carries nothing over");
@@ -269,9 +301,6 @@ fn guard_8_a_seat_is_carried_over_only_with_a_session_from_before_that_is_still_
     let new_since = session(&office, "admin", "2099-01-01T00:00:00Z", "2099-02-01T00:00:00Z");
     let fresh = office.client(&signer(14)).with_token(&new_since).ask_to_be_let_in("view", "New").unwrap().unwrap();
     assert_eq!(fresh.state, "waiting", "a session issued after devices began carries nothing over");
-
-    let from_outside = office.raw("POST", "/api/v1/devices/request", &office.ask(&key(15), "view"), None, &[("cf-connecting-ip", "203.0.113.9"), ("Authorization", &format!("Bearer {admin_seat}"))]);
-    assert_eq!(from_outside.1["state"], "approved", "a seat with a session from before comes over from outside too: {}", from_outside.1);
 }
 
 #[test]
@@ -388,4 +417,218 @@ fn a_first_contact_pins_only_on_a_local_address() {
     }
     assert!(!hub::office::host_is_local("192.0.2.1", 8714), "a public address is never a first contact");
     assert!(hub::office::host_is_local("127.0.0.1", 8714));
+}
+
+
+// ---- the security review's findings, each kept as a regression test ----------
+
+/// A key for another program, written straight into the database for the
+/// person who owns `session_person`'s row; its token.
+fn assistant_key(office: &Office, device: Option<&str>) -> (String, String) {
+    let (key, digest) = auth::fresh_key();
+    let id = api::fresh_id("key");
+    let person = api::fresh_id("usr");
+    office
+        .store()
+        .with(|db| {
+            db.execute("INSERT INTO people (id, name, email, password, role, created) VALUES (?1, 'Bot', ?2, 'x', 'admin', '2020-01-01T00:00:00Z')", params![person, format!("{person}@example.test")])?;
+            db.execute("INSERT INTO keys (id, digest, person, purpose, name, made, device) VALUES (?1, ?2, ?3, 'assistant', 'An assistant', '2026-11-11T00:00:00Z', ?4)", params![id, digest, person, device])?;
+            Ok(())
+        })
+        .unwrap();
+    (key, id)
+}
+
+#[test]
+fn review_h1_the_assistant_door_needs_a_device_for_a_session_and_still_takes_a_key() {
+    let office = start();
+    first_admin(&office);
+    let token = session(&office, "admin", &now_text(0), &now_text(30)); // WHAT: a session made since devices began, as if stolen. WHY: the attack
+    let call = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_projects","arguments":{}}});
+    let (status, said) = office.raw("POST", "/mcp", &serde_json::to_vec(&call).unwrap(), None, &[("Authorization", &format!("Bearer {token}")), ("cf-connecting-ip", "203.0.113.9")]);
+    assert_eq!(status, 401, "a session with no device never reaches the assistant's door: {said}");
+    assert_eq!(said["error"], "device_unknown");
+    let (key, _) = assistant_key(&office, None);
+    let (status, said) = office.raw("POST", "/mcp", &serde_json::to_vec(&call).unwrap(), None, &[("Authorization", &format!("Bearer {key}"))]);
+    assert_eq!(status, 200, "an assistant's own key still works: {said}");
+    assert!(said.get("result").is_some(), "{said}");
+}
+
+fn now_text(offset_days: i64) -> String {
+    (time::OffsetDateTime::now_utc() + time::Duration::days(offset_days)).format(&time::format_description::well_known::Rfc3339).unwrap()
+}
+
+#[test]
+fn review_h2_an_old_session_carries_one_seat_over_never_as_an_admin_from_outside_and_never_revives_one() {
+    let office = start();
+    office.store().set_setting("device_claim_until", "2020-01-01T00:00:00Z").unwrap(); // WHAT: no claiming. WHY: only the migration is under test
+    let stolen = session(&office, "admin", "2026-01-01T00:00:00Z", "2099-01-01T00:00:00Z");
+    let auth = format!("Bearer {stolen}");
+    let outside = [("cf-connecting-ip", "203.0.113.9"), ("Authorization", auth.as_str())];
+    let first = office.raw("POST", "/api/v1/devices/request", &office.ask(&key(40), "view"), None, &outside);
+    assert_eq!(first.1["state"], "approved", "{}", first.1);
+    assert!(!office.client(&signer(40)).device_me().unwrap().admin, "(d) never an admin from outside");
+    let second = office.raw("POST", "/api/v1/devices/request", &office.ask(&key(41), "view"), None, &outside);
+    assert_eq!(second.0, 403, "(a) the session carried its one seat over already: {}", second.1);
+
+    let local_admin = session(&office, "admin", "2026-01-01T00:00:00Z", "2099-01-01T00:00:00Z");
+    let admin = signer(42);
+    office.client(&admin).with_token(&local_admin).ask_to_be_let_in("view", "Sam").unwrap();
+    assert!(office.client(&admin).device_me().unwrap().admin, "an administrator's seat on the office network is an admin device");
+    office.client(&admin).remove_device(&key(40).id()).unwrap();
+    let back = office.raw("POST", "/api/v1/devices/request", &office.ask(&key(40), "view"), None, &[]);
+    assert_eq!(back.1["state"], "removed", "(c) asking again never brings a removed computer back: {}", back.1);
+    let fresh_session = session(&office, "admin", "2026-01-01T00:00:00Z", "2099-01-01T00:00:00Z");
+    let migrated = office.raw("POST", "/api/v1/devices/request", &office.ask(&key(40), "view"), None, &[("Authorization", &format!("Bearer {fresh_session}"))]);
+    assert_eq!(migrated.1["state"], "removed", "(c) nor does a session: {}", migrated.1);
+    office.client(&admin).approve_device(&key(40).id(), false).unwrap();
+    assert_eq!(state_of(&office, &key(40).id()), "approved", "only an admin's approval does");
+
+    office.store().set_setting("devices_began", &now_text(-31)).unwrap(); // WHAT: a month and a day since devices began. WHY: (b)
+    let late = session(&office, "admin", "2025-01-01T00:00:00Z", "2099-01-01T00:00:00Z");
+    let closed = office.raw("POST", "/api/v1/devices/request", &office.ask(&key(43), "view"), None, &[("Authorization", &format!("Bearer {late}"))]);
+    assert_eq!(closed.1["state"], "waiting", "(b) carrying over closes thirty days after devices began: {}", closed.1);
+}
+
+#[test]
+fn review_h2e_the_update_doors_never_keep_a_session_alive() {
+    let office = start();
+    let ending = now_text(2); // WHAT: a session two days from its end. WHY: one a sliding check would push out to thirty days
+    let token = session(&office, "estimator", "2026-01-01T00:00:00Z", &ending);
+    let _ = office.raw("GET", "/api/v1/update/latest?platform=windows-x64", b"", None, &[("Authorization", &format!("Bearer {token}"))]);
+    let after: String = office.store().with(|db| Ok(db.query_row("SELECT expires FROM sessions WHERE token = ?1", params![auth::token_hash(&token)], |r| r.get(0))?)).unwrap();
+    assert_eq!(after, ending, "the open update door left the session exactly as it was");
+}
+
+#[test]
+fn review_m1_computers_from_citadel_never_leave_the_office_without_an_admin_and_reach_only_the_cell() {
+    let office = start();
+    let paired = vec![hyperview_server::devices::Paired { public_key: key(50).public_key_text(), name: "Old".into(), machine: "PC".into(), paired_at: "2026-10-01T00:00:00Z".into(), paired_by: "Mark".into() }];
+    assert_eq!(hyperview_server::devices::from_citadel(&office.store(), &paired).unwrap(), Some(1));
+    let mark = office.raw("POST", "/api/v1/devices/request", &office.ask(&key(51), "view"), None, &[]);
+    assert_eq!(mark.1["state"], "approved", "Mark's first ask still makes him the admin: {}", mark.1);
+    assert!(office.client(&signer(51)).device_me().unwrap().admin);
+    assert!(hyperview_server::devices::reopen_claim(&office.store()).is_err(), "claiming can't be reopened over an office that has an admin");
+    assert_eq!(hyperview_server::devices::for_the_cell(&office.store(), &key(50).id())["state"], "approved", "the cell still takes it");
+    let old = signer(50);
+    let (status, said) = office.raw("GET", "/api/v1/me", b"", Some(&old.sign(&office.pin, "GET", "/api/v1/me", b"", device::unix_now()).unwrap()), &[]);
+    assert_eq!((status, said["error"].as_str()), (401, Some("device_unknown")), "but View's API doesn't, until an admin widens it");
+    office.client(&signer(51)).approve_device(&key(50).id(), false).unwrap();
+    let (_, said) = office.raw("GET", "/api/v1/me", b"", Some(&old.sign(&office.pin, "GET", "/api/v1/me", b"", device::unix_now() + 1).unwrap()), &[]);
+    assert_eq!(said["error"], "unauthorised", "widened: past the gate to View's own sign-in");
+}
+
+#[test]
+fn review_m1_the_cell_migrates_only_on_its_first_connection_after_its_first_hello() {
+    use hyperview_server::cell::Office as _;
+    let n: u64 = rand::random();
+    let data = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("cell-{n:016x}"));
+    let config = Config { data: data.clone(), ..Config::default() };
+    let server = api::Server::new(Store::open(&config.database(), &config.blobs()).unwrap(), config);
+    let paired = vec![hyperview_server::devices::Paired { public_key: key(55).public_key_text(), name: "Old".into(), machine: "PC".into(), paired_at: String::new(), paired_by: String::new() }];
+    let before_hello = hyperview_server::cell::Answering::new(&server);
+    assert_eq!(before_hello.migrate(&paired)["error"], "migrate_sealed", "never before the first hello");
+    let first = hyperview_server::cell::Answering::new(&server);
+    let _ = first.hello("1.1.0");
+    assert_eq!(first.migrate(&paired)["ok"], true, "the first connection after the first hello migrates");
+    let later = hyperview_server::cell::Answering::new(&server);
+    let _ = later.hello("1.1.0");
+    assert_eq!(later.migrate(&paired)["error"], "migrate_sealed", "a later connection never does");
+}
+
+#[test]
+fn review_m2_an_unproven_body_is_never_read_past_a_small_one() {
+    let n: u64 = rand::random();
+    let office = start_with(|c| c.largest_upload = 16 * 1024 * 1024, n); // WHAT: a big upload limit. WHY: the attack was buffering up to it
+    let admin = first_admin(&office);
+    let big = vec![b'x'; 3 * 1024 * 1024];
+    let bogus = device::Signed { device: admin.key().id(), time: device::unix_now().to_string(), signature: "A".repeat(86) + "==", body: device::body_hash(&big) };
+    let declared = office.raw_body("POST", "/api/v1/sets", &big, &bogus, true);
+    assert!(declared == (401, "device_unknown".into()) || declared.0 == 0, "a declared hash with a bad signature is refused before the body is read: {declared:?}");
+    let undeclared = office.raw_body("POST", "/api/v1/sets", &big, &bogus, false);
+    assert!(undeclared.0 == 413 || undeclared.0 == 0, "without a declared hash, no more than 1 MiB is read, never the whole body: {undeclared:?}");
+    let good = admin.sign(&office.pin, "PUT", "/api/v1/cad/drawings/1/file", &big, device::unix_now()).unwrap();
+    let proven = office.raw_body("PUT", "/api/v1/cad/drawings/1/file", &big, &good, true);
+    assert!(proven.0 != 0 && proven.0 != 413 && proven.1 != "device_unknown", "a proven big body is read whole and passes the gate to the route's own checks: {proven:?}");
+}
+
+#[test]
+fn review_m3_any_sign_of_a_proxy_is_outside_and_the_console_can_recover_an_office() {
+    let office = start();
+    for header in ["X-Forwarded-For", "X-Real-IP", "Forwarded", "Via"] {
+        let (status, said) = office.raw("POST", "/api/v1/devices/request", &office.ask(&key(70), "view"), None, &[(header, "203.0.113.9")]);
+        assert_eq!((status, said["error"].as_str()), (403, Some("not_on_the_office_network")), "{header}");
+    }
+    let admin = first_admin(&office);
+    let dana = signer(71);
+    office.client(&dana).ask_to_be_let_in("view", "Dana").unwrap();
+    hyperview_server::devices::make_admin_here(&office.store(), &dana.key().id()).unwrap();
+    assert!(office.client(&dana).device_me().unwrap().admin, "made an admin at the server");
+    hyperview_server::devices::reset_admins_here(&office.store()).unwrap();
+    assert!(!office.client(&admin).device_me().unwrap().admin && !office.client(&dana).device_me().unwrap().admin, "every admin unmade");
+    let next = office.raw("POST", "/api/v1/devices/request", &office.ask(&key(72), "view"), None, &[]);
+    assert_eq!(next.1["state"], "approved", "the next computer on the office network becomes the admin: {}", next.1);
+    assert!(office.store().audit_since(None, 100).unwrap().iter().any(|e| e.email == "the server console"), "both are in the audit log");
+}
+
+#[test]
+fn review_l1_head_meets_the_get_door() {
+    let office = start();
+    let admin = first_admin(&office);
+    let dana = signer(60);
+    office.client(&dana).ask_to_be_let_in("view", "Dana").unwrap();
+    office.client(&admin).approve_device(&dana.key().id(), false).unwrap();
+    let head = dana.sign(&office.pin, "HEAD", "/api/v1/devices", b"", device::unix_now()).unwrap();
+    assert_eq!(office.raw_body("HEAD", "/api/v1/devices", b"", &head, false).0, 403, "HEAD on the admin list is refused like GET");
+}
+
+#[test]
+fn review_l2_every_ask_counts_even_a_known_computers() {
+    let office = start();
+    let admin = first_admin(&office);
+    let asker = key(80);
+    let mut statuses = Vec::new();
+    for _ in 0..6 {
+        statuses.push(office.raw("POST", "/api/v1/devices/request", &office.ask(&asker, "view"), None, &[]).0); // WHAT: the same known key asking again and again. WHY: the flood
+    }
+    assert!(statuses.contains(&429), "asking again is counted: {statuses:?}");
+    let _ = admin; // WHAT: the office's admin, made first. WHY: so the asker waits rather than claims
+}
+
+#[test]
+fn review_l3_a_signature_is_bound_to_this_server_and_to_this_start() {
+    let before = device::unix_now() - 2; // WHAT: a moment before the server starts. WHY: a signature from before its start
+    let office = start();
+    let admin = first_admin(&office);
+    let elsewhere = admin.sign(&"0".repeat(64), "GET", "/api/v1/me", b"", device::unix_now()).unwrap();
+    let (status, said) = office.raw("GET", "/api/v1/me", b"", Some(&elsewhere), &[]);
+    assert_eq!((status, said["error"].as_str()), (401, Some("device_unknown")), "signed for another server's pin");
+    let old = admin.sign(&office.pin, "GET", "/api/v1/me", b"", before).unwrap();
+    let (status, said) = office.raw("GET", "/api/v1/me", b"", Some(&old), &[]);
+    assert_eq!((status, said["error"].as_str()), (401, Some("device_unknown")), "signed before this server started");
+}
+
+#[test]
+fn review_l3_one_device_can_never_fill_the_replay_cache_for_everyone() {
+    let replays = hyperview_server::devices::Replays::default();
+    for i in 0..hyperview_server::devices::MOST_PER_DEVICE {
+        assert!(replays.first_time("a", &format!("sig{i}"), 100, 100));
+    }
+    assert!(!replays.first_time("a", "one more", 100, 100), "its share is full");
+    assert!(replays.first_time("b", "another device's", 100, 100), "another device is never locked out by it");
+}
+
+#[test]
+fn review_l5_removing_a_computer_takes_back_the_keys_made_from_it() {
+    let office = start();
+    let admin = first_admin(&office);
+    let dana = signer(90);
+    office.client(&dana).ask_to_be_let_in("view", "Dana").unwrap();
+    office.client(&admin).approve_device(&dana.key().id(), false).unwrap();
+    let (key, _) = assistant_key(&office, Some(&dana.key().id()));
+    office.client(&admin).remove_device(&dana.key().id()).unwrap();
+    let call = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_projects","arguments":{}}});
+    let (status, said) = office.raw("POST", "/mcp", &serde_json::to_vec(&call).unwrap(), None, &[("Authorization", &format!("Bearer {key}"))]);
+    assert!(status == 401 || said.get("error").is_some(), "the key went with the computer: {status} {said}");
+    assert_eq!(device::short_id("29ac6b9dfea94459862660c7ee55eebd"), "29AC 6B9D", "the code a person compares");
 }

@@ -38,26 +38,28 @@ pub struct Attempt {
     request: ureq::Request,
     twice: bool,
     device: Option<std::sync::Arc<crate::device::Signer>>, // WHAT: the device that signs it, if any. WHY: signed as it is sent, over the body actually sent
+    pin: Option<String>, // WHAT: the pin of the server it goes to. WHY: the signature is bound to that server
 }
 
 impl Attempt {
     fn again(request: ureq::Request) -> Attempt {
-        Attempt { request, twice: true, device: None }
+        Attempt { request, twice: true, device: None, pin: None }
     }
 
     fn once(request: ureq::Request) -> Attempt {
-        Attempt { request, twice: false, device: None }
+        Attempt { request, twice: false, device: None, pin: None }
     }
 
     /// Signed by `device` when it goes.
-    fn by(mut self, device: Option<std::sync::Arc<crate::device::Signer>>) -> Attempt {
+    fn by(mut self, device: Option<std::sync::Arc<crate::device::Signer>>, pin: Option<&str>) -> Attempt {
         self.device = device; // WHAT: the signer. WHY: §4
+        self.pin = pin.map(str::to_string); // WHAT: the server's pin. WHY: the signature's pin line
         self
     }
 
     /// `request` with the three signature headers for `body`, when a device
     /// signs; as it is otherwise.
-    fn signed(device: Option<&crate::device::Signer>, request: ureq::Request, body: &[u8]) -> Result<ureq::Request, String> {
+    fn signed(device: Option<&crate::device::Signer>, pin: Option<&str>, request: ureq::Request, body: &[u8]) -> Result<ureq::Request, String> {
         let Some(device) = device else { return Ok(request) }; // WHAT: no device. WHY: an older server, or before one is made
         let url = request.request_url().map_err(|e| e.to_string())?; // WHAT: the address as it will be sent, queries added. WHY: the path and query exactly as sent
         let url = url.as_url();
@@ -65,11 +67,12 @@ impl Attempt {
             Some(query) if !query.is_empty() => format!("{}?{query}", url.path()), // WHAT: path and query. WHY: as the request line writes them
             _ => url.path().to_string(), // WHAT: the path alone. WHY: no query is written without its '?'
         };
-        let headers = device.sign(request.method(), &target, body, crate::device::unix_now())?; // WHAT: the three headers. WHY: §4
+        let headers = device.sign(pin.unwrap_or(crate::device::NO_PIN), request.method(), &target, body, crate::device::unix_now())?; // WHAT: the headers, for this server's pin. WHY: §4
         Ok(request
             .set(crate::device::HEADER_DEVICE, &headers.device)
             .set(crate::device::HEADER_TIME, &headers.time)
-            .set(crate::device::HEADER_SIGNATURE, &headers.signature)) // WHAT: put on. WHY: the server checks them before anything else
+            .set(crate::device::HEADER_SIGNATURE, &headers.signature)
+            .set(crate::device::HEADER_BODY, &headers.body)) // WHAT: put on. WHY: the server checks them before anything else, the body last
     }
 
     /// The one check every request to an office server passes.
@@ -99,9 +102,10 @@ impl Attempt {
         self.allowed()?;
         let spare = self.twice.then(|| self.request.clone());
         let device = self.device.as_deref(); // WHAT: the signer. WHY: each try signed for itself
+        let pin = self.pin.as_deref(); // WHAT: the server's pin. WHY: signed into every try
         let unsigned = |e: String| ureq::Error::from(std::io::Error::other(e)); // WHAT: a request that couldn't be signed, as a transport failure. WHY: said like any other
-        match (Self::signed(device, self.request, b"").map_err(unsigned)?.call(), spare) {
-            (Err(e), Some(spare)) if never_arrived(&e) => Self::signed(device, spare, b"").map_err(unsigned)?.call(), // WHAT: signed again. WHY: a fresh signature, never a replay of the first
+        match (Self::signed(device, pin, self.request, b"").map_err(unsigned)?.call(), spare) {
+            (Err(e), Some(spare)) if never_arrived(&e) => Self::signed(device, pin, spare, b"").map_err(unsigned)?.call(), // WHAT: signed again. WHY: a fresh signature, never a replay of the first
             (result, _) => result,
         }
     }
@@ -133,9 +137,10 @@ impl Attempt {
         self.allowed()?;
         let spare = self.twice.then(|| self.request.clone());
         let device = self.device.as_deref(); // WHAT: the signer. WHY: each try signed for itself
+        let pin = self.pin.as_deref(); // WHAT: the server's pin. WHY: signed into every try
         let unsigned = |e: String| ureq::Error::from(std::io::Error::other(e)); // WHAT: a request that couldn't be signed, as a transport failure. WHY: said like any other
-        match (Self::signed(device, self.request, body).map_err(unsigned)?.send_bytes(body), spare) {
-            (Err(e), Some(spare)) if never_arrived(&e) => Self::signed(device, spare, body).map_err(unsigned)?.send_bytes(body), // WHAT: signed again. WHY: as for a GET
+        match (Self::signed(device, pin, self.request, body).map_err(unsigned)?.send_bytes(body), spare) {
+            (Err(e), Some(spare)) if never_arrived(&e) => Self::signed(device, pin, spare, body).map_err(unsigned)?.send_bytes(body), // WHAT: signed again. WHY: as for a GET
             (result, _) => result,
         }
     }
@@ -289,7 +294,7 @@ impl Client {
     /// never arrives. Sending it again is the whole fix, and it is safe here
     /// because asking twice is the same as asking once.
     fn get(&self, path: &str) -> Attempt {
-        Attempt::again(self.sign(self.agent.get(&self.url(path)))).by(self.device.clone()) // WHAT: signed by the device when there is one. WHY: §4
+        Attempt::again(self.sign(self.agent.get(&self.url(path)))).by(self.device.clone(), self.pin.as_deref()) // WHAT: signed by the device when there is one. WHY: §4
     }
 
     /// A POST, which is sent once and once only.
@@ -299,7 +304,7 @@ impl Client {
     /// two people, two of whatever it made. Better a sentence somebody can act
     /// on than a duplicate they have to find.
     fn post(&self, path: &str) -> Attempt {
-        Attempt::once(self.sign(self.agent.post(&self.url(path)))).by(self.device.clone()) // WHAT: signed by the device when there is one. WHY: §4
+        Attempt::once(self.sign(self.agent.post(&self.url(path)))).by(self.device.clone(), self.pin.as_deref()) // WHAT: signed by the device when there is one. WHY: §4
     }
 
     fn sign(&self, request: ureq::Request) -> ureq::Request {
@@ -369,7 +374,7 @@ impl Client {
 
     pub fn remote_off(&self) -> Answer<crate::Remote> {
         Self::read(
-            Attempt::once(self.sign(self.agent.delete(&self.url("/admin/remote")))).by(self.device.clone()).call(), // WHAT: signed. WHY: §4
+            Attempt::once(self.sign(self.agent.delete(&self.url("/admin/remote")))).by(self.device.clone(), self.pin.as_deref()).call(), // WHAT: signed. WHY: §4
         )
     }
 
@@ -672,7 +677,7 @@ impl Client {
     /// Throws one away before it is used.
     pub fn drop_invite(&self, code: &str) -> Answer<Vec<crate::Invitation>> {
         Self::read(
-            Attempt::once(self.sign(self.agent.delete(&self.url(&format!("/admin/invites/{code}"))))).by(self.device.clone()) // WHAT: signed. WHY: §4
+            Attempt::once(self.sign(self.agent.delete(&self.url(&format!("/admin/invites/{code}"))))).by(self.device.clone(), self.pin.as_deref()) // WHAT: signed. WHY: §4
                 .call(),
         )
     }

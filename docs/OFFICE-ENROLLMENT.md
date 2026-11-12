@@ -91,7 +91,17 @@ Binding the request to the server's pin means a request made to an impostor can'
 When the server has **no approved device** yet, it is unclaimed. The first local request is then **approved as an admin** at once. That is Mark at LatCon, or the person who sets the server up.
 
 - To stop a stranger racing the owner, claiming is open only for **24 hours after the service first starts**.
-- The server's Manager window, on the server PC, can reopen it.
+- "Unclaimed" means **no admin device**: computers carried over from Citadel Server never count.
+- A request showing any sign of a proxy (`Forwarded`, `X-Forwarded-For`, `X-Real-IP`, `Via`) is treated as outside, and never claims.
+- On the server PC itself: `hyperview-server --reopen-claim` (only while there is no admin), `--make-admin <device id>`, and `--reset-admins` (every admin unmade, claiming open for a day). All three are in the audit log.
+
+### Carrying seats over from before 0.7.0
+
+- A session issued before the device list began, and still valid, carries **exactly one** device over, once; then it is spent.
+- Carrying over closes **30 days** after the device list began.
+- An administrator's seat becomes an admin device only from the office network; from outside it comes over as an ordinary one.
+- A refused or removed device is never brought back by asking again, by a session or by a join: only an admin's Approve does that.
+- The open update routes never keep a session alive.
 
 ### Waiting
 
@@ -126,18 +136,20 @@ A badge or notice tells admins that someone is waiting.
 
 ## 4. Signed requests
 
-Every request from an approved device to the Office Server, and to the Citadel cell, carries these headers:
+Every request from an approved device to the Office Server carries these headers:
 
 ```
 X-Excalibur-Device: <device id>
 X-Excalibur-Time: <unix seconds>
 X-Excalibur-Signature: <base64 Ed25519>
+X-Excalibur-Body-SHA256: <body SHA-256, 64 lowercase hex>
 ```
 
-The signature is over these lines, each ended by `\n`:
+The signature is over these lines, each ended by `\n` (changed 2026-11-11 after the security review: the server's pin is now the second line):
 
 ```
 excalibur-request/1
+<server pin: the 8714 SPKI SHA-256 hex, or none>
 <device id>
 <METHOD>
 <path and query exactly as sent>
@@ -145,12 +157,16 @@ excalibur-request/1
 <time>
 ```
 
+`X-Excalibur-Body-SHA256` repeats the body line, so the server checks the signature **before it reads the body**, then holds the body to that hash. A request without the header is read only up to 1 MiB. `docs/office-enrollment-vectors.json` has worked examples.
+
 The server checks each of these, and **401 `device_unknown`** answers any failure:
 
-- the time is within ±300 s;
-- the signature is not one already seen inside that window (a replay cache);
-- the device is approved;
-- the signature verifies.
+- the time is within ±300 s, and not before the server's process started (so a restart opens no replay window);
+- the signature is not one already seen inside that window (a replay cache, with a share per device);
+- the device is approved for every app (a computer carried over from Citadel Server is approved for the cell only, until an admin approves it);
+- the signature verifies, for this server's pin.
+
+A HEAD request meets the same door as its GET.
 
 Citadel's existing `citadel-request/1` signing stays exactly as it is, for LatCon Estimating's traffic to the Citadel cell. Only the device list moves.
 
@@ -195,7 +211,8 @@ Citadel's existing `citadel-request/1` signing stays exactly as it is, for LatCo
 **The pipe:** `\\.\pipe\excalibur-office-<install id>`.
 
 - Created by the Office Server.
-- ACL: SYSTEM, plus the cell's own SID. Nobody else may connect.
+- ACL: SYSTEM, plus the cell's own SID (read and write data only, never make an instance). Nobody else may connect.
+- The Office Server makes the next instance before the old one closes, so the name is never free; a name someone else holds is an alarm ("pipe-taken" on `/api/v1/office`), not a restart.
 - Messages are one JSON object per line, UTF-8, at most 4 KiB per line. Each request gets exactly one answer line.
 
 The messages:
@@ -206,8 +223,9 @@ The messages:
 - Cell to server: `{"op":"hello","version":"1.1.0"}`
   - Server to cell: `{"ok":true,"office":"<company>","modules":["view","citadel",...]}`
 - Cell to server: `{"op":"migrate","devices":[{"public_key":"...","name":"...","machine":"...","paired_at":"...","paired_by":"..."}]}`
-  - Server to cell: `{"ok":true,"added":N}`
-  - Sent once, on the first start of a cell over an old Citadel Server's data. It brings its paired computers into the device list, approved.
+  - Server to cell: `{"ok":true,"added":N}`, or `{"ok":false,"error":"migrate_sealed"}`
+  - Sent once, on the first start of a cell over an old Citadel Server's data. It brings its paired computers into the device list, approved **for the cell only**.
+  - Taken only on the cell's very first connection, after its first `hello`, and never again.
 
 **Device ids for Citadel traffic:** the cell takes the Office Server's answer for the public key and works out Citadel's own id from it (`citadel-device/1` label). Both ids name the same key.
 

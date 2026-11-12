@@ -136,7 +136,7 @@ fn record(server: &crate::api::Server, token: &str, ip: &str, ua: &str) {
         let now_text = crate::api::now();
         server
             .store
-            .with(|db| crate::auth::whose(db, token, &now_text))
+            .with(|db| crate::auth::whose_still(db, token, &now_text)) // WHAT: whose session, without keeping it alive. WHY: watching who is connected must never make a session last longer (security review H2e)
             .ok()
             .flatten()
             .map(|who| who.name)
