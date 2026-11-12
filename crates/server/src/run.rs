@@ -65,6 +65,13 @@ pub async fn serve(
         .await
         .with_context(|| format!("listening on {}", config.listen))?;
     let address = listener.local_addr().unwrap_or(config.listen);
+    let https_only = match &config.https_only {
+        Ok(on) => *on,
+        Err(v) => anyhow::bail!("HYPERVIEW_HTTPS_ONLY is {v:?}; it takes on or off"), // WHAT: refuse to start. WHY: a typo in a security switch is found now, not by a seat that was never turned away
+    };
+    if https_only && !config.tls {
+        anyhow::bail!("HYPERVIEW_HTTPS_ONLY=on needs HTTPS, but HYPERVIEW_TLS is off; turn one of them back"); // WHAT: refuse to start. WHY: HTTPS-only with no HTTPS would turn every seat away
+    }
 
     let secure = if config.tls {
         Some(secure_settings(&config.data, address)?) // WHAT: the certificate and TLS settings, before anything is served. WHY: a server that can't keep its certificate private doesn't start half-secure
@@ -139,8 +146,13 @@ pub async fn serve(
         .layer(tower_http::trace::TraceLayer::new_for_http());
     ready(&serving);
     if let Some(settings) = secure {
-        tracing::info!("{name} is serving the Excalibur View API on {}/api/v1, HTTPS and plain HTTP on the one port", serving.url());
-        crate::tls::serve(listener, settings, app, stop).await; // WHAT: HTTPS and plain HTTP on the API's port. WHY: an update needs no new firewall rule or tunnel rule
+        if https_only {
+            tracing::info!("{name} is serving the Excalibur View API on {}/api/v1, HTTPS only (plain HTTP from this machine alone)", serving.url());
+        } else {
+            tracing::info!("{name} is serving the Excalibur View API on {}/api/v1, HTTPS and plain HTTP on the one port", serving.url());
+        }
+        let plain = if https_only { crate::tls::Plain::ThisMachineOnly } else { crate::tls::Plain::Everyone }; // WHAT: who may still use plain HTTP. WHY: the switch above
+        crate::tls::serve(listener, settings, app, stop, plain).await; // WHAT: HTTPS and plain HTTP on the API's port. WHY: an update needs no new firewall rule or tunnel rule
         tracing::info!("stopped cleanly");
         return Ok(());
     }
