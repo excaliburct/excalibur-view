@@ -9,6 +9,7 @@
 //! 8. a restored file is owner-only from the moment it exists
 //! 9. no object name can reach outside the target, and no remote can be read by rclone as an option
 //! 10. the settings are checked as the server starts, and the night comes once a day
+//! 11. a target belongs to one office: another office's target is refused before anything is sent or pruned (audit M2)
 
 use super::*; // WHAT: the module under test. WHY: its private parts are tested too.
 
@@ -72,6 +73,8 @@ fn world() -> World {
     let d1 = store.put_blob(&pdf).unwrap(); // WHAT: a drawing. WHY: a file to back up.
     let d2 = store.put_blob(b"a chest file").unwrap(); // WHAT: a second file. WHY: more than one.
     store.with(|db| { db.execute_batch(&format!("INSERT INTO projects(id,number,name,created) VALUES('p1','2630','Real Job Name','2026-11-01'); INSERT INTO sets(id,project,name,filename,digest,bytes,sheets,uploaded,uploaded_by) VALUES('s1','p1','Structural','s.pdf','{d1}',{},1,'2026-11-01T10:00:00Z','x'); INSERT INTO files(id,project,name,digest,bytes,uploaded,uploaded_by) VALUES('f1','p1','note.txt','{d2}',12,'2026-11-01','x');", pdf.len()))?; Ok(()) }).unwrap(); // WHAT: a project, a set and a file. WHY: real records pointing at real files.
+    store.set_setting(crate::api::settings::INSTALLATION, &crate::api::fresh_id("inst")).unwrap(); // WHAT: the office's own id, as the server makes it when it first starts. WHY: the backup names its office by it
+    store.set_setting(crate::api::settings::COMPANY, "Test Fab Co").unwrap(); // WHAT: the company it was set up with. WHY: rides only inside the encrypted catalog
     drop(store); // WHAT: close it. WHY: as a running server would leave it, open or not.
     create_private_dir(&work).unwrap();
     lock_work(&work); // WHAT: lock the work folder with the server's own code, as it does each time it starts. WHY: a new Windows folder inherits its parent's permissions (on a build machine, often write for every account); the server locks it before any night runs, so the tests take the same path.
@@ -1727,4 +1730,106 @@ fn with_real_age_the_backup_cannot_be_read_without_the_private_key() {
     assert!(report(&w.data).restore_tested.is_some()); // WHAT: the right key restores everything, kept to look at. WHY: the backup is real.
     owner_only(&w.root.join("rr")); // WHAT: what real age wrote is owner-only too. WHY: age never makes the file itself.
     eprintln!("NOTE: the real-age proof ran with {}", age.display()); // WHAT: say it ran. WHY: a skip and a pass must not look the same.
+}
+
+/// The office id the world's server named itself.
+fn installation(w: &World) -> String {
+    installation_of(&w.data.join("hyperview.sqlite")).unwrap() // WHAT: read it as the backup does. WHY: compared below
+}
+
+/// Every file under a folder with its bytes. WHY: proves a refused run changed nothing.
+fn snapshot_of(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    files_in(dir).into_iter().map(|f| { let b = std::fs::read(&f).unwrap(); (f, b) }).collect() // WHAT: path to bytes. WHY: compared whole
+}
+
+#[test]
+fn the_first_night_claims_the_target_for_this_office_and_says_so_only_in_ids() {
+    let w = world();
+    let e = job(&w).backup();
+    assert_eq!(e.code, 0, "{e:?}"); // WHAT: a first night. WHY: it adopts the empty target
+    let raw = std::fs::read(w.bucket.join("owner-view.json")).expect("the owner marker is at the top of the target"); // WHAT: the marker. WHY: the claim
+    let o: Owner = serde_json::from_slice(&raw).unwrap();
+    assert_eq!((o.format.as_str(), o.product.as_str(), o.installation.clone()), (OWNER_FORMAT, "view", installation(&w)), "it names this office"); // WHAT: whose. WHY: the one thing compared
+    assert!(!contains(&raw, b"Test Fab Co") && !contains(&raw, b"Real Job Name"), "the unencrypted marker holds no names"); // WHAT: ids only. WHY: nothing readable travels unencrypted
+    std::thread::sleep(std::time::Duration::from_millis(1100)); // WHAT: the next second. WHY: names are to the second
+    let e2 = job(&w).backup();
+    assert_eq!(e2.code, 0, "{e2:?}"); // WHAT: the next night. WHY: its own target is accepted
+    assert_eq!(std::fs::read(w.bucket.join("owner-view.json")).unwrap(), raw, "the marker is never rewritten"); // WHAT: unchanged. WHY: the first office keeps it
+    let log = std::fs::read_to_string(w.work.join("view/offsite.log")).unwrap();
+    assert!(log.contains("target was new") && log.contains("target belongs to this office"), "the log says both"); // WHAT: the story. WHY: the morning read
+}
+
+#[test]
+fn a_second_office_pointed_at_the_same_target_is_refused_and_changes_nothing() {
+    let a = world();
+    assert_eq!(job(&a).backup().code, 0); // WHAT: office A's backup. WHY: the target is A's
+    let before = snapshot_of(&a.bucket); // WHAT: every byte of A's target. WHY: B must change none of it
+    let b = world(); // WHAT: another office, its own id and key. WHY: the mistake: two offices, one NAS folder
+    assert_ne!(installation(&a), installation(&b));
+    let mut jb = job(&b);
+    jb.target = Target::Folder(a.bucket.clone()); // WHAT: B pointed at A's folder. WHY: the case
+    let e = jb.backup();
+    assert_eq!(e.code, 2, "{e:?}"); // WHAT: refused before anything is marked. WHY: the guard
+    assert!(e.why.contains("belongs to another office") && e.why.contains(&installation(&a)), "says whose it is: {}", e.why); // WHAT: plain words. WHY: a person can fix it
+    assert_eq!(snapshot_of(&a.bucket), before, "nothing sent, copied or pruned in A's target"); // WHAT: untouched. WHY: B's keep rule would have pruned A's catalogs
+    assert_eq!(report(&b.data).last_good, None, "B is not marked backed up"); // WHAT: no false green. WHY: Fleet must see B has no backup
+}
+
+#[test]
+fn a_target_that_cant_be_read_or_has_a_broken_marker_is_never_adopted() {
+    let w = world();
+    std::fs::create_dir_all(&w.bucket).unwrap();
+    std::fs::write(w.bucket.join("owner-view.json"), b"{not json").unwrap(); // WHAT: a broken marker. WHY: must not be taken for "no owner"
+    let e = job(&w).backup();
+    assert_eq!(e.code, 2, "{e:?}");
+    assert!(e.why.contains("owner-view.json"), "{}", e.why);
+    assert!(!w.bucket.join("daily").exists(), "nothing sent"); // WHAT: refused first. WHY: the guard runs before the upload
+    std::fs::write(w.bucket.join("owner-view.json"), vec![b' '; (OWNER_CAP + 1) as usize]).unwrap(); // WHAT: a giant one. WHY: refused unfetched
+    let e = job(&w).backup();
+    assert_eq!(e.code, 2, "{e:?}");
+    assert!(e.why.contains("over the"), "{}", e.why);
+    let planted = Owner { format: OWNER_FORMAT.into(), product: "view".into(), installation: "inst_$(rm -rf)".into(), since: "x".into() };
+    std::fs::write(w.bucket.join("owner-view.json"), serde_json::to_vec(&planted).unwrap()).unwrap(); // WHAT: an id the server never makes. WHY: refused, not compared
+    assert_eq!(job(&w).backup().code, 2);
+    let other = Owner { format: OWNER_FORMAT.into(), product: "archetype".into(), installation: installation(&w), since: "x".into() };
+    std::fs::write(w.bucket.join("owner-view.json"), serde_json::to_vec(&other).unwrap()).unwrap(); // WHAT: another product's marker under View's name. WHY: refused
+    assert_eq!(job(&w).backup().code, 2);
+}
+
+#[test]
+fn data_with_no_office_id_is_not_backed_up() {
+    let w = world();
+    let store = crate::Store::open(&w.data.join("hyperview.sqlite"), &w.data.join("files")).unwrap();
+    store.with(|db| { db.execute("DELETE FROM settings WHERE key = ?1", [crate::api::settings::INSTALLATION])?; Ok(()) }).unwrap(); // WHAT: a server never started. WHY: nothing to name the target's office by
+    drop(store);
+    let e = job(&w).backup();
+    assert_eq!(e.code, 2, "{e:?}");
+    assert!(e.why.contains("start the server once"), "{}", e.why); // WHAT: what to do. WHY: plain words
+    assert!(!w.bucket.join("owner-view.json").exists(), "no target adopted"); // WHAT: nothing claimed. WHY: an unnamed office claims nothing
+}
+
+#[test]
+fn the_drill_says_whose_backup_it_restored_and_refuses_another_offices_catalog() {
+    let w = world();
+    assert_eq!(job(&w).backup().code, 0);
+    let cat = files_in(&w.bucket.join("daily")).into_iter().find(|p| p.to_string_lossy().ends_with(EXT)).unwrap();
+    let plain = fake::open(&std::fs::read_to_string(&w.id).unwrap(), &std::fs::read(&cat).unwrap()).unwrap();
+    let t = Tmp::new("man");
+    untar(&mut flate2::read::GzDecoder::new(&plain[..]), &t.0.join("x"), 1 << 30, EXPECT).unwrap();
+    let m: Manifest = serde_json::from_slice(&std::fs::read(t.0.join("x/manifest.json")).unwrap()).unwrap();
+    assert_eq!((m.installation, m.company.as_deref()), (Some(installation(&w)), Some("Test Fab Co")), "the encrypted manifest names the office"); // WHAT: whose data. WHY: a restore can tell
+    let e = drill(&w, &w.id, "s1").run();
+    assert_eq!(e.code, 0, "{e:?}");
+    let log = std::fs::read_to_string(w.work.join("view/offsite.log")).unwrap();
+    assert!(log.contains(&format!("Test Fab Co, office {}", installation(&w))), "the summary names the office"); // WHAT: said. WHY: the person restoring knows whose it is
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let later = object_name("view", time::OffsetDateTime::now_utc());
+    plant(&w, &later, |m| m["installation"] = "inst_0000000000000000000000ff".into(), 0); // WHAT: a newer catalog from another office, locked to the same key. WHY: someone copied it in
+    let e = drill(&w, &w.id, "s2").run();
+    assert_eq!(e.code, 2, "{e:?}"); // WHAT: refused. WHY: never restored as this office's data
+    assert!(e.why.contains("was made by office inst_0000000000000000000000ff"), "{}", e.why);
+    plant(&w, &later, |m| { m.as_object_mut().unwrap().remove("installation"); }, 0); // WHAT: a catalog from before catalogs named their office. WHY: still restores
+    std::fs::remove_dir_all(w.root.join("s3")).ok();
+    let e = drill(&w, &w.id, "s3").run();
+    assert_eq!(e.code, 0, "an old catalog still drills: {e:?}");
 }

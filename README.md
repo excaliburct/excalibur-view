@@ -341,6 +341,17 @@ A target written after `--offsite-backup` (a USB disk, say) is backed up to
 as well, but it doesn't count: only a backup to the server's own
 `HYPERVIEW_OFFSITE_TARGET` moves the days since the last backup.
 
+One target, one office. From 0.7.0 the first backup into a target leaves a
+small `owner-view.json` at its top. It holds this office's installation id
+and nothing else readable. A different office's backup into that folder or
+bucket path is refused before anything is sent. Without that check, each
+office would prune the other's catalogs as its own. Two offices can share one
+NAS or bucket, but each needs its own folder in it. The drill also says whose
+backup it restored. It refuses a catalog made by another office than the one
+the target belongs to. A server rebuilt after a disaster keeps its old id once
+its data is restored, because the id lives in the database. Never edit the
+marker by hand.
+
 Each night the server tries once, after the time; a failed night is tried
 again an hour later, and nothing is marked until one passes. A failed night
 is shown in the maintenance report too (`lastFailed`, and why), until the
