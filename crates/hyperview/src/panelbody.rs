@@ -2566,7 +2566,13 @@ impl App {
 /// and gets taller as its lines wrap past the bottom, rather than running
 /// out of it. Comes back true when the box changed.
 fn size_to_words(doc: &mut crate::sheet::Doc, index: usize, text: &str, fit: bool) -> bool {
+    let turn = doc
+        .marks
+        .get(index)
+        .and_then(|m| doc.frames.get(m.page as usize))
+        .map_or(0, |f| f.rotation); // WHAT: the turn of the sheet the box is on. WHY: a box on a turned sheet grows the way its words read
     let Some(mark) = doc.marks.get_mut(index) else { return false };
+    mark.markup.turn_with_sheet(turn); // WHAT: a new box on a turned sheet takes the sheet's turn. WHY: it is sized and drawn upright from the first letter
     let changed = if fit {
         crate::grips::fit_to_words(&mut mark.markup, text)
     } else {
