@@ -48,6 +48,11 @@ pub const NAMES: &str = "names.json"; // WHAT: fingerprint to file name. WHY: th
 /// What is said when this build carries no cell.
 pub const NOT_CARRIED: &str = "this build of the Office Server carries no Citadel cell (packaging/citadel-cell.json lists no files)"; // WHAT: the reason. WHY: the cell never starts without a pin
 
+/// The start of the error when the cell before can't be put aside, which on
+/// Windows means its program is still running; the caller may wait and try
+/// again.
+pub const BUSY: &str = "the cell before couldn't be put aside, which on Windows means it is still running"; // WHAT: the words. WHY: told apart from a refusal
+
 /// The largest cell file taken.
 const LARGEST: u64 = 400 * 1024 * 1024; // WHAT: 400 MB. WHY: the one-file cell is about 100 MB; a planted giant never fills the disk
 
@@ -208,7 +213,7 @@ pub fn swap_staged(home: &Path, pin: &Pin) -> Result<bool, String> {
     let had = std::fs::symlink_metadata(&current).is_ok(); // WHAT: whether there is a cell now. WHY: the first install has none
     if had {
         let _ = std::fs::remove_dir_all(&kept); // WHAT: the one kept before gone. WHY: one previous version is kept, the one before this
-        std::fs::rename(&current, &kept).map_err(|e| format!("could not put the cell aside ({e})"))?; // WHAT: the cell now, kept. WHY: a rollback puts it back
+        std::fs::rename(&current, &kept).map_err(|e| format!("{BUSY} ({e}); nothing was changed, and the new cell waits for the next start"))?; // WHAT: the cell now, kept; nothing changed if it can't be. WHY: a rollback puts it back; review low 1: never half swapped
     }
     if let Err(e) = std::fs::rename(&staged, &current) {
         if had {

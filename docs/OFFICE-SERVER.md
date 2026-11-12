@@ -142,7 +142,9 @@ see the commit "Review fixes".
   move or as the cell. A build whose pin lists no files carries no cell, and the cell doesn't start.
 - **Ports.** TCP 8714 and UDP 8715 for the Office Server, and TCP 47110 for the cell: a rule
   "Excalibur Office Server (Citadel cell)" for the cell's program only, on every profile, from the local subnet
-  only, added at install and again at the cell's first start if it is missing.
+  only, added at install and again at the cell's first start if it is missing. "Local subnet" is the server's own
+  network segment: estimating computers on another VLAN or subnet can't reach the cell until the office's IT adds a
+  rule (or widens this one's remote addresses) for that network.
 - **Backups.** The nightly off-site backup carries the Citadel cell's newest own backup (from
   `ProgramData\Excalibur Office\citadel\Backups`) inside the same encrypted catalog, and the drill checks it.
 - **Fleet's key on 47110.** Before every start of the cell, the Office Server writes its own maintenance key's

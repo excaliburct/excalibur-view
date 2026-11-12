@@ -55,6 +55,44 @@ pub const FOUND: &str = "citadel_old_service"; // WHAT: the setting's name. WHY:
 /// What was done with the 1.0 leftovers after a good move, in words.
 pub const LEFTOVERS: &str = "citadel_old_leftovers"; // WHAT: the setting's name. WHY: shown on /api/v1/office beside the move
 
+/// Kept while 1.0's nightly update task couldn't be removed: the alarm.
+pub const TASK_ALARM: &str = "citadel_old_task_alarm"; // WHAT: the setting. WHY: shown on /api/v1/office until the task is gone
+
+/// The alarm's words.
+pub const TASK_LEFT: &str = "ALARM: Citadel 1.0's update task couldn't be removed; the Office Server tries again at each start"; // WHAT: said on /office. WHY: review low 2: a 03:30 task as the system, left behind
+
+/// Citadel Server 1.0's nightly update task, as the tidying sees it.
+pub trait OldTask {
+    /// Whether the task is still there.
+    fn there(&self) -> bool;
+    /// Removes it; whether that worked.
+    fn remove(&self) -> bool;
+}
+
+/// At every start after a good move: 1.0's update task looked for and
+/// removed, the alarm kept while it can't be, and cleared once it is gone.
+pub fn tidy_old_task(store: &crate::Store, task: &dyn OldTask) {
+    let moved = recorded(store).is_some_and(|m| m.lets_the_cell_start()); // WHAT: a move that succeeded. WHY: 1.0's leftovers go only after the data is safe
+    if found_before(store).is_none() || !moved {
+        return; // WHAT: no 1.0 here, or not moved yet. WHY: nothing of 1.0's to take away
+    }
+    if !task.there() || task.remove() {
+        if store.setting(TASK_ALARM).ok().flatten().is_some() {
+            let _ = store.with(|db| Ok(db.execute("DELETE FROM settings WHERE key = ?1", rusqlite::params![TASK_ALARM])?)); // WHAT: the alarm cleared. WHY: the task is gone
+            tracing::warn!("Citadel 1.0's update task is gone now"); // WHAT: said. WHY: the alarm ends in the log too
+        }
+        return;
+    }
+    let _ = store.set_setting(TASK_ALARM, TASK_LEFT); // WHAT: the alarm kept. WHY: shown on /office; tried again at the next start
+    tracing::error!("{TASK_LEFT}"); // WHAT: written. WHY: whoever looks after the server can see it
+}
+
+/// The alarm about 1.0's update task, while there is one.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn task_alarm(store: &crate::Store) -> Option<String> {
+    store.setting(TASK_ALARM).ok().flatten() // WHAT: the words kept. WHY: shown on /api/v1/office
+}
+
 /// What is recorded when a folder is at the old place but no 1.0 service is.
 pub const NO_SERVICE: &str = "no Citadel 1.0 service; the folder at the old place was ignored"; // WHAT: the note. WHY: audit: the folder alone never runs the move as the system
 
@@ -305,7 +343,14 @@ pub struct Run;
 
 impl Mover for Run {
     fn run(&self, program: &Path, args: &[String], limit: Duration) -> Result<(Option<i32>, String), String> {
-        let mut child = std::process::Command::new(program)
+        let mut command = std::process::Command::new(program); // WHAT: the move program. WHY: run below
+        #[cfg(windows)]
+        if let Some(home) = program.parent().and_then(Path::parent) {
+            let unpack = crate::cell::extract_folder(home, false); // WHAT: the move's own unpacking folder, in the locked service folder. WHY: review low 3: never C:\Windows\Temp
+            let _ = std::fs::create_dir_all(&unpack); // WHAT: made; it inherits the service folder's lock. WHY: the system and administrators only
+            command.env(crate::cell::EXTRACT_VARIABLE, &unpack); // WHAT: .NET unpacks there, if it unpacks at all. WHY: likewise
+        }
+        let mut child = command
             .args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -601,5 +646,40 @@ mod tests {
         assert_eq!(program_folder_of(r#""C:\Program Files\Citadel Server\Citadel Server.exe" --service"#), r"C:\Program Files\Citadel Server"); // WHAT: quoted, with arguments. WHY: as Windows keeps it
         assert_eq!(program_folder_of(r"C:\Citadel\Citadel Server.exe"), r"C:\Citadel"); // WHAT: unquoted. WHY: likewise
         assert_eq!(program_folder_of("odd"), "Citadel Server 1.0's program folder"); // WHAT: a general name. WHY: never empty
+    }
+
+    /// A fake 1.0 update task: whether it is there and whether it goes.
+    struct Task {
+        there: Cell<bool>, // WHAT: still scheduled. WHY: removed at each start until gone
+        removable: bool, // WHAT: whether removing it works. WHY: the alarm case
+    }
+
+    impl OldTask for Task {
+        fn there(&self) -> bool {
+            self.there.get() // WHAT: as set. WHY: the test's case
+        }
+        fn remove(&self) -> bool {
+            if self.removable {
+                self.there.set(false); // WHAT: gone. WHY: removed
+            }
+            self.removable // WHAT: whether it went. WHY: the alarm follows
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_1_0_update_task_that_won_t_go_is_an_alarm_tried_again_at_each_start() {
+        let (store, dir) = store(); // WHAT: a fresh store. WHY: nothing recorded yet
+        let old = dir.join("Citadel Server"); // WHAT: the 1.0 folder. WHY: moved
+        std::fs::create_dir_all(&old).unwrap(); // WHAT: made. WHY: likewise
+        let stuck = Task { there: Cell::new(true), removable: false }; // WHAT: a task that won't go. WHY: the review's case
+        tidy_old_task(&store, &stuck); // WHAT: before any move. WHY: nothing of 1.0's is touched then
+        assert!(task_alarm(&store).is_none(), "no alarm before a move"); // WHAT: none. WHY: 1.0 still runs
+        assert!(before_first_start(&store, &Service::new(true, false), &Run, &fake(&dir, &line("moved", 0, ""), Some(0)), &old, &dir.join("cell"))); // WHAT: a good move. WHY: then the leftovers go
+        tidy_old_task(&store, &stuck); // WHAT: the first start after. WHY: the task won't go
+        assert_eq!(task_alarm(&store).as_deref(), Some(TASK_LEFT), "the alarm on /office"); // WHAT: raised. WHY: review low 2
+        let goes = Task { there: Cell::new(true), removable: true }; // WHAT: the next start, when it can be removed. WHY: tried again
+        tidy_old_task(&store, &goes); // WHAT: tried again. WHY: at each start
+        assert!(!goes.there.get() && task_alarm(&store).is_none(), "removed and the alarm cleared"); // WHAT: gone. WHY: the alarm ends
     }
 }

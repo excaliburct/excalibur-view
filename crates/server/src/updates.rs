@@ -212,6 +212,9 @@ pub async fn look(server: Arc<Server>) -> Option<Outcome> {
         tracing::info!("restarting as the new version");
         tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(2)).await;
+            if !tokio::task::spawn_blocking(crate::cell::end_for_update).await.unwrap_or(false) {
+                tracing::error!("ALARM: the Citadel cell didn't end within ten seconds; the new cell waits, whole, until it can be put in place at a start"); // WHAT: said. WHY: review low 1: never a half-swapped cell
+            } // WHAT: the cell ended before the server exits, off the async threads. WHY: review low 1: its folder is swapped at the next start
             std::process::exit(RESTART_TO_UPDATE);
         });
     }
