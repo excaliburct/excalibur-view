@@ -437,12 +437,14 @@ pub(crate) fn refusal_worth_a_line(server: &Server, id: &str) -> bool { // WHAT:
     true
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn now() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn fresh_id(prefix: &str) -> String {
     let mut bytes = [0u8; 12];
     rand::Rng::fill(&mut rand::thread_rng(), &mut bytes);
@@ -2951,6 +2953,7 @@ async fn update_latest(
     }))
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn channel_name(channel: Channel) -> &'static str {
     match channel {
         Channel::Stable => "stable",
@@ -3496,6 +3499,7 @@ fn behind_proxy() -> bool {
 /// The address a request came from: the socket's, or, from a proxy on this
 /// machine, the address the proxy says it is passing on. Empty when the
 /// server was not told the socket (only ever in a test).
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn address_of(peer: Option<std::net::SocketAddr>, headers: &HeaderMap, proxied: bool) -> String {
     let Some(peer) = peer else {
         return String::new(); // WHAT: nothing known. WHY: as before, such a request is not counted with the others.
@@ -4458,6 +4462,10 @@ async fn upload_chest(
 /// assistant or integration key; never a sync key, which is for its own list
 /// of routes. The answers are exactly what that person would get from the API:
 /// every tool below takes this Who and applies the same project gate.
+///
+/// # Errors
+///
+/// Refused, with nothing said, when the request carries no assistant or integration key that is still good.
 pub fn mcp_caller(server: &Server, headers: &HeaderMap) -> Result<Who, ()> {
     caller_as(
         server,
@@ -4485,6 +4493,9 @@ fn mcp_may_read_set(server: &Server, who: &Who, id: &str) -> Result<(), String> 
     may_reach_set(server, who, id).map_err(|_| format!("There is no drawing set called {id} on this server.")) // WHAT: the REST routes' own gate. WHY: one rule for both doors; a refusal reads as "not here".
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_projects(server: &Server, who: &Who) -> Result<String, String> {
     let everything = who.role == hub::Role::Admin; // WHAT: whether this person sees every job. WHY: the same administrator rule as the project list.
     let list: Vec<(String, String, String, i64, Option<String>)> = server
@@ -4528,6 +4539,10 @@ pub fn mcp_projects(server: &Server, who: &Who) -> Result<String, String> {
 /// drawing replaced is marked so, because its quantities are not the job's
 /// any more; so is takeoff carried forward onto a new issue and not yet
 /// checked.
+///
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_sets(server: &Server, who: &Who, project: Option<&str>) -> Result<String, String> {
     type Row = (String, String, String, i64, i64, Option<String>, Option<String>, i64);
     let everything = who.role == hub::Role::Admin; // WHAT: whether this person sees every job. WHY: the same administrator rule as everywhere else.
@@ -4637,6 +4652,9 @@ fn mcp_short_by(rows: &[takeoff::Row], sheets: &[quantities::SheetScale]) -> Str
     )
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_takeoff(server: &Server, who: &Who, id: &str) -> Result<String, String> {
     let (rows, sheets) = mcp_gather(server, who, id)?; // WHAT: the set's measurements, if this person may read it. WHY: the gate lives in mcp_gather.
     if rows.is_empty() {
@@ -4684,6 +4702,9 @@ pub fn mcp_takeoff(server: &Server, who: &Who, id: &str) -> Result<String, Strin
     Ok(out)
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_shop_list(
     server: &Server,
     who: &Who,
@@ -4780,6 +4801,9 @@ pub fn mcp_shop_list(
     Ok(out)
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_doubles(server: &Server, who: &Who, id: &str) -> Result<String, String> {
     let (rows, sheets) = mcp_gather(server, who, id)?; // WHAT: the set's measurements, if this person may read it. WHY: the gate lives in mcp_gather.
     let found = takeoff::doubles::find(&rows, takeoff::doubles::HowClose::default());
@@ -4823,6 +4847,9 @@ pub fn mcp_doubles(server: &Server, who: &Who, id: &str) -> Result<String, Strin
     Ok(out)
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_revision(server: &Server, who: &Who, was_bid: &str, arrived: &str) -> Result<String, String> {
     let (before, _) = mcp_gather(server, who, was_bid)?; // WHAT: the set that was bid, if this person may read it. WHY: both sides are gated.
     let (after, _) = mcp_gather(server, who, arrived)?; // WHAT: the set that arrived, likewise. WHY: comparing against a set you may not see would leak it.
@@ -4854,6 +4881,9 @@ pub fn mcp_revision(server: &Server, who: &Who, was_bid: &str, arrived: &str) ->
     Ok(out)
 }
 
+/// # Errors
+///
+/// Fails with a sentence for the assistant when the person may not see it, it isn't there, or the database can't be read.
 pub fn mcp_sheets(server: &Server, who: &Who, id: &str) -> Result<String, String> {
     mcp_may_read_set(server, who, id)?; // WHAT: the project gate. WHY: the sheet list of a set is part of the set.
     let (_, _, sheets) =

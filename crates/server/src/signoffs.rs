@@ -247,6 +247,10 @@ fn on_set(db: &rusqlite::Connection, set: &str) -> anyhow::Result<Vec<SignOff>> 
 }
 
 /// `GET /sets/:id/signoffs`: a set's lines, for anyone who may see it.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn of_set(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -371,6 +375,10 @@ fn signed(
 }
 
 /// `POST /signoffs/:id/withdraw`: the asker takes back a line not yet signed.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn withdraw(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -414,6 +422,10 @@ pub async fn withdraw(
 }
 
 /// `GET /signoffs?since=N`: every line changed after `since`, on sets the caller may reach.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn changes(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -503,6 +515,7 @@ pub async fn picture(
 // ---- the picture: strokes drawn on the pad, as a PNG ------------------------
 
 /// The signature drawn, as a PNG: 400 by 140, one grey byte a pixel.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn drawn(strokes: &[Vec<[f64; 2]>]) -> Vec<u8> {
     let (w, h) = (PAD.0 as usize, PAD.1 as usize); // WHAT: the pad's size in pixels. WHY: one unit, one pixel.
     let mut ink = vec![255u8; w * h]; // WHAT: white. WHY: black ink goes on it.
@@ -534,6 +547,7 @@ pub fn drawn(strokes: &[Vec<[f64; 2]>]) -> Vec<u8> {
 
 /// A greyscale picture as a PNG, with its data stored rather than packed (a
 /// signature is 56 KB that way, and the encoder is a page of code with no library).
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn png_gray(w: usize, h: usize, pixels: &[u8]) -> Vec<u8> {
     let mut raw = Vec::with_capacity((w + 1) * h); // WHAT: the rows, each led by its filter byte. WHY: PNG's layout.
     for row in pixels.chunks(w) {

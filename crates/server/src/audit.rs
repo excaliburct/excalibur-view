@@ -97,6 +97,7 @@ fn clip(text: &str) -> String {
 }
 
 impl Entry {
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn new(action: &str, email: &str) -> Entry {
         Entry {
             at: now(),
@@ -109,27 +110,33 @@ impl Entry {
         }
     }
 
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn by(mut self, person: &str) -> Entry {
         self.person = Some(clip(person)); // WHAT: capped. WHY: as every field
         self
     }
 
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn about(mut self, subject: impl Into<String>) -> Entry {
         self.subject = clip(&subject.into()); // WHAT: capped. WHY: as every field
         self
     }
 
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn saying(mut self, detail: impl Into<String>) -> Entry {
         self.detail = clip(&detail.into()); // WHAT: capped. WHY: as every field
         self
     }
 
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn from(mut self, address: impl Into<String>) -> Entry {
         self.address = clip(&address.into()); // WHAT: capped. WHY: as every field
         self
     }
 
     /// One line, the way it reads in an export.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn line(&self) -> String {
         let mut said = format!("{}  {}  {}", self.at, self.email, self.action);
         if !self.subject.is_empty() {
@@ -142,6 +149,7 @@ impl Entry {
     }
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn now() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
@@ -149,6 +157,7 @@ pub fn now() -> String {
 }
 
 /// The whole log as a CSV an auditor can open, quoted properly.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn as_csv(entries: &[Entry]) -> String {
     let mut out = String::from("when,who,action,subject,detail,from\n");
     for e in entries {

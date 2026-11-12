@@ -43,6 +43,7 @@ pub struct SheetScale {
 /// Everything that works out a quantity on this server goes through here, so
 /// the takeoff, the cut list and the double-count check are all looking at the
 /// same measurements rather than three separate attempts at them.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn measured(
     markups: &[Stored],
     sheets: &[SheetScale],
@@ -71,6 +72,7 @@ pub fn measured(
 }
 
 /// Just the measurements, for the things that only want those.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn rows_of(markups: &[Stored], sheets: &[SheetScale]) -> Vec<Row> {
     measured(markups, sheets)
         .into_iter()
@@ -79,6 +81,10 @@ pub fn rows_of(markups: &[Stored], sheets: &[SheetScale]) -> Vec<Row> {
 }
 
 /// Measures everything and totals it.
+///
+/// # Errors
+///
+/// Fails when a markup can't be measured.
 pub fn takeoff(set: &str, revision: u64, markups: &[Stored], sheets: &[SheetScale]) -> Result<Takeoff> {
     let rows = measured(markups, sheets);
 
@@ -145,6 +151,7 @@ pub fn takeoff(set: &str, revision: u64, markups: &[Stored], sheets: &[SheetScal
 }
 
 /// Parses a stored annotation dictionary back into a markup.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn read_markup(bytes: &[u8]) -> Option<Markup> {
     let mut reader = pdf::Reader::new(bytes); // WHAT: a reader over the markup's bytes. WHY: asked afterwards whether it went too deep.
     let object = reader.object().ok()?;
@@ -157,6 +164,7 @@ pub fn read_markup(bytes: &[u8]) -> Option<Markup> {
 
 /// Serialises a markup for storage: the dictionary exactly as it would be
 /// written into the drawing.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn write_markup(markup: &Markup) -> Vec<u8> {
     let mut out = Vec::new();
     pdf::write::write_object(&pdf::Object::Dict(markup.dict.clone()), &mut out);
@@ -164,6 +172,7 @@ pub fn write_markup(markup: &Markup) -> Vec<u8> {
 }
 
 /// The CSV a spreadsheet wants, from the same rows.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn to_csv(markups: &[Stored], sheets: &[SheetScale], columns: &[Column]) -> String {
     let mut rows = Vec::new();
     for stored in markups {

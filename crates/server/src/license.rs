@@ -64,6 +64,7 @@ pub enum State {
 }
 
 impl State {
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn sharing(&self) -> bool {
         !matches!(self, State::Unlicensed | State::Beyond(_))
     }
@@ -167,6 +168,7 @@ fn pick_up_from_the_data_folder(server: &Server) {
 /// the list of what was seen can be trusted, in the same edition, and issued
 /// no earlier than the one held; so a file can never undo a later licence,
 /// and a change of edition is always somebody's own decision, made by hand.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn folder_file_wanted(held: Option<&License>, fresh: &License, seen_before: bool, list_known: bool) -> bool {
     match held {
         None => true, // WHAT: no licence in use. WHY: what a file in the data folder is for
@@ -236,6 +238,10 @@ pub fn begin_at(server: &Server, now: &str, founding_before: &str) {
 
 /// Checks a license file and keeps it. The error is a sentence for whoever
 /// chose the file.
+///
+/// # Errors
+///
+/// A sentence saying why, when the file isn't a good license for this server or can't be kept.
 pub fn install(server: &Server, text: &str) -> Result<License, String> {
     install_with(server, text, &trust(server))
 }
@@ -288,6 +294,7 @@ pub fn renewal_url(server: &Server) -> Option<String> {
 /// The name a license is published under: the id put through SHA-256, so the
 /// address cannot be worked out from a company's name and the list of
 /// customers is not something anybody can walk.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn name_for(id: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -302,6 +309,7 @@ pub fn name_for(id: &str) -> String {
 /// forward, would cut a shop off in the middle of a bid because a file was
 /// stale — so it is refused, and a genuine reduction is installed by hand
 /// like everything else that ought to be somebody's decision.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn is_a_renewal(held: &License, fresh: &License) -> bool {
     if fresh.id != held.id || fresh.company != held.company {
         return false;
@@ -491,6 +499,7 @@ fn renewal_note(license: &License, now: &str) -> Option<String> {
     }
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn standing_of(state: &State, users: u32, administrator: bool, company: Option<String>, now: &str) -> Standing {
     let buy_url = BUY_URL.to_string();
     match state {
@@ -609,6 +618,10 @@ fn covered_by(state: &State, published: &str) -> bool {
 }
 
 /// Whether there is room on the license for one more person.
+///
+/// # Errors
+///
+/// A sentence saying why, when the license has no room or can't be read.
 pub fn room_for_another(server: &Server) -> Result<(), String> {
     room_in(&state(server), people(server))
 }
@@ -627,6 +640,10 @@ fn room_in(state: &State, people: u32) -> Result<(), String> {
 }
 
 /// Whether new work can be shared through the server right now.
+///
+/// # Errors
+///
+/// A sentence saying why, when the license does not allow sharing now.
 pub fn sharing(server: &Server) -> Result<(), String> {
     match state(server) {
         State::Unlicensed => Err("This office's Excalibur View Office trial has ended, so sharing new work \

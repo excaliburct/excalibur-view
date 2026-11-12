@@ -103,6 +103,7 @@ const KEEP: [(&str, usize); 3] = [("daily", 7), ("weekly", 4), ("monthly", 12)];
 const EXT: &str = ".tar.gz.age"; // WHAT: the catalog's ending. WHY: says what it is: a gzipped tar, encrypted with age.
 
 /// The catalog's name for a moment, in UTC, to the second.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn object_name(product: &str, t: time::OffsetDateTime) -> String {
     let t = t.to_offset(time::UtcOffset::UTC); // WHAT: in UTC. WHY: UTC never repeats an hour, so two runs never share a name.
     format!(
@@ -117,6 +118,7 @@ pub fn object_name(product: &str, t: time::OffsetDateTime) -> String {
 }
 
 /// The moment a name stands for, or `None` for anything that isn't exactly one of ours.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn parse_name(product: &str, name: &str) -> Option<time::OffsetDateTime> {
     let rest = name
         .strip_prefix(product)?
@@ -141,6 +143,7 @@ pub fn parse_name(product: &str, name: &str) -> Option<time::OffsetDateTime> {
 
 /// Whether `name` is one of ours and dated no more than a day after `now`. A name from the future is a clock gone wrong or a
 /// planted object: seven "2099" names must never push the real catalogs out of the keep, or be the one a drill picks.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn believable(product: &str, name: &str, now: time::OffsetDateTime) -> bool {
     parse_name(product, name).is_some_and(|t| t <= now + time::Duration::days(1))
     // WHAT: ours, and not from the future. WHY: as above.
@@ -155,6 +158,10 @@ pub struct Plan {
 }
 
 /// The keep rule, on its own so the tests can attack it.
+///
+/// # Errors
+///
+/// Fails when the rule can't keep tonight's copy, so nothing is deleted.
 pub fn plan(product: &str, listing: &BTreeMap<String, Vec<String>>, tonight: &str) -> Result<Plan> {
     let when =
         parse_name(product, tonight).ok_or_else(|| anyhow!("not a catalog name: {tonight}"))?; // WHAT: tonight's date. WHY: the plan never runs on a name it can't date.
@@ -212,6 +219,7 @@ pub fn plan(product: &str, listing: &BTreeMap<String, Vec<String>>, tonight: &st
 /// `None`. Every entry is checked, no link followed. Unix: owned by root or this account, no group or other write, and
 /// rclone.conf readable by its owner only. Windows: owned by the system, administrators or this account, and no change
 /// right for anyone else.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn others_can_change(work: &Path) -> Option<String> {
     let mut stack = vec![work.to_path_buf()]; // WHAT: entries still to look at. WHY: the whole tree, not only the folder, bin and rclone.conf.
     while let Some(p) = stack.pop() {
@@ -620,6 +628,7 @@ mod winacl {
 
 /// The first file in the work folder holding an age private key, if any. `bin` (age's own program names the format) and
 /// the job's logs are skipped, and so is anything over 64 KB: a key file is a few lines.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn private_key_in(work: &Path) -> Option<PathBuf> {
     let mut stack = vec![work.to_path_buf()]; // WHAT: folders still to look in. WHY: the whole work folder, not only the recipients file.
     while let Some(dir) = stack.pop() {
@@ -653,6 +662,10 @@ pub fn private_key_in(work: &Path) -> Option<PathBuf> {
 }
 
 /// Reads the recipients file. Only age public keys (age1…) may be in it.
+///
+/// # Errors
+///
+/// Fails when the file has no keys or anything in it is not an age public key.
 pub fn check_recipients(text: &str) -> Result<usize> {
     if text.to_ascii_uppercase().contains("AGE-SECRET-KEY-") {
         bail!("the recipients file holds a PRIVATE key (AGE-SECRET-KEY-…). Only the public line (age1…) belongs on this server. Remove it now, and keep the private key with Creede, off this machine.");
@@ -705,6 +718,10 @@ fn key_ok(key: &str) -> bool {
 
 impl Target {
     /// `rclone:REMOTE:bucket/folder` for rclone (its program and settings in WORK), anything else a folder.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the target is malformed.
     pub fn parse(spec: &str, work: &Path) -> Result<Target> {
         if let Some(remote) = spec.strip_prefix("rclone:") {
             // WHAT: an rclone remote. WHY: the cloud.
@@ -739,6 +756,7 @@ impl Target {
     }
 
     /// Where it went, in words, for the ops report. No keys, no account numbers.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn words(&self) -> String {
         match self {
             Target::Folder(p) => format!("folder {}", p.display()),
@@ -793,6 +811,10 @@ impl Target {
     }
 
     /// Sends one file, never over an object that is already there.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the object is already there or the file could not be sent.
     pub fn put(&self, local: &Path, key: &str) -> Result<()> {
         match self {
             Target::Folder(_) => {
@@ -842,6 +864,10 @@ impl Target {
     }
 
     /// Sends every file in a local folder into a folder of the target.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the folder can't be read or any file could not be sent.
     pub fn put_all(&self, local_dir: &Path, folder: &str) -> Result<()> {
         match self {
             Target::Folder(_) => {
@@ -875,6 +901,10 @@ impl Target {
     }
 
     /// The objects in a folder: name and size.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the target can't be listed.
     pub fn list(&self, folder: &str) -> Result<Vec<(String, u64)>> {
         match self {
             Target::Folder(_) => {
@@ -913,6 +943,10 @@ impl Target {
     }
 
     /// A copy inside the target (weekly/, monthly/). Nothing is sent again.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the copy could not be made.
     pub fn copy(&self, from: &str, to: &str) -> Result<()> {
         match self {
             Target::Folder(_) => {
@@ -928,6 +962,10 @@ impl Target {
     }
 
     /// Deletes one object. Only the keep rule calls this, only for our own names.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the object could not be deleted.
     pub fn delete(&self, key: &str) -> Result<()> {
         match self {
             Target::Folder(_) => {
@@ -942,6 +980,10 @@ impl Target {
     }
 
     /// Fetches one object to a local file.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the object could not be fetched.
     pub fn get(&self, key: &str, local: &Path) -> Result<()> {
         match self {
             Target::Folder(_) => {
@@ -959,6 +1001,10 @@ impl Target {
     }
 
     /// Fetches many objects of one folder into a local folder.
+    ///
+    /// # Errors
+    ///
+    /// Fails when any of them could not be fetched.
     pub fn get_many(&self, folder: &str, names: &[String], local_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(local_dir)?; // WHAT: the folder. WHY: they land there.
         match self {
@@ -1004,6 +1050,7 @@ pub enum Cipher {
 
 impl Cipher {
     /// The program this runs, if it runs one.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn program(&self) -> Option<&Path> {
         match self {
             Cipher::Age(exe) => Some(exe),
@@ -1013,6 +1060,10 @@ impl Cipher {
     }
 
     /// Encrypts what `fill` writes, to the recipients file, into `out`. Nothing unencrypted touches the disk.
+    ///
+    /// # Errors
+    ///
+    /// Fails when age could not be run, `fill` fails, or age does not finish cleanly.
     pub fn encrypt_stream(
         &self,
         recipients: &Path,
@@ -1062,6 +1113,10 @@ impl Cipher {
     }
 
     /// Encrypts one file into another. Returns the SHA-256 of the bytes that went in, as they went.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file can't be read or the encryption fails.
     pub fn encrypt_file(&self, recipients: &Path, input: &Path, out: &Path) -> Result<String> {
         let mut h = Sha256::new(); // WHAT: the fingerprint of what is sent. WHY: a file changed between its check and its sending is caught.
         self.encrypt_stream(recipients, out, |w| {
@@ -1081,6 +1136,10 @@ impl Cipher {
     }
 
     /// Opens a passphrase-locked file (Creede's locked key): age asks for the passphrase on the console itself.
+    ///
+    /// # Errors
+    ///
+    /// Fails when age could not be run or the passphrase is wrong.
     pub fn unlock(&self, input: &Path, out: &Path) -> Result<()> {
         match self {
             Cipher::Age(exe) => {
@@ -1119,6 +1178,10 @@ impl Cipher {
     }
 
     /// Decrypts with Creede's private key (an unlocked key: see `Drill::run`, which opens a locked one once).
+    ///
+    /// # Errors
+    ///
+    /// Fails when age could not be run or the file does not open with that key.
     pub fn decrypt_file(&self, identity: &Path, input: &Path, out: &Path) -> Result<()> {
         match self {
             Cipher::Age(exe) => {
@@ -1418,6 +1481,10 @@ fn is_installation(s: &str) -> bool {
 }
 
 /// The office's installation id from a database (the backup's consistent copy). The server makes it as it first starts.
+///
+/// # Errors
+///
+/// Fails when the database can't be opened or has no installation id.
 pub fn installation_of(db: &Path) -> Result<String> {
     use rusqlite::OptionalExtension; // WHAT: a row that may be missing. WHY: a database the server never ran on has none.
     let c = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?; // WHAT: read-only. WHY: the copy is never changed.
@@ -1483,6 +1550,10 @@ impl Target {
     /// The product's owner marker, read and checked, or `None` when the target has none. A listing that fails is an
     /// error, never "none": a target that can't be read must not be adopted. The error carries the exit code: 3 the
     /// target couldn't be reached, 2 its marker is refused.
+    ///
+    /// # Errors
+    ///
+    /// The exit code: 3 when the target couldn't be reached, 2 when its marker is refused.
     pub fn owner(&self, product: &str, scratch: &Path) -> std::result::Result<Option<Owner>, Exit> {
         let key = owner_key(product); // WHAT: its name. WHY: looked for at the top.
         let top = self.top().map_err(|e| refuse(3, format!("listing {} failed: {e:#}", self.words())))?; // WHAT: the top level. WHY: an unreadable target is a failed night, not a new target
@@ -1507,6 +1578,10 @@ impl Target {
 
     /// Makes sure the target is this office's: adopts a target with no owner, refuses one owned by another office.
     /// Returns what to log.
+    ///
+    /// # Errors
+    ///
+    /// The exit code: 3 when the target couldn't be reached, 2 when another office owns it.
     pub fn claim(&self, product: &str, installation: &str, scratch: &Path) -> std::result::Result<String, Exit> {
         if let Some(o) = self.owner(product, scratch)? {
             if o.installation == installation {
@@ -1570,6 +1645,7 @@ fn read_marker(path: &Path) -> Option<Marker> {
 }
 
 /// The ops report's off-site section, read from the data folder.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn report(data: &Path) -> Report {
     let b = read_marker(&data.join(BACKUP_MARKER)).unwrap_or_default(); // WHAT: the backup marker. WHY: unknown when absent.
     let d = read_marker(&data.join(DRILL_MARKER)).unwrap_or_default(); // WHAT: the drill marker. WHY: the same.
@@ -1598,6 +1674,7 @@ pub fn report(data: &Path) -> Report {
 }
 
 /// Days since the last confirmed off-site backup, or `None` for never.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn backup_days(data: &Path) -> Option<f64> {
     let t = past_time(&read_marker(&data.join(BACKUP_MARKER))?.last_good)?; // WHAT: its time. WHY: unknown when absent or damaged.
     Some(((time::OffsetDateTime::now_utc() - t).as_seconds_f64() / 86_400.0).max(0.0))
@@ -2155,6 +2232,10 @@ thread_local! {
 }
 
 /// SQLite's own consistent copy of a database in use (VACUUM INTO), then made a single file.
+///
+/// # Errors
+///
+/// Fails when the database can't be copied.
 pub fn snapshot(live: &Path, to: &Path) -> Result<()> {
     let db = Connection::open_with_flags(
         live,
@@ -2166,6 +2247,10 @@ pub fn snapshot(live: &Path, to: &Path) -> Result<()> {
 }
 
 /// Opens a copy, checks it, counts it, and lists the files it names.
+///
+/// # Errors
+///
+/// Fails when the copy can't be opened or does not pass its check.
 pub fn check_database(
     product: &Product,
     path: &Path,
@@ -2198,6 +2283,10 @@ fn is_digest(s: &str) -> bool {
 } // WHAT: 64 lowercase hex letters. WHY: the store's names.
 
 /// Every file in the store, by digest: its path and size. `aa/bb/digest`, nothing else.
+///
+/// # Errors
+///
+/// Fails when the store can't be read or holds something that isn't a stored file.
 pub fn list_blobs(root: &Path) -> Result<BTreeMap<String, (PathBuf, u64)>> {
     let mut out = BTreeMap::new(); // WHAT: the files. WHY: sorted, so runs are repeatable.
     if !root.exists() {
@@ -2231,6 +2320,7 @@ fn matches_digest(path: &Path, digest: &str) -> Result<bool> {
 } // WHAT: the file is what its name says. WHY: never send damaged bytes as good ones.
 
 /// The object name of a drawing file: a salted digest, so the bucket doesn't say which files it holds.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn object_for(salt: &str, digest: &str) -> String {
     format!(
         "{}.age",
@@ -2266,6 +2356,11 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 } // WHAT: bytes as hex. WHY: names and fingerprints.
 
+/// The SHA-256 of a file, as lowercase hex, read in pieces.
+///
+/// # Errors
+///
+/// Fails when the file can't be read.
 pub fn sha256_file(path: &Path) -> Result<String> {
     let mut f = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?; // WHAT: open it. WHY: streamed.
     let mut h = Sha256::new();
@@ -2485,6 +2580,7 @@ pub struct Drill<'a> {
 
 impl Drill<'_> {
     /// Runs the drill. RESTORE DRILL PASSED, or the reason it didn't.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn run(&self) -> Exit {
         let identity = match std::path::absolute(&self.identity) {
             Ok(p) => p,
@@ -2904,6 +3000,10 @@ impl Drop for OpenedKey {
 // ---------------------------------------------------------------- the settings, the command line and the night
 
 /// The job the settings describe: the data folder, the work folder and the target. `None` when either setting is empty.
+///
+/// # Errors
+///
+/// Fails when the work folder or the target can't be read.
 pub fn job_from(
     product: &'static Product,
     data: PathBuf,
@@ -2934,6 +3034,10 @@ pub fn job_from(
 }
 
 /// The time of night, "1:30" or "01:30", 24-hour, the server's own clock.
+///
+/// # Errors
+///
+/// Fails, saying what is wanted, when it isn't a time of day.
 pub fn night_time(at: &str) -> Result<chrono::NaiveTime> {
     let t = at.trim(); // WHAT: without spaces. WHY: a setting typed with a space still reads.
     let ok = t.len() >= 4
@@ -2950,6 +3054,10 @@ pub fn night_time(at: &str) -> Result<chrono::NaiveTime> {
 }
 
 /// Checks the off-site settings as the server starts: a typo is found now, not at night.
+///
+/// # Errors
+///
+/// Fails, saying which setting is wrong, when they can't work together.
 pub fn check_settings(
     data: &Path,
     work: Option<&str>,
@@ -2971,6 +3079,7 @@ pub fn check_settings(
 }
 
 /// Whether tonight's backup is due: past the time, none confirmed since it, and no failed try in the last hour.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn due(
     now: chrono::NaiveDateTime,
     at: chrono::NaiveTime,

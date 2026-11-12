@@ -59,6 +59,7 @@ pub const KEY_HEADER: &str = "x-av-update-key";
 /// Where the digest of a Fleet key an administrator turned on is kept.
 pub const FLEET_KEY: &str = "fleet_key_digest";
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn key_digest(key: &str) -> String {
     use sha2::{Digest, Sha256};
     crate::store::hex(&Sha256::digest(key.trim().as_bytes()))
@@ -66,6 +67,10 @@ pub fn key_digest(key: &str) -> String {
 
 /// Lets the Fleet in with a new key, or shuts the door. Returns the key, once:
 /// it is not kept anywhere it can be read back.
+///
+/// # Errors
+///
+/// Fails when the setting can't be written.
 pub fn set_fleet_access(server: &Server, on: bool) -> anyhow::Result<Option<String>> {
     if !on {
         server.store.set_setting(FLEET_KEY, "")?;

@@ -36,6 +36,10 @@ pub const GATHER: Duration = Duration::from_secs(2);
 const AGAIN_AFTER: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(30)];
 
 /// An address a notice may be sent to: http or https, and not absurdly long.
+///
+/// # Errors
+///
+/// A sentence saying why the address is refused.
 pub fn acceptable(url: &str) -> Result<(), String> {
     let url = url.trim();
     let scheme_ok = url.starts_with("https://") || url.starts_with("http://");
@@ -88,6 +92,7 @@ fn never_a_notice(ip: std::net::IpAddr) -> bool {
 }
 
 /// A new secret: 32 random bytes, as hex.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn secret() -> String {
     let mut bytes = [0u8; 32];
     rand::Rng::fill(&mut rand::thread_rng(), &mut bytes);
@@ -95,6 +100,7 @@ pub fn secret() -> String {
 }
 
 /// HMAC-SHA256, the way every webhook receiver already knows how to check.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn sign(secret: &str, body: &[u8]) -> String {
     const BLOCK: usize = 64;
     let mut key = secret.as_bytes().to_vec();
@@ -141,6 +147,10 @@ pub fn changed(server: &Shared, set: &str) {
 
 /// Sends a notice straight away, to see whether the other program is
 /// listening. Returns how it went.
+///
+/// # Errors
+///
+/// A sentence saying why, when there is no such notice or it could not be sent.
 pub fn test(server: &Shared, id: &str) -> Result<String, String> {
     let found: Option<(String, String)> = server
         .store

@@ -44,6 +44,7 @@ use crate::api::Shared;
 pub const PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// The version to answer an `initialize` with.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn protocol_for(requested: Option<&str>) -> &'static str {
     requested
         .and_then(|r| PROTOCOLS.iter().find(|p| **p == r).copied())
@@ -150,6 +151,7 @@ impl Trouble {
 /// Every tool, and what it takes.
 ///
 /// All of them read. None of them write. See the note at the top of the file.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn tools() -> Vec<Value> {
     let set_argument = json!({
         "type": "object",

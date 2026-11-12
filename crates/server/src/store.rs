@@ -353,6 +353,9 @@ pub struct Invite {
 }
 
 impl Store {
+    /// # Errors
+    ///
+    /// Fails when the database or the blob folder can't be opened or made.
     pub fn open(database: &Path, blobs: &Path) -> Result<Store> {
         if let Some(parent) = database.parent() {
             std::fs::create_dir_all(parent)
@@ -373,6 +376,10 @@ impl Store {
     }
 
     /// An in-memory store, for tests.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database can't be made.
     pub fn temporary(blobs: &Path) -> Result<Store> {
         std::fs::create_dir_all(blobs)?;
         let db = Connection::open_in_memory()?;
@@ -387,6 +394,9 @@ impl Store {
         })
     }
 
+    /// # Errors
+    ///
+    /// Whatever `f` fails with.
     pub fn with<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let db = self.db.lock().map_err(|_| anyhow!("the database lock was poisoned"))?;
         f(&db)
@@ -403,6 +413,10 @@ impl Store {
 
     /// Stores bytes under their own digest, and says what that digest is.
     /// Uploading the same drawing twice costs one copy, not two.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the bytes can't be written.
     pub fn put_blob(&self, bytes: &[u8]) -> Result<String> {
         let digest = hex(&Sha256::digest(bytes));
         let path = self.blob_path(&digest);
@@ -433,6 +447,9 @@ impl Store {
         Ok(digest)
     }
 
+    /// # Errors
+    ///
+    /// Fails when there is no such blob or it can't be read.
     pub fn get_blob(&self, digest: &str) -> Result<Vec<u8>> {
         // A digest is used to build a path, so it gets checked before it is.
         if !is_digest(digest) {
@@ -450,6 +467,10 @@ impl Store {
 
     /// Writes an invitation down. The code is the secret; everything else is
     /// what it turns into.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database can't be read or written.
     pub fn make_invite(
         &self,
         code: &str,
@@ -472,6 +493,10 @@ impl Store {
     /// An invitation by its code, whatever state it is in. The caller decides
     /// what to do about used or expired, because the answer it gives somebody
     /// guessing has to be the same in every case.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database can't be read.
     pub fn invite(&self, code: &str) -> Result<Option<Invite>> {
         self.with(|db| {
             Ok(db
@@ -495,6 +520,10 @@ impl Store {
 
     /// Marks one used. Returns false when somebody got there first, which is
     /// what makes it single-use even if two people press at once.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database can't be read or written.
     pub fn use_invite(&self, code: &str, person: &str) -> Result<bool> {
         self.with(|db| {
             let changed = db.execute(
@@ -507,6 +536,10 @@ impl Store {
     }
 
     /// Every invitation that has not been used, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database can't be read.
     pub fn invites_outstanding(&self) -> Result<Vec<Invite>> {
         self.with(|db| {
             let mut statement = db.prepare(
@@ -529,6 +562,10 @@ impl Store {
 
     /// Throws one away before it is used, for an invitation sent to the wrong
     /// person or to somebody who never joined.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database can't be read or written.
     pub fn drop_invite(&self, code: &str) -> Result<()> {
         self.with(|db| {
             db.execute("DELETE FROM invites WHERE code = ?1", params![code])?;
@@ -540,6 +577,10 @@ impl Store {
 
     /// Everybody named on a project. Empty means nobody has been named, which
     /// means it is everybody's.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database can't be read.
     pub fn people_on(&self, project: &str) -> Result<Vec<String>> {
         self.with(|db| {
             let mut statement =
@@ -550,6 +591,10 @@ impl Store {
     }
 
     /// Puts somebody on a project. Doing it twice is not an error.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database can't be read or written.
     pub fn put_on_project(&self, project: &str, person: &str, by: &str) -> Result<()> {
         self.with(|db| {
             db.execute(
@@ -565,6 +610,10 @@ impl Store {
     /// Takes somebody off. Taking the last person off makes the project
     /// everybody's again, which is the same rule read backwards and is worth
     /// knowing before doing it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database can't be read or written.
     pub fn take_off_project(&self, project: &str, person: &str) -> Result<()> {
         self.with(|db| {
             db.execute(
@@ -581,6 +630,10 @@ impl Store {
     /// never disagree -- which is the failure that matters, because a project
     /// somebody cannot see in a list but can open by guessing its id is not
     /// access control, it is a tidier list.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database can't be read.
     pub fn may_see(&self, project: &str, person: &str, is_admin: bool) -> Result<bool> {
         if is_admin {
             return Ok(true);
@@ -605,6 +658,9 @@ impl Store {
 
     // ---- settings --------------------------------------------------------
 
+    /// # Errors
+    ///
+    /// Fails when the database can't be read.
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
         self.with(|db| {
             Ok(db
@@ -618,6 +674,10 @@ impl Store {
     /// Writes one line into the audit log. Never fails the thing it is
     /// recording: a log that can stop somebody opening a drawing is a log
     /// that gets switched off.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database can't be read or written.
     pub fn audit(&self, entry: &crate::audit::Entry) -> Result<()> {
         self.with(|db| {
             db.execute(
@@ -638,6 +698,10 @@ impl Store {
     }
 
     /// The log, newest first, for an administrator or an export.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database can't be read.
     pub fn audit_since(&self, since: Option<&str>, limit: usize) -> Result<Vec<crate::audit::Entry>> {
         self.with(|db| {
             let mut statement = db.prepare(
@@ -662,6 +726,9 @@ impl Store {
         })
     }
 
+    /// # Errors
+    ///
+    /// Fails when the database can't be read or written.
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
         self.with(|db| {
             db.execute(
@@ -675,6 +742,10 @@ impl Store {
 
     /// The next revision for a drawing set, bumped as one step with whatever
     /// is being written into it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database can't be read or written.
     pub fn bump(db: &Connection, set: &str) -> Result<u64> {
         db.execute("UPDATE sets SET revision = revision + 1 WHERE id = ?1", params![set])?;
         let revision: i64 = db.query_row(
@@ -685,6 +756,9 @@ impl Store {
         Ok(revision as u64)
     }
 
+    /// # Errors
+    ///
+    /// Fails when the database can't be read.
     pub fn is_empty(&self) -> Result<bool> {
         self.with(|db| {
             let people: i64 = db.query_row("SELECT count(*) FROM people", [], |r| r.get(0))?;
@@ -747,6 +821,7 @@ fn add_column(db: &Connection, table: &str, column: &str, declaration: &str) -> 
     Ok(())
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -756,6 +831,7 @@ pub fn hex(bytes: &[u8]) -> String {
 /// This is the check that stops a digest arriving from outside being used to
 /// walk out of the file store. Anything that is not exactly a digest is not a
 /// digest.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn is_digest(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
@@ -824,6 +900,12 @@ pub mod tempdir {
     pub struct Dir(PathBuf);
 
     impl Dir {
+        /// A fresh scratch directory, removed again when it is dropped.
+        ///
+        /// # Panics
+        ///
+        /// When the scratch directory can't be made, which stops the test that wanted it.
+        #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
         pub fn new() -> Dir {
             let n: u64 = rand::random();
             let path = std::env::temp_dir().join(format!("hyperview-test-{n:016x}"));
@@ -831,6 +913,7 @@ pub mod tempdir {
             Dir(path)
         }
 
+        #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
         pub fn path(&self) -> &Path {
             &self.0
         }

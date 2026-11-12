@@ -57,6 +57,10 @@ const PROJECT_COLUMNS: &str = "p.id, p.number, p.name, p.created,
 /// with `/` (a `\` is taken as one): each folder's name trimmed, none empty,
 /// none `.` or `..`, nothing that is not printable. Empty is none: the
 /// project's own, as before places. `what` names it in the refusal.
+///
+/// # Errors
+///
+/// A sentence naming `what`, when a folder's name is refused.
 pub fn folders(text: &str, what: &str) -> Result<Option<String>, String> {
     let text = text.trim();
     if text.is_empty() {
@@ -114,6 +118,10 @@ fn by_reference(db: &Connection, reference: &str) -> rusqlite::Result<Option<Pro
 // ---- the routes -----------------------------------------------------------
 
 /// `GET /projects` — the jobs, archived ones left off unless `?all=1`.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn list(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -156,6 +164,10 @@ pub async fn list(
 /// `POST /projects` — a new job, or, when it carries a reference that already
 /// has one, that one: brought back if it had been archived, and renamed if the
 /// other program has renamed it.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn create(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -230,6 +242,10 @@ pub async fn create(
 }
 
 /// `GET /projects/{id}`.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn one(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -264,6 +280,10 @@ pub async fn one(
 }
 
 /// `GET /projects/:id/people` — who is on it. Empty means everybody.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn who_is_on(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -296,6 +316,10 @@ pub struct WhoOnProject {
 ///
 /// Administrators only. Deciding who sees which job is the sort of thing that
 /// should not be doable by whoever happens to be on the job already.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn change_who_is_on(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -349,6 +373,10 @@ pub struct Placing {
 /// `POST /projects/{id}/place` — moves it in the Studio's list: a bid won
 /// goes to `Active Jobs`, a lost one to `Lost Bids/2026`. Its drawings,
 /// markups and takeoff are as they were.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn place(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -385,6 +413,10 @@ fn yes() -> bool {
 }
 
 /// `POST /projects/{id}/archive` — `{"archived": false}` brings it back.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn archive(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -429,6 +461,10 @@ pub struct Stamp {
 }
 
 /// `GET /projects/{id}/stamp`.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn stamp(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -511,6 +547,7 @@ pub(crate) fn same_drawing(
 
 /// Whether two folders are the same folder: case and spacing aside, as a
 /// share's folders are; none is only none.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn same_folder(a: Option<&str>, b: Option<&str>) -> bool {
     fn plain(f: &str) -> Vec<String> {
         f.split('/')
@@ -526,6 +563,7 @@ pub fn same_folder(a: Option<&str>, b: Option<&str>) -> bool {
 
 /// How two names for a drawing are compared: case, spacing and a trailing
 /// `.pdf` do not make it a different drawing.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn same_name(a: &str, b: &str) -> bool {
     fn plain(n: &str) -> String {
         let n = n.trim().to_lowercase();

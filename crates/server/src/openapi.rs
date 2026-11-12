@@ -8,6 +8,7 @@
 
 use serde_json::{json, Value};
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn document(name: &str) -> Value {
     json!({
         "openapi": "3.1.0",

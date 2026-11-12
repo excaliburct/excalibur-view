@@ -45,6 +45,7 @@ const MOST_FOLDERS: usize = 10_000; // WHAT: ten thousand. WHY: more than any jo
 
 /// The folder as compared: each folder's name in lower case with its spacing
 /// tidied, joined with `/`. The same rule `projects::same_folder` uses.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn key_of(path: &str) -> String {
     path.split('/') // WHAT: each folder's name. WHY: compared one at a time.
         .map(|p| {
@@ -59,6 +60,7 @@ pub fn key_of(path: &str) -> String {
 
 /// A folder and every folder it is in, the outermost first:
 /// `a`, `a/b`, `a/b/c`.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn and_above(path: &str) -> Vec<String> {
     let parts: Vec<&str> = path.split('/').collect(); // WHAT: its folders. WHY: each prefix is a folder above it.
     (1..=parts.len()).map(|n| parts[..n].join("/")).collect() // WHAT: every prefix. WHY: the rules above apply to it.
@@ -66,6 +68,7 @@ pub fn and_above(path: &str) -> Vec<String> {
 
 /// Whether this person is the office: an administrator or an estimator, who
 /// see every folder whatever its rule.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn is_office(who: &Who) -> bool {
     who.role != Role::Viewer // WHAT: anybody but a viewer. WHY: the rule as defined: the office is administrators and estimators.
 }
@@ -108,6 +111,7 @@ pub struct Sight {
 
 impl Sight {
     /// Everything: the office's sight.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn everything() -> Sight {
         Sight {
             everything: true,
@@ -117,12 +121,14 @@ impl Sight {
     }
 
     /// Whether this is the office's sight.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn is_everything(&self) -> bool {
         self.everything // WHAT: the flag. WHY: a listing can skip filtering.
     }
 
     /// Who sees `folder`, its parents' rules counted. No folder is the
     /// project's own, which everybody on the project sees.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn rule(&self, folder: Option<&str>) -> See {
         let mut rule = See::Everyone; // WHAT: the default. WHY: a folder with no rule anywhere above it is everybody's, as every folder was before.
         if let Some(folder) = folder {
@@ -136,6 +142,7 @@ impl Sight {
     }
 
     /// Whether this person sees what is in `folder`.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn sees(&self, folder: Option<&str>) -> bool {
         if self.everything {
             return true; // WHAT: the office. WHY: sees every folder.
@@ -162,6 +169,10 @@ pub(crate) fn everybodys(db: &Connection, project: &str, folder: &str) -> rusqli
 }
 
 /// What `who` may see of `project`'s folders, read fresh from the database.
+///
+/// # Errors
+///
+/// Fails when the database can't be read.
 pub fn sight_of(db: &Connection, project: &str, who: &Who) -> rusqlite::Result<Sight> {
     if is_office(who) {
         return Ok(Sight {
@@ -186,6 +197,10 @@ pub fn sight_of(db: &Connection, project: &str, who: &Who) -> rusqlite::Result<S
 
 /// The same, through the server's store, refused as a server error when the
 /// database can't be read: never read as "may see".
+///
+/// # Errors
+///
+/// A server error when the database can't be read.
 pub fn sight(server: &Server, project: &str, who: &Who) -> Answer<Sight> {
     if is_office(who) {
         return Ok(Sight::everything()); // WHAT: the office. WHY: no database read for the common case.
@@ -198,6 +213,10 @@ pub fn sight(server: &Server, project: &str, who: &Who) -> Answer<Sight> {
 
 /// The gate for anything kept in a folder: the project's own gate, then the
 /// folder's. Refused as `what` not found, exactly as one that isn't there.
+///
+/// # Errors
+///
+/// Not found when the project or folder is hidden from `who`, or a server error when the database can't be read.
 pub fn may_see_folder(
     server: &Server,
     who: &Who,
@@ -215,6 +234,10 @@ pub fn may_see_folder(
 /// How many current drawing sets of a project this sight sees: the count a
 /// project shows, so a hidden folder's sets aren't counted for somebody who
 /// can't see them.
+///
+/// # Errors
+///
+/// Fails when the database can't be read.
 pub fn current_sets_seen(db: &Connection, project: &str, sight: &Sight) -> rusqlite::Result<usize> {
     let mut statement =
         db.prepare("SELECT folder FROM sets WHERE project = ?1 AND superseded_by IS NULL")?; // WHAT: each current set's folder. WHY: counted by who sees it.
@@ -277,6 +300,10 @@ pub(crate) fn make_folder(
 
 /// Every folder of a project this sight sees: those written down, those a
 /// current set or file is in, and every folder above them, each once.
+///
+/// # Errors
+///
+/// Fails when the database can't be read.
 pub fn listing(db: &Connection, project: &str, sight: &Sight) -> rusqlite::Result<Vec<FolderInfo>> {
     struct Row {
         path: String,           // WHAT: as first written. WHY: shown so.
@@ -418,6 +445,10 @@ fn group_named(db: &Connection, name: &str, by: &str) -> rusqlite::Result<(Strin
 }
 
 /// `GET /groups`: every group and who is in it. Administrators only.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn groups(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<Vec<Group>>> {
     administrator(&server, &headers)?; // WHAT: an administrator signed in. WHY: who is in which group decides who sees which folder.
     server
@@ -445,6 +476,10 @@ fn group_name(name: &str) -> Answer<String> {
 
 /// `POST /groups` `{"name": "Shop"}`: a group, made if it isn't there, and
 /// the one there if it is. Administrators only.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn make_group(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -484,6 +519,10 @@ fn yes() -> bool {
 
 /// `POST /groups/{id}/people` `{"person": "usr_…", "on": true}`: somebody put
 /// in a group or taken out. Administrators only. Counts on their next request.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn change_group(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -533,6 +572,10 @@ pub async fn change_group(
 
 /// `GET /projects/{id}/folders`: every folder of the project the caller may
 /// see, the empty ones too, each with who sees it.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn folders_of(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -820,6 +863,10 @@ fn saved_at(sent: &str) -> Answer<Option<String>> {
 /// the project answer with that file (`already_here`); the same name in the
 /// same folder is the file saved again, and replaces it in place, the one
 /// before kept as its history (`replaces`).
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn upload_file(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -947,6 +994,10 @@ pub async fn upload_file(
 
 /// `GET /projects/{id}/files`: the project's current files the caller may
 /// see; `?all=1` adds the ones replaced since.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn files_of(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -974,6 +1025,10 @@ pub async fn files_of(
 }
 
 /// `GET /files/{id}/file`: the file's bytes, as they were sent.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn file_bytes(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -1026,6 +1081,10 @@ pub struct Moving {
 
 /// `POST /files/{id}/folder` `{"folder": "…"}`: a file moved to another
 /// folder of its project, with the files it replaced.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn move_file(
     State(server): State<Shared>,
     headers: HeaderMap,
@@ -1084,6 +1143,10 @@ pub async fn move_file(
 /// `POST /sets/{id}/folder` `{"folder": "…"}`: a drawing set moved to another
 /// folder of its project, with every issue of it before and after. Its
 /// markups are untouched.
+///
+/// # Errors
+///
+/// Refused with the problem the request earned: not signed in, not allowed, not found, a bad request, or a server error when the database can't be read.
 pub async fn move_set(
     State(server): State<Shared>,
     headers: HeaderMap,

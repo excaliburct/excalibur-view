@@ -227,6 +227,7 @@ fn rfc3339(t: SystemTime) -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
 }
 
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn roster(company: &str) -> Roster {
     let Ok(ledger) = ledger().lock() else {
         return Roster {

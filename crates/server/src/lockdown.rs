@@ -42,6 +42,7 @@ const ADMINISTRATORS_OWN: &str = "*S-1-5-32-544"; // WHAT: the administrators gr
 /// 4. Administrators made the owner of the folder and everything in it
 ///    (`/setowner /T`): nobody keeps an owner's right to change a file's
 ///    permissions back, including on a file made in the moment between 1 and 2.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn service_only_steps(folder: &Path) -> Vec<Vec<OsString>> {
     let whole = || folder.as_os_str().to_os_string(); // WHAT: the folder, as one argument. WHY: used by most steps.
     let below = folder.join("*").into_os_string(); // WHAT: everything inside the folder. WHY: icacls reads the `*` itself, so the folder's own entry is not touched by step 3.
@@ -69,6 +70,7 @@ pub fn service_only_steps(folder: &Path) -> Vec<Vec<OsString>> {
 /// folder below it and put its own program in its place for the system to start
 /// (audit, 2026-11-11). Granted to the folder itself, not passed on: what is
 /// inside keeps its own permissions.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn parent_steps(parent: &Path) -> Vec<Vec<OsString>> {
     let whole = || parent.as_os_str().to_os_string(); // WHAT: the folder, as one argument. WHY: every step is on it alone
     let quiet = ["/C", "/Q"]; // WHAT: carry on past an error, quietly. WHY: as for the service's folder
@@ -105,6 +107,7 @@ pub fn lock_parent(parent: &Path) {
 /// Whether `name`, a file directly in the service's folder, is one the
 /// service would load as a library and does not ship: any DLL, and the
 /// `.local` redirection folder Windows looks in beside a program.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn planted(name: &str, program: &str) -> bool {
     let lower = name.to_ascii_lowercase(); // WHAT: the name as Windows compares it. WHY: `VERSION.DLL` is `version.dll`.
     lower.ends_with(".dll") || lower == format!("{}.local", program.to_ascii_lowercase())

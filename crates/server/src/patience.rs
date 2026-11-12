@@ -122,6 +122,10 @@ impl Patience {
     /// allowed. Done under one lock, each try sees every try before it.
     ///
     /// [`right`]: Patience::right
+    ///
+    /// # Errors
+    ///
+    /// The wait still owed, when any of `who` owes one; the try is then not counted.
     pub fn begin(&self, rule: Rule, who: &[&str]) -> Result<(), Duration> {
         self.begin_keeping(rule, who, &[]) // WHAT: nothing in `who` is a real account. WHY: every count may be forgotten to make room.
     }
@@ -133,6 +137,10 @@ impl Patience {
     /// filled the ledger five fresh guesses at it every time.
     ///
     /// [`begin`]: Patience::begin
+    ///
+    /// # Errors
+    ///
+    /// The wait still owed, as [`begin`].
     pub fn begin_keeping(&self, rule: Rule, who: &[&str], keep: &[&str]) -> Result<(), Duration> {
         let Ok(mut held) = self.wrong.lock() else {
             return Ok(()); // WHAT: a poisoned lock lets the try through uncounted. WHY: the same as `wait_for` did; a panic elsewhere must not lock the whole office out.
@@ -232,6 +240,7 @@ fn forget_the_least_guessed_at(held: &mut HashMap<String, Wrong>) {
 /// IPv6 address is its /64: one home, office or cloud machine is handed a
 /// whole /64 and can take a new address from it for every request, so
 /// counting the address alone let it make a new one per guess.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn counted_as(address: &str) -> String {
     match address.parse::<std::net::IpAddr>().map(|ip| ip.to_canonical()) {
         Ok(std::net::IpAddr::V6(v6)) => {
@@ -245,6 +254,7 @@ pub fn counted_as(address: &str) -> String {
 
 /// What to tell somebody who has to wait. Never says how many tries are left
 /// or what the limit is; that is a hint about the thing being guarded.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn refusal(owed: Duration) -> String {
     let seconds = owed.as_secs().max(1);
     let how_long = if seconds < 90 {
