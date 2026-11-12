@@ -279,7 +279,7 @@ pub fn build_with(markup: &mut Markup, how: Draw) -> Option<Appearance> {
             }
             // A callout points at what it is about.
             draw_leader(markup, &mut c, colour, width);
-            words = draw_words(markup, &mut c, box_only, width);
+            words = draw_words_turned(markup, &mut c, box_only, width);
         }
         _ => {
             // Anything else at least gets its outline, so nothing is invisible.
@@ -477,6 +477,27 @@ fn picture_stream(
     ));
 
     finish_stream_with(c, area, opacity, fill_opacity, Subtype::Stamp, extra)
+}
+
+/// The words of a text box, turned to read upright on a sheet the PDF turns for showing. `/Rotate` on the text box
+/// (as Acrobat and Revu write it) is how far its words turn counter-clockwise on the page; a sheet stored sideways and
+/// turned 90 degrees to be shown needs its words turned the same 90, or they are shown sideways.
+fn draw_words_turned(markup: &Markup, c: &mut Content, area: [f64; 4], border: f64) -> Vec<(String, Dict)> {
+    let [x0, y0, x1, y1] = area; // WHAT: the box on the page. WHY: the words are laid out inside it
+    let (w, h) = (x1 - x0, y1 - y0); // WHAT: its width and height on the page. WHY: swapped below for a quarter turn
+    // WHAT: the turn's matrix, where the words start (the box's bottom left as the sheet is shown), and the box as the
+    // words see it. WHY: the words are laid out in an upright box of their own, then turned into place
+    let (m, origin, local) = match markup.turn() {
+        90 => ([0.0, 1.0, -1.0, 0.0], [x1, y0], [0.0, 0.0, h, w]),
+        180 => ([-1.0, 0.0, 0.0, -1.0], [x1, y1], [0.0, 0.0, w, h]),
+        270 => ([0.0, -1.0, 1.0, 0.0], [x0, y1], [0.0, 0.0, h, w]),
+        _ => return draw_words(markup, c, area, border), // WHAT: not turned. WHY: drawn exactly as before
+    };
+    c.save(); // WHAT: keep the page's own axes. WHY: only the words turn
+    c.matrix(m[0], m[1], m[2], m[3], origin[0], origin[1]); // WHAT: turn about the box's shown bottom left. WHY: the words read left to right as the sheet is shown
+    let words = draw_words(markup, c, local, border); // WHAT: the words in the turned box. WHY: the same wrapping, alignment and clipping as an upright box
+    c.restore(); // WHAT: back to the page's axes. WHY: nothing after it turns
+    words
 }
 
 /// Draws a text markup's own words into its box.
@@ -1493,4 +1514,69 @@ fn corners_of(area: [f64; 4]) -> Vec<[f64; 2]> {
         [area[2], area[3]],
         [area[0], area[3]],
     ]
+}
+
+#[cfg(test)]
+mod turned_words {
+    // WHAT: text boxes on sheets a PDF turns for showing. WHY: 0.6.31 wrote their words along the stored page, so on a sheet stored sideways the words were shown sideways (Creede, 2026-11-11)
+    use super::*;
+
+    const WORDS: &str = "Welds were completed 6 in on the top of the bars and 1 1/2 in on the vertical sides"; // WHAT: a field note long enough to wrap. WHY: how far it wraps shows which way it reads
+
+    fn tall_box(turn: Option<i64>) -> Markup {
+        let mut m = Markup::new(Subtype::FreeText);
+        m.set_box([100.0, 100.0, 200.0, 400.0]); // WHAT: 100 wide and 300 tall on the page. WHY: on a sheet turned 90 degrees it shows 300 wide and 100 tall
+        m.set_contents(WORDS);
+        if let Some(t) = turn {
+            m.set("Rotate", Object::Int(t));
+        } // WHAT: the box's own turn. WHY: each case below
+        m
+    }
+
+    fn drawn(m: &mut Markup) -> String {
+        String::from_utf8_lossy(&m.finish().unwrap().stream.data).into_owned() // WHAT: the appearance as text. WHY: its operators are read below
+    }
+
+    #[test]
+    fn a_box_turned_a_quarter_writes_its_words_turned_from_its_shown_bottom_left() {
+        let text = drawn(&mut tall_box(Some(90)));
+        assert!(text.contains("0 1 -1 0 200 100 cm"), "words turned about the shown bottom left: {text}"); // WHAT: x runs up the page, starting at the right edge. WHY: that is left to right once the sheet is turned
+        assert!(text.contains("(Welds were completed"), "the words are drawn: {text}");
+    }
+
+    #[test]
+    fn a_turned_box_wraps_to_its_shown_width_not_its_stored_width() {
+        let upright = drawn(&mut tall_box(None)).matches("Tj").count(); // WHAT: lines as 0.6.31 wrapped them, 96 points wide. WHY: the baseline
+        let turned = drawn(&mut tall_box(Some(90))).matches("Tj").count(); // WHAT: lines wrapped 296 points wide. WHY: the width the sheet shows
+        assert!(turned < upright, "fewer, longer lines: {turned} vs {upright}");
+    }
+
+    #[test]
+    fn every_quarter_turn_starts_at_the_corner_shown_bottom_left() {
+        for (turn, cm) in [(180, "-1 0 0 -1 200 400 cm"), (270, "0 -1 1 0 100 400 cm"), (-90, "0 -1 1 0 100 400 cm"), (450, "0 1 -1 0 200 100 cm")] {
+            assert!(drawn(&mut tall_box(Some(turn))).contains(cm), "{turn}: {cm}");
+        } // WHAT: each turn's matrix and corner. WHY: a wrong corner puts the words outside the box, clipped to nothing
+    }
+
+    #[test]
+    fn an_unturned_box_is_drawn_exactly_as_before() {
+        assert_eq!(drawn(&mut tall_box(None)), drawn(&mut tall_box(Some(0))), "a turn of 0 is no turn");
+        assert!(!drawn(&mut tall_box(None)).contains(" cm"), "no matrix for an upright box"); // WHAT: unchanged output. WHY: every box on an upright sheet stays byte for byte what 0.6.31 wrote
+    }
+
+    #[test]
+    fn a_text_box_takes_its_sheets_turn_once_and_nothing_else_does() {
+        let mut m = tall_box(None);
+        m.turn_with_sheet(90);
+        assert_eq!(m.turn(), 90, "an unturned box on a turned sheet takes the turn");
+        m.turn_with_sheet(180);
+        assert_eq!(m.turn(), 90, "a box already turned keeps its turn"); // WHAT: kept. WHY: a box Revu turned stays as Revu turned it
+        let mut upright = tall_box(None);
+        upright.turn_with_sheet(0);
+        assert!(!upright.dict.has("Rotate"), "an upright sheet writes nothing");
+        let mut cloud = Markup::new(Subtype::Square);
+        cloud.turn_with_sheet(90);
+        assert!(!cloud.dict.has("Rotate"), "only a text box turns its words"); // WHAT: a cloud has no words. WHY: nothing else changes
+        assert_eq!(tall_box(Some(-90)).turn(), 270, "a negative turn reads as its quarter");
+    }
 }
