@@ -26,7 +26,7 @@ impl Frame {
     pub fn new(area: [f64; 4], rotation: i32) -> Frame {
         Frame {
             area,
-            rotation: (((rotation % 360) + 360) % 360) / 90 * 90,
+            rotation: rotation.rem_euclid(360) / 90 * 90, // WHAT: a quarter turn, 0 to 270. WHY: rem_euclid is the same sum, written the way the strict lint asks
         }
     }
 
