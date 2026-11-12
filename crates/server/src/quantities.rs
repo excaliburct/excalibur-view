@@ -64,8 +64,7 @@ pub fn measured(
         );
         let sheet = sheets
             .get(stored.page)
-            .map(|s| s.number.clone())
-            .unwrap_or_else(|| format!("Sheet {}", stored.page + 1));
+            .map_or_else(|| format!("Sheet {}", stored.page + 1), |s| s.number.clone()); // WHAT: the sheet's number, else its place. WHY: every row names its sheet
         rows.push((stored.id.clone(), row, sheet));
     }
     rows
@@ -106,9 +105,9 @@ pub fn takeoff(set: &str, revision: u64, markups: &[Stored], sheets: &[SheetScal
             // Every measured field is absent, not zero, when there is no
             // scale. A zero in a JSON document is a measurement; a null is an
             // admission.
-            length_feet: row.scaled.then(|| row.length).flatten(),
-            area_square_feet: row.scaled.then(|| row.area).flatten(),
-            volume_cubic_feet: row.scaled.then(|| row.volume).flatten(),
+            length_feet: row.scaled.then_some(row.length).flatten(), // WHAT: the length, only with a scale. WHY: a null is an admission, a zero a measurement
+            area_square_feet: row.scaled.then_some(row.area).flatten(), // WHAT: the area, likewise. WHY: the same
+            volume_cubic_feet: row.scaled.then_some(row.volume).flatten(), // WHAT: the volume, likewise. WHY: the same
             pounds: row.pounds(WEIGHTS),
         })
         .collect();
@@ -116,8 +115,7 @@ pub fn takeoff(set: &str, revision: u64, markups: &[Stored], sheets: &[SheetScal
     let name_of = |page: usize| {
         sheets
             .get(page)
-            .map(|s| s.number.clone())
-            .unwrap_or_else(|| format!("Sheet {}", page + 1))
+            .map_or_else(|| format!("Sheet {}", page + 1), |s| s.number.clone()) // WHAT: the sheet's number, else its place. WHY: every row names its sheet
     };
 
     let groups = summary
@@ -190,8 +188,7 @@ pub fn to_csv(markups: &[Stored], sheets: &[SheetScale], columns: &[Column]) -> 
     let name_of = |page: usize| {
         sheets
             .get(page)
-            .map(|s| s.number.clone())
-            .unwrap_or_else(|| format!("Sheet {}", page + 1))
+            .map_or_else(|| format!("Sheet {}", page + 1), |s| s.number.clone()) // WHAT: the sheet's number, else its place. WHY: every row names its sheet
     };
     let mut out = takeoff::summary::to_csv_with(&rows, columns, WEIGHTS, &name_of);
     let summary = takeoff::summarise(&rows, WEIGHTS);

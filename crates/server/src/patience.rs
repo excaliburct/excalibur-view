@@ -87,7 +87,7 @@ pub struct Patience {
 
 impl std::fmt::Debug for Patience {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let held = self.wrong.lock().map(|w| w.len()).unwrap_or(0);
+        let held = self.wrong.lock().map_or(0, |w| w.len()); // WHAT: how many are watched, nought when the lock is poisoned. WHY: a look at the box never stops on it
         write!(f, "Patience({held} watched)")
     }
 }
@@ -180,7 +180,7 @@ impl Patience {
 
     /// How many are being watched. For the tests and for a look at the box.
     pub fn watching(&self) -> usize {
-        self.wrong.lock().map(|w| w.len()).unwrap_or(0)
+        self.wrong.lock().map_or(0, |w| w.len()) // WHAT: how many are watched, nought when the lock is poisoned. WHY: likewise
     }
 }
 
@@ -393,7 +393,7 @@ mod tests {
     #[test]
     fn a_flood_of_made_up_names_does_not_push_out_the_account_being_guessed_at() {
         let p = Patience::default(); // WHAT: a ledger. WHY: filled below.
-        for _ in 0..(QUICK.free + 1) {
+        for _ in 0..=QUICK.free { // WHAT: one more try than is free. WHY: until it owes a wait
             let _ = p.begin(QUICK, &["the-victim"]); // WHAT: wrong tries at one account. WHY: until it owes a wait.
         }
         assert!(p.wait_for(QUICK, "the-victim").is_some(), "the account owes a wait");
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn an_account_being_guessed_at_outlives_a_flood_of_names_guessed_at_more_often() {
         let p = Patience::default(); // WHAT: a ledger. WHY: filled below.
-        for _ in 0..(QUICK.free + 1) {
+        for _ in 0..=QUICK.free { // WHAT: one more try than is free. WHY: likewise
             let _ = p.begin_keeping(QUICK, &["the-victim@example.com"], &["the-victim@example.com"]); // WHAT: wrong tries at a real account. WHY: until it owes a wait.
         }
         assert!(p.wait_for(QUICK, "the-victim@example.com").is_some(), "the account owes a wait");

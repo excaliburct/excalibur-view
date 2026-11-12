@@ -413,7 +413,7 @@ fn a_good_night_sends_only_encrypted_bytes_reads_them_back_and_marks_it() {
     ); // WHAT: two objects. WHY: one per file.
     for f in files_in(&w.bucket) {
         let b = std::fs::read(&f).unwrap();
-        let side = f.extension().map(|x| x == "json").unwrap_or(false); // WHAT: every object. WHY: nothing may leave in the clear.
+        let side = f.extension().is_some_and(|x| x == "json"); // WHAT: every object. WHY: nothing may leave in the clear.
         if !side {
             assert!(
                 b.starts_with(b"FAKEAGE1"),
@@ -664,7 +664,7 @@ fn a_damaged_file_on_disk_is_never_sent_as_good_and_is_said() {
     );
     assert!(std::fs::read_to_string(w.work.join("view/offsite.log"))
         .unwrap()
-        .contains(&format!("{:.12} on disk doesn't match", d))); // WHAT: not sent, and said. WHY: never damaged bytes as good ones.
+        .contains(&format!("{d:.12} on disk doesn't match"))); // WHAT: not sent, and said. WHY: never damaged bytes as good ones.
 }
 
 #[test]
@@ -916,7 +916,7 @@ fn the_command_refuses_what_it_doesnt_know_and_says_when_it_isnt_set_up() {
         data: w.data.clone(),
         ..crate::Config::default()
     };
-    let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>(); // WHAT: a server with no off-site settings. WHY: the command reads the server's settings.
+    let a = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>(); // WHAT: a server with no off-site settings. WHY: the command reads the server's settings.
     assert_eq!(
         main_from_args(&VIEW, &cfg, "9.9.9", &a(&["--offsite-backup"])),
         4,
@@ -1225,7 +1225,7 @@ fn a_run_by_hand_to_another_target_marks_nothing() {
         marks(
             Some(&folder.to_string_lossy()),
             None,
-            Some(&format!("{}/../bucket", wk)),
+            Some(&format!("{wk}/../bucket")), // WHAT: the same bucket by a longer path. WHY: the case
             None
         ),
         "a folder target is the same place by any path"
@@ -1450,7 +1450,7 @@ fn a_work_folder_others_could_change_is_refused() {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
             std::thread::sleep(WAIT); // WHAT: open one to other accounts. WHY: each is checked.
             let e = job(&w).backup();
-            let d = drill(&w, &w.id, &format!("s-open-{}", mode)).run();
+            let d = drill(&w, &w.id, &format!("s-open-{mode}")).run(); // WHAT: a drill under this mode. WHY: it refuses too
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(was)).unwrap(); // WHAT: a backup and a drill, then put back. WHY: both refuse.
             assert_eq!(e.code, 2, "{what}: {e:?}");
             assert!(
@@ -1670,7 +1670,7 @@ fn with_real_age_the_backup_cannot_be_read_without_the_private_key() {
     assert_eq!(e.code, 0, "{e:?}"); // WHAT: a real backup. WHY: the baseline.
     let objects: Vec<_> = files_in(&w.bucket)
         .into_iter()
-        .filter(|p| p.extension().map(|x| x == "age").unwrap_or(false))
+        .filter(|p| p.extension().is_some_and(|x| x == "age")) // WHAT: the encrypted ones. WHY: tampered with below
         .collect();
     assert!(objects.len() >= 3); // WHAT: the encrypted objects. WHY: catalog copies and files.
     for o in &objects {

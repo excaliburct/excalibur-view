@@ -281,7 +281,7 @@ pub fn others_can_change(work: &Path) -> Option<String> {
 #[cfg(unix)]
 fn my_uid() -> u32 {
     #[cfg(test)]
-    if let Some(u) = PRETEND_UID.with(|c| c.get()) {
+    if let Some(u) = PRETEND_UID.with(std::cell::Cell::get) { // WHAT: the account a test pretends to be. WHY: read from its cell
         return u;
     } // WHAT: the tests' other account. WHY: proves a stranger's file is refused, without being root.
     nix::unistd::getuid().as_raw() // WHAT: this process's account. WHY: its own files are trusted.
@@ -824,7 +824,7 @@ impl Target {
                     bail!("{key} is already there; a backup is never written over");
                 } // WHAT: refuse an overwrite. WHY: what was sent stays as it was sent.
                 #[cfg(test)]
-                if let Some(n) = FAIL_PUT_AFTER.with(|f| f.get()) {
+                if let Some(n) = FAIL_PUT_AFTER.with(std::cell::Cell::get) { // WHAT: the uploads left before a planted failure. WHY: read from its cell
                     if n == 0 {
                         bail!("a planted upload failure");
                     }
@@ -832,7 +832,7 @@ impl Target {
                 } // WHAT: the tests' connection that drops part way. WHY: the next night must still run.
                 #[cfg(test)]
                 if LOSE_UPLOADS
-                    .with(|l| l.get())
+                    .with(std::cell::Cell::get) // WHAT: the folder whose uploads a test loses. WHY: read from its cell
                     .is_some_and(|f| key.starts_with(f))
                 {
                     return Ok(());
@@ -1726,8 +1726,7 @@ impl Job<'_> {
         println!("{line}"); // WHAT: to the console. WHY: a person running it sees it.
         let path = self.own().join("offsite.log"); // WHAT: the log file. WHY: beside the job.
         if std::fs::metadata(&path)
-            .map(|m| m.len() > 4 * 1024 * 1024)
-            .unwrap_or(false)
+            .is_ok_and(|m| m.len() > 4 * 1024 * 1024) // WHAT: whether the log is past 4 MB. WHY: false when it can't be read
         {
             let _ = std::fs::rename(&path, self.own().join("offsite.log.1"));
         } // WHAT: one old log kept past 4 MB. WHY: a log must never fill the disk.
@@ -1775,7 +1774,7 @@ impl Job<'_> {
             return refuse(4, "the work folder and the data folder must be apart: a backup inside what it backs up grows forever");
         } // WHAT: refuse overlap. WHY: the spool would be backed up into itself.
         if let Err(e) =
-            create_private_dir(&own).and_then(|_| create_private_dir(&own.join("spool")))
+            create_private_dir(&own).and_then(|()| create_private_dir(&own.join("spool"))) // WHAT: the folder, then its spool. WHY: the spool only when its folder is made
         {
             return refuse(2, format!("could not make {}: {e}", own.display()));
         } // WHAT: make it, owner-only. WHY: the first run; the stage inside holds the database unencrypted.
@@ -1808,7 +1807,7 @@ impl Job<'_> {
 
     fn backup_locked(&self, stage: &Path) -> std::result::Result<i32, Exit> {
         #[cfg(test)]
-        if FAULT.with(|f| f.get()) {
+        if FAULT.with(std::cell::Cell::get) { // WHAT: whether a test planted a fault. WHY: read from its cell
             panic!("a fault planted by a test");
         } // WHAT: the tests' fault. WHY: proves a fault becomes a failed run.
         let own = self.own(); // WHAT: the job's folder. WHY: spool and salt.
@@ -1929,14 +1928,13 @@ impl Job<'_> {
             } // WHAT: already there. WHY: files never change, so once is enough; the manifest keeps the fingerprint already in the bucket.
             if !matches_digest(path, digest).unwrap_or(false) {
                 self.log(&format!(
-                    "WARNING: {:.12} on disk doesn't match its own fingerprint; not sent",
-                    digest
+                    "WARNING: {digest:.12} on disk doesn't match its own fingerprint; not sent" // WHAT: the warning, naming the file. WHY: the log says which
                 ));
                 damaged.push(digest.clone());
                 continue;
             } // WHAT: check before sending. WHY: never send damaged bytes as good ones.
             #[cfg(test)]
-            if CHANGE_WHILE_SENT.with(|c| c.get()) {
+            if CHANGE_WHILE_SENT.with(std::cell::Cell::get) { // WHAT: whether a test changes a file while it is sent. WHY: read from its cell
                 std::fs::write(path, b"changed while it was being sent")
                     .map_err(|e| refuse(2, e))?;
             } // WHAT: the tests' change between the check and the send. WHY: the fingerprint taken while sending must catch it.
@@ -1949,8 +1947,7 @@ impl Job<'_> {
             if as_sent != *digest {
                 let _ = std::fs::remove_file(&out);
                 self.log(&format!(
-                    "WARNING: {:.12} changed while it was being sent; not sent tonight",
-                    digest
+                    "WARNING: {digest:.12} changed while it was being sent; not sent tonight" // WHAT: the warning, naming the file. WHY: likewise
                 ));
                 damaged.push(digest.clone());
                 continue;
@@ -2141,7 +2138,7 @@ impl Job<'_> {
                 match self
                     .target
                     .copy(&format!("daily/{name}"), &format!("{g}/{name}"))
-                    .and_then(|_| {
+                    .and_then(|()| { // WHAT: then its sidecar. WHY: only when the catalog copied
                         self.target
                             .copy(&format!("daily/{name}.json"), &format!("{g}/{name}.json"))
                     }) {
@@ -2217,7 +2214,7 @@ fn hold_lock(path: &Path) -> std::result::Result<std::fs::File, Exit> {
 /// A fault's message, for the log.
 fn panic_words(p: &(dyn std::any::Any + Send)) -> String {
     p.downcast_ref::<&str>()
-        .map(|s| s.to_string())
+        .map(ToString::to_string) // WHAT: a panic's &str, as text. WHY: the log says what stopped it
         .or_else(|| p.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "an unexpected fault".into()) // WHAT: the text a panic carries. WHY: the log says what stopped it.
 }
@@ -2360,7 +2357,7 @@ fn megabytes(bytes: u64) -> f64 {
 }
 
 fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    crate::store::hex(b) // WHAT: the store's hex writer. WHY: one way of writing hex in the server
 } // WHAT: bytes as hex. WHY: names and fingerprints.
 
 /// The SHA-256 of a file, as lowercase hex, read in pieces.
@@ -2420,7 +2417,7 @@ fn new_private_dir(path: &Path) -> Result<()> {
         winacl::create_dir(path, &me, &[&me, winacl::SYSTEM])?;
     } // WHAT: born with only this account and the system, nothing inherited. WHY: no moment when another account could plant a junction in it.
     #[cfg(all(test, unix))]
-    if LOOSEN_SCRATCH.with(|l| l.get()) {
+    if LOOSEN_SCRATCH.with(std::cell::Cell::get) { // WHAT: whether a test loosens the scratch folder. WHY: read from its cell
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
     } // WHAT: the tests' folder opened up after it is made. WHY: proves the check below catches it.
@@ -2524,12 +2521,11 @@ fn valid_manifest(product: &Product, man: &Manifest) -> Result<()> {
         bail!("the database fingerprint or the salt is not 64 hex digits");
     } // WHAT: the two fingerprints. WHY: they name and check files.
     if let Some((d, _)) = man.blobs.iter().find(|(d, _)| !is_digest(d)) {
-        bail!("a file fingerprint is not 64 hex digits: {:.16}", d);
+        bail!("a file fingerprint is not 64 hex digits: {d:.16}"); // WHAT: refused, naming the start of it. WHY: a bad digest must never become a path
     } // WHAT: every file. WHY: digests become paths and object names.
     if let Some(d) = man.missing_on_disk.iter().find(|d| !is_digest(d)) {
         bail!(
-            "a missing file's fingerprint is not 64 hex digits: {:.16}",
-            d
+            "a missing file's fingerprint is not 64 hex digits: {d:.16}" // WHAT: the refusal, naming the start of it. WHY: a bad digest must never become a path
         );
     } // WHAT: the same. WHY: compared with the database.
     if man.installation.as_deref().is_some_and(|i| !is_installation(i)) {
@@ -2551,7 +2547,7 @@ fn real(p: &Path) -> PathBuf {
     let mut rest = Vec::new(); // WHAT: the nearest folder that exists, and what is below it. WHY: a folder not made yet still has a real place.
     while !base.exists() {
         match (
-            base.file_name().map(|n| n.to_os_string()),
+            base.file_name().map(std::ffi::OsStr::to_os_string), // WHAT: this folder's own name. WHY: walked back up below
             base.parent().map(Path::to_path_buf),
         ) {
             (Some(n), Some(up)) => {
@@ -2666,8 +2662,7 @@ impl Drill<'_> {
                     &serde_json::to_vec_pretty(&m).unwrap_or_default(),
                 ) {
                     self.job.log(&format!(
-                        "WARNING: passed, but could not write {}: {e:#}",
-                        DRILL_MARKER
+                        "WARNING: passed, but could not write {DRILL_MARKER}: {e:#}" // WHAT: the warning, naming the marker. WHY: the log says what wasn't written
                     ));
                 } // WHAT: write it. WHY: Fleet shows when a restore was last proven.
                 self.job.log(&format!("RESTORE DRILL PASSED: {summary}"));
@@ -2744,9 +2739,7 @@ impl Drill<'_> {
                 2,
                 format!(
                     "the catalog is listed at {} bytes and its sidecar says {}; not fetched",
-                    cat_size
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| "no".into()),
+                    cat_size.map_or_else(|| "no".into(), |n| n.to_string()), // WHAT: the catalog's listed size, or "no". WHY: said in the refusal
                     side.age_bytes
                 ),
             ));
@@ -2846,8 +2839,7 @@ impl Drill<'_> {
             return Err(refuse(
                 2,
                 format!(
-                    "the database names a file the manifest doesn't list ({:.12})",
-                    d
+                    "the database names a file the manifest doesn't list ({d:.12})" // WHAT: the refusal, naming the file. WHY: a hole is found now
                 ),
             ));
         } // WHAT: every named file accounted for. WHY: a hole is found now, not on the bad day.
@@ -2860,14 +2852,12 @@ impl Drill<'_> {
         if let Some((d, _)) = man.blobs.iter().find(|(d, s)| {
             there
                 .get(&object_for(&man.salt, d))
-                .map(|&b| b <= *s)
-                .unwrap_or(true)
+                .is_none_or(|&b| b <= *s) // WHAT: missing, or short of its size. WHY: either is a hole
         }) {
             return Err(refuse(
                 2,
                 format!(
-                    "a file the backup lists is not in the bucket at full size ({:.12})",
-                    d
+                    "a file the backup lists is not in the bucket at full size ({d:.12})" // WHAT: the refusal, naming the file. WHY: likewise
                 ),
             ));
         } // WHAT: all present. WHY: a missing file is a hole in the backup.
@@ -2913,7 +2903,7 @@ impl Drill<'_> {
             if sha256_file(&out).map_err(|e| refuse(2, e))? != *d {
                 return Err(refuse(
                     2,
-                    format!("a restored file doesn't match its fingerprint ({:.12})", d),
+                    format!("a restored file doesn't match its fingerprint ({d:.12})"), // WHAT: the refusal, naming the start of it. WHY: a restore that differs is not a restore
                 ));
             } // WHAT: compare. WHY: every byte the same.
         }
@@ -3298,8 +3288,7 @@ pub fn main_from_args(
     } // WHAT: a target first, then --name value pairs and two flags. WHY: a mistyped option must not be ignored.
     let data = opt
         .get("--data")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| config.data.clone()); // WHAT: the data folder the server uses, or the one given. WHY: the installed program finds its own drawings.
+        .map_or_else(|| config.data.clone(), PathBuf::from); // WHAT: the data folder the server uses, or the one given. WHY: the installed program finds its own drawings.
     let work = opt
         .get("--work")
         .cloned()

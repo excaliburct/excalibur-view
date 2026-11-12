@@ -108,9 +108,7 @@ pub async fn seen(
         .take(120)
         .collect::<String>();
     if let Some(token) = token {
-        let ip = connect
-            .map(|ConnectInfo(addr)| addr.ip().to_string())
-            .unwrap_or_else(|| "?".into());
+        let ip = connect.map_or_else(|| "?".into(), |ConnectInfo(addr)| addr.ip().to_string()); // WHAT: the seat's address, or "?". WHY: shown beside who is on
         record(&server, &token, &ip, &ua);
     }
     next.run(request).await
@@ -296,7 +294,7 @@ mod tests {
     static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
     fn alone() -> std::sync::MutexGuard<'static, ()> {
-        ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner())
+        ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner) // WHAT: the lock, even after a test panicked holding it. WHY: one test at a time, whatever the last did
     }
 
     fn put(key: &str, who: &str, age: Duration) {

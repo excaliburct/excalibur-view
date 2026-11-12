@@ -252,7 +252,7 @@ fn parse_time(text: &str) -> Option<time::OffsetDateTime> {
 pub mod purpose {
     /// An assistant: the MCP endpoint and nothing else, and that read-only.
     pub const ASSISTANT: &str = "assistant";
-    /// Another system — FabWire — using the API as the person who made it.
+    /// Another system — `FabWire` — using the API as the person who made it.
     /// It never carries an administrator's power, even when an administrator
     /// made it: running the server takes a signed-in administrator.
     pub const INTEGRATION: &str = "integration";

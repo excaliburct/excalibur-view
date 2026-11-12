@@ -111,9 +111,7 @@ pub async fn serve(
         .name("hyperview-announce".into())
         .spawn(move || {
             hub::discover::answer_for(|asker| {
-                let host = hub::discover::facing(asker.ip())
-                    .map(|ip| ip.to_string())
-                    .unwrap_or_else(|| "localhost".into());
+                let host = hub::discover::facing(asker.ip()).map_or_else(|| "localhost".into(), |ip| ip.to_string()); // WHAT: the address this computer faces the asker on, else localhost. WHY: the answer it is told to use
                 hub::discover::Answer {
                     name: api::installation_name(&announcing),
                     url: format!("http://{host}:{port}"),
@@ -124,7 +122,7 @@ pub async fn serve(
                     ready: !announcing.store.is_empty().unwrap_or(false),
                     id: id.clone(),
                 }
-            })
+            });
         })
         .ok();
 
@@ -223,8 +221,8 @@ pub async fn on_a_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = interrupt => {},
-        _ = terminate => {},
+        () = interrupt => {}, // WHAT: Ctrl+C. WHY: stops the server
+        () = terminate => {}, // WHAT: the service being stopped. WHY: likewise
     }
     tracing::info!("stopping");
 }

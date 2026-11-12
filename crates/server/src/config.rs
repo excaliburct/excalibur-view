@@ -242,7 +242,7 @@ mod tests {
         // No browser may call it until somebody says which one, because the
         // clients are desktop programs and a wide-open origin list on a server
         // holding a company's drawings is nobody's idea of a default.
-        assert!(config.allow_origins.is_empty());
+        assert_eq!(config.allow_origins, Vec::<String>::new()); // WHAT: no browser origin allowed. WHY: a failure shows which one was
         // And no maintenance channel until somebody sets a key for one.
         assert!(config.maintenance_key.is_none());
     }

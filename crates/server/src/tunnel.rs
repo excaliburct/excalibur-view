@@ -183,7 +183,7 @@ impl Tunnel {
     /// False once somebody has turned it off, which is how the restart loop
     /// knows to stop rather than fighting them.
     fn wanted(&self) -> bool {
-        self.inner.lock().map(|i| i.wanted).unwrap_or(false)
+        self.inner.lock().is_ok_and(|i| i.wanted) // WHAT: whether it is wanted, false when the lock is poisoned. WHY: the restart loop stops rather than fight
     }
 
     /// True when a connector of ours is running right now.
@@ -494,7 +494,7 @@ fn digest_of(path: &Path) -> Option<String> {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    crate::store::hex(bytes) // WHAT: the store's hex writer. WHY: one way of writing hex in the server
 }
 
 /// What is stored, if anything.
@@ -705,7 +705,7 @@ mod tests {
             State::Trouble { why: "it would not start".into() },
         ] {
             let said = state.in_words();
-            assert!(!said.is_empty());
+            assert_ne!(said, ""); // WHAT: it says something. WHY: a failure shows what
             assert!(said.len() > 10, "{state:?} says too little: {said:?}");
         }
     }

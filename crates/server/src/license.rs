@@ -204,7 +204,7 @@ fn fingerprint(license: &License) -> String {
     let mut hasher = Sha256::new();
     hasher.update(license.signing_payload()); // WHAT: what was signed. WHY: the licence itself, not how the file happens to be spaced
     hasher.update(license.signature.to_ascii_lowercase().as_bytes()); // WHAT: and its signature. WHY: the same signed licence, saved again with a BOM or CRLF, is the same
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    crate::store::hex(&hasher.finalize()) // WHAT: the digest as lower-case hex. WHY: the one hex writer the server has
 }
 
 /// Tells the `sealed` module what this server's license says, so everything
@@ -212,7 +212,7 @@ fn fingerprint(license: &License) -> String {
 /// Called as the server opens and again whenever a license is installed.
 pub fn settle_sealed(server: &Server) {
     let edition = held(server, &trust(server)).map(|l| l.edition);
-    hub::sealed::license_says(edition.map(|e| e.name()));
+    hub::sealed::license_says(edition.map(hub::license::Edition::name)); // WHAT: the held licence's edition, by name. WHY: decides whether the server is sealed
 }
 
 pub fn begin_at(server: &Server, now: &str, founding_before: &str) {
@@ -299,7 +299,7 @@ pub fn name_for(id: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(id.trim().as_bytes());
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    crate::store::hex(&hasher.finalize()) // WHAT: the digest as lower-case hex. WHY: the one hex writer the server has
 }
 
 /// Whether `fresh` is worth installing over `held`.
@@ -416,7 +416,7 @@ fn latest_seen(server: &Server, now: &str) -> String {
     };
     let seen = server.store.setting(SEEN).ok().flatten().and_then(|s| time::OffsetDateTime::parse(&s, &Rfc3339).ok()); // WHAT: the latest kept. WHY: compared below
     let believable = time::OffsetDateTime::parse(&format!("{BUILT}T00:00:00Z"), &Rfc3339).map_or(true, |built| at <= built + time::Duration::days(730)); // WHAT: no later than two years after this program was built. WHY: a clock set years ahead by mistake (a dead battery) must not end a trial for good
-    if believable && seen.map_or(true, |seen| at > seen + time::Duration::hours(1)) {
+    if believable && seen.is_none_or(|seen| at > seen + time::Duration::hours(1)) { // WHAT: a believable time, and the first or more than an hour past the latest. WHY: only then is it kept as the latest seen
         let _ = server.store.set_setting(SEEN, now); // WHAT: kept. WHY: the next look compares with it
     }
     match seen {
@@ -720,7 +720,7 @@ mod tests {
             signature: String::new(),
         };
         license.signature =
-            signing.sign(&license.signing_payload()).to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+            crate::store::hex(&signing.sign(&license.signing_payload()).to_bytes()); // WHAT: signed with the test key, as hex. WHY: a licence the test server accepts
         serde_json::to_string(&license).unwrap()
     }
 
@@ -938,7 +938,7 @@ mod tests {
         license.id = id.into(); // WHAT: its id. WHY: a different licence, or a newer copy of one
         license.key = UNIT_KEY.into(); // WHAT: the test key's own name. WHY: the built-in mesafab-2026 would be found first and refuse it
         use ed25519_dalek::Signer;
-        license.signature = signing.sign(&license.signing_payload()).to_bytes().iter().map(|b| format!("{b:02x}")).collect(); // WHAT: signed again. WHY: the id is in the signed text
+        license.signature = crate::store::hex(&signing.sign(&license.signing_payload()).to_bytes()); // WHAT: signed again. WHY: the id is in the signed text
         serde_json::to_string_pretty(&license).unwrap()
     }
 
@@ -982,7 +982,7 @@ mod tests {
         license.issued = issued.into(); // WHAT: its issue date. WHY: an older licence never wins over a newer one
         license.edition = edition; // WHAT: office or sealed. WHY: an edition change is never automatic
         use ed25519_dalek::Signer;
-        license.signature = signing.sign(&license.signing_payload()).to_bytes().iter().map(|b| format!("{b:02x}")).collect(); // WHAT: signed again. WHY: both are in the signed text
+        license.signature = crate::store::hex(&signing.sign(&license.signing_payload()).to_bytes()); // WHAT: signed again. WHY: both are in the signed text
         serde_json::to_string_pretty(&license).unwrap()
     }
 
@@ -1053,7 +1053,7 @@ mod tests {
         let (signing, _) = issuer();
         let trusted = Trusted { keys: vec![(UNIT_KEY.into(), signing.verifying_key().to_bytes())] };
         let read = |text: String| License::read(&text, &trusted).unwrap();
-        let parts = |l: License, p: &[&str]| License { modules: p.iter().map(|m| m.to_string()).collect(), ..l }; // WHAT: the same licence with these parts. WHY: the rule reads only the fields, not the signature
+        let parts = |l: License, p: &[&str]| License { modules: p.iter().map(ToString::to_string).collect(), ..l }; // WHAT: the same licence with these parts. WHY: the rule reads only the fields, not the signature
         let held = parts(read(a_license_with(&signing, "evl_a", 6, "2027-11-01", "2026-10-01", Edition::Office)), &["cad"]); // WHAT: an office with CAD. WHY: the part that must not go
         let newer = read(a_license_with(&signing, "evl_b", 9, "2028-11-01", "2026-11-01", Edition::Office));
         assert!(!folder_file_wanted(Some(&held), &parts(newer.clone(), &[]), false, true), "another licence without CAD: by hand only");
@@ -1102,7 +1102,7 @@ mod tests {
         let mut theirs: License = serde_json::from_str(&a_license_called(&signing, "evl_theirs", 9, "2028-11-01")).unwrap();
         theirs.company = "Some Other Steel, Inc.".into(); // WHAT: another company. WHY: the case
         use ed25519_dalek::Signer;
-        theirs.signature = signing.sign(&theirs.signing_payload()).to_bytes().iter().map(|b| format!("{b:02x}")).collect(); // WHAT: signed again. WHY: the company is in the signed text
+        theirs.signature = crate::store::hex(&signing.sign(&theirs.signing_payload()).to_bytes()); // WHAT: signed again. WHY: the company is in the signed text
         assert!(!folder_file_wanted(Some(&held), &read(serde_json::to_string(&theirs).unwrap()), false, true), "another company's licence: no");
     }
 
@@ -1186,7 +1186,7 @@ mod renewal_tests {
     }
 
     fn with_parts(users: u32, through: &str, parts: &[&str]) -> License {
-        License { modules: parts.iter().map(|p| p.to_string()).collect(), ..a_license(users, through) } // WHAT: a licence with Office Server parts. WHY: the parts line in renewals
+        License { modules: parts.iter().map(ToString::to_string).collect(), ..a_license(users, through) } // WHAT: a licence with Office Server parts. WHY: the parts line in renewals
     }
 
     /// More seats bought through the shop come back signed without the parts

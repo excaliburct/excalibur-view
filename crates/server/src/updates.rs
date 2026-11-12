@@ -383,8 +383,7 @@ fn already_have(server: &Server, release: &Release) -> bool {
                 |r| r.get::<_, i64>(0),
             )?)
         })
-        .map(|n| n > 0)
-        .unwrap_or(false)
+        .is_ok_and(|n| n > 0) // WHAT: whether any are held, false when it can't be read. WHY: as before
 }
 
 /// The newest viewer this server already holds for one platform, or "0" when

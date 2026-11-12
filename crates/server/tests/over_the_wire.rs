@@ -1345,7 +1345,7 @@ fn a_release_signed_by_nobody_this_build_trusts_is_refused() {
         .expect("a body");
     let answer: serde_json::Value = serde_json::from_str(&said).expect("json");
     assert_eq!(
-        answer["written"].as_array().map(|a| a.len()),
+        answer["written"].as_array().map(Vec::len), // WHAT: how many were written. WHY: none should be
         Some(0),
         "nothing should have been written: {said}"
     );
@@ -1969,7 +1969,7 @@ fn a_project_with_nobody_named_on_it_is_everybodys() {
     let hand = signed_in(&server, "est@example.com", "camber-weld-joist-plate-19");
 
     let project = boss.create_project("6742", "Elm West").expect("project");
-    assert!(boss.who_is_on(&project.id).expect("who").is_empty());
+    assert_eq!(boss.who_is_on(&project.id).expect("who"), Vec::<String>::new()); // WHAT: nobody named on the new job. WHY: a failure shows who was
 
     let seen = hand.projects().expect("list");
     assert!(
@@ -2124,7 +2124,7 @@ fn an_invitation_gets_somebody_in_and_gives_them_the_role_it_says() {
     let invite = boss
         .invite("newhand@example.com", "New Hand", "estimator", None)
         .expect("invite");
-    assert!(!invite.code.is_empty());
+    assert_ne!(invite.code, ""); // WHAT: a code was made. WHY: a failure shows what came back
     assert_eq!(invite.role, "estimator");
 
     let mut joining = Client::new(&server.base);

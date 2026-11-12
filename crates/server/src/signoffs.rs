@@ -153,7 +153,7 @@ pub async fn ask(
     body: Body,
 ) -> Response {
     let gate =
-        writer(&server, &headers).and_then(|who| may_reach_set(&server, &who, &set).map(|_| who)); // WHAT: someone who may change drawings, on this set. WHY: asked before the body is read.
+        writer(&server, &headers).and_then(|who| may_reach_set(&server, &who, &set).map(|()| who)); // WHAT: someone who may change drawings, on this set. WHY: asked before the body is read.
     let who = match gate {
         Ok(who) => who, // WHAT: let in. WHY: their list is read next.
         Err(denied) => return turned_away(body, denied).await, // WHAT: refused. WHY: a stranger's body is read no further than a little.

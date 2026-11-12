@@ -475,7 +475,7 @@ fn an_office_whose_trial_ended_keeps_everything_readable_and_only_sharing_pauses
 
 // ---- being told instead of asking -----------------------------------------
 
-/// A program listening for notices, as FabWire would: every request that
+/// A program listening for notices, as `FabWire` would: every request that
 /// arrives, as (headers, body), answered 200.
 fn a_listener() -> (String, std::sync::mpsc::Receiver<(String, String)>) {
     use std::io::{BufRead, BufReader, Read, Write};

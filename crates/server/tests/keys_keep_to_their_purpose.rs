@@ -660,7 +660,7 @@ fn no_key_administers_whoever_made_it_and_an_integration_key_otherwise_works_as_
             .send_bytes(b"--x--\r\n"); // WHAT: a form with nothing in it. WHY: the handler runs and asks who is asking.
         match answer {
             Err(ureq::Error::Status(403, r)) => {
-                assert_eq!(r.into_json::<Value>().unwrap()["error"], "key_not_allowed")
+                assert_eq!(r.into_json::<Value>().unwrap()["error"], "key_not_allowed"); // WHAT: the refusal's reason. WHY: a key, not a person
             } // WHAT: refused as a key. WHY: tool chests and releases are administrators' alone.
             other => panic!("POST {path} with an integration key: {other:?}"), // WHAT: anything else. WHY: a key uploaded a chest or a release.
         }

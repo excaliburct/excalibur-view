@@ -343,9 +343,9 @@ pub fn listing(db: &Connection, project: &str, sight: &Sight) -> rusqlite::Resul
         let (folder, file) = row?; // WHAT: one thing's folder, and whether it is a file. WHY: counted in the right column.
         let count = counts.entry(key_of(&folder)).or_default(); // WHAT: its folder's counts. WHY: added to.
         if file == 1 {
-            count.1 += 1
+            count.1 += 1; // WHAT: one more file. WHY: shown
         } else {
-            count.0 += 1
+            count.0 += 1; // WHAT: one more set. WHY: shown
         } // WHAT: one more file or set. WHY: shown.
         held.push(folder); // WHAT: kept. WHY: listed with the folders above it.
     }

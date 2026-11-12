@@ -255,7 +255,7 @@ fn call(server: &crate::api::Server, headers: &HeaderMap, body: &Value) -> Resul
     // person whose token it is would get, and nothing else: the person is
     // kept and handed to every tool, which applies the API's own project gate.
     let who = crate::api::mcp_caller(server, headers) // WHAT: whoever the token belongs to. WHY: kept, not thrown away: every answer is filtered by it.
-        .map_err(|_| Trouble::refused(
+        .map_err(|()| Trouble::refused( // WHAT: refused when nobody is known. WHY: the endpoint answers nobody it can't name
             "this server does not know who is asking. Put an Excalibur View access token \
              in an Authorization: Bearer header.",
         ))?;
@@ -268,7 +268,7 @@ fn call(server: &crate::api::Server, headers: &HeaderMap, body: &Value) -> Resul
             server,
             &who, // WHAT: the person asking. WHY: the cut list is gated like the takeoff it comes from.
             need(&args, "set")?,
-            args.get("stock_length_feet").and_then(|v| v.as_f64()),
+            args.get("stock_length_feet").and_then(serde_json::Value::as_f64), // WHAT: the stock length, if one was given. WHY: the cut list's stock
         ),
         "counted_twice" => crate::api::mcp_doubles(server, &who, need(&args, "set")?), // WHAT: doubles on a set, gated. WHY: reading markups is reading the set.
         "revision_cost" => crate::api::mcp_revision(

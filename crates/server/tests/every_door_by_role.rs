@@ -1188,7 +1188,7 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
         ("POST", "/signoffs/{id}/sign") => {
             Body::Json(json!({"name": "Knock", "strokes": [[[1.0, 1.0], [9.0, 9.0]]]}))
         }
-        ("POST", "/files/{id}/folder") | ("POST", "/sets/{id}/folder") => {
+        ("POST", "/files/{id}/folder" | "/sets/{id}/folder") => { // WHAT: a folder to move to. WHY: both routes take one
             Body::Json(json!({"folder": null}))
         }
         ("POST", "/cad/drawings") | ("PUT", "/cad/drawings/{id}/file") => Body::Raw("application/octet-stream".into(), b"a drawing".to_vec()), // WHAT: a drawing's bytes. WHY: what CAD sends
@@ -1197,7 +1197,7 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
         ("POST", "/archetype/jobs/{id}/checkin") => Body::Json(json!({"base_revision": 0, "files": [], "machine": "PROBE"})),
         ("POST", "/archetype/files/missing") => Body::Json(json!({"digests": []})),
         ("PUT", "/archetype/files/{digest}") => Body::Raw("application/octet-stream".into(), b"x".to_vec()),
-        ("POST", _) | ("DELETE", _) => Body::Raw("application/json".into(), Vec::new()), // WHAT: nothing in the body. WHY: the routes that take none.
+        ("POST" | "DELETE", _) => Body::Raw("application/json".into(), Vec::new()), // WHAT: nothing in the body. WHY: the routes that take none.
         _ => Body::None,
     };
     (format!("/api/v1{path}"), body)

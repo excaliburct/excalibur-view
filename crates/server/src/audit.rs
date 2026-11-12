@@ -21,6 +21,8 @@
 //! The log lives on the office's own server with everything else. It is never
 //! sent anywhere, sealed or not.
 
+use std::fmt::Write as _; // WHAT: write! into a String. WHY: text is written straight in, with no string made only to be copied
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -111,7 +113,6 @@ impl Entry {
     }
 
     #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
-    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn by(mut self, person: &str) -> Entry {
         self.person = Some(clip(person)); // WHAT: capped. WHY: as every field
         self
@@ -140,10 +141,10 @@ impl Entry {
     pub fn line(&self) -> String {
         let mut said = format!("{}  {}  {}", self.at, self.email, self.action);
         if !self.subject.is_empty() {
-            said.push_str(&format!(": {}", self.subject));
+            let _ = write!(said, ": {}", self.subject); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         if !self.detail.is_empty() {
-            said.push_str(&format!(" ({})", self.detail));
+            let _ = write!(said, " ({})", self.detail); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         said
     }
@@ -161,15 +162,15 @@ pub fn now() -> String {
 pub fn as_csv(entries: &[Entry]) -> String {
     let mut out = String::from("when,who,action,subject,detail,from\n");
     for e in entries {
-        out.push_str(&format!(
-            "{},{},{},{},{},{}\n",
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "{},{},{},{},{},{}", // WHAT: six fields, comma-separated. WHY: one CSV line
             field(&e.at),
             field(&e.email),
             field(&e.action),
             field(&e.subject),
             field(&e.detail),
             field(&e.address)
-        ));
+        );
     }
     out
 }
@@ -195,7 +196,7 @@ mod tests {
         let row = csv.lines().nth(1).unwrap(); // WHAT: the entry's line. WHY: checked.
         assert!(row.contains(",\"'=HYPERLINK("), "the formula is text: {row}");
         for start in ["+1", "-1", "@SUM(A1)", "\tx"] {
-            assert!(field(start).starts_with("'") || field(start).starts_with("\"'"), "{start:?} -> {}", field(start));
+            assert!(field(start).starts_with('\'') || field(start).starts_with("\"'"), "{start:?} -> {}", field(start)); // WHAT: every risky start made text. WHY: a spreadsheet never runs it as a formula
         }
         assert_eq!(field("pat@acme.test"), "pat@acme.test", "an ordinary cell is left alone");
     }
@@ -239,7 +240,7 @@ mod tests {
     fn the_time_is_utc_and_sorts_as_text() {
         let e = Entry::new(action::SIGNED_IN, "pat@acme.test");
         assert!(e.at.ends_with('Z') || e.at.contains('+'), "{}", e.at);
-        assert_eq!(e.at.len() >= 20, true, "{}", e.at);
+        assert!(e.at.len() >= 20, "{}", e.at); // WHAT: a full time, to the second. WHY: sorts as text
     }
 }
 

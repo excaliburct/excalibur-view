@@ -5,6 +5,7 @@
 //! copying it. It goes a very long way; when a company outgrows it, the
 //! schema here is ordinary SQL and moves.
 
+use std::fmt::Write as _; // WHAT: write! into a String. WHY: hex is written straight in
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
@@ -854,7 +855,10 @@ pub mod int {
 
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut out, b| { // WHAT: one string, room for two digits a byte. WHY: grown once
+        let _ = write!(out, "{b:02x}"); // WHAT: two hex digits a byte, written straight in. WHY: one string for the lot, not one a byte; writing to a String never fails
+        out // WHAT: handed on to the next byte. WHY: the fold's running text
+    }) // WHAT: the bytes as lower-case hex. WHY: digests, ids and signatures are written so
 }
 
 /// A digest and nothing else: sixty-four lower-case hex characters.

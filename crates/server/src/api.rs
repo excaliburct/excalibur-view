@@ -4,6 +4,7 @@
 //! the two agree, so the published description of this server cannot drift
 //! away from what it actually does.
 
+use std::fmt::Write as _; // WHAT: write! into a String. WHY: text is written straight in, with no string made only to be copied
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -1071,7 +1072,7 @@ async fn change_password(
     check_password(&body.new)?; // WHAT: the new password's length checked first. WHY: a short one is refused without counting as a guess at the current one.
     if let Err(owed) = server.patience.begin_keeping(crate::patience::SIGNING_IN, &[email.as_str(), from.as_str()], &[email.as_str()]) {
         // WHAT: too many wrong current passwords lately: refused before the password is checked; otherwise this try is counted until it proves right. WHY: the same limit as sign-in, so this door is no faster for guessing, even in a burst.
-        return Err(Denied(StatusCode::TOO_MANY_REQUESTS, Problem::new("too_many", &crate::patience::refusal(owed))));
+        return Err(Denied(StatusCode::TOO_MANY_REQUESTS, Problem::new("too_many", crate::patience::refusal(owed)))); // WHAT: refused, saying how long to wait. WHY: the sentence is handed over as it is made
     }
     let stored: String = server
         .store
@@ -1243,9 +1244,9 @@ async fn change_remote(
             "This server is sealed, so it makes no outward connections at all \u{2014} including this one. That is what the Sealed edition is.",
         ));
     }
-    let token = crate::tunnel::a_token(&body.token).map_err(|e| Denied::wrong(e))?;
+    let token = crate::tunnel::a_token(&body.token).map_err(Denied::wrong)?; // WHAT: the token, or a bad request saying why. WHY: checked before it is kept
     let hostname =
-        crate::tunnel::a_hostname(&body.hostname).map_err(|e| Denied::wrong(e))?;
+        crate::tunnel::a_hostname(&body.hostname).map_err(Denied::wrong)?; // WHAT: the hostname, likewise. WHY: the same
     crate::tunnel::remember(&server.store, &token, &hostname)
         .map_err(|e| Denied::broke("keep the tunnel settings", e))?;
     // Whatever was running before belongs to the old token.
@@ -1635,7 +1636,7 @@ async fn upload_set(
                     set.carried_forward = carried;
                     set.carry_note = note;
                     if carried > 0 {
-                        set.revision = read_set(db, &set.id)?.map(|s| s.revision).unwrap_or(0);
+                        set.revision = read_set(db, &set.id)?.map_or(0, |s| s.revision); // WHAT: the set's revision after the carry, nought when it can't be read. WHY: the answer shows the markups' revision
                     }
                 }
             }
@@ -1842,7 +1843,7 @@ async fn add_markups(
     Path(id): Path<String>,
     body: Body,
 ) -> Response {
-    let gate = writer(&server, &headers).and_then(|who| may_reach_set(&server, &who, &id).map(|_| who)); // WHAT: who may mark this set up, asked before the body is read. WHY: a stranger's batch is never read.
+    let gate = writer(&server, &headers).and_then(|who| may_reach_set(&server, &who, &id).map(|()| who)); // WHAT: who may mark this set up, asked before the body is read. WHY: a stranger's batch is never read.
     let who = match gate {
         Ok(who) => who, // WHAT: let in. WHY: their batch is read next.
         Err(denied) => return turned_away(body, denied).await, // WHAT: refused, with the body read no further than a little. WHY: as above.
@@ -2620,7 +2621,7 @@ async fn plugins(State(server): State<Shared>, headers: HeaderMap) -> Answer<Jso
         })
         .map_err(|e| Denied::broke("list the plugins", e))?;
     let mut list = list;
-    for plugin in list.iter_mut() {
+    for plugin in &mut list { // WHAT: each plugin listed. WHY: its manifest is filled in
         plugin.manifest = manifest_of(&server, &plugin.digest).await;
     }
     Ok(Json(list))
@@ -2740,7 +2741,7 @@ async fn add_plugin(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let gate = administrator(&server, &headers).and_then(|who| sharing(&server).map(|_| who)); // WHAT: an administrator, while sharing is allowed, asked first. WHY: a plugin file is read only for them.
+    let gate = administrator(&server, &headers).and_then(|who| sharing(&server).map(|()| who)); // WHAT: an administrator, while sharing is allowed, asked first. WHY: a plugin file is read only for them.
     let who = match gate {
         Ok(who) => who, // WHAT: let in. WHY: the file is read next.
         Err(denied) => return turned_away(body, denied).await, // WHAT: refused before the file is read. WHY: as above.
@@ -2942,8 +2943,7 @@ async fn update_latest(
     });
     let required = release
         .as_ref()
-        .map(|r| r.minimum_api_version > API_VERSION)
-        .unwrap_or(false);
+        .is_some_and(|r| r.minimum_api_version > API_VERSION); // WHAT: whether the newest release needs a newer API than this server's. WHY: then the seat must update before it connects
 
     Ok(Json(UpdateOffer {
         release,
@@ -3699,7 +3699,7 @@ async fn join(
     if let Err(owed) = server.patience.begin(crate::patience::JOINING, &[counted.as_str()]) {
         return Err(Denied(
             StatusCode::TOO_MANY_REQUESTS,
-            Problem::new("too_many", &crate::patience::refusal(owed)),
+            Problem::new("too_many", crate::patience::refusal(owed)), // WHAT: refused, saying how long to wait. WHY: the sentence is handed over as it is made
         ));
     }
 
@@ -4413,7 +4413,7 @@ async fn upload_chest(
     let chest = Chest {
         id: fresh_id("cst"),
         name: if name.trim().is_empty() {
-            profile.map(|p| p.name).unwrap_or_else(|| filename.clone())
+            profile.map_or_else(|| filename.clone(), |p| p.name) // WHAT: the chest's own name, else its file's. WHY: a chest is never nameless
         } else {
             name.trim().to_string()
         },
@@ -4534,9 +4534,9 @@ pub fn mcp_projects(server: &Server, who: &Who) -> Result<String, String> {
             Some(when) => format!("  (archived {})", when.get(..10).unwrap_or(&when)),
             None => String::new(),
         };
-        out.push_str(&format!(
-            "  {number}  {name}  —  {sets} current drawing set(s){put_away}   [id {id}]\n"
-        ));
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "  {number}  {name}  —  {sets} current drawing set(s){put_away}   [id {id}]" // WHAT: one job's line. WHY: what the assistant reads
+        );
     }
     Ok(out)
 }
@@ -4605,17 +4605,17 @@ pub fn mcp_sets(server: &Server, who: &Who, project: Option<&str>) -> Result<Str
         }
         let mut notes = String::new();
         if let (Some(newer), Some(newer_name)) = (&newer, &newer_name) {
-            notes.push_str(&format!("  — superseded by {newer_name} [id {newer}]"));
+            let _ = write!(notes, "  — superseded by {newer_name} [id {newer}]"); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         if carried > 0 {
-            notes.push_str(&format!(
+            let _ = write!(notes, // WHAT: written straight into the text. WHY: no string is made only to be copied in
                 "  — {carried} markup(s) carried forward from the issue before, marked \"{}\" until somebody checks them",
                 crate::projects::CARRIED
-            ));
+            );
         }
-        out.push_str(&format!(
-            "  {name}  —  {sheets} sheets, revision {revision}, uploaded {uploaded}   [id {id}]{notes}\n"
-        ));
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "  {name}  —  {sheets} sheets, revision {revision}, uploaded {uploaded}   [id {id}]{notes}" // WHAT: one set's line. WHY: likewise
+        );
     }
     Ok(out)
 }
@@ -4645,8 +4645,7 @@ fn mcp_short_by(rows: &[takeoff::Row], sheets: &[quantities::SheetScale]) -> Str
         .map(|page| {
             sheets
                 .get(*page)
-                .map(|s| s.number.clone())
-                .unwrap_or_else(|| format!("sheet {}", page + 1))
+                .map_or_else(|| format!("sheet {}", page + 1), |s| s.number.clone()) // WHAT: the sheet's number, else its place. WHY: every page has a name to show
         })
         .collect();
     format!(
@@ -4669,37 +4668,37 @@ pub fn mcp_takeoff(server: &Server, who: &Who, id: &str) -> Result<String, Strin
     let summary = takeoff::summarise(&rows, quantities::WEIGHTS);
     let mut out = format!("Takeoff for {id} — {} markup(s).\n\n", summary.picks);
     for group in &summary.groups {
-        out.push_str(&format!("  {}  ({})\n", group.subject, group.kind.name()));
-        out.push_str(&format!("      {} markup(s)", group.picks));
+        let _ = writeln!(out, "  {}  ({})", group.subject, group.kind.name()); // WHAT: written straight into the text. WHY: no string is made only to be copied in
+        let _ = write!(out, "      {} markup(s)", group.picks); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         if group.length > 0.0 {
-            out.push_str(&format!(", {:.2} ft", group.length));
+            let _ = write!(out, ", {:.2} ft", group.length); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         if group.area > 0.0 {
-            out.push_str(&format!(", {:.2} sq ft", group.area));
+            let _ = write!(out, ", {:.2} sq ft", group.area); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         if group.count > 0.0 && group.kind == annot::Kind::Count {
-            out.push_str(&format!(", count {:.0}", group.count));
+            let _ = write!(out, ", count {:.0}", group.count); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         }
         // Absent, never zero. The distinction is the whole argument.
         match group.weighed {
-            true => out.push_str(&format!(", {:.0} lb", group.pounds)),
+            true => { let _ = write!(out, ", {:.0} lb", group.pounds); }, // WHAT: written straight into the text. WHY: no string is made only to be copied in
             false => out.push_str(", NO unit weight in the tool chest for this shape — \
                                    it has no weight, which is not a weight of zero"),
         }
         if group.unscaled > 0 {
-            out.push_str(&format!(
+            let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
                 " — {} of them left out for want of a scale",
                 group.unscaled
-            ));
+            );
         }
         out.push('\n');
     }
     match summary.pounds > 0.0 {
-        true => out.push_str(&format!(
+        true => { let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
             "\nTOTAL: {:.0} lb · {:.3} tons\n",
             summary.pounds,
             summary.tons()
-        )),
+        ); },
         false => out.push_str(
             "\nTOTAL: no weight — nothing on this takeoff carries a unit weight.\n",
         ),
@@ -4731,19 +4730,19 @@ pub fn mcp_shop_list(
     }
     let mut out = format!("Cut list for {id} — lengths in feet, every one rounded UP.\n\n");
     for shape in &list.shapes {
-        out.push_str(&format!("  {}\n", shape.name));
+        let _ = writeln!(out, "  {}", shape.name); // WHAT: written straight into the text. WHY: no string is made only to be copied in
         for cut in &shape.cuts {
-            out.push_str(&format!(
+            let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
                 "      {:.3} ft  × {}",
                 cut.length, cut.count
-            ));
+            );
             if !cut.places.is_empty() {
-                out.push_str(&format!("   at {}", cut.places.join(", ")));
+                let _ = write!(out, "   at {}", cut.places.join(", ")); // WHAT: written straight into the text. WHY: no string is made only to be copied in
             }
             out.push('\n');
         }
-        out.push_str(&format!(
-            "      {} piece(s), {:.2} ft, {}\n",
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "      {} piece(s), {:.2} ft, {}", // WHAT: one cut's line. WHY: likewise
             shape.pieces,
             shape.total_length,
             match shape.pounds {
@@ -4751,43 +4750,43 @@ pub fn mcp_shop_list(
                 None => "NO unit weight in the tool chest — no weight, not a weight of zero"
                     .to_string(),
             }
-        ));
+        );
     }
-    out.push_str(&format!(
+    let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
         "\n{} piece(s) altogether · {}\n",
         list.pieces,
         list.weight_says()
-    ));
+    );
 
     match stock_feet {
         Some(stock) if stock > 0.0 => {
-            out.push_str(&format!("\nWHAT TO BUY, in {stock} ft stock:\n"));
+            let _ = write!(out, "\nWHAT TO BUY, in {stock} ft stock:\n"); // WHAT: written straight into the text. WHY: no string is made only to be copied in
             for nest in takeoff::shoplist::nest_all(&list, stock, takeoff::shoplist::INCH / 8.0)
             {
-                out.push_str(&format!(
-                    "  {}: {} stick(s), {:.0}% of the steel ends up in the building\n",
+                let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+                    "  {}: {} stick(s), {:.0}% of the steel ends up in the building", // WHAT: one shape's nest. WHY: likewise
                     nest.shape,
                     nest.sticks_to_buy(),
                     nest.yield_of() * 100.0
-                ));
+                );
                 if nest.unnested > 0 {
-                    out.push_str(&format!(
-                        "      {} piece(s) were NOT nested: a shape with more than {} pieces, or one past the first {} pieces of the whole list, is not nested one by one, so none of them is on a stick\n",
+                    let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+                        "      {} piece(s) were NOT nested: a shape with more than {} pieces, or one past the first {} pieces of the whole list, is not nested one by one, so none of them is on a stick", // WHAT: the pieces left unnested. WHY: likewise
                         nest.unnested,
                         takeoff::shoplist::MOST_NESTED,
                         takeoff::shoplist::MOST_NESTED_IN_ALL
-                    )); // WHAT: said plainly. WHY: an answer with no sticks must not read as nothing to buy.
+                    ); // WHAT: said plainly. WHY: an answer with no sticks must not read as nothing to buy.
                 } else if !nest.is_whole() {
-                    out.push_str(&format!(
+                    let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
                         "      {} piece(s) WILL NOT come out of {stock} ft stock and are on \
-                         no stick: {}\n",
+                         no stick: {}", // WHAT: the pieces too long for the stock. WHY: likewise
                         nest.too_long.len(),
                         nest.too_long
                             .iter()
                             .map(|p| format!("{p:.2} ft"))
                             .collect::<Vec<_>>()
                             .join(", ")
-                    ));
+                    );
                 }
             }
         }
@@ -4801,7 +4800,7 @@ pub fn mcp_shop_list(
 
     let missing = list.what_is_missing();
     if !missing.is_empty() {
-        out.push_str(&format!("\n{missing}\n"));
+        let _ = write!(out, "\n{missing}\n"); // WHAT: written straight into the text. WHY: no string is made only to be copied in
     }
     out.push_str(&mcp_short_by(&rows, &sheets));
     Ok(out)
@@ -4823,8 +4822,7 @@ pub fn mcp_doubles(server: &Server, who: &Who, id: &str) -> Result<String, Strin
     let name_of = |page: usize| {
         sheets
             .get(page)
-            .map(|s| s.number.clone())
-            .unwrap_or_else(|| format!("sheet {}", page + 1))
+            .map_or_else(|| format!("sheet {}", page + 1), |s| s.number.clone()) // WHAT: the sheet's number, else its place. WHY: every page has a name to show
     };
     let mut out = format!(
         "{} pair(s) on {id} sit in the same place measuring the same thing. \
@@ -4833,17 +4831,17 @@ pub fn mcp_doubles(server: &Server, who: &Who, id: &str) -> Result<String, Strin
         found.pairs.len()
     );
     for pair in &found.pairs {
-        out.push_str(&format!(
+        let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
             "  {}  {}  ({})\n      {}\n",
             name_of(pair.page),
             pair.subject,
             pair.sure.name(),
             pair.why
-        ));
+        );
     }
     let worth = found.what_it_is_worth(quantities::WEIGHTS, &rows);
     if !worth.is_empty() {
-        out.push_str(&format!("\n{worth}\n"));
+        let _ = write!(out, "\n{worth}\n"); // WHAT: written straight into the text. WHY: no string is made only to be copied in
     }
     out.push_str(
         "\nWhether any of these is really a double is for the estimator to decide. A \
@@ -4865,8 +4863,8 @@ pub fn mcp_revision(server: &Server, who: &Who, was_bid: &str, arrived: &str) ->
         revision.headline()
     );
     for line in revision.changes() {
-        out.push_str(&format!(
-            "  {}  ({})  {} → {} {}  [{}]\n",
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "  {}  ({})  {} → {} {}  [{}]", // WHAT: one change's line. WHY: likewise
             line.subject,
             line.what.name(),
             format_args!("{:.2}", line.quantity.0),
@@ -4878,11 +4876,11 @@ pub fn mcp_revision(server: &Server, who: &Who, was_bid: &str, arrived: &str) ->
                          can be worked out"
                     .to_string(),
             }
-        ));
+        );
     }
     let missing = revision.what_is_missing();
     if !missing.is_empty() {
-        out.push_str(&format!("\n{missing}\n"));
+        let _ = write!(out, "\n{missing}\n"); // WHAT: written straight into the text. WHY: no string is made only to be copied in
     }
     Ok(out)
 }
@@ -4904,23 +4902,23 @@ pub fn mcp_sheets(server: &Server, who: &Who, id: &str) -> Result<String, String
         .collect();
     let mut out = format!("{} sheet(s) in {id}:\n", sheets.len());
     for sheet in &sheets {
-        out.push_str(&format!(
-            "  {}  —  {}\n",
+        let _ = writeln!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
+            "  {}  —  {}", // WHAT: one sheet's line. WHY: likewise
             sheet.number,
             match &sheet.scale {
                 Some(scale) => scale.ratio.clone(),
                 None => "NO SCALE SET".to_string(),
             }
-        ));
+        );
     }
     if !without.is_empty() {
-        out.push_str(&format!(
+        let _ = write!(out, // WHAT: written straight into the text. WHY: no string is made only to be copied in
             "\n{} sheet(s) have no scale: {}. Any measurement on those is left out of \
              every total — never counted as zero. A takeoff of this set is short by \
              whatever is on them.\n",
             without.len(),
             without.join(", ")
-        ));
+        );
     }
     Ok(out)
 }

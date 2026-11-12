@@ -61,7 +61,7 @@ fn a_sealed_licence_seals_the_server_at_once_and_it_stops_reaching_out_for_renew
         key: "sealed-test".into(),
         signature: String::new(),
     };
-    license.signature = signing.sign(&license.signing_payload()).to_bytes().iter().map(|b| format!("{b:02x}")).collect(); // WHAT: signed. WHY: a real licence.
+    license.signature = hyperview_server::store::hex(&signing.sign(&license.signing_payload()).to_bytes()); // WHAT: signed. WHY: a real licence.
     assert!(!hub::sealed::is_sealed(), "not sealed before the licence");
     let added: Value = ureq::post(&format!("{base}/api/v1/license"))
         .set("Authorization", &format!("Bearer {token}"))
