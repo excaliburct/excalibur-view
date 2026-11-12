@@ -651,6 +651,12 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/admin/updates"),
     ("GET", "/admin/fleet"),
     ("POST", "/admin/fleet"),
+    ("GET", "/admin/invites"), // WHAT: the invitations. WHY: audit: described, so the openapi and the role and key tests cover it
+    ("POST", "/admin/invites"), // WHAT: one made. WHY: likewise
+    ("DELETE", "/admin/invites/{code}"), // WHAT: one thrown away. WHY: likewise
+    ("GET", "/admin/remote"), // WHAT: reaching the office from outside. WHY: likewise
+    ("POST", "/admin/remote"), // WHAT: turned on. WHY: likewise
+    ("DELETE", "/admin/remote"), // WHAT: turned off. WHY: likewise
     ("GET", "/projects"),
     ("POST", "/projects"),
     ("GET", "/projects/{id}"),
@@ -671,6 +677,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/people"),
     ("POST", "/people/{id}/role"),
     ("POST", "/people/{id}/remove"),
+    ("GET", "/projects/{id}/people"), // WHAT: who is on a project. WHY: likewise
+    ("POST", "/projects/{id}/people"), // WHAT: put on or taken off. WHY: likewise
     ("GET", "/chests"),
     ("POST", "/chests"),
     ("GET", "/notices"),

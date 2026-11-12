@@ -566,8 +566,19 @@ fn review_m3_any_sign_of_a_proxy_is_outside_and_the_console_can_recover_an_offic
     office.client(&dana).ask_to_be_let_in("view", "Dana").unwrap();
     hyperview_server::devices::make_admin_here(&office.store(), &dana.key().id()).unwrap();
     assert!(office.client(&dana).device_me().unwrap().admin, "made an admin at the server");
+    let sam = signer(73); // WHAT: a third computer. WHY: made an admin by the code its app shows
+    office.client(&sam).ask_to_be_let_in("view", "Sam").unwrap(); // WHAT: it asks. WHY: on the list, waiting
+    let code = hub::device::short_id(&sam.key().id()); // WHAT: its code as shown, "29AC 6B9D EFA9". WHY: what a person reads off the screen
+    assert!(hyperview_server::devices::make_admin_here(&office.store(), "000000000000").is_err(), "a code that names nobody is refused"); // WHAT: refused. WHY: a typo is never silent
+    assert_eq!(hyperview_server::devices::make_admin_here(&office.store(), &code).unwrap(), sam.key().id(), "the code with its spaces names the computer"); // WHAT: made by its spaced code. WHY: audit: the code as shown on screen
+    assert_eq!(hyperview_server::devices::make_admin_here(&office.store(), &code.replace(' ', "").to_lowercase()).unwrap(), sam.key().id(), "and without them"); // WHAT: made by the code typed plain. WHY: likewise
+    assert!(office.client(&sam).device_me().unwrap().admin, "made an admin by its code"); // WHAT: an admin now. WHY: the console did it
+    for twin in ["abcdefabcdef00000000000000000001", "abcdefabcdef00000000000000000002"] {
+        office.store().with(|db| Ok(db.execute("INSERT INTO devices (id, public_key, app, machine, os_user, state, admin, asked, changed, scope) VALUES (?1, ?2, 'view', 'PC', 'pat', 'waiting', 0, '2026-11-12T00:00:00Z', '2026-11-12T00:00:00Z', 'all')", params![twin, format!("key-of-{twin}")])?)).unwrap(); // WHAT: two computers sharing a code. WHY: one in 2^48, but never the wrong one made an admin
+    }
+    assert!(hyperview_server::devices::make_admin_here(&office.store(), "ABCD EFAB CDEF").unwrap_err().to_string().contains("more than one"), "a code that names two is refused"); // WHAT: refused. WHY: the full id is asked for
     hyperview_server::devices::reset_admins_here(&office.store()).unwrap();
-    assert!(!office.client(&admin).device_me().unwrap().admin && !office.client(&dana).device_me().unwrap().admin, "every admin unmade");
+    assert!(!office.client(&admin).device_me().unwrap().admin && !office.client(&dana).device_me().unwrap().admin && !office.client(&sam).device_me().unwrap().admin, "every admin unmade");
     let next = office.raw("POST", "/api/v1/devices/request", &office.ask(&key(72), "view"), None, &[]);
     assert_eq!(next.1["state"], "approved", "the next computer on the office network becomes the admin: {}", next.1);
     assert!(office.store().audit_since(None, 100).unwrap().iter().any(|e| e.email == "the server console"), "both are in the audit log");

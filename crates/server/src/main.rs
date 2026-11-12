@@ -30,7 +30,7 @@ static BUILD_MARK: &str = hub::build_mark!();
 
 fn main() {
     std::hint::black_box(BUILD_MARK);
-    let given: Vec<String> = std::env::args().take(3).collect(); // WHAT: the program's name and its first two words, read once. WHY: the command, and the device id --make-admin takes
+    let given: Vec<String> = std::env::args().take(6).collect(); // WHAT: the program's name and its first five words, read once. WHY: the command, and the device code --make-admin takes, which may be typed as three groups
     let first = given.get(1).cloned().unwrap_or_default();
     match first.as_str() {
         #[cfg(windows)]
@@ -105,7 +105,7 @@ fn main() {
                 }
             }
         }
-        "--reopen-claim" | "--make-admin" | "--reset-admins" | "--retry-citadel-move" => device_console(&first, given.get(2).map(String::as_str)), // WHAT: the device list's console commands. WHY: §3 and the security review's M3; on the server itself
+        "--reopen-claim" | "--make-admin" | "--reset-admins" | "--retry-citadel-move" => device_console(&first, Some(given.get(2..).map(|rest| rest.join(" ")).unwrap_or_default().as_str()).filter(|code| !code.is_empty())), // WHAT: the device list's console commands. WHY: §3 and the security review's M3; on the server itself
         "--console" | "--serve" => console(),
         #[cfg(windows)]
         "" => front_door(),
@@ -114,7 +114,7 @@ fn main() {
 }
 
 /// The device list's commands, on the server itself: `--reopen-claim`,
-/// `--make-admin <device id>` and `--reset-admins`. Each needs the server's
+/// `--make-admin <device code or id>` and `--reset-admins`. Each needs the server's
 /// own data folder, so it runs only on the server, and each is written in
 /// the audit log.
 fn device_console(command: &str, id: Option<&str>) {
@@ -126,7 +126,7 @@ fn device_console(command: &str, id: Option<&str>) {
         "--reopen-claim" => hyperview_server::devices::reopen_claim(&store).map(|until| format!("  The first computer to ask, until {until}, becomes the office's admin.")), // WHAT: claiming open for a day. WHY: only while the office has no admin
         "--retry-citadel-move" => hyperview_server::cellmove::retry(&store).map(|()| "  The failed Citadel move is cleared. Restart the Office Server service and it tries once more.".to_string()), // WHAT: a failure cleared. WHY: the console way to try the move again
         "--make-admin" => hyperview_server::devices::make_admin_here(&store, id.unwrap_or_default()).map(|id| format!("  The computer {id} is approved, and an admin.")), // WHAT: one computer made an admin. WHY: the way back when every admin computer is lost
-        _ => hyperview_server::devices::reset_admins_here(&store).map(|until| format!("  No computer is an admin now. The first computer on the office network to ask, until {until}, becomes the admin.")), // WHAT: every admin unmade, claiming open. WHY: the same
+        _ => hyperview_server::devices::reset_admins_here(&store).map(|until| format!("  No computer is an admin now. Until {until}, the next NEW computer to ask from the office network becomes the admin, whoever's it is.\n  To pick a computer you know instead, use: hyperview-server --make-admin <device code>, with the 12-digit code its Excalibur app shows (for example 29AC 6B9D EFA9).")), // WHAT: every admin unmade, claiming open, said plainly. WHY: audit: the next new computer to ask takes the office, so the safer way is named
     });
     match done {
         Ok(said) => println!("{said}"), // WHAT: what was done. WHY: a person reads it

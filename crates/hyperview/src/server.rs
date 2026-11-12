@@ -435,12 +435,23 @@ fn pin_book() -> hub::secure::PinBook {
 }
 
 /// This computer's device key for View, made on first run and kept in the
-/// program's settings folder (DPAPI on Windows, a 0600 file elsewhere).
-/// `None` when it can't be read, said once in the log.
+/// program's local data folder (`AppData\Local` on Windows; DPAPI there, a
+/// 0600 file elsewhere), never the roaming one, so it never follows a
+/// roaming profile to another computer. A key kept by an earlier build in the
+/// roaming settings folder is moved across once. `None` when it can't be
+/// read, said once in the log.
 fn device() -> Option<std::sync::Arc<hub::device::Signer>> {
     static KEY: std::sync::OnceLock<Option<std::sync::Arc<hub::device::Signer>>> = std::sync::OnceLock::new(); // WHAT: read once. WHY: the same key for the life of the program
     KEY.get_or_init(|| {
-        let folder = directories::ProjectDirs::from("com", "Excalibur", "Hyperview").map_or_else(|| PathBuf::from("."), |d| d.config_dir().to_path_buf()); // WHAT: the settings folder. WHY: the key outlives the program, like the pins
+        let dirs = directories::ProjectDirs::from("com", "Excalibur", "Hyperview"); // WHAT: the program's folders. WHY: the key's place, and where an earlier build kept it
+        let folder = dirs.as_ref().map_or_else(|| PathBuf::from("."), |d| d.data_local_dir().to_path_buf()); // WHAT: the local data folder. WHY: audit: a device key belongs to this computer, never a roaming profile
+        if let Some(roaming) = dirs.as_ref().map(|d| d.config_dir().to_path_buf()).filter(|r| *r != folder) {
+            match move_key_once(&roaming, &folder) {
+                Ok(true) => eprintln!("this computer's office server key was moved from {} to {}, so it no longer roams", roaming.display(), folder.display()), // WHAT: said in the log. WHY: the audit asked that the move be noted
+                Ok(false) => {} // WHAT: nothing to move. WHY: a new computer, or moved before
+                Err(why) => eprintln!("this computer's office server key couldn't be moved from {} ({why}); it stays where it is and a new one is not made over it", roaming.display()), // WHAT: said. WHY: never a quiet second key
+            }
+        }
         match hub::keystore::load_or_make(&folder) {
             Ok(key) => Some(std::sync::Arc::new(hub::device::Signer::new(key))), // WHAT: the signer. WHY: every request is signed
             Err(why) => {
@@ -450,6 +461,42 @@ fn device() -> Option<std::sync::Arc<hub::device::Signer>> {
         }
     })
     .clone()
+}
+
+/// Moves the device key from `from` to `to` once: only when `from` has one
+/// and `to` has none, and never over a key already there. Whether it moved.
+///
+/// # Errors
+///
+/// When a key at `from` couldn't be moved.
+fn move_key_once(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<bool> {
+    let (old, new) = (from.join(hub::keystore::FILE), to.join(hub::keystore::FILE)); // WHAT: the two places. WHY: the same file name in both
+    if std::fs::symlink_metadata(&new).is_ok() || std::fs::symlink_metadata(&old).is_err() {
+        return Ok(false); // WHAT: a key here already, or none there. WHY: never replaced; nothing to move
+    }
+    std::fs::create_dir_all(to)?; // WHAT: the local folder. WHY: it may not exist yet
+    match std::fs::hard_link(&old, &new) {
+        Ok(()) => {} // WHAT: named in the new place, whole. WHY: a link never replaces a file there
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false), // WHAT: a key appeared there meanwhile. WHY: kept; the old one is left alone
+        Err(_) => {
+            let bytes = std::fs::read(&old)?; // WHAT: the sealed key. WHY: copied where a link can't be made
+            let mut options = std::fs::OpenOptions::new(); // WHAT: how the copy is opened. WHY: new, and private from the start
+            options.write(true).create_new(true); // WHAT: a new file only. WHY: never over a key there
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600); // WHAT: owner only. WHY: as the key store makes it
+            }
+            let mut file = options.open(&new)?; // WHAT: made. WHY: AlreadyExists if a key appeared there
+            if let Err(e) = std::io::Write::write_all(&mut file, &bytes).and_then(|()| file.sync_all()) {
+                drop(file); // WHAT: closed. WHY: removed next
+                let _ = std::fs::remove_file(&new); // WHAT: the half copy gone. WHY: never a damaged key in the new place
+                return Err(e);
+            }
+        }
+    }
+    std::fs::remove_file(&old)?; // WHAT: the roaming copy gone. WHY: the key no longer follows the profile
+    Ok(true)
 }
 
 /// A client for `base`: the server's HTTPS by its pin when it offers HTTPS,
@@ -2035,6 +2082,23 @@ impl Standing {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_roaming_device_key_is_moved_once_and_never_over_a_local_one() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()); // WHAT: a fresh name. WHY: tests run side by side
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("key-move-{n}-{}", std::process::id())); // WHAT: a fresh folder under the build's own. WHY: never a shared temporary folder
+        let (roaming, local) = (base.join("roaming"), base.join("local")); // WHAT: the two places. WHY: as on Windows
+        std::fs::create_dir_all(&roaming).unwrap(); // WHAT: made. WHY: the old key goes in it
+        std::fs::write(roaming.join(hub::keystore::FILE), b"sealed key").unwrap(); // WHAT: an earlier build's key. WHY: to be moved
+        assert!(super::move_key_once(&roaming, &local).unwrap(), "moved"); // WHAT: moved. WHY: none in the local place
+        assert_eq!(std::fs::read(local.join(hub::keystore::FILE)).unwrap(), b"sealed key"); // WHAT: the same key. WHY: the computer keeps its approval
+        assert!(!roaming.join(hub::keystore::FILE).exists(), "gone from the roaming place"); // WHAT: removed. WHY: it never follows the profile
+        assert!(!super::move_key_once(&roaming, &local).unwrap(), "once"); // WHAT: nothing more. WHY: moved before
+        std::fs::write(roaming.join(hub::keystore::FILE), b"another").unwrap(); // WHAT: a key back in the roaming place. WHY: never over the local one
+        assert!(!super::move_key_once(&roaming, &local).unwrap(), "a local key is never replaced"); // WHAT: not moved. WHY: never replaced
+        assert_eq!(std::fs::read(local.join(hub::keystore::FILE)).unwrap(), b"sealed key"); // WHAT: unchanged. WHY: likewise
+        let _ = std::fs::remove_dir_all(&base); // WHAT: tidied. WHY: a test leaves nothing
+    }
 
     #[test]
     fn a_remembered_name_loses_the_version_older_seats_saved_with_it() {

@@ -226,13 +226,31 @@ fn claimable(db: &Connection, until: Option<&str>, now: time::OffsetDateTime) ->
 }
 
 /// Makes one device an approved admin, from the server's own console
-/// (`hyperview-server --make-admin <device id>`): the way back for an office
-/// whose admin computers are all lost.
+/// (`hyperview-server --make-admin <device code or id>`): the way back for an
+/// office whose admin computers are all lost. `id` is the full id, or the
+/// 12-digit code the app shows, with or without its spaces.
 ///
 /// # Errors
 ///
-/// When there is no such device, or the database can't be written.
+/// When there is no such device, the code names more than one, or the
+/// database can't be written.
 pub fn make_admin_here(store: &crate::Store, id: &str) -> anyhow::Result<String> {
+    let typed: String = id.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase(); // WHAT: as typed, without spaces, in lower case. WHY: the code is shown in upper case in three groups; ids are kept in lower case
+    let id = if typed.len() == 12 && typed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let named: Vec<String> = store.with(|db| {
+            let mut found = db.prepare("SELECT id FROM devices WHERE substr(id, 1, 12) = ?1")?; // WHAT: the devices whose id starts with the code. WHY: the code is the id's first twelve digits
+            let rows = found.query_map(params![typed], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?; // WHAT: every one. WHY: more than one is refused
+            Ok(rows)
+        })?;
+        match named.as_slice() {
+            [one] => one.clone(), // WHAT: the one computer. WHY: the code names it
+            [] => anyhow::bail!("there is no computer with the code {} on this server's list", wire::short_id(&typed)), // WHAT: said. WHY: a typo is never silent
+            _ => anyhow::bail!("more than one computer has the code {}; use its full id from the device list", wire::short_id(&typed)), // WHAT: refused. WHY: never the wrong computer made an admin
+        }
+    } else {
+        typed // WHAT: the full id. WHY: as before
+    };
+    let id = id.as_str(); // WHAT: the id to make an admin. WHY: below
     let now = rfc3339(time::OffsetDateTime::now_utc()); // WHAT: now. WHY: written on the row
     let done = store.with(|db| {
         Ok(db.execute(
@@ -249,7 +267,8 @@ pub fn make_admin_here(store: &crate::Store, id: &str) -> anyhow::Result<String>
 
 /// Takes admin away from every computer and opens claiming for a day, from
 /// the server's own console (`hyperview-server --reset-admins`): the next
-/// computer on the office network to ask becomes the admin.
+/// new computer on the office network to ask becomes the admin, whoever's it
+/// is; `--make-admin` with a known computer's code is the safer way.
 ///
 /// # Errors
 ///

@@ -200,7 +200,7 @@ mod tests {
         assert_eq!(state_of(&failed, "citadel").state, "move-failed", "an alarm, never running");
         assert!(state_of(&failed, "citadel").version.is_none());
         assert!(state_of(&failed, "citadel").note.as_deref().unwrap_or_default().starts_with("move failed: no access"));
-        assert!(state_of(&with_move(parts_of(&[Module::View], IN_THIS_BUILD, None), Some(&Moved::Nothing)), "citadel").note.is_none(), "unlicensed, nothing said");
+        assert!(state_of(&with_move(parts_of(&[Module::View], IN_THIS_BUILD, None), Some(&Moved::Nothing { note: None })), "citadel").note.is_none(), "unlicensed, nothing said");
     }
 
     #[test]

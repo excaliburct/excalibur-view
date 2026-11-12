@@ -16,6 +16,11 @@
 //!    would make a new certificate and every estimating computer would have
 //!    to pair again; the old data is left exactly as it was.
 //!
+//! The move is run only when the 1.0 service was found (and stopped and
+//! uninstalled). A folder at the old place with no 1.0 service is ignored:
+//! any local account can make that folder, and the move runs as the system.
+//! The cell never reads the old place, so it starts.
+//!
 //! After "moved" or "nothing to move" it never runs again.
 //! `hyperview-server --retry-citadel-move` clears a failure so the next start
 //! tries once more.
@@ -36,6 +41,9 @@ pub const SETTING: &str = "citadel_move"; // WHAT: the setting's name. WHY: read
 
 /// The longest the move may take.
 pub const TIME_LIMIT: Duration = Duration::from_secs(30 * 60); // WHAT: half an hour. WHY: an office's whole estimating history, copied once; past it, something is stuck
+
+/// What is recorded when a folder is at the old place but no 1.0 service is.
+pub const NO_SERVICE: &str = "no Citadel 1.0 service; the folder at the old place was ignored"; // WHAT: the note. WHY: audit: the folder alone never runs the move as the system
 
 /// The names the 1.0 service may have: its display name, and the name its
 /// SID (`NT SERVICE\CitadelServer`) is made from.
@@ -61,7 +69,10 @@ struct Said {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Moved {
     Moved { files: u64, kept_as: Option<String> }, // WHAT: moved, with how many files, and where the old folder was kept. WHY: "moved N files"
-    Nothing, // WHAT: nothing to move. WHY: a fresh office, or no 1.0 data
+    Nothing {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>, // WHAT: why nothing was moved, when it isn't plain. WHY: a folder ignored for want of a 1.0 service is said; a result kept before this field reads as none
+    }, // WHAT: nothing to move. WHY: a fresh office, or no 1.0 service
     Already, // WHAT: the move program says it moved this folder before. WHY: never moved twice
     Failed { reason: String }, // WHAT: failed, and why. WHY: the cell isn't started; an admin is told
 }
@@ -73,7 +84,8 @@ impl Moved {
         match self {
             Moved::Moved { files, kept_as: Some(kept) } => format!("moved {files} files; the old folder is kept as {kept}"), // WHAT: the count, and where the old folder went. WHY: the person checks it, and knows where the original is
             Moved::Moved { files, kept_as: None } => format!("moved {files} files"), // WHAT: the count. WHY: the person checks it against the old server
-            Moved::Nothing => "nothing to move".to_string(), // WHAT: said. WHY: plain
+            Moved::Nothing { note: None } => "nothing to move".to_string(), // WHAT: said. WHY: plain
+            Moved::Nothing { note: Some(note) } => format!("nothing to move: {note}"), // WHAT: said, with why. WHY: a folder that was ignored is never a mystery
             Moved::Already => "moved before".to_string(), // WHAT: said. WHY: plain
             Moved::Failed { reason } => format!("move failed: {reason}. The old data is untouched and the cell was not started; run hyperview-server --retry-citadel-move, then restart the Office Server"), // WHAT: the alarm, with what to do. WHY: a cell started empty would make a new certificate
         }
@@ -143,7 +155,7 @@ pub fn reading(code: Option<i32>, out: &str) -> Moved {
     if code == 0 && said.exit == Some(0) {
         match said.result.as_str() {
             "moved" => return Moved::Moved { files: said.files.unwrap_or(0), kept_as: said.kept_as.map(|k| k.chars().take(200).collect()) }, // WHAT: moved, its file count. WHY: read from `files`, never the first number in the output
-            "nothing" => return Moved::Nothing, // WHAT: no old folder. WHY: a fresh office
+            "nothing" => return Moved::Nothing { note: None }, // WHAT: no old folder. WHY: a fresh office
             "already" => return Moved::Already, // WHAT: marked before. WHY: never run again
             _ => {} // WHAT: any other word with code 0. WHY: never a success
         }
@@ -153,7 +165,9 @@ pub fn reading(code: Option<i32>, out: &str) -> Moved {
 }
 
 /// Before the cell's first start: stops and uninstalls the 1.0 service, and
-/// moves its data in once. Whether the cell may start.
+/// moves its data in once. Whether the cell may start. The move is run only
+/// when the 1.0 service was found; a folder at the old place without one is
+/// ignored, recorded as nothing to move with [`NO_SERVICE`].
 ///
 /// Runs only when nothing is recorded yet; after a success or "nothing to
 /// move" it never runs again, and after a failure it doesn't run until
@@ -162,18 +176,25 @@ pub fn before_first_start(store: &crate::Store, old: &dyn OldService, mover: &dy
     if let Some(done) = recorded(store) {
         return done.lets_the_cell_start(); // WHAT: decided before. WHY: never run again after a success; a failure holds the cell until retried
     }
-    if old.present() {
-        match old.stop_and_remove() {
-            Ok(()) => tracing::warn!("Citadel Server 1.0's service was stopped and uninstalled; the Office Server's Citadel cell takes over"), // WHAT: written in the log. WHY: step 1
-            Err(why) => {
-                let failed = Moved::Failed { reason: format!("Citadel Server 1.0's service couldn't be stopped ({why})") }; // WHAT: failed. WHY: it holds the port and the files
-                record(store, &failed);
-                return false;
-            }
+    let folder = !std::fs::symlink_metadata(old_folder).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound); // WHAT: anything at the old place. WHY: even unreadable, it is the move program's to judge, once a 1.0 service vouches for it
+    if !old.present() {
+        let nothing = Moved::Nothing { note: folder.then(|| NO_SERVICE.to_string()) }; // WHAT: nothing moved, and a folder there said. WHY: audit: any local account can make that folder, and the move runs as the system
+        if folder {
+            tracing::warn!("{NO_SERVICE}: {}", old_folder.display()); // WHAT: written in the log. WHY: whoever looks after the server can see it
+        }
+        record(store, &nothing); // WHAT: kept. WHY: never looked at again; the cell never reads the old place
+        return true;
+    }
+    match old.stop_and_remove() {
+        Ok(()) => tracing::warn!("Citadel Server 1.0's service was stopped and uninstalled; the Office Server's Citadel cell takes over"), // WHAT: written in the log. WHY: step 1
+        Err(why) => {
+            let failed = Moved::Failed { reason: format!("Citadel Server 1.0's service couldn't be stopped ({why})") }; // WHAT: failed. WHY: it holds the port and the files
+            record(store, &failed);
+            return false;
         }
     }
-    if std::fs::symlink_metadata(old_folder).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
-        record(store, &Moved::Nothing); // WHAT: no 1.0 folder at all. WHY: a fresh office; anything else there, even unreadable, is the move program's to judge
+    if !folder {
+        record(store, &Moved::Nothing { note: None }); // WHAT: no 1.0 folder at all. WHY: a fresh office; anything else there, even unreadable, is the move program's to judge
         return true;
     }
     let outcome = match mover.run(program, &arguments(old_folder, data), TIME_LIMIT) {
@@ -308,7 +329,7 @@ mod tests {
         let old = dir.join("Citadel Server");
         std::fs::create_dir_all(&old).unwrap(); // WHAT: a 1.0 folder. WHY: so the program is run
         let program = fake(&dir, said, code);
-        let service = Service { there: false, stops: Cell::new(0), fails: false };
+        let service = Service { there: true, stops: Cell::new(0), fails: false }; // WHAT: a 1.0 service found. WHY: only then is the program run
         let starts = before_first_start(&store, &service, &Run, &program, &old, &dir.join("cell"));
         (starts, recorded(&store).expect("recorded"))
     }
@@ -381,6 +402,42 @@ mod tests {
         let (store, dir) = store();
         let service = Service { there: false, stops: Cell::new(0), fails: false };
         assert!(before_first_start(&store, &service, &Run, Path::new("/nonexistent"), &dir.join("none"), &dir.join("cell")));
-        assert_eq!(recorded(&store), Some(Moved::Nothing));
+        assert_eq!(recorded(&store), Some(Moved::Nothing { note: None }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_with_no_1_0_service_is_ignored_and_the_move_never_run() {
+        let (store, dir) = store(); // WHAT: a fresh store. WHY: nothing recorded yet
+        let planted = dir.join("Citadel Server"); // WHAT: the old place. WHY: any local account can make it
+        std::fs::create_dir_all(&planted).unwrap(); // WHAT: a folder planted there. WHY: the audit's case
+        let program = fake(&dir, &line("moved", 0, ",\"files\":1"), Some(0)); // WHAT: a move program that would say moved. WHY: it must never be run
+        let service = Service { there: false, stops: Cell::new(0), fails: false }; // WHAT: no 1.0 service. WHY: the audit's case
+        assert!(before_first_start(&store, &service, &Run, &program, &planted, &dir.join("cell")), "the cell starts"); // WHAT: started. WHY: it never reads the old place
+        assert!(!dir.join("args").exists(), "the move program was never run"); // WHAT: not run. WHY: never as the system for a folder anyone could make
+        assert_eq!(service.stops.get(), 0, "nothing to stop"); // WHAT: untouched. WHY: no service
+        assert_eq!(recorded(&store), Some(Moved::Nothing { note: Some(NO_SERVICE.to_string()) })); // WHAT: nothing, with the note. WHY: said on /office and in the audit log
+        assert_eq!(recorded(&store).unwrap().words(), format!("nothing to move: {NO_SERVICE}")); // WHAT: its words. WHY: as shown
+        assert!(std::fs::metadata(&planted).is_ok(), "the planted folder is left alone"); // WHAT: untouched. WHY: ignored, not removed
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn with_the_1_0_service_found_the_move_runs() {
+        let (store, dir) = store(); // WHAT: a fresh store. WHY: nothing recorded yet
+        let old = dir.join("Citadel Server"); // WHAT: the 1.0 folder. WHY: there to move
+        std::fs::create_dir_all(&old).unwrap(); // WHAT: made. WHY: likewise
+        let program = fake(&dir, &line("moved", 0, ",\"files\":3"), Some(0)); // WHAT: a good move. WHY: the .NET side's answer
+        let service = Service { there: true, stops: Cell::new(0), fails: false }; // WHAT: the 1.0 service, found. WHY: it vouches for the folder
+        assert!(before_first_start(&store, &service, &Run, &program, &old, &dir.join("cell"))); // WHAT: moved, the cell starts. WHY: a success
+        assert!(dir.join("args").exists(), "the move program was run"); // WHAT: run. WHY: the service was there
+        assert_eq!(service.stops.get(), 1, "stopped and uninstalled first"); // WHAT: stopped once. WHY: step 1
+        assert_eq!(recorded(&store), Some(Moved::Moved { files: 3, kept_as: None })); // WHAT: kept. WHY: shown on /office
+    }
+
+    #[test]
+    fn a_result_kept_before_the_note_still_reads() {
+        assert_eq!(serde_json::from_str::<Moved>("{\"state\":\"nothing\"}").unwrap(), Moved::Nothing { note: None }); // WHAT: an older record. WHY: a store kept before this field must still read, or the move would run again
+        assert_eq!(serde_json::to_string(&Moved::Nothing { note: None }).unwrap(), "{\"state\":\"nothing\"}"); // WHAT: written as before. WHY: likewise
     }
 }

@@ -700,6 +700,59 @@ another drawing.",
                     "content": { "text/csv": { "schema": { "type": "string" } } } } }
             }
         },
+        "/admin/invites": {
+            "get": {
+                "summary": "The invitations not yet thrown away. Administrators only.",
+                "responses": ok_list("Invitation")
+            },
+            "post": {
+                "summary": "One code, for one person, used once. Administrators only.",
+                "description": "Nothing is emailed: the administrator sends the code themselves. \
+The email is kept and checked when the code is used, so a forwarded invitation is no spare account.",
+                "requestBody": body("NewInvite"),
+                "responses": ok("Invitation")
+            }
+        },
+        "/admin/invites/{code}": {
+            "delete": {
+                "summary": "Throw an invitation away. Administrators only.",
+                "parameters": [path_param("code", "The invitation's code.")],
+                "responses": ok_list("Invitation")
+            }
+        },
+        "/admin/remote": {
+            "get": {
+                "summary": "Whether the office is reachable from outside, and at what name. Administrators only.",
+                "description": "Never the token: a screen that can show a secret is a screen somebody can photograph.",
+                "responses": ok("Remote")
+            },
+            "post": {
+                "summary": "Turn on reaching the office from outside, through the tunnel. Administrators only.",
+                "requestBody": body("ChangeRemote"),
+                "responses": ok("Remote")
+            },
+            "delete": {
+                "summary": "Turn reaching the office from outside off, and forget the tunnel's settings. Administrators only.",
+                "responses": ok("Remote")
+            }
+        },
+        "/projects/{id}/people": {
+            "get": {
+                "summary": "Who is on a project: their ids.",
+                "parameters": [path_param("id", "The project.")],
+                "responses": { "200": { "description": "Done.", "content": { "application/json": {
+                    "schema": { "type": "array", "items": { "type": "string" } }
+                } } } }
+            },
+            "post": {
+                "summary": "Put somebody on a project, or take them off. Administrators only.",
+                "parameters": [path_param("id", "The project.")],
+                "requestBody": body("WhoOnProject"),
+                "responses": { "200": { "description": "Who is on it now: their ids.", "content": { "application/json": {
+                    "schema": { "type": "array", "items": { "type": "string" } }
+                } } } }
+            }
+        },
         "/people": {
             "get": {
                 "summary": "Everyone with a seat. Administrators only.",
@@ -1176,6 +1229,36 @@ fn schemas() -> Value {
             ("new", "string", "Twelve characters at the very least."),
         ]),
         "Changed": object(&[("changed", "boolean", "")]),
+        "Invitation": object(&[
+            ("code", "string", "The secret. This is the whole of what gets sent to somebody."),
+            ("email", "string", "Who it is for; checked when it is used."),
+            ("name", "string", ""),
+            ("role", "string", "What they will be: viewer, estimator or admin."),
+            ("expires", "string", "When it stops working, RFC 3339."),
+            ("used", "boolean", "True when it has been used or has run out."),
+        ]),
+        "NewInvite": object(&[
+            ("email", "string", "Who it is for."),
+            ("name", "string", ""),
+            ("role", "string", "viewer, estimator or admin."),
+            ("days", "integer", "How many days it lasts. Thirty when not said."),
+        ]),
+        "Remote": object(&[
+            ("off", "boolean", "Nobody has turned it on: the ordinary state."),
+            ("sealed", "boolean", "Sealed, and refusing."),
+            ("starting", "boolean", ""),
+            ("on", "boolean", "On, and the address answered from the outside."),
+            ("hostname", "string", "The hostname, when there is one. Never the token."),
+            ("said", "string", "The sentence to put on screen."),
+        ]),
+        "ChangeRemote": object(&[
+            ("token", "string", "The tunnel's token."),
+            ("hostname", "string", "The name the office is reached at from outside."),
+        ]),
+        "WhoOnProject": object(&[
+            ("person", "string", "The person's id."),
+            ("on", "boolean", "True puts them on, false takes them off. True when not said."),
+        ]),
         "NewRole": object(&[("role", "string", "viewer, estimator or admin.")]),
         "Removed": object(&[("removed", "string", "The person who is no longer on this server.")]),
         "SignedOut": object(&[("signed_out", "boolean", "")]),
