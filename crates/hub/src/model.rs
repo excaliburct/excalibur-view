@@ -425,6 +425,7 @@ pub struct OfficePart {
 
 impl OfficePart {
     /// How the part is, in words for the Office panel.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn line(&self) -> String {
         let version = self.version.as_deref().map(|v| format!(" {v}")).unwrap_or_default();
         match self.state.as_str() {

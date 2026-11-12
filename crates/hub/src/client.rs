@@ -259,6 +259,10 @@ impl Client {
 
     /// A client for `base` that accepts only the certificate with `pin`
     /// (`crate::pinned`): an Office Server's own HTTPS.
+    ///
+    /// # Errors
+    ///
+    /// When `pin` isn't a certificate pin: refused, never treated as no pin.
     pub fn pinned(base: &str, pin: &str) -> Answer<Client> {
         let (agent, _) = crate::pinned::agent(Some(pin)).map_err(Trouble::Unreadable)?; // WHAT: the pinned check. WHY: a malformed pin is refused, never treated as none
         Ok(Client {
@@ -289,6 +293,7 @@ impl Client {
     }
 
     /// The certificate pin this client holds its server to, if any.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn pin(&self) -> Option<&str> {
         self.pin.as_deref()
     }
@@ -582,6 +587,10 @@ impl Client {
 
     /// The Office Server's parts and how each is. `None` from a server older
     /// than the Office Server.
+    ///
+    /// # Errors
+    ///
+    /// Why not, in words: the server refused, or couldn't be reached.
     pub fn office_parts(&self) -> Answer<Option<crate::OfficeParts>> {
         match Self::read(self.get("/office").call()) {
             Ok(parts) => Ok(Some(parts)),

@@ -430,7 +430,7 @@ pub fn profiles_folder() -> PathBuf {
 /// The pins of the office servers this computer has connected to over HTTPS
 /// (`hub::secure`), kept in the program's own settings folder.
 fn pin_book() -> hub::secure::PinBook {
-    let folder = directories::ProjectDirs::from("com", "Excalibur", "Hyperview").map(|d| d.config_dir().to_path_buf()).unwrap_or_else(|| PathBuf::from(".")); // WHAT: the settings folder. WHY: the pins outlive the program, like its other settings
+    let folder = directories::ProjectDirs::from("com", "Excalibur", "Hyperview").map_or_else(|| PathBuf::from("."), |d| d.config_dir().to_path_buf()); // WHAT: the settings folder. WHY: the pins outlive the program, like its other settings
     hub::secure::PinBook::at(folder.join("server-pins.json"))
 }
 

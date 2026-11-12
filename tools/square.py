@@ -704,12 +704,12 @@ def held_by(folder, company):
         if lic["company"] == company:
             return lic, None  # WHAT: spelled exactly as given. WHY: the one meant, whatever looks like it
     same = simple(company)
-    loose = {}
+    loose: dict[str, dict] = {}  # WHAT: look-alike licences by id. WHY: typed, so mypy checks what goes in
     for lic in here:
         if simple(lic["company"]) == same:
             loose.setdefault(lic["id"], lic)  # WHAT: each licence once, its newest copy. WHY: renewals of one licence are not two companies
     if len(loose) > 1:
-        named = "; ".join(f"'{l['company']}' ({l['id']})" for l in loose.values())  # WHAT: every look-alike, by name and id. WHY: so the person can choose
+        named = "; ".join(f"'{x['company']}' ({x['id']})" for x in loose.values())  # WHAT: every look-alike, by name and id. WHY: so the person can choose
         return None, (f"'{company}' looks like more than one licence here: {named}. Finish it with --company "
                       "and the name exactly as the right licence spells it, or issue it by hand.")
     return next(iter(loose.values()), None), None  # WHAT: the one loose match, or none. WHY: a first purchase has no licence yet

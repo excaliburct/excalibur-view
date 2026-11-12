@@ -40,3 +40,7 @@ windows = { version = "0.58", features = ["Win32_System_Registry", "Win32_Founda
 # WHAT: renameat2 with RENAME_NOREPLACE. WHY: a move that never replaces, for a new device key on a disk without hard links; libc is already in the build.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+
+# WHAT: renamex_np with RENAME_EXCL. WHY: the same move that never replaces, on macOS and iOS; the same libc already in Cargo.lock, no new version.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+libc = "0.2"

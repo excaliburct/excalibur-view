@@ -460,7 +460,6 @@ struct Rotating {
 #[cfg(windows)]
 impl std::io::Write for Rotating {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        use std::io::Write as _; // WHAT: the file's own write. WHY: called below
         let n = self.file.write(bytes)?; // WHAT: written. WHY: the log line
         self.written += n as u64; // WHAT: counted. WHY: as above
         if self.written > 1024 * 1024 {
@@ -476,7 +475,6 @@ impl std::io::Write for Rotating {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        use std::io::Write as _; // WHAT: as above. WHY: as above
         self.file.flush() // WHAT: passed on. WHY: as the file does
     }
 }
