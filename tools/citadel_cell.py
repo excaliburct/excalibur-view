@@ -105,19 +105,27 @@ def pack(files):
     return buf.getvalue()
 
 
+def entry_bytes(tar, member):
+    """The bytes of one regular file in a cell part. Raises if it isn't one."""
+    f = tar.extractfile(member)  # WHAT: the entry, opened. WHY: read below
+    if f is None:
+        raise SystemExit(f"{member.name} in a cell part isn't a plain file")  # WHAT: refused. WHY: a link or folder is never read as a file
+    return f.read()  # WHAT: its bytes. WHY: checked by the caller
+
+
 def check_part(path, pin):
     """Whether a cell part holds exactly the pinned files. Raises if not."""
     with tarfile.open(path, mode="r:gz") as tar:
         members = {m.name: m for m in tar.getmembers()}  # WHAT: every entry. WHY: checked
         if "names.json" not in members:
             raise SystemExit(f"{path} has no names.json")  # WHAT: refused. WHY: not a cell part
-        names = json.loads(tar.extractfile(members["names.json"]).read())  # WHAT: fingerprint to name. WHY: compared with the pin
+        names = json.loads(entry_bytes(tar, members["names.json"]))  # WHAT: fingerprint to name. WHY: compared with the pin
         if sorted(names.values()) != sorted(pin["files"]) or any(pin["files"][n] != s for s, n in names.items()):
             raise SystemExit(f"{path} doesn't hold exactly the pinned cell files")  # WHAT: refused. WHY: the release carries the pinned cell only
         if set(members) != {"names.json"} | set(names):
             raise SystemExit(f"{path} holds entries names.json doesn't list")  # WHAT: refused. WHY: nothing unnamed
         for digest in names:
-            if sha256(tar.extractfile(members[digest]).read()) != digest:
+            if sha256(entry_bytes(tar, members[digest])) != digest:
                 raise SystemExit(f"{path}: an entry isn't the file its name says")  # WHAT: refused. WHY: every file checked
     return True
 
