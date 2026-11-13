@@ -95,6 +95,9 @@ pub fn install() -> Result<(), String> {
     let home = home();
     let parent = home.parent().ok_or("the service's folder has no folder above it")?.to_path_buf(); // WHAT: ProgramData\Excalibur Hyperview. WHY: locked first
     std::fs::create_dir_all(&parent).map_err(|e| format!("could not make {}: {e}", parent.display()))?;
+    if std::fs::symlink_metadata(&home).is_ok_and(|m| m.is_dir()) {
+        crate::lockdown::lock_down(&home); // WHAT: the service's folder, if there already, made its own (protected) first. WHY: locking the folder above takes away what it passed on, which would leave this folder with no entries until it was locked itself
+    }
     crate::lockdown::lock_parent(&parent); // WHAT: the folder above made the system's and administrators' alone. WHY: whoever made it first could otherwise swap the service's folder (audit, 2026-11-11)
     if std::fs::symlink_metadata(&home).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(format!("{} is a link to somewhere else, not a folder; it was left as it is and nothing was installed. Remove it, then install again.", home.display())); // WHAT: refused. WHY: a link put there would point the system's program somewhere an account controls

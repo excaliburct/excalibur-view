@@ -92,11 +92,13 @@ pub fn set(path: &Path, sddl: &str, tree: bool) -> Result<(), String> {
         let (mut present, mut dacl) = (0i32, std::ptr::null_mut::<ACL>()); // WHAT: filled by Windows. WHY: the DACL
         GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted);
         GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted);
-        let what = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION; // WHAT: owner and a protected DACL. WHY: nothing from above
         let code = if owner.is_null() || present == 0 || dacl.is_null() {
             87 // WHAT: ERROR_INVALID_PARAMETER. WHY: never an empty grant or no owner
         } else {
-            SetNamedSecurityInfoW(name.as_ptr(), SE_FILE_OBJECT, what, owner, std::ptr::null_mut(), dacl, std::ptr::null()) // WHAT: the folder itself, owner and protected DACL in one write; Windows passes the inheritable entries on to everything inside, each in one write. WHY: never a moment without entries
+            match SetNamedSecurityInfoW(name.as_ptr(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, std::ptr::null_mut(), std::ptr::null_mut(), dacl, std::ptr::null()) { // WHAT: the folder's protected DACL first, in one write; Windows passes the inheritable entries on to everything inside, each in one write. WHY: never a moment without entries; the owner's own right to change the DACL is enough for this, where changing the owner first needs a privilege (found by the Windows end-to-end test, 2026-11-13)
+                0 => SetNamedSecurityInfoW(name.as_ptr(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, owner, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()), // WHAT: then the owner. WHY: administrators now have full control, which includes taking ownership
+                failed => failed, // WHAT: Windows' reason. WHY: said by the caller
+            }
         };
         if code == 0 && tree {
             let mut empty: *mut core::ffi::c_void = std::ptr::null_mut(); // WHAT: filled by Windows. WHY: a DACL with no entries of its own
@@ -109,7 +111,7 @@ pub fn set(path: &Path, sddl: &str, tree: bool) -> Result<(), String> {
                     let reset = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION; // WHAT: owner, and a DACL that inherits. WHY: only what the folder passes on
                     if TreeResetNamedSecurityInfoW(inside.as_mut_ptr(), SE_FILE_OBJECT, reset, owner, std::ptr::null_mut(), empty_dacl, std::ptr::null(), 0, Some(failed), ProgressInvokeOnError, (&raw const missed).cast()) != 0 {
                         missed.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // WHAT: counted. WHY: said below
-                    } // WHAT: its own entries and those below it taken away, each written once with what it inherits. WHY: an entry an account wrote on its own file goes; a TreeReset on the folder itself would leave it with none (found by the Windows end-to-end test, 2026-11-13)
+                    } // WHAT: its own entries and those below it taken away, each written once with what it inherits. WHY: an entry an account wrote on its own file goes
                 }
                 LocalFree(empty); // WHAT: let go. WHY: Windows copied it
             }
