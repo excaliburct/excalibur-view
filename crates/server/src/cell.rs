@@ -407,7 +407,7 @@ pub fn cell_sid(install_id: &str) -> String {
 /// else, and nothing inherited.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn pipe_sddl(cell_sid: &str) -> String {
-    format!("D:P(A;;GA;;;SY)(A;;0x12008b;;;{cell_sid})") // WHAT: SYSTEM full; the cell reads and writes data only (FILE_GENERIC_READ and FILE_WRITE_DATA), never FILE_CREATE_PIPE_INSTANCE. WHY: §6a: "SYSTEM, plus the cell's own SID. Nobody else may connect"; and the cell can never make an instance of the pipe itself
+    format!("D:P(A;;GA;;;SY)(A;;0x12019f;;;{cell_sid})") // WHAT: SYSTEM full; the cell what .NET's read-write open asks for (FILE_GENERIC_READ and FILE_GENERIC_WRITE, which holds FILE_CREATE_PIPE_INSTANCE). WHY: §6a: "SYSTEM, plus the cell's own SID. Nobody else may connect"; with 0x12008b the cell was refused (the Windows end-to-end test, 2026-11-12); it still never makes an instance, because both of the pipe's two are the Office Server's while the cell runs
 }
 
 /// The cell's data folder's permissions, as SDDL: nothing inherited, the
@@ -988,7 +988,7 @@ mod tests {
         assert!(sid.starts_with("S-1-5-80-") && sid.split('-').count() == 9, "S, 1, 5, 80 and five sub-authorities: {sid}");
         assert_eq!(sid, cell_sid("inst_1"), "the same every start");
         assert_ne!(sid, cell_sid("inst_2"), "another installation, another SID");
-        assert_eq!(pipe_sddl(&sid), format!("D:P(A;;GA;;;SY)(A;;0x12008b;;;{sid})"), "the cell may read and write, never make an instance");
+        assert_eq!(pipe_sddl(&sid), format!("D:P(A;;GA;;;SY)(A;;0x12019f;;;{sid})"), "the cell may open it read-write as .NET does; both instances are the server's while it runs"); // WHAT: the pipe's entries. WHY: .NET's NamedPipeClientStream asks GENERIC_READ and GENERIC_WRITE
         assert_eq!(data_sddl(&sid), format!("D:P(A;OICI;FA;;;SY)(A;OICI;0x1301bf;;;{sid})"), "protected: the system and the cell, nobody else"); // WHAT: the data folder's entries. WHY: §6
         assert_eq!(program_sddl(&sid), format!("D:(A;OICI;0x1200a9;;;{sid})"), "the cell reads and runs its program, beside what the folder inherits"); // WHAT: the program folder's entry. WHY: never change its own program
         let steps = data_steps(Path::new(r"C:\ProgramData\Excalibur Office\citadel")); // WHAT: icacls after the entries are set. WHY: checked below

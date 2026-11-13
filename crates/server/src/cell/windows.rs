@@ -173,7 +173,7 @@ struct Cell {
     pipe: String, // WHAT: `\\.\pipe\excalibur-office-<install id>`. WHY: §6a
     sid: String, // WHAT: the cell's SID. WHY: the pipe and the token
     process: Option<Raw>, // WHAT: the running cell. WHY: waited for
-    serving: Option<std::thread::JoinHandle<std::fs::File>>, // WHAT: the thread answering its pipe, which hands the pipe back when done. WHY: the old instance is held until the next exists
+    serving: Option<std::thread::JoinHandle<(std::fs::File, Option<std::fs::File>)>>, // WHAT: the thread answering its pipe, which hands the pipe back when done, with the next instance it made once the cell connected. WHY: the old instance is held until the next exists
     next: Option<std::fs::File>, // WHAT: the next pipe instance, made before the old one closed. WHY: security review L4: the name is never free during the restart wait
     pin: crate::cellbundle::Pin, // WHAT: the cell this build was made with. WHY: checked before every start
     data: PathBuf, // WHAT: the cell's data folder. WHY: its settings get the Office Server's maintenance key before every start
@@ -188,8 +188,8 @@ impl super::Launcher for Cell {
             Some(pipe) => pipe, // WHAT: the instance made while the last one was still held. WHY: the name was never free
             None => make_pipe(&self.pipe, &self.sid, true)?, // WHAT: the first instance, made only if nobody made it first. WHY: a name somebody else holds is an alarm (AddrInUse), not a restart
         };
-        let server = self.server.clone(); // WHAT: the server, for the thread. WHY: its answers
-        self.serving = Some(std::thread::Builder::new().name("citadel-pipe".into()).spawn(move || serve(pipe, &server))?); // WHAT: the pipe answered on its own thread. WHY: the supervisor waits on the process meanwhile
+        let (server, name, sid) = (self.server.clone(), self.pipe.clone(), self.sid.clone()); // WHAT: the server, the pipe's name and the cell's SID, for the thread. WHY: its answers, and the next instance
+        self.serving = Some(std::thread::Builder::new().name("citadel-pipe".into()).spawn(move || serve(pipe, &server, &name, &sid))?); // WHAT: the pipe answered on its own thread. WHY: the supervisor waits on the process meanwhile
         match restricted_process(&self.program, &self.line, &self.sid, &self.environment) {
             Ok(process) => {
                 self.process = Some(process); // WHAT: kept. WHY: waited for
@@ -219,15 +219,18 @@ impl super::Launcher for Cell {
 }
 
 impl Cell {
-    /// Makes the next pipe instance while the old one is still held, then
-    /// ends the old one's thread (cancelling its wait if the cell never
-    /// connected) and lets the old instance go.
+    /// Ends the old instance's thread (cancelling its wait if the cell never
+    /// connected), keeps the next instance it made once the cell connected
+    /// (or makes it now, while the old one is still held), and lets the old
+    /// instance go.
     fn end_pipe(&mut self) {
-        match make_pipe(&self.pipe, &self.sid, false) {
-            Ok(next) => self.next = Some(next), // WHAT: held for the next start. WHY: the name is ours throughout
-            Err(e) => tracing::error!("the Citadel cell's next pipe could not be made: {e}"), // WHAT: said. WHY: the next start makes it fresh, and refuses a name someone else took
-        }
-        if let Some(thread) = self.serving.take() {
+        let Some(thread) = self.serving.take() else {
+            if self.next.is_none() {
+                self.next = self.make_next(); // WHAT: the next instance. WHY: the name is ours throughout
+            }
+            return;
+        };
+        {
             use std::os::windows::io::AsRawHandle;
             for _ in 0..50 {
                 if thread.is_finished() {
@@ -237,8 +240,19 @@ impl Cell {
                 unsafe { CancelSynchronousIo(thread.as_raw_handle() as HANDLE) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: cancelling our own thread's wait for the cell
                 std::thread::sleep(std::time::Duration::from_millis(20)); // WHAT: a moment. WHY: for the cancel to land
             }
-            let _ = thread.join(); // WHAT: waited for; the old instance it hands back is dropped here. WHY: only once the next one exists
+            match thread.join() {
+                Ok((old, made)) => {
+                    self.next = made.or_else(|| self.make_next()); // WHAT: the next instance, made while the cell ran or now. WHY: the name is ours throughout
+                    drop(old); // WHAT: the old instance let go. WHY: only once the next one exists
+                }
+                Err(_) => self.next = self.make_next(), // WHAT: the thread failed; a next instance made. WHY: as above
+            }
         }
+    }
+
+    /// The next instance of the cell's pipe, or none, said in the log.
+    fn make_next(&self) -> Option<std::fs::File> {
+        make_pipe(&self.pipe, &self.sid, false).inspect_err(|e| tracing::error!("the Citadel cell's next pipe could not be made: {e}")).ok() // WHAT: made, or said. WHY: the next start makes it fresh, and refuses a name someone else took
     }
 }
 
@@ -280,11 +294,13 @@ fn make_pipe(name: &str, sid: &str, first: bool) -> std::io::Result<std::fs::Fil
 
 /// Waits for the cell to connect, then answers it until it closes; hands the
 /// pipe back, still open.
-fn serve(pipe: std::fs::File, server: &crate::api::Server) -> std::fs::File {
+fn serve(pipe: std::fs::File, server: &crate::api::Server, name: &str, sid: &str) -> (std::fs::File, Option<std::fs::File>) {
     use std::os::windows::io::AsRawHandle;
     // SAFETY: the handle is the pipe this File owns, alive for the whole call; no overlapped structure is used.
     let connected = unsafe { ConnectNamedPipe(pipe.as_raw_handle() as HANDLE, std::ptr::null_mut()) != 0 || GetLastError() == ERROR_PIPE_CONNECTED }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: waiting for the cell on our own pipe
+    let mut next = None; // WHAT: the second instance, once the cell is connected. WHY: below
     if connected {
+        next = make_pipe(name, sid, false).inspect_err(|e| tracing::error!("the Citadel cell's next pipe could not be made: {e}")).ok(); // WHAT: the second of the two instances, made as soon as the cell is connected to the first. WHY: both are the Office Server's while the cell runs, so the cell can never make one of its own (its access to the pipe includes FILE_CREATE_PIPE_INSTANCE, which .NET's read-write open asks for)
         let office = super::Answering::new(server); // WHAT: the answers for this connection. WHY: the pure part
         let mut reader = BufReader::new(&pipe); // WHAT: lines in. WHY: one JSON object each
         let mut writer = &pipe; // WHAT: lines out. WHY: one answer each
@@ -292,7 +308,7 @@ fn serve(pipe: std::fs::File, server: &crate::api::Server) -> std::fs::File {
             tracing::debug!("the Citadel cell's pipe closed: {e}"); // WHAT: noted. WHY: a stopping cell closes it
         }
     }
-    pipe // WHAT: handed back open. WHY: closed only once the next instance exists
+    (pipe, next) // WHAT: handed back open, with the next instance. WHY: closed only once the next instance exists
 }
 
 /// Starts `program` under a restricted copy of this service's token: every
