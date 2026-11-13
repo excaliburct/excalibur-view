@@ -20,8 +20,11 @@
 //! all of it, and any DLL beside the program is taken away: the service is
 //! one program and ships none.
 //!
-//! All of that is one call to Windows (`TreeResetNamedSecurityInfoW`), which
-//! writes each file's new permissions in a single step. Before 0.7.1 it was
+//! All of that is done with Windows' own calls: the folder's owner and
+//! protected DACL in one `SetNamedSecurityInfoW` (which passes the entries on
+//! to everything inside), then each thing inside reset to inherit only
+//! (`TreeResetNamedSecurityInfoW`); each file's new permissions are written in
+//! a single step. Before 0.7.1 it was
 //! four `icacls` runs, and between two of them the folder had no entries at
 //! all, so for a moment even an administrator couldn't read in it: an install
 //! reading its own report just then said it "stopped without saying why"
@@ -67,7 +70,7 @@ pub fn set(path: &Path, sddl: &str, tree: bool) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt as _; // WHAT: UTF-16. WHY: Windows' W calls
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW, TreeResetNamedSecurityInfoW, ProgressInvokeOnError, PROG_INVOKE_SETTING, SDDL_REVISION_1, SE_FILE_OBJECT};
-    use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID};
+    use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID, UNPROTECTED_DACL_SECURITY_INFORMATION};
     /// Counts each object Windows couldn't change, and carries on.
     unsafe extern "system" fn failed(_name: windows_sys::core::PCWSTR, status: u32, _setting: *mut PROG_INVOKE_SETTING, args: *const core::ffi::c_void, _set: windows_sys::core::BOOL) {
         if status != 0 && !args.is_null() {
@@ -92,11 +95,25 @@ pub fn set(path: &Path, sddl: &str, tree: bool) -> Result<(), String> {
         let what = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION; // WHAT: owner and a protected DACL. WHY: nothing from above
         let code = if owner.is_null() || present == 0 || dacl.is_null() {
             87 // WHAT: ERROR_INVALID_PARAMETER. WHY: never an empty grant or no owner
-        } else if tree {
-            TreeResetNamedSecurityInfoW(name.as_mut_ptr(), SE_FILE_OBJECT, what, owner, std::ptr::null_mut(), dacl, std::ptr::null(), 0, Some(failed), ProgressInvokeOnError, (&raw const missed).cast()) // WHAT: the folder and everything inside, each in one step. WHY: never a moment without entries
         } else {
-            SetNamedSecurityInfoW(name.as_ptr(), SE_FILE_OBJECT, what, owner, std::ptr::null_mut(), dacl, std::ptr::null()) // WHAT: the folder alone. WHY: likewise
+            SetNamedSecurityInfoW(name.as_ptr(), SE_FILE_OBJECT, what, owner, std::ptr::null_mut(), dacl, std::ptr::null()) // WHAT: the folder itself, owner and protected DACL in one write; Windows passes the inheritable entries on to everything inside, each in one write. WHY: never a moment without entries
         };
+        if code == 0 && tree {
+            let mut empty: *mut core::ffi::c_void = std::ptr::null_mut(); // WHAT: filled by Windows. WHY: a DACL with no entries of its own
+            let none: Vec<u16> = std::ffi::OsStr::new("D:").encode_wide().chain(std::iter::once(0)).collect(); // WHAT: an empty, present DACL. WHY: each thing inside keeps only what it inherits
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(none.as_ptr(), SDDL_REVISION_1, &mut empty, std::ptr::null_mut()) != 0 {
+                let (mut empty_present, mut empty_dacl, mut empty_defaulted) = (0i32, std::ptr::null_mut::<ACL>(), 0i32); // WHAT: filled by Windows. WHY: the empty DACL
+                GetSecurityDescriptorDacl(empty, &mut empty_present, &mut empty_dacl, &mut empty_defaulted);
+                for entry in std::fs::read_dir(path).into_iter().flatten().flatten() {
+                    let mut inside: Vec<u16> = entry.path().as_os_str().encode_wide().chain(std::iter::once(0)).collect(); // WHAT: one thing inside. WHY: reset with all below it
+                    let reset = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION; // WHAT: owner, and a DACL that inherits. WHY: only what the folder passes on
+                    if TreeResetNamedSecurityInfoW(inside.as_mut_ptr(), SE_FILE_OBJECT, reset, owner, std::ptr::null_mut(), empty_dacl, std::ptr::null(), 0, Some(failed), ProgressInvokeOnError, (&raw const missed).cast()) != 0 {
+                        missed.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // WHAT: counted. WHY: said below
+                    } // WHAT: its own entries and those below it taken away, each written once with what it inherits. WHY: an entry an account wrote on its own file goes; a TreeReset on the folder itself would leave it with none (found by the Windows end-to-end test, 2026-11-13)
+                }
+                LocalFree(empty); // WHAT: let go. WHY: Windows copied it
+            }
+        }
         LocalFree(descriptor); // WHAT: let go. WHY: Windows copied what it needed
         code
     };
