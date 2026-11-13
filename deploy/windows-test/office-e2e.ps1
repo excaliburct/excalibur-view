@@ -211,7 +211,8 @@ function InstallOffice([string] $version) {
     & $exe --install                                                            # WHAT: the elevated install, as the double-click runs it. WHY: the runner is an administrator.
     $code = $LASTEXITCODE                                                       # WHAT: its exit code. WHY: checked.
     $report = Get-Content -Raw -LiteralPath (Join-Path $OfficeHome 'last-install.txt') -ErrorAction SilentlyContinue   # WHAT: what it says. WHY: the reason, if it failed.
-    Write-Host "install said: $report"                                          # WHAT: shown. WHY: the log has it.
+    Write-Host "install exited $code and said: $report"                        # WHAT: shown. WHY: the log has it.
+    if (-not $report) { Get-ChildItem -Force -LiteralPath $OfficeHome -ErrorAction Continue | Format-Table -AutoSize | Out-String | Write-Host }   # WHAT: what the install left. WHY: an install that says nothing must say something here.
     Check ($code -eq 0 -and "$report".StartsWith('ok')) "the Office Server $version installed as a service from the USB kit"   # WHAT: installed. WHY: (b).
     Check ((ServiceState $OfficeService) -eq 'RUNNING') "the $OfficeService service is RUNNING"   # WHAT: running. WHY: started by install.
     Check ((Sha (Join-Path $OfficeHome 'citadel\Citadel Server.exe')) -eq (Sha (Join-Path $Kit 'citadel\Citadel Server.exe'))) "the kit's pinned cell is installed beside it"   # WHAT: the cell in place. WHY: critical 3.
