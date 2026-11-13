@@ -127,8 +127,10 @@ function ListenerPath([int] $port) {
     return (Get-CimInstance Win32_Process -Filter "ProcessId = $($listen.OwningProcess)").ExecutablePath   # WHAT: its program. WHY: compared with a path.
 }
 
-# WHAT: the processes running a program, by its full path. WHY: whether 1.0 or the cell is running.
-function Running([string] $exe) { @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ieq $exe }) }
+# WHAT: the processes running a program, by its full path, always as a list (the comma keeps an empty one a list).
+# WHY: whether 1.0 or the cell is running; PowerShell turns an empty list a function returns into nothing, and .Count on
+#      nothing fails under strict mode (try 17, the first run to get this far).
+function Running([string] $exe) { return ,@(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ieq $exe }) }
 
 # WHAT: whether a process is inside a job object. WHY: the cell must die with the Office Server.
 function InJob([int] $id) {
