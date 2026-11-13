@@ -342,6 +342,10 @@ fn restricted_process(program: &Path, line: &str, sid: &str, environment: &[std:
         }
         CloseHandle(own);
         made?;
+        if let Err(e) = give_default_dacl(token, sid) {
+            CloseHandle(token); // WHAT: let go. WHY: not started
+            return Err(e); // WHAT: said. WHY: a cell that can't open its own process never starts
+        }
         let (said, write) = match output_pipe() {
             Ok(pair) => pair, // WHAT: the pipe the cell's output comes back on. WHY: it says why it stopped, on its error output
             Err(e) => {
@@ -410,6 +414,37 @@ fn restricted_process(program: &Path, line: &str, sid: &str, environment: &[std:
         ResumeThread(info.hThread); // WHAT: let it run, now inside the job. WHY: started suspended for that
         CloseHandle(info.hThread); // WHAT: the thread's handle let go. WHY: only the process is waited for
         Ok(Raw(info.hProcess as usize))
+    }
+}
+
+/// Gives the restricted token a default DACL that its own SID passes
+/// (`super::token_default_sddl`): what the cell makes without saying who may
+/// use it (its own process and threads above all) is the system's and the
+/// cell's. With the system's default alone, the token's second check refuses
+/// the cell its own process, and Windows ends it as it starts (0xC0000142).
+fn give_default_dacl(token: HANDLE, sid: &str) -> std::io::Result<()> {
+    use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, SetTokenInformation, TokenDefaultDacl, ACL, TOKEN_DEFAULT_DACL};
+    let sddl = wide(OsStr::new(&super::token_default_sddl(sid))); // WHAT: the default DACL, as SDDL. WHY: read by Windows
+    // SAFETY: every pointer passed is to a live local for the length of the call; the descriptor Windows allocates is
+    // freed once, after SetTokenInformation has copied the DACL it points into.
+    unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: the cell's token's default DACL
+        let mut descriptor: *mut core::ffi::c_void = std::ptr::null_mut(); // WHAT: filled by Windows. WHY: the parsed SDDL
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut descriptor, std::ptr::null_mut()) == 0 {
+            return Err(std::io::Error::last_os_error()); // WHAT: refused. WHY: said
+        }
+        let (mut present, mut defaulted, mut dacl) = (0, 0, std::ptr::null_mut::<ACL>()); // WHAT: filled by Windows. WHY: the DACL inside
+        let done = if GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) == 0 || present == 0 {
+            Err(std::io::Error::other("the default DACL's SDDL has no DACL")) // WHAT: refused. WHY: never an empty one
+        } else {
+            let value = TOKEN_DEFAULT_DACL { DefaultDacl: dacl }; // WHAT: the DACL, as the call takes it. WHY: below
+            if SetTokenInformation(token, TokenDefaultDacl, (&raw const value).cast(), u32::try_from(std::mem::size_of::<TOKEN_DEFAULT_DACL>()).unwrap_or(0)) == 0 {
+                Err(std::io::Error::last_os_error()) // WHAT: Windows' reason. WHY: said
+            } else {
+                Ok(()) // WHAT: set. WHY: the cell may open its own process
+            }
+        };
+        LocalFree(descriptor); // WHAT: let go. WHY: the token holds its own copy
+        done
     }
 }
 

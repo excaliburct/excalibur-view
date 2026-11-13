@@ -668,6 +668,16 @@ pub fn extract_folder(home: &Path, for_the_cell: bool) -> PathBuf {
 /// The variable that points .NET's single-file bundle at that folder.
 pub const EXTRACT_VARIABLE: &str = "DOTNET_BUNDLE_EXTRACT_BASE_DIR"; // WHAT: .NET's own setting. WHY: harmless when the bundle doesn't extract
 
+/// The cell's token's default DACL, as SDDL: the system and the cell's SID.
+/// What the cell makes without naming who may use it (its own process and
+/// threads above all) gets this; the system's default alone fails the
+/// token's second check, and Windows ends the cell as it starts (0xC0000142,
+/// found by the Windows end-to-end test).
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn token_default_sddl(cell_sid: &str) -> String {
+    format!("D:(A;;GA;;;SY)(A;;GA;;;{cell_sid})") // WHAT: the system and the cell, in full. WHY: the cell may open what it made
+}
+
 /// The cell's own window station and desktop, as SDDL: the system and the
 /// cell's SID, nobody else. A process under the cell's restricted token can't
 /// open the service's own desktop (it grants the system only, which the
@@ -752,6 +762,7 @@ mod tests {
         assert!(texts.contains(&format!(r"{}=C:\x\cell", super::EXTRACT_VARIABLE)), "{texts:?}"); // WHAT: set. WHY: the folder
         assert!(!texts.iter().any(|t| t.to_ascii_lowercase().contains("windows\\temp")), "the old value is gone: {texts:?}"); // WHAT: replaced. WHY: never Windows' temp
         assert!(texts.iter().any(|t| t.starts_with("Path=")), "everything else kept"); // WHAT: kept. WHY: the cell needs its environment
+        assert_eq!(super::token_default_sddl("S-1-5-80-1"), "D:(A;;GA;;;SY)(A;;GA;;;S-1-5-80-1)", "what the cell makes is the system's and its own"); // WHAT: its token's default DACL. WHY: it must open its own process
         assert_eq!(super::desktop_sddl("S-1-5-80-1"), "D:P(A;;GA;;;SY)(A;;GA;;;S-1-5-80-1)", "the cell's desktop is the system's and the cell's alone"); // WHAT: its desktop. WHY: a restricted token can't use the service's own
         assert_eq!(super::desktop_name(42), ("ExcaliburOfficeCell-42".to_string(), "ExcaliburOfficeCell-42\\Default".to_string()), "station\\desktop, one per server process"); // WHAT: the names. WHY: lpDesktop's form
         assert_eq!(super::extract_sddl("S-1-5-80-1"), "D:(A;OICI;0x1301bf;;;S-1-5-80-1)", "the cell may use its own, beside what it inherits"); // WHAT: granted. WHY: it unpacks there
