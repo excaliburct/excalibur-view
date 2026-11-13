@@ -12,14 +12,14 @@ use std::os::windows::io::FromRawHandle;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, SetHandleInformation, ERROR_PIPE_CONNECTED, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::IO::CancelSynchronousIo;
 use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, SDDL_REVISION_1};
 use windows_sys::Win32::Security::{CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, PSID, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY};
 use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
-use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT};
+use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, CreatePipe, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT};
 use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
-use windows_sys::Win32::System::Threading::{CreateProcessAsUserW, GetCurrentProcess, OpenProcessToken, ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION, STARTUPINFOW};
+use windows_sys::Win32::System::Threading::{CreateProcessAsUserW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess, InitializeProcThreadAttributeList, OpenProcessToken, ResumeThread, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW};
 
 use crate::api::Shared;
 
@@ -207,6 +207,10 @@ impl super::Launcher for Cell {
             // SAFETY: `process` is the process handle CreateProcessAsUserW gave us, owned here and closed once.
             unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: waiting on and closing our own process handle
                 WaitForSingleObject(process.handle(), INFINITE); // WHAT: until the cell stops. WHY: then it is restarted
+                let mut code = 0u32; // WHAT: filled by Windows. WHY: how it ended
+                if GetExitCodeProcess(process.handle(), &mut code) != 0 {
+                    tracing::warn!("the Citadel cell ended with exit code {code} (0x{code:08X})"); // WHAT: said. WHY: 4 is a refused start, others a crash; the log says which
+                }
                 CloseHandle(process.handle()); // WHAT: let go. WHY: no handle kept for a stopped process
             }
         }
@@ -338,8 +342,32 @@ fn restricted_process(program: &Path, line: &str, sid: &str, environment: &[std:
         }
         CloseHandle(own);
         made?;
-        let mut startup: STARTUPINFOW = std::mem::zeroed(); // WHAT: no window, nothing special. WHY: the defaults
-        startup.cb = u32::try_from(std::mem::size_of::<STARTUPINFOW>()).unwrap_or(0);
+        let (said, write) = match output_pipe() {
+            Ok(pair) => pair, // WHAT: the pipe the cell's output comes back on. WHY: it says why it stopped, on its error output
+            Err(e) => {
+                CloseHandle(token); // WHAT: let go. WHY: not started
+                return Err(e);
+            }
+        };
+        let mut size = 0usize; // WHAT: the attribute list's size. WHY: asked of Windows first
+        InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size); // WHAT: the size for one attribute. WHY: the list is made in our own memory
+        let mut list = vec![0u8; size.max(64)]; // WHAT: room for it. WHY: Windows fills it
+        let attributes = list.as_mut_ptr().cast::<core::ffi::c_void>(); // WHAT: the list. WHY: passed on
+        let inherited = [write]; // WHAT: the only handle the cell inherits: its output's write end. WHY: it reaches us otherwise only through the pipe
+        let listed = InitializeProcThreadAttributeList(attributes, 1, 0, &mut size) != 0
+            && UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize, inherited.as_ptr().cast(), std::mem::size_of_val(&inherited), std::ptr::null_mut(), std::ptr::null()) != 0; // WHAT: that one handle named. WHY: no other handle of ours is ever inherited
+        if !listed {
+            let why = std::io::Error::last_os_error(); // WHAT: why. WHY: read first
+            CloseHandle(write); // WHAT: let go. WHY: not started
+            CloseHandle(token);
+            return Err(why);
+        }
+        let mut startup: STARTUPINFOEXW = std::mem::zeroed(); // WHAT: no window; its output to our pipe. WHY: the defaults otherwise
+        startup.StartupInfo.cb = u32::try_from(std::mem::size_of::<STARTUPINFOEXW>()).unwrap_or(0); // WHAT: the extended form's size. WHY: the attribute list follows
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES; // WHAT: its standard handles given. WHY: below
+        startup.StartupInfo.hStdOutput = write; // WHAT: its output. WHY: to our log
+        startup.StartupInfo.hStdError = write; // WHAT: its errors. WHY: likewise
+        startup.lpAttributeList = attributes; // WHAT: the one inherited handle. WHY: as above
         let mut info: PROCESS_INFORMATION = std::mem::zeroed(); // WHAT: filled by Windows. WHY: the process's handle
         let started = CreateProcessAsUserW(
             token,
@@ -347,18 +375,21 @@ fn restricted_process(program: &Path, line: &str, sid: &str, environment: &[std:
             command.as_mut_ptr(),
             std::ptr::null(),
             std::ptr::null(),
-            0, // WHAT: no handles inherited. WHY: the cell reaches us only through the pipe
-            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED, // WHAT: no window, and held until it is in the job. WHY: §6a; nothing it starts escapes the job
+            1, // WHAT: inherit, but only the handle in the list. WHY: the cell's output comes back; nothing else of ours reaches it
+            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, // WHAT: no window, held until it is in the job, the list read. WHY: §6a; nothing it starts escapes the job
             block.as_ptr().cast(), // WHAT: its environment, with .NET's unpacking folder. WHY: review low 3
             folder.as_ref().map_or(std::ptr::null(), |f| f.as_ptr()),
-            &startup,
+            (&raw const startup).cast::<STARTUPINFOW>(),
             &mut info,
         );
         let start_error = std::io::Error::last_os_error(); // WHAT: why, if it failed. WHY: read before CloseHandle can change it
+        DeleteProcThreadAttributeList(attributes); // WHAT: the list let go. WHY: used only by the call
+        CloseHandle(write); // WHAT: our copy of the write end closed. WHY: the read end ends when the cell does
         CloseHandle(token);
         if started == 0 {
             return Err(start_error);
         }
+        let _ = std::thread::Builder::new().name("citadel-output".into()).spawn(move || log_output(said)); // WHAT: the cell's output read and logged. WHY: "The cell didn't start: ..." reaches the Office Server's log
         if AssignProcessToJobObject(job.handle(), info.hProcess) == 0 {
             let why = std::io::Error::last_os_error(); // WHAT: why. WHY: read before anything else changes it
             TerminateProcess(info.hProcess, 1); // WHAT: never run outside the job. WHY: it wouldn't die with the server
@@ -369,6 +400,37 @@ fn restricted_process(program: &Path, line: &str, sid: &str, environment: &[std:
         ResumeThread(info.hThread); // WHAT: let it run, now inside the job. WHY: started suspended for that
         CloseHandle(info.hThread); // WHAT: the thread's handle let go. WHY: only the process is waited for
         Ok(Raw(info.hProcess as usize))
+    }
+}
+
+/// A pipe for the cell's output: the read end, ours, never inherited; the
+/// write end, inheritable, for the cell.
+fn output_pipe() -> std::io::Result<(std::fs::File, HANDLE)> {
+    let attributes = SECURITY_ATTRIBUTES { nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(0), lpSecurityDescriptor: std::ptr::null_mut(), bInheritHandle: 1 }; // WHAT: inheritable handles. WHY: the write end goes to the cell
+    let (mut read, mut write): (HANDLE, HANDLE) = (std::ptr::null_mut(), std::ptr::null_mut()); // WHAT: filled by Windows. WHY: the two ends
+    // SAFETY: the pointers are to live locals; the read end is owned by the File returned, the write end by the caller.
+    unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: an anonymous pipe for the cell's output
+        if CreatePipe(&mut read, &mut write, &attributes, 0) == 0 {
+            return Err(std::io::Error::last_os_error()); // WHAT: refused. WHY: said
+        }
+        SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0); // WHAT: the read end never inherited. WHY: only the write end goes to the cell
+        Ok((std::fs::File::from_raw_handle(read), write))
+    }
+}
+
+/// Writes what the cell prints into the Office Server's log, a line at a
+/// time, the first 50 lines of each start at most; the rest is read and let
+/// go, so the cell never waits on a full pipe.
+fn log_output(said: std::fs::File) {
+    use std::io::BufRead as _; // WHAT: reading lines. WHY: one log line each
+    let mut shown = 0; // WHAT: lines written so far. WHY: a cell printing without end can't flood the log
+    for line in BufReader::new(said).split(b'\n') {
+        let Ok(line) = line else { break }; // WHAT: the next line, or the end. WHY: read until the cell's output closes, so the cell never blocks writing
+        let line = String::from_utf8_lossy(&line[..line.len().min(4096)]).into_owned(); // WHAT: as text, bounded. WHY: whatever the cell's console writes
+        if shown < 50 && !line.trim().is_empty() {
+            shown += 1; // WHAT: counted. WHY: as above
+            tracing::warn!("the Citadel cell said: {}", line.chars().filter(|c| !c.is_control()).take(500).collect::<String>()); // WHAT: its words, plain and bounded. WHY: why it stopped, in the log
+        }
     }
 }
 

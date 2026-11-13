@@ -54,6 +54,7 @@ $OfficeHome = Join-Path $env:ProgramData 'Excalibur Hyperview\Server'         # 
 $OfficeExe = Join-Path $OfficeHome 'Hyperview-Server.exe'                     # WHAT: the installed program. WHY: --roll-back and --retry-citadel-move run it.
 $OfficeData = Join-Path $OfficeHome 'hyperview-data'                          # WHAT: its data. WHY: the licence is left there; its log is there.
 $OfficeLog = Join-Path $OfficeData 'hyperview-server.log'                     # WHAT: the service's log. WHY: the move's and the updates' lines.
+$OfficeKept = Join-Path $OfficeHome 'Hyperview-Server.old'                    # WHAT: the version before an update. WHY: kept.rs kept_program, put back by --roll-back.
 $CellExe = Join-Path $OfficeHome 'citadel\Citadel Server.exe'                 # WHAT: the cell's program. WHY: what runs in the job.
 $CellData = Join-Path $env:ProgramData 'Excalibur Office\citadel'             # WHAT: the cell's data. WHY: where 1.0's data goes.
 $CellRule = 'Excalibur Office Server (Citadel cell)'                          # WHAT: the 47110 rule. WHY: cell.rs FIREWALL_RULE.
@@ -307,26 +308,27 @@ try {
     New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$OfficeService" -Name Environment -PropertyType MultiString -Value @("HYPERVIEW_RELEASE_FEED=http://127.0.0.1:$FeedPort/releases") -Force | Out-Null   # WHAT: the service reads the stand-in feed. WHY: never the public one.
     Restart-Service -Name $OfficeService -Force                                 # WHAT: restarted with it. WHY: the feed is looked at 20 s after a start.
     OfficeAt $Second 300                                                        # WHAT: updated, cell and all. WHY: (f).
-    Check (MarkedAs "$OfficeExe.old" $First) "the server before ($First) is kept as Hyperview-Server.old"   # WHAT: kept. WHY: for a rollback.
+    Check (MarkedAs $OfficeKept $First) "the server before ($First) is kept as Hyperview-Server.old"   # WHAT: kept. WHY: for a rollback.
     Check (Test-Path -LiteralPath (Join-Path $OfficeHome 'citadel.old\Citadel Server.exe')) 'the cell before is kept as citadel.old'   # WHAT: kept. WHY: put back with the server.
     Check ((Pin $Port) -eq $pin) 'the cell still shows the same certificate after the update'   # WHAT: unchanged. WHY: the PCs' pins.
     $back = & $OfficeExe --roll-back 2>&1 | Out-String                          # WHAT: the rollback, as an administrator runs it. WHY: (f).
     Write-Host $back.TrimEnd()                                                  # WHAT: shown. WHY: the log has it.
     Check ($LASTEXITCODE -eq 0 -and $back.Contains("put version $First back")) "--roll-back put $First back"   # WHAT: done. WHY: (f).
     OfficeAt $First 120                                                         # WHAT: running as the version before. WHY: (f).
-    Check (MarkedAs "$OfficeExe.old" $Second) "the version rolled back from ($Second) is kept beside it"   # WHAT: swapped. WHY: both kept.
+    Check (MarkedAs $OfficeKept $Second) "the version rolled back from ($Second) is kept beside it"   # WHAT: swapped. WHY: both kept.
     Check ((Test-Path -LiteralPath (Join-Path $OfficeHome 'citadel\Citadel Server.exe')) -and (Test-Path -LiteralPath (Join-Path $OfficeHome 'citadel.old\Citadel Server.exe'))) 'the cell was swapped back with it'   # WHAT: both cells. WHY: put back together.
     WaitFor { (OfficeLogText).Contains("version $Second is not taken") } 180 "the server to look at the feed and leave $Second"   # WHAT: held. WHY: a rollback holds.
     Check ((OfficeVersion) -eq $First) "$Second is not taken again"             # WHAT: still the version before. WHY: (f).
     Publish $Third                                                              # WHAT: a newer one. WHY: taken.
     Restart-Service -Name $OfficeService -Force                                 # WHAT: restarted. WHY: looked at 20 s after.
     OfficeAt $Third 300                                                         # WHAT: the newer one taken. WHY: (f).
-    Check (MarkedAs "$OfficeExe.old" $First) "$First is kept beside $Third now"   # WHAT: the one before. WHY: one version kept.
+    Check (MarkedAs $OfficeKept $First) "$First is kept beside $Third now"   # WHAT: the one before. WHY: one version kept.
 
     Step '(e) a failed move on a fresh install: 1.0 started again, the cell held; then the retry'
     & $OfficeExe --uninstall                                                    # WHAT: the Office Server taken off. WHY: a fresh install for the failure.
     Check ($LASTEXITCODE -eq 0 -and (ServiceState $OfficeService) -eq 'MISSING') 'the Office Server is uninstalled'   # WHAT: gone. WHY: below.
     WaitFor { (Running $CellExe).Count -eq 0 } 30 'the cell to end with its server'   # WHAT: the job ended. WHY: it dies with the server.
+    Copy-Item -LiteralPath $OfficeLog -Destination (Join-Path $Logs 'hyperview-server-before-e.log')   # WHAT: the log so far, kept. WHY: its folder is removed next.
     Remove-Item -LiteralPath (Join-Path $env:ProgramData 'Excalibur Hyperview'), (Join-Path $env:ProgramData 'Excalibur Office') -Recurse -Force   # WHAT: its folders gone. WHY: a fresh office.
     & $oldExe install                                                           # WHAT: 1.0.1 again, fresh. WHY: an office that hasn't moved yet.
     Check ($LASTEXITCODE -eq 0) '1.0.1 installed again'                         # WHAT: it worked. WHY: exit 0.
@@ -358,9 +360,10 @@ try {
 } catch {
     Write-Host '--- the end of the Office Server''s log ---'                    # WHAT: a heading. WHY: the failure's cause is usually there.
     (OfficeLogText) -split "`n" | Select-Object -Last 80 | ForEach-Object { Write-Host $_ }   # WHAT: its last lines. WHY: read on the run page without downloading.
-    $cellLog = Get-ChildItem -LiteralPath (Join-Path $CellData 'logs') -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1   # WHAT: the cell's newest log. WHY: why it stopped, if it ran at all.
+    & "$env:SystemRoot\System32\robocopy.exe" (Join-Path $CellData 'logs') (Join-Path $Logs 'cell-now') /E /B /R:0 /W:0 /NP /NFL /NDL | Out-Null   # WHAT: the cell's logs, in backup mode. WHY: its folder is the system's and the cell's alone.
+    $cellLog = Get-ChildItem -LiteralPath (Join-Path $Logs 'cell-now') -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1   # WHAT: the cell's newest log. WHY: why it stopped, if it ran at all.
     if ($cellLog) { Write-Host "--- the end of the cell's log ($($cellLog.Name)) ---"; Get-Content -LiteralPath $cellLog.FullName -Tail 40 | ForEach-Object { Write-Host $_ } }   # WHAT: its last lines. WHY: as above.
-    if (Test-Path -LiteralPath $CellData) { Write-Host '--- who may use the cell''s folder ---'; & "$env:SystemRoot\System32\icacls.exe" $CellData | ForEach-Object { Write-Host $_ } }   # WHAT: its permissions. WHY: the cell runs under a restricted token.
+    Write-Host '--- who may use the cell''s folder ---'; & "$env:SystemRoot\System32\icacls.exe" $CellData 2>&1 | ForEach-Object { Write-Host $_ }   # WHAT: its permissions. WHY: the cell runs under a restricted token.
     throw                                                                       # WHAT: the failure, as it was. WHY: the step fails.
 } finally {
     if ($script:feedProcess) { Stop-Process -Id $script:feedProcess.Id -Force -ErrorAction SilentlyContinue }   # WHAT: the feed stopped. WHY: pass or fail.
@@ -368,7 +371,7 @@ try {
         if (Test-Path -LiteralPath $from) { Copy-Item -LiteralPath $from -Destination $Logs -ErrorAction SilentlyContinue }   # WHAT: the Office Server's log. WHY: a failed run says why.
     }
     foreach ($pair in @(@($CellData, 'cell'), @($CitadelData, 'citadel-1.0'))) {
-        $logsThere = Join-Path $pair[0] 'Logs'                                  # WHAT: the cell's or 1.0's own logs. WHY: likewise.
-        if (Test-Path -LiteralPath $logsThere) { Copy-Item -LiteralPath $logsThere -Destination (Join-Path $Logs $pair[1]) -Recurse -ErrorAction SilentlyContinue }   # WHAT: copied. WHY: logs only, no keys or data.
+        & "$env:SystemRoot\System32\robocopy.exe" (Join-Path $pair[0] 'logs') (Join-Path $Logs $pair[1]) /E /B /R:0 /W:0 /NP /NFL /NDL | Out-Null   # WHAT: the cell's or 1.0's own logs, in backup mode. WHY: their folders are the system's and the cell's alone; logs only, no keys or data.
     }
+    $global:LASTEXITCODE = 0                                                    # WHAT: robocopy's codes forgotten. WHY: they are counts, not failures.
 }
