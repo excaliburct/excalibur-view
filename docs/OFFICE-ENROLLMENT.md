@@ -208,7 +208,7 @@ Citadel's existing `citadel-request/1` signing stays exactly as it is, for LatCo
   - it exits when the pipe closes.
 - The Office Server restarts the cell after 5 s if it exits, at most 5 times in 10 minutes, then writes it in the log and shows it on `/api/v1/office` as "not answering".
 
-**The pipe:** `\\.\pipe\excalibur-office-<install id>`.
+**The pipe:** `\\.\pipe\excalibur-office-<install id>`, the install id written in letters, digits and dashes only (its `_` as `-`, at most 64), the form the cell accepts.
 
 - Created by the Office Server.
 - ACL: SYSTEM, plus the cell's own SID (read and write data only, never make an instance). Nobody else may connect.

@@ -48,10 +48,15 @@ pub const PROGRAM: &str = "Citadel Server.exe"; // WHAT: the cell's file name. W
 /// The folder it is in, inside the Office Server's program folder.
 pub const FOLDER: &str = "citadel"; // WHAT: `citadel\`. WHY: §6a
 
-/// The named pipe for an installation: `excalibur-office-<install id>`.
+/// The named pipe for an installation: `excalibur-office-<install id>`, the
+/// id written in letters, digits and dashes only (its `_` as `-`), at most
+/// 64 of them: the form the cell accepts (Citadel's `CellOptions.IsPipeName`).
+/// The id itself (`inst_<hex>`) has an underscore, and the cell refused
+/// every start over it (found by the Windows end-to-end test, 2026-11-12).
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn pipe_name(install_id: &str) -> String {
-    format!("excalibur-office-{install_id}") // WHAT: the pipe's name, without `\\.\pipe\`. WHY: §6a; the argument the cell is given
+    let id: String = install_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).take(64).collect(); // WHAT: letters, digits and dashes, 64 at most. WHY: the cell reads nothing else
+    format!("excalibur-office-{id}") // WHAT: the pipe's name, without `\\.\pipe\`. WHY: §6a; the argument the cell is given
 }
 
 /// The cell's data folder: `ProgramData\Excalibur Office\citadel`.
@@ -893,7 +898,10 @@ mod tests {
         let (program, args) = command(Path::new(r"C:\Program Files\Excalibur Office"), "inst_1", Path::new(r"C:\ProgramData\Excalibur Office\citadel"));
         let line = command_line(&program, &args);
         assert!(line.starts_with('"') && line.contains("Citadel Server.exe\""), "{line}");
-        assert!(line.ends_with(r#" --cell --pipe excalibur-office-inst_1 --data "C:\ProgramData\Excalibur Office\citadel" --port 47110"#), "{line}");
+        assert!(line.ends_with(r#" --cell --pipe excalibur-office-inst-1 --data "C:\ProgramData\Excalibur Office\citadel" --port 47110"#), "{line}");
+        let real = pipe_name(&crate::api::fresh_id("inst")); // WHAT: the pipe for a real installation id. WHY: inst_<hex> has an underscore
+        let id = real.strip_prefix("excalibur-office-").unwrap_or_default(); // WHAT: the id part. WHY: checked as the cell checks it
+        assert!(real.len() > 17 && real.len() <= 81 && !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "the cell's own rule (CellOptions.IsPipeName) takes {real}"); // WHAT: what the cell accepts. WHY: it refused every start with the underscore
         assert_eq!(quoted(r"a\b"), r"a\b");
         assert_eq!(quoted(r#"a "b""#), r#""a \"b\"""#);
         assert_eq!(quoted(r"C:\a b\"), r#""C:\a b\\""#);
