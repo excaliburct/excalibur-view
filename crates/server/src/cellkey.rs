@@ -76,6 +76,29 @@ pub struct Entry {
     pub sid: String, // WHAT: who, as an SID string. WHY: compared exactly
 }
 
+/// A file access mask with its generic bits written as the file rights they
+/// stand for (GENERIC_READ as FILE_GENERIC_READ, and so on), the way Windows
+/// grants them. The key store keeps both: it reported the system's entry as
+/// `0xD01F01FF` and the cell's as `0x80120089` for the `FA` and `FR` set
+/// (the Windows end-to-end test, 2026-11-13).
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn file_rights(mask: u32) -> u32 {
+    let mut rights = mask & 0x0FFF_FFFF; // WHAT: the specific and standard rights, generic bits aside. WHY: the generic ones are written out below
+    if mask & 0x8000_0000 != 0 {
+        rights |= READ; // WHAT: GENERIC_READ is FILE_GENERIC_READ. WHY: as Windows maps it for files
+    }
+    if mask & 0x4000_0000 != 0 {
+        rights |= 0x0012_0116; // WHAT: GENERIC_WRITE is FILE_GENERIC_WRITE. WHY: likewise
+    }
+    if mask & 0x2000_0000 != 0 {
+        rights |= 0x0012_00A0; // WHAT: GENERIC_EXECUTE is FILE_GENERIC_EXECUTE. WHY: likewise
+    }
+    if mask & 0x1000_0000 != 0 {
+        rights |= FULL; // WHAT: GENERIC_ALL is FILE_ALL_ACCESS. WHY: likewise
+    }
+    rights
+}
+
 /// Whether a key's permissions are exactly ours: protected, the system in
 /// full and the cell's SID read, and nothing else at all.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
@@ -83,7 +106,7 @@ pub fn locked_as_ours(protected: bool, entries: &[Entry], cell_sid: &str) -> boo
     let want = [(SYSTEM, FULL), (cell_sid, READ)]; // WHAT: the two entries. WHY: [`key_sddl`]
     protected // WHAT: nothing from above. WHY: the key store's folder grants others
         && entries.len() == want.len() // WHAT: exactly two. WHY: a third entry is somebody else's way in
-        && want.iter().all(|(sid, mask)| entries.iter().any(|e| e.allow && !e.inherited && e.sid == *sid && e.mask == *mask)) // WHAT: each, exactly. WHY: more rights for the cell, or less for the system, is a change
+        && want.iter().all(|(sid, mask)| entries.iter().any(|e| e.allow && !e.inherited && e.sid == *sid && file_rights(e.mask) == *mask)) // WHAT: each, exactly, generic bits read as the rights they grant. WHY: more rights for the cell, or less for the system, is a change
 }
 
 /// Whether a key's owner is one this server accepts: the system, or the
@@ -245,6 +268,10 @@ mod tests {
         denied[0].allow = false; // WHAT: a deny where the system's allow was. WHY: not ours
         assert!(!locked_as_ours(true, &denied, cell), "a deny entry"); // WHAT: refused. WHY: likewise
         assert_eq!(key_sddl(cell), format!("D:P(A;;FA;;;SY)(A;;FR;;;{cell})"), "what is set"); // WHAT: the SDDL. WHY: matches what is checked
+        let as_kept = vec![entry(SYSTEM, 0xD01F_01FF), entry(cell, 0x8012_0089)]; // WHAT: what Windows' key store kept for that SDDL. WHY: the end-to-end test's run 15 read these back
+        assert!(locked_as_ours(true, &as_kept, cell), "the key store's own way of writing ours"); // WHAT: passes. WHY: the same rights
+        assert!(!locked_as_ours(true, &[entry(SYSTEM, 0xD01F_01FF), entry(cell, 0xC012_0089)], cell), "the cell given GENERIC_WRITE as well"); // WHAT: refused. WHY: read only
+        assert!(!locked_as_ours(true, &[entry(SYSTEM, 0xD01F_01FF), entry(cell, 0x1000_0000)], cell), "the cell given GENERIC_ALL"); // WHAT: refused. WHY: likewise
     }
 
     #[test]
