@@ -405,32 +405,37 @@ pub fn pipe_sddl(cell_sid: &str) -> String {
     format!("D:P(A;;GA;;;SY)(A;;0x12008b;;;{cell_sid})") // WHAT: SYSTEM full; the cell reads and writes data only (FILE_GENERIC_READ and FILE_WRITE_DATA), never FILE_CREATE_PIPE_INSTANCE. WHY: §6a: "SYSTEM, plus the cell's own SID. Nobody else may connect"; and the cell can never make an instance of the pipe itself
 }
 
-/// The `icacls` runs that make the cell's data folder its own: nothing
-/// inherited, the system (which the cell's restricted token is made from,
-/// and needs for the token's first check) and the cell's SID.
+/// The cell's data folder's permissions, as SDDL: nothing inherited, the
+/// system in full (the cell's restricted token is made from it, and needs it
+/// for the token's first check) and the cell's SID to read, write and
+/// delete, both passed on to everything inside. Set through Windows' own
+/// call, never icacls: the cell's SID names no account, and icacls refused
+/// every grant to it on a real Windows server (the end-to-end test, 2026-11-12).
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
-pub fn data_steps(folder: &Path, cell_sid: &str) -> Vec<Vec<std::ffi::OsString>> {
-    let whole = folder.as_os_str().to_os_string(); // WHAT: the folder. WHY: every step is on it
+pub fn data_sddl(cell_sid: &str) -> String {
+    format!("D:P(A;OICI;FA;;;SY)(A;OICI;0x1301bf;;;{cell_sid})") // WHAT: protected; SYSTEM full; the cell's SID "modify" (0x1301bf). WHY: §6: ACL'd to the cell
+}
+
+/// The `icacls` runs after [`data_sddl`] is set: everything inside made to
+/// inherit it, and the system made the owner. Neither names the cell's SID.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn data_steps(folder: &Path) -> Vec<Vec<std::ffi::OsString>> {
+    let whole = folder.as_os_str().to_os_string(); // WHAT: the folder. WHY: the owner is set on it
     let below = folder.join("*").into_os_string(); // WHAT: what is inside. WHY: reset to inherit
-    let cell = format!("*{cell_sid}:(OI)(CI)M"); // WHAT: the cell may read, write and delete its own data. WHY: a blind store keeps its files here
     let os = |a: &str| std::ffi::OsString::from(a); // WHAT: one argument. WHY: icacls takes them as they are
     vec![
-        vec![whole.clone(), os("/reset"), os("/C"), os("/Q")], // WHAT: its own entries cleared. WHY: as the service's folder
-        vec![whole.clone(), os("/inheritance:r"), os("/grant:r"), os("*S-1-5-18:(OI)(CI)F"), os(&cell), os("/C"), os("/Q")], // WHAT: the system and the cell only. WHY: §6: ACL'd to the cell
-        vec![below, os("/reset"), os("/T"), os("/C"), os("/Q")], // WHAT: everything inside inherits. WHY: an entry written on a file goes
+        vec![below, os("/reset"), os("/T"), os("/C"), os("/Q")], // WHAT: everything inside inherits. WHY: an entry written on a moved file goes
         vec![whole, os("/setowner"), os("*S-1-5-18"), os("/T"), os("/C"), os("/Q")], // WHAT: the system owns it. WHY: nobody keeps an owner's right to change it back
     ]
 }
 
-/// The `icacls` runs that let the cell read and run its own program folder:
-/// the system and administrators as for the service, and the cell's SID to
-/// read and run. Run after the service's folder is locked, which resets it.
+/// The cell's program folder's own entry, as SDDL: the cell's SID may read
+/// and run (0x1200a9), added to what the folder inherits from the locked
+/// service folder (the system and administrators). Set through Windows' own
+/// call, as [`data_sddl`].
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
-pub fn program_steps(folder: &Path, cell_sid: &str) -> Vec<Vec<std::ffi::OsString>> {
-    let whole = folder.as_os_str().to_os_string(); // WHAT: `citadel\`. WHY: the cell's program
-    let os = |a: &str| std::ffi::OsString::from(a); // WHAT: one argument. WHY: as above
-    let cell = format!("*{cell_sid}:(OI)(CI)RX"); // WHAT: read and run. WHY: never change its own program
-    vec![vec![whole, os("/grant:r"), os(&cell), os("/C"), os("/Q")]] // WHAT: added to what it inherits from the locked service folder. WHY: the system and administrators keep theirs
+pub fn program_sddl(cell_sid: &str) -> String {
+    format!("D:(A;OICI;0x1200a9;;;{cell_sid})") // WHAT: not protected, so the inherited entries stay; the cell reads and runs. WHY: never change its own program
 }
 
 /// The SIDs the cell's restricted token is checked against a second time:
@@ -663,12 +668,12 @@ pub fn extract_folder(home: &Path, for_the_cell: bool) -> PathBuf {
 /// The variable that points .NET's single-file bundle at that folder.
 pub const EXTRACT_VARIABLE: &str = "DOTNET_BUNDLE_EXTRACT_BASE_DIR"; // WHAT: .NET's own setting. WHY: harmless when the bundle doesn't extract
 
-/// The `icacls` run that lets the cell use its own unpacking folder: added to
-/// what it inherits from the locked service folder.
+/// The cell's unpacking folder's own entry, as SDDL: the cell's SID may
+/// change it (0x1301bf), added to what it inherits from the locked service
+/// folder. Set through Windows' own call, as [`data_sddl`].
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
-pub fn extract_steps(folder: &Path, cell_sid: &str) -> Vec<Vec<std::ffi::OsString>> {
-    let os = |a: &str| std::ffi::OsString::from(a); // WHAT: one argument. WHY: icacls takes them as they are
-    vec![vec![folder.as_os_str().to_os_string(), os("/grant:r"), os(&format!("*{cell_sid}:(OI)(CI)M")), os("/C"), os("/Q")]] // WHAT: the cell may unpack there. WHY: nobody else but the system and administrators can
+pub fn extract_sddl(cell_sid: &str) -> String {
+    format!("D:(A;OICI;0x1301bf;;;{cell_sid})") // WHAT: not protected; the cell unpacks there. WHY: nobody else but the system and administrators can
 }
 
 /// A Windows environment block (`name=value` pairs, each ended by a zero,
@@ -728,7 +733,7 @@ mod tests {
         assert!(texts.contains(&format!(r"{}=C:\x\cell", super::EXTRACT_VARIABLE)), "{texts:?}"); // WHAT: set. WHY: the folder
         assert!(!texts.iter().any(|t| t.to_ascii_lowercase().contains("windows\\temp")), "the old value is gone: {texts:?}"); // WHAT: replaced. WHY: never Windows' temp
         assert!(texts.iter().any(|t| t.starts_with("Path=")), "everything else kept"); // WHAT: kept. WHY: the cell needs its environment
-        assert!(super::extract_steps(Path::new("x"), "S-1-5-80-1").last().unwrap().iter().any(|a| a.to_string_lossy() == "*S-1-5-80-1:(OI)(CI)M"), "the cell may use its own"); // WHAT: granted. WHY: it unpacks there
+        assert_eq!(super::extract_sddl("S-1-5-80-1"), "D:(A;OICI;0x1301bf;;;S-1-5-80-1)", "the cell may use its own, beside what it inherits"); // WHAT: granted. WHY: it unpacks there
     }
 
     #[test]
@@ -944,10 +949,10 @@ mod tests {
         assert_eq!(sid, cell_sid("inst_1"), "the same every start");
         assert_ne!(sid, cell_sid("inst_2"), "another installation, another SID");
         assert_eq!(pipe_sddl(&sid), format!("D:P(A;;GA;;;SY)(A;;0x12008b;;;{sid})"), "the cell may read and write, never make an instance");
-        let steps = data_steps(Path::new(r"C:\ProgramData\Excalibur Office\citadel"), &sid);
-        let grant: Vec<String> = steps[1].iter().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert!(grant.contains(&"/inheritance:r".to_string()));
-        assert_eq!(grant.iter().filter(|a| a.starts_with('*')).count(), 2, "the system and the cell, nobody else: {grant:?}");
+        assert_eq!(data_sddl(&sid), format!("D:P(A;OICI;FA;;;SY)(A;OICI;0x1301bf;;;{sid})"), "protected: the system and the cell, nobody else"); // WHAT: the data folder's entries. WHY: §6
+        assert_eq!(program_sddl(&sid), format!("D:(A;OICI;0x1200a9;;;{sid})"), "the cell reads and runs its program, beside what the folder inherits"); // WHAT: the program folder's entry. WHY: never change its own program
+        let steps = data_steps(Path::new(r"C:\ProgramData\Excalibur Office\citadel")); // WHAT: icacls after the entries are set. WHY: checked below
+        assert!(steps.iter().flatten().all(|a| !a.to_string_lossy().contains(&sid)), "icacls never names the cell's SID, which it refuses: {steps:?}"); // WHAT: no grant to the cell through icacls. WHY: the end-to-end test found icacls refusing it
         assert!(!restricting_sids(&sid).iter().any(|s| s == "S-1-5-18" || s == "S-1-5-32-544"), "never the system or administrators");
     }
 }

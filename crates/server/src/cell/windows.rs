@@ -88,15 +88,16 @@ pub fn start(server: Shared) {
         if !crate::cellmove::before_first_start(&server.store, &OldCitadel, &crate::cellmove::Run, &program, &old, &data) {
             return; // WHAT: the move failed: the cell is not started. WHY: a cell started empty would make a new certificate; /api/v1/office shows the alarm
         }
-        icacls(&super::data_steps(&data, &sid)); // WHAT: the system and the cell only, the moved files included. WHY: §6
+        allow(&data, &super::data_sddl(&sid), true); // WHAT: the system and the cell only. WHY: §6
+        icacls(&super::data_steps(&data)); // WHAT: the moved files inherit it, the system owns them. WHY: §6
         if let Some(own) = program.parent() {
-            icacls(&super::program_steps(own, &sid)); // WHAT: the cell may read and run its program. WHY: the service's folder is locked to the system and administrators
+            allow(own, &super::program_sddl(&sid), false); // WHAT: the cell may read and run its program. WHY: the service's folder is locked to the system and administrators
         }
         crate::winsvc::cell_firewall(&program); // WHAT: TCP 47110 open for the cell's program, when it isn't yet. WHY: critical 2: an office installed before the rule existed gets it here
         crate::cellmove::tidy_old_task(&server.store, &OldTask); // WHAT: 1.0's update task removed, or the alarm kept and tried again. WHY: review low 2
         let unpack = super::extract_folder(&folder, true); // WHAT: the cell's own unpacking folder. WHY: review low 3: never C:\Windows\Temp
         let _ = std::fs::create_dir_all(&unpack); // WHAT: made; it inherits the locked service folder's ACL. WHY: the system and administrators only
-        icacls(&super::extract_steps(&unpack, &sid)); // WHAT: the cell may use it too. WHY: a restricted token unpacks there
+        allow(&unpack, &super::extract_sddl(&sid), false); // WHAT: the cell may use it too. WHY: a restricted token unpacks there
         let environment = super::environment_block(std::env::vars_os(), super::EXTRACT_VARIABLE, unpack.as_os_str()); // WHAT: this server's environment, with .NET's unpacking folder set. WHY: review low 3
         let mut launcher = Cell { server: server.clone(), program, line: String::new(), args, pipe: format!(r"\\.\pipe\{}", super::pipe_name(&install)), sid, process: None, serving: None, next: None, pin, data, environment };
         launcher.line = super::command_line(&launcher.program, &launcher.args); // WHAT: the command line. WHY: written once
@@ -107,16 +108,59 @@ pub fn start(server: Shared) {
     }
 }
 
-/// Runs each icacls step, saying in the log when one fails.
+/// Runs each icacls step, saying in the log, with icacls' own words, when
+/// one fails.
 fn icacls(steps: &[Vec<std::ffi::OsString>]) {
     use std::os::windows::process::CommandExt; // WHAT: Windows-only process options. WHY: no console window
     let system = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from); // WHAT: Windows' folder. WHY: icacls by its full path
     let program = system.join("System32").join("icacls.exe"); // WHAT: the program. WHY: never one found on the PATH
     for args in steps {
-        let done = std::process::Command::new(&program).args(args).creation_flags(CREATE_NO_WINDOW).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status(); // WHAT: run and waited for. WHY: done before the cell starts
-        if !matches!(done, Ok(status) if status.success()) {
-            tracing::warn!("could not set who may use {:?}", args.first()); // WHAT: said. WHY: whoever looks after the server can see it
+        match std::process::Command::new(&program).args(args).creation_flags(CREATE_NO_WINDOW).stdin(std::process::Stdio::null()).output() {
+            Ok(done) if done.status.success() => {} // WHAT: done. WHY: nothing to say
+            Ok(done) => tracing::warn!("could not set who may use {:?}: icacls said {}", args.first(), String::from_utf8_lossy(&done.stdout).trim().chars().take(300).collect::<String>()), // WHAT: said, with icacls' reason. WHY: whoever looks after the server can see why
+            Err(e) => tracing::warn!("could not set who may use {:?}: icacls didn't run ({e})", args.first()), // WHAT: said. WHY: likewise
         }
+    }
+}
+
+/// Sets a folder's own entries from SDDL with Windows' own call, saying in
+/// the log when it can't. `protected`: nothing inherited from above; else
+/// the entries are added to what the folder inherits.
+fn allow(folder: &Path, sddl: &str, protected: bool) {
+    if let Err(e) = set_acl(folder, sddl, protected) {
+        tracing::warn!("could not set who may use {}: {e}", folder.display()); // WHAT: said. WHY: whoever looks after the server can see it
+    }
+}
+
+/// The work of [`allow`]: the SDDL made into a security descriptor (a SID is
+/// read as written, so the cell's SID needs no account behind it), its DACL
+/// set on the folder; Windows passes the inheritable entries on to what is
+/// inside.
+fn set_acl(folder: &Path, sddl: &str, protected: bool) -> std::io::Result<()> {
+    use windows_sys::Win32::Security::Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, UNPROTECTED_DACL_SECURITY_INFORMATION};
+    let text = wide(OsStr::new(sddl)); // WHAT: the SDDL. WHY: as Windows takes it
+    let path = wide(folder.as_os_str()); // WHAT: the folder. WHY: likewise
+    // SAFETY: every pointer passed is to a live local for the length of the call; the descriptor Windows allocates is
+    // freed once, after SetNamedSecurityInfoW has copied the DACL it points into.
+    unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: a folder's DACL set from SDDL
+        let mut descriptor: *mut core::ffi::c_void = std::ptr::null_mut(); // WHAT: filled by Windows. WHY: the parsed SDDL
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(text.as_ptr(), SDDL_REVISION_1, &mut descriptor, std::ptr::null_mut()) == 0 {
+            return Err(std::io::Error::last_os_error()); // WHAT: refused. WHY: SDDL that doesn't read
+        }
+        let (mut present, mut defaulted, mut dacl) = (0, 0, std::ptr::null_mut::<ACL>()); // WHAT: filled by Windows. WHY: the DACL inside
+        let found = GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted); // WHAT: the DACL. WHY: set next
+        let done = if found == 0 || present == 0 {
+            Err(std::io::Error::other("the SDDL has no DACL")) // WHAT: refused. WHY: never an empty grant
+        } else {
+            let how = DACL_SECURITY_INFORMATION | if protected { PROTECTED_DACL_SECURITY_INFORMATION } else { UNPROTECTED_DACL_SECURITY_INFORMATION }; // WHAT: the DACL, inheriting or not. WHY: as asked
+            match SetNamedSecurityInfoW(path.as_ptr(), SE_FILE_OBJECT, how, std::ptr::null_mut(), std::ptr::null_mut(), dacl, std::ptr::null()) {
+                0 => Ok(()), // WHAT: set. WHY: done
+                code => Err(std::io::Error::from_raw_os_error(i32::try_from(code).unwrap_or(i32::MAX))), // WHAT: Windows' reason. WHY: said
+            }
+        };
+        LocalFree(descriptor); // WHAT: let go. WHY: the folder holds its own copy
+        done
     }
 }
 

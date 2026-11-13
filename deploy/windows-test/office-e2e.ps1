@@ -238,6 +238,7 @@ function NoAlarmSince([int] $from) {
     $text = OfficeLogText                                                       # WHAT: the log now. WHY: searched from $from.
     $new = $text.Substring([Math]::Min($from, $text.Length))                    # WHAT: what was written since. WHY: older alarms were expected.
     if ($new.Contains('ALARM')) { throw "FAILED: the Office Server raised an alarm:`n$new" }   # WHAT: stop, with the log. WHY: said plainly.
+    if (([regex]::Matches($new, 'the Citadel cell stopped')).Count -ge 3) { throw "FAILED: the cell keeps stopping:`n$new" }   # WHAT: stop after three restarts. WHY: a cell that can't run won't run on the fourth try either.
 }
 
 # WHAT: the cell up on 47110, waited for, failing at once on an alarm. WHY: the move, then the cell's start.
@@ -357,6 +358,9 @@ try {
 } catch {
     Write-Host '--- the end of the Office Server''s log ---'                    # WHAT: a heading. WHY: the failure's cause is usually there.
     (OfficeLogText) -split "`n" | Select-Object -Last 80 | ForEach-Object { Write-Host $_ }   # WHAT: its last lines. WHY: read on the run page without downloading.
+    $cellLog = Get-ChildItem -LiteralPath (Join-Path $CellData 'logs') -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1   # WHAT: the cell's newest log. WHY: why it stopped, if it ran at all.
+    if ($cellLog) { Write-Host "--- the end of the cell's log ($($cellLog.Name)) ---"; Get-Content -LiteralPath $cellLog.FullName -Tail 40 | ForEach-Object { Write-Host $_ } }   # WHAT: its last lines. WHY: as above.
+    if (Test-Path -LiteralPath $CellData) { Write-Host '--- who may use the cell''s folder ---'; & "$env:SystemRoot\System32\icacls.exe" $CellData | ForEach-Object { Write-Host $_ } }   # WHAT: its permissions. WHY: the cell runs under a restricted token.
     throw                                                                       # WHAT: the failure, as it was. WHY: the step fails.
 } finally {
     if ($script:feedProcess) { Stop-Process -Id $script:feedProcess.Id -Force -ErrorAction SilentlyContinue }   # WHAT: the feed stopped. WHY: pass or fail.
