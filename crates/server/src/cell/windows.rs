@@ -362,7 +362,17 @@ fn restricted_process(program: &Path, line: &str, sid: &str, environment: &[std:
             CloseHandle(token);
             return Err(why);
         }
+        let mut desktop = match desktop(sid) {
+            Ok(name) => name, // WHAT: the cell's own desktop. WHY: below
+            Err(e) => {
+                DeleteProcThreadAttributeList(attributes); // WHAT: let go. WHY: not started
+                CloseHandle(write);
+                CloseHandle(token);
+                return Err(e);
+            }
+        };
         let mut startup: STARTUPINFOEXW = std::mem::zeroed(); // WHAT: no window; its output to our pipe. WHY: the defaults otherwise
+        startup.StartupInfo.lpDesktop = desktop.as_mut_ptr(); // WHAT: the cell's own window station and desktop. WHY: its restricted token can't open the service's; Windows would end it at once (0xC0000142)
         startup.StartupInfo.cb = u32::try_from(std::mem::size_of::<STARTUPINFOEXW>()).unwrap_or(0); // WHAT: the extended form's size. WHY: the attribute list follows
         startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES; // WHAT: its standard handles given. WHY: below
         startup.StartupInfo.hStdOutput = write; // WHAT: its output. WHY: to our log
@@ -400,6 +410,58 @@ fn restricted_process(program: &Path, line: &str, sid: &str, environment: &[std:
         ResumeThread(info.hThread); // WHAT: let it run, now inside the job. WHY: started suspended for that
         CloseHandle(info.hThread); // WHAT: the thread's handle let go. WHY: only the process is waited for
         Ok(Raw(info.hProcess as usize))
+    }
+}
+
+/// The cell's own window station and desktop, made once for this process,
+/// the system's and the cell's alone (`super::desktop_sddl`); its name as
+/// `lpDesktop` takes it. The handles are kept for the life of the process,
+/// which keeps them there.
+fn desktop(sid: &str) -> std::io::Result<Vec<u16>> {
+    static MADE: std::sync::OnceLock<Result<String, i32>> = std::sync::OnceLock::new(); // WHAT: made once. WHY: every start of the cell uses the same one
+    let name = MADE.get_or_init(|| make_desktop(sid)).clone().map_err(std::io::Error::from_raw_os_error)?; // WHAT: its name, or why not. WHY: said by the caller
+    Ok(wide(OsStr::new(&name))) // WHAT: as Windows takes it. WHY: STARTUPINFO.lpDesktop
+}
+
+/// The work of [`desktop`].
+fn make_desktop(sid: &str) -> Result<String, i32> {
+    use windows_sys::Win32::Foundation::GENERIC_ALL;
+    use windows_sys::Win32::System::StationsAndDesktops::{CloseWindowStation, CreateDesktopW, CreateWindowStationW, GetProcessWindowStation, SetProcessWindowStation};
+    let (station, full) = super::desktop_name(std::process::id()); // WHAT: the names. WHY: one per Office Server process
+    let sddl = wide(OsStr::new(&super::desktop_sddl(sid))); // WHAT: who may use them. WHY: the system and the cell only
+    let (station_wide, desk_wide) = (wide(OsStr::new(&station)), wide(OsStr::new("Default"))); // WHAT: the names as Windows takes them. WHY: below
+    let failed = || std::io::Error::last_os_error().raw_os_error().unwrap_or(0); // WHAT: Windows' reason. WHY: said
+    // SAFETY: every pointer passed is to a live local for the length of the call; the descriptor Windows allocates is freed
+    // once, after both objects hold their own copies; the window station is the process's own again before returning; the
+    // two new handles are kept open on purpose for the life of the process.
+    unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: the cell's private window station and desktop
+        let mut descriptor: *mut core::ffi::c_void = std::ptr::null_mut(); // WHAT: filled by Windows. WHY: the permissions
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut descriptor, std::ptr::null_mut()) == 0 {
+            return Err(failed()); // WHAT: refused. WHY: never without its permissions
+        }
+        let attributes = SECURITY_ATTRIBUTES { nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(0), lpSecurityDescriptor: descriptor, bInheritHandle: 0 }; // WHAT: the permissions, not inherited. WHY: the cell gets no handle of ours
+        let made_station = CreateWindowStationW(station_wide.as_ptr(), 0, GENERIC_ALL, &attributes); // WHAT: the window station. WHY: the desktop lives in it
+        if made_station.is_null() {
+            let why = failed(); // WHAT: why. WHY: read first
+            LocalFree(descriptor);
+            return Err(why);
+        }
+        let ours = GetProcessWindowStation(); // WHAT: this process's own. WHY: put back after
+        if SetProcessWindowStation(made_station) == 0 {
+            let why = failed(); // WHAT: why. WHY: read first
+            CloseWindowStation(made_station);
+            LocalFree(descriptor);
+            return Err(why);
+        }
+        let made_desktop = CreateDesktopW(desk_wide.as_ptr(), std::ptr::null(), std::ptr::null(), 0, GENERIC_ALL, &attributes); // WHAT: the desktop, made in the station just set. WHY: CreateDesktopW makes it in the process's current station
+        let why = failed(); // WHAT: why, if it failed. WHY: read before anything else changes it
+        SetProcessWindowStation(ours); // WHAT: this process's own station back. WHY: it was changed only for the call above
+        LocalFree(descriptor); // WHAT: let go. WHY: both hold their own copies
+        if made_desktop.is_null() {
+            CloseWindowStation(made_station); // WHAT: let go. WHY: no desktop, no use
+            return Err(why);
+        }
+        Ok(full) // WHAT: station\desktop. WHY: both handles stay open with the process
     }
 }
 

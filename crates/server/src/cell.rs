@@ -668,6 +668,25 @@ pub fn extract_folder(home: &Path, for_the_cell: bool) -> PathBuf {
 /// The variable that points .NET's single-file bundle at that folder.
 pub const EXTRACT_VARIABLE: &str = "DOTNET_BUNDLE_EXTRACT_BASE_DIR"; // WHAT: .NET's own setting. WHY: harmless when the bundle doesn't extract
 
+/// The cell's own window station and desktop, as SDDL: the system and the
+/// cell's SID, nobody else. A process under the cell's restricted token can't
+/// open the service's own desktop (it grants the system only, which the
+/// token's second check leaves out), and Windows then ends it as it starts
+/// with 0xC0000142 (found by the Windows end-to-end test, 2026-11-12).
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn desktop_sddl(cell_sid: &str) -> String {
+    format!("D:P(A;;GA;;;SY)(A;;GA;;;{cell_sid})") // WHAT: protected; the system and the cell, in full. WHY: the cell's private desktop, no other program's
+}
+
+/// The window station made for the cell by the Office Server with this
+/// process id, and the desktop in it, as `STARTUPINFO.lpDesktop` names them.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn desktop_name(process_id: u32) -> (String, String) {
+    let station = format!("ExcaliburOfficeCell-{process_id}"); // WHAT: one per Office Server process. WHY: a restarted server makes its own; the old one goes with the old process
+    let full = format!("{station}\\Default"); // WHAT: station\desktop. WHY: the form CreateProcess reads
+    (station, full)
+}
+
 /// The cell's unpacking folder's own entry, as SDDL: the cell's SID may
 /// change it (0x1301bf), added to what it inherits from the locked service
 /// folder. Set through Windows' own call, as [`data_sddl`].
@@ -733,6 +752,8 @@ mod tests {
         assert!(texts.contains(&format!(r"{}=C:\x\cell", super::EXTRACT_VARIABLE)), "{texts:?}"); // WHAT: set. WHY: the folder
         assert!(!texts.iter().any(|t| t.to_ascii_lowercase().contains("windows\\temp")), "the old value is gone: {texts:?}"); // WHAT: replaced. WHY: never Windows' temp
         assert!(texts.iter().any(|t| t.starts_with("Path=")), "everything else kept"); // WHAT: kept. WHY: the cell needs its environment
+        assert_eq!(super::desktop_sddl("S-1-5-80-1"), "D:P(A;;GA;;;SY)(A;;GA;;;S-1-5-80-1)", "the cell's desktop is the system's and the cell's alone"); // WHAT: its desktop. WHY: a restricted token can't use the service's own
+        assert_eq!(super::desktop_name(42), ("ExcaliburOfficeCell-42".to_string(), "ExcaliburOfficeCell-42\\Default".to_string()), "station\\desktop, one per server process"); // WHAT: the names. WHY: lpDesktop's form
         assert_eq!(super::extract_sddl("S-1-5-80-1"), "D:(A;OICI;0x1301bf;;;S-1-5-80-1)", "the cell may use its own, beside what it inherits"); // WHAT: granted. WHY: it unpacks there
     }
 
