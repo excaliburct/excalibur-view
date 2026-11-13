@@ -210,7 +210,11 @@ function InstallOffice([string] $version) {
     $exe = Stick $version                                                       # WHAT: the kit. WHY: below.
     & $exe --install                                                            # WHAT: the elevated install, as the double-click runs it. WHY: the runner is an administrator.
     $code = $LASTEXITCODE                                                       # WHAT: its exit code. WHY: checked.
-    $report = Get-Content -Raw -LiteralPath (Join-Path $OfficeHome 'last-install.txt') -ErrorAction SilentlyContinue   # WHAT: what it says. WHY: the reason, if it failed.
+    $report = $null                                                             # WHAT: what it says. WHY: the reason, if it failed.
+    for ($i = 0; $i -lt 20 -and -not $report; $i++) {                           # WHAT: up to ten seconds. WHY: run 3 and 4 found the report there but not readable at first; each try's error is shown.
+        try { $report = [System.IO.File]::ReadAllText((Join-Path $OfficeHome 'last-install.txt')) }   # WHAT: read. WHY: below.
+        catch { Write-Host "reading last-install.txt, try $($i + 1): $($_.Exception.Message)"; Start-Sleep -Milliseconds 500 }   # WHAT: why not. WHY: the log says what kept it.
+    }
     Write-Host "install exited $code and said: $report"                        # WHAT: shown. WHY: the log has it.
     if (-not $report) { Get-ChildItem -Force -LiteralPath $OfficeHome -ErrorAction Continue | Format-Table -AutoSize | Out-String | Write-Host }   # WHAT: what the install left. WHY: an install that says nothing must say something here.
     Check ($code -eq 0 -and "$report".StartsWith('ok')) "the Office Server $version installed as a service from the USB kit"   # WHAT: installed. WHY: (b).
