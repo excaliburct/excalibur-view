@@ -82,7 +82,14 @@ function Check([bool] $ok, [string] $what) {
     Write-Host "ok   $what"                   # WHAT: said. WHY: the log reads as the list of what was proved.
 }
 
-function Sha([string] $path) { (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant() }   # WHAT: a file's SHA-256. WHY: compares files byte for byte.
+# WHAT: a file's SHA-256, asked again for up to ten seconds while it can't be read. WHY: at each start the Office Server
+# locks its own folder again (lockdown.rs, icacls step by step), and for a moment not even an administrator can read in it.
+function Sha([string] $path) {
+    for ($i = 0; ; $i++) {
+        try { return (Get-FileHash -Algorithm SHA256 -LiteralPath $path -ErrorAction Stop).Hash.ToLowerInvariant() }   # WHAT: the hash. WHY: compared byte for byte.
+        catch { if ($i -ge 20 -or $_.Exception -isnot [System.UnauthorizedAccessException]) { throw }; Start-Sleep -Milliseconds 500 }   # WHAT: tried again only while access is refused. WHY: anything else is a real failure.
+    }
+}
 
 # WHAT: waits for a condition, up to a limit. WHY: services and updates take a moment; never forever.
 function WaitFor([scriptblock] $condition, [int] $seconds, [string] $what) {
@@ -163,9 +170,14 @@ function OfficeVersion {
 
 # WHAT: the service's log, read while it is being written. WHY: the move's and the updates' lines are checked in it.
 function OfficeLogText {
-    if (-not (Test-Path -LiteralPath $OfficeLog)) { return '' }                 # WHAT: none yet. WHY: nothing to read.
-    $stream = [System.IO.File]::Open($OfficeLog, 'Open', 'Read', 'ReadWrite, Delete')   # WHAT: opened beside the writer. WHY: the service holds it open.
-    try { return [System.IO.StreamReader]::new($stream).ReadToEnd() } finally { $stream.Dispose() }   # WHAT: all of it. WHY: searched.
+    for ($i = 0; $i -lt 20; $i++) {
+        try {
+            $stream = [System.IO.File]::Open($OfficeLog, 'Open', 'Read', 'ReadWrite, Delete')   # WHAT: opened beside the writer. WHY: the service holds it open.
+            try { return [System.IO.StreamReader]::new($stream).ReadToEnd() } finally { $stream.Dispose() }   # WHAT: all of it. WHY: searched.
+        } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { return '' }   # WHAT: none yet. WHY: nothing to read.
+        catch { Start-Sleep -Milliseconds 500 }                                 # WHAT: refused for a moment. WHY: the folder is being locked again at a start.
+    }
+    return ''                                                                   # WHAT: nothing readable. WHY: the caller waits on and asks again.
 }
 
 # WHAT: whether a program file carries a version's build mark. WHY: which version a kept .old is (hub::build_mark).
