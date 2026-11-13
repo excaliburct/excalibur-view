@@ -112,7 +112,7 @@ fn main() {
         #[cfg(windows)]
         "--install-citadel-cell" => { // WHAT: the Citadel cell installed from the office's private IT kit. WHY: View's public release never carries it (Creede, 2026-11-13)
             let Some(zip) = std::env::args_os().nth(2) else {
-                eprintln!("  Say which zip: hyperview-server --install-citadel-cell \"D:\\CitadelServer-1.1.2-win-x64-cell.zip\""); // WHAT: how to use it. WHY: a person types it
+                eprintln!("  Say which zip: hyperview-server --install-citadel-cell \"D:\\CitadelServer-1.1.3-win-x64-cell.zip\""); // WHAT: how to use it. WHY: a person types it
                 std::process::exit(2);
             };
             match hyperview_server::winsvc::install_citadel_cell(std::path::Path::new(&zip)) {

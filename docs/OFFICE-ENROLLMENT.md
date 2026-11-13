@@ -204,7 +204,7 @@ Citadel's existing `citadel-request/1` signing stays exactly as it is, for LatCo
 "<office program folder>\citadel\Citadel Server.exe" --cell --pipe excalibur-office-<install id> --data "C:\ProgramData\Excalibur Office\citadel" --port 47110 --tls-key <key name> --tls-cert <certificate, base64 DER>
 ```
 
-`--tls-key` and `--tls-cert` are required from Citadel Server 1.1.2 (§6b). The cell never makes or imports a key of its own.
+`--tls-key` and `--tls-cert` are required from Citadel Server 1.1.3 (§6b). The cell never makes or imports a key of its own.
 
 - `--cell` means:
   - no Manager window and no Windows service of its own;
@@ -236,7 +236,7 @@ The messages:
 
 **Failing closed:** if the pipe doesn't answer within 2 s, the cell refuses the request with 503 `office_unreachable`. It never falls back to an old list.
 
-## 6b. The cell's TLS key (Citadel Server 1.1.2, View 0.7.1)
+## 6b. The cell's TLS key (Citadel Server 1.1.3, View 0.7.1)
 
 The cell serves HTTPS on 47110 under a restricted token. That token can't import a private key into any key store
 Windows' TLS (SChannel) can use: the system account's own store and the machine store both refused it ("Access denied",
