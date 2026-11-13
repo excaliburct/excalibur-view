@@ -20,7 +20,7 @@ on by the office's signed licence:
 | `view` | drawings, takeoff, markups, sign-offs, the field package | View's server (always on) |
 | `cad` | Excalibur CAD's office drawings: check-out, check-in, versions | built in; an old CAD server's drawings are moved in (`--move-cad`) |
 | `archetype` | Archetype's shared jobs and releases | built in; an old Archetype server's jobs are moved in (`--move-archetype`) |
-| `citadel` | Citadel's estimating jobs, kept **blind** | the Citadel cell: `citadel\Citadel Server.exe`, shipped inside the Office Server and run by it as a supervised child process under a restricted token (docs/OFFICE-ENROLLMENT.md §6a). This is the only way Citadel runs |
+| `citadel` | Citadel's estimating jobs, kept **blind** | the Citadel cell: `citadel\Citadel Server.exe`, installed only on offices licensed for citadel (from the IT kit's zip, then pushed by Fleet with each update; never in View's public release) and run by the Office Server as a supervised child process under a restricted token, with its TLS key held by the Office Server (docs/OFFICE-ENROLLMENT.md §6a to §6c). This is the only way Citadel runs |
 
 A module that isn't licensed isn't served: its routes answer 404, as if it didn't exist.
 
@@ -66,7 +66,7 @@ Every separate server is **moved in, then retired**. Nothing is retired until th
 | Mesa Fab's View server | the next server update (Fleet push), in place: it *becomes* the Office Server | nothing to retire |
 | Mesa Fab's Archetype server | `hyperview-server --move-archetype "<old Archetype data folder>"` on the Office Server's machine | once the moved jobs are checked in Archetype: stop the old Archetype server's service, then remove it (`sc stop` / `sc delete`, or its own uninstaller); keep its data folder until the next verified backup |
 | A separate Excalibur CAD server | `hyperview-server --move-cad "<old CAD data folder>"` (below) | once the moved drawings are checked in CAD: stop the old CAD server's service, then remove it; keep its data folder until the next verified backup |
-| An office's Citadel Server 1.0.x | the Office Server's release carries `citadel\Citadel Server.exe`; before the cell's first start the Office Server finds the 1.0 service and records where, stops and disables it, and runs `--move-from` as the system; the cell then sends its paired computers to the Office Server once (`migrate`), approved, with who paired them | nothing by hand: after a good move the Office Server uninstalls the 1.0 service, its 03:30 update task and its firewall rule, and leaves `C:\Program Files\Citadel Server` and the renamed old data folder as they are (the log and `/office` say so). After a failed move it starts 1.0 again, so estimating carries on, and holds the cell with an alarm until `--retry-citadel-move` |
+| An office's Citadel Server 1.0.x | the cell is installed with `--install-citadel-cell` from the office's IT kit; before the cell's first start the Office Server finds the 1.0 service and records where, stops and disables it, and runs `--move-from` as the system; the cell then sends its paired computers to the Office Server once (`migrate`), approved, with who paired them | nothing by hand: after a good move the Office Server uninstalls the 1.0 service, its 03:30 update task and its firewall rule, and leaves `C:\Program Files\Citadel Server` and the renamed old data folder as they are (the log and `/office` say so). After a failed move it starts 1.0 again, so estimating carries on, and holds the cell with an alarm until `--retry-citadel-move` |
 
 ## How every part stays up to date
 
@@ -79,7 +79,7 @@ Every separate server is **moved in, then retired**. Nothing is retired until th
 | View on iPads and Android | From the stores (Release workflow) | the store release scripts' tests |
 | Excalibur CAD | From its own signed feed (GitHub), whatever server it signs in to | CAD's update tests |
 | Archetype | From its own Archetype server, or from its own signed feed when its server is an Office Server (an Office Server hands out View's releases, which Archetype would refuse) | ExcaliburArchetype branch archetype-office-client-20261110 |
-| The Citadel cell | Inside the Office Server's own signed update: both update together | the cell supervisor's tests (`crate::cell`) and Citadel's own |
+| The Citadel cell | Fleet pushes its signed cell part first, to licensed offices only; the server's update then takes it: both update together | the cell supervisor's tests (`crate::cell`) and Citadel's own |
 | The estimating program on each computer | Its own signed feed, as today | its own tests |
 | Licences | The office's licence renews itself from the publisher when bought seats, parts or years are added; a renewal can never take a part, seat or year away | the licence tests |
 
@@ -119,7 +119,7 @@ Each step merges on its own, with tests, the guards proven, and a review; each s
 | 5. CAD part | done on both sides: CAD's check-out/check-in store under `/api/v1/cad/...` with the office's own accounts, kept in the server's own database and file store (so the nightly off-site backup and its drill carry CAD's drawings); `hyperview-server --move-cad "<old CAD data folder>"` moves a CAD server's drawings in. Excalibur CAD signs in to an Office Server (branch excad-office-server-20261110) |
 | 6. Archetype part | done on both sides: Archetype's jobs under `/api/v1/archetype/...` with the office's accounts, in the server's own database and file store (backed up with the rest); only files sent to Archetype are handed out by it, so a View drawing's fingerprint opens nothing; `hyperview-server --move-archetype "<old Archetype data folder>"` moves an Archetype server's jobs in. Archetype finds its jobs on an Office Server (ExcaliburArchetype branch archetype-office-client-20261110). Branch office-archetype-20261110 |
 | One installer and Manager | the server program installs itself as one Windows service carrying View, CAD, Archetype and the Citadel cell; there is no separate Citadel Server service any more (branch office-enroll-20261111: the cell is started, restarted and answered by the Office Server, under a restricted token). Studio > Office in View shows every part and how it is (running and version, not licensed, needs an update, not found, not answering, a changed certificate) |
-| The USB kit | after **C** signs the releases: the Office Server (View Server 0.7.0, carrying the Citadel cell), the estimating program, View, the checklists and the sums |
+| The USB kit | after **C** signs the releases: the Office Server (no Citadel cell in it), the estimating program, View, the checklists and the sums; an office licensed for citadel also gets the cell zip in its private IT kit, installed with `--install-citadel-cell` |
 
 Ports: TCP 8714 (the API, HTTPS and plain HTTP on the one port) and UDP 8715 (seats find the server). Nothing
 new to open: an office's firewall and its tunnel's rules stay exactly as they are when the server updates to the
@@ -134,12 +134,12 @@ see the commit "Review fixes".
 - **The program and the service.** The Office Server installs itself as
   `C:\ProgramData\Excalibur Hyperview\Server\Hyperview-Server.exe`, run by the Windows service
   "Excalibur Hyperview Server" (`ExcaliburHyperviewServer`), with its data in `...\Server\hyperview-data`.
-- **The Citadel cell.** `citadel\Citadel Server.exe` beside it. The USB kit carries a `citadel\` folder beside
-  `ExcaliburView-Server.exe` (made by `python3 tools/citadel_cell.py kit`); installing checks every file in it
-  against the cell pinned in `packaging/citadel-cell.json`, which the server is built with, and refuses anything
-  else. An update brings the cell with the server, signed together; the new server checks it against its own pin and
-  puts it in place before the cell starts. A cell program whose SHA-256 isn't the pinned one is never run, for the
-  move or as the cell. A build whose pin lists no files carries no cell, and the cell doesn't start.
+- **The Citadel cell.** `citadel\Citadel Server.exe` beside it, only on an office licensed for citadel. The USB kit
+  carries no cell. Afterwards an administrator runs `hyperview-server --install-citadel-cell "<zip>"` with the zip in
+  the office's private IT kit (made by `python3 tools/citadel_cell.py kit`); it refuses an office whose licence doesn't
+  list `citadel`, and any zip but the one pinned in `packaging/citadel-cell.json`, which the server is built with. Fleet
+  then pushes each version's cell part over the maintenance channel before the server updates (OFFICE-ENROLLMENT.md
+  §6c). The cell's TLS key is held by the Office Server in Windows' key store, usable only by the cell (§6b).
 - **Ports.** TCP 8714 and UDP 8715 for the Office Server, and TCP 47110 for the cell: a rule
   "Excalibur Office Server (Citadel cell)" for the cell's program only, on every profile, from the local subnet
   only, added at install and again at the cell's first start if it is missing. "Local subnet" is the server's own

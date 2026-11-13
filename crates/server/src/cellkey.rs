@@ -131,6 +131,7 @@ pub const STARTED_MARK: &str = "state/moved-from.json"; // WHAT: written at the 
 /// certificate or the other way round), or nothing is kept although the cell
 /// has served before. The cell is then not started, because making a new key
 /// would change the pin every computer holds.
+#[allow(clippy::fn_params_excessive_bools)] // WHAT: four yes-or-no facts. WHY: each is one thing seen on disk; the table of answers reads plainest with them side by side
 pub fn plan(pfx_in_cell: bool, kept_name: bool, kept_certificate: bool, started_before: bool) -> Result<Plan, String> {
     match (kept_name, kept_certificate) {
         (true, true) if pfx_in_cell => Ok(Plan::ReuseAndIgnorePfx), // WHAT: held already; the file left alone. WHY: the cell can write its own folder, so a file there never replaces the office's key

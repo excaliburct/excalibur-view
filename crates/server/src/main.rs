@@ -28,6 +28,7 @@ use hyperview_server::{run, Config, Store, VERSION};
 /// double-clicked on the server can tell it is newer than the one installed.
 static BUILD_MARK: &str = hub::build_mark!();
 
+#[allow(clippy::too_many_lines)] // WHAT: one arm per command. WHY: the command table reads in one place; each arm is short
 fn main() {
     std::hint::black_box(BUILD_MARK);
     let given: Vec<String> = std::env::args().take(6).collect(); // WHAT: the program's name and its first five words, read once. WHY: the command, and the device code --make-admin takes, which may be typed as three groups

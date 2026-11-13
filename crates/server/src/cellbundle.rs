@@ -537,7 +537,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir); // WHAT: tidied. WHY: a test leaves nothing
     }
 
-    /// A zip holding `files`, deflated, as .NET's ZipFile makes the cell's.
+    /// A zip holding `files`, deflated, as .NET's `ZipFile` makes the cell's.
     fn a_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
         use std::io::Write as _; // WHAT: writing entries. WHY: below
         let mut out = std::io::Cursor::new(Vec::new()); // WHAT: the zip in memory. WHY: returned

@@ -1,11 +1,11 @@
 {
-  "_readme": "The Citadel cell this Office Server build carries, pinned. tools/citadel_cell.py fetches 'source.url', checks it against 'source.sha256', takes out every file in 'files', checks each against its SHA-256, and makes the signed release's cell bundle from them. The server is built with this file inside it and runs a cell program only when its SHA-256 is the one here. An empty 'files' means this build carries no cell: the cell never starts and the release has no cell part. Fill in all four at once, in one commit, from a LatCon Estimating release that has been tested end to end.",
-  "version": "1.1.1",
+  "_readme": "The Citadel cell this Office Server build runs, pinned. View's public releases carry only this pin, never the cell: the zip is a private LatCon Estimating release. The server is built with this file inside it: --install-citadel-cell takes only the zip whose SHA-256 is 'source.sha256', and only the files in 'files', each checked against its SHA-256; the cell program is run only when its SHA-256 is the one here. tools/citadel_cell.py makes the IT kit's copy of the zip and the cell part Fleet signs and pushes to licensed offices. An empty 'files' means this build runs no cell. Fill in all four at once, in one commit, from a LatCon Estimating release that has been tested end to end.",
+  "version": "1.1.2",
   "source": {
-    "url": "https://github.com/excaliburct/LatconEstimating/releases/download/citadel-server-1.1.1-cell/CitadelServer-1.1.1-win-x64-cell.zip",
-    "sha256": "ddce58183aea8cb4452e279573207542306ccd6368e0c5492c741c63fa15a4d6"
+    "url": "https://github.com/excaliburct/LatconEstimating/releases/download/citadel-server-1.1.2-cell/CitadelServer-1.1.2-win-x64-cell.zip",
+    "sha256": "6a01e1f56f65edb9956caec285117bc5357f3d3d9e81441c8073e92ff0f7b61e"
   },
   "files": {
-    "Citadel Server.exe": "b2727f72be02d76e0210425427d9acf40657bc4000fa037a6fe971573e168779"
+    "Citadel Server.exe": "4f97c3addb2e769458daa2c45cd723ea88283bbcc3bd8ef824f3a1a3c62c0fc2"
   }
 }

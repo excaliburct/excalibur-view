@@ -184,12 +184,15 @@ Citadel's existing `citadel-request/1` signing stays exactly as it is, for LatCo
 
 ## 6. Citadel inside the Office Server
 
-- The Office Server's installer carries `Citadel Server.exe`, signed with the update key.
+- View's public release does **not** carry the cell: it carries only its pin (`packaging/citadel-cell.json`, the SHA-256 of
+  LatCon's cell zip and of `Citadel Server.exe`). The cell reaches only offices whose licence lists `citadel` (§6c).
 - The Office Server installs the cell into its own folder, locked to the cell's identity, and starts it as a child process:
   - under a restricted token;
   - with its own data folder at `ProgramData\Excalibur Office\citadel\`, ACL'd to the cell alone;
   - HTTPS on 47110, as now, so LatCon Estimating's wire is unchanged.
-- The Office Server watches the cell and restarts it if it stops. Fleet updates both together, in one signed update.
+- The Office Server watches the cell and restarts it if it stops. Fleet updates both together: the cell part first, over the
+  maintenance channel, then the server, which takes only the cell part of its own version.
+- **Its TLS key:** held by the Office Server in Windows' own key store, usable only by the cell (§6b).
 - **Device checks:** the cell asks the Office Server over the pipe ("is device X approved, and with what key?") and caches the answer for 60 s.
 - **The licence:** the cell runs only when the licence lists the `citadel` module.
 
@@ -198,8 +201,10 @@ Citadel's existing `citadel-request/1` signing stays exactly as it is, for LatCo
 **How the Office Server starts the cell** (Windows):
 
 ```
-"<office program folder>\citadel\Citadel Server.exe" --cell --pipe excalibur-office-<install id> --data "C:\ProgramData\Excalibur Office\citadel" --port 47110
+"<office program folder>\citadel\Citadel Server.exe" --cell --pipe excalibur-office-<install id> --data "C:\ProgramData\Excalibur Office\citadel" --port 47110 --tls-key <key name> --tls-cert <certificate, base64 DER>
 ```
+
+`--tls-key` and `--tls-cert` are required from Citadel Server 1.1.2 (§6b). The cell never makes or imports a key of its own.
 
 - `--cell` means:
   - no Manager window and no Windows service of its own;
@@ -230,6 +235,54 @@ The messages:
 **Device ids for Citadel traffic:** the cell takes the Office Server's answer for the public key and works out Citadel's own id from it (`citadel-device/1` label). Both ids name the same key.
 
 **Failing closed:** if the pipe doesn't answer within 2 s, the cell refuses the request with 503 `office_unreachable`. It never falls back to an old list.
+
+## 6b. The cell's TLS key (Citadel Server 1.1.2, View 0.7.1)
+
+The cell serves HTTPS on 47110 under a restricted token. That token can't import a private key into any key store
+Windows' TLS (SChannel) can use: the system account's own store and the machine store both refused it ("Access denied",
+the Windows end-to-end test, 2026-11-12), and SChannel never serves with an in-memory key. So the Office Server, which runs
+as the system, holds the key for the cell:
+
+- **Where:** a persisted, **non-exportable** machine key in the Microsoft Software Key Storage Provider.
+- **Who may use it:** its permissions are exactly `D:P(A;;FA;;;SY)(A;;FR;;;<cell SID>)`: protected (nothing inherited
+  from the key store's folder), the system in full, the cell's own SID **read** (enough to use the key, never to change,
+  delete or export it). No other account gains anything. The cell's token passes both of its access checks: its normal
+  SIDs through the system's entry, its restricting SIDs through the cell SID's entry. No group (Users, Everyone,
+  RESTRICTED) is granted anything on a system folder.
+- **What the cell gets:** the key's name and the certificate (public), on its command line. It opens the key by name
+  (`CngKey.Open`, machine key) and joins it to the certificate (`CopyWithPrivateKey`), which refuses a mismatch.
+- **What the Office Server keeps** in `<service folder>\citadel-tls\` (the system's and administrators' only):
+  `key-name.txt`, `certificate.der`, and 1.0's moved `tls.pfx`.
+
+At every start of the cell (`crate::cellkey` decides; `cell::tlskey` hands it to Windows):
+
+| What is there | What happens |
+|---|---|
+| The first start after the move: 1.0's `tls.pfx` in the cell's folder, nothing kept | It is imported once (DPAPI opened as the system with Citadel's purpose; PFX import as a non-exportable CNG machine key). Its certificate is kept, so every computer's pin still matches. `tls.pfx` is moved out of the cell's reach into `citadel-tls\`. |
+| A new office: nothing moved, nothing kept, and the cell never served | A new P-256 key is made with its permissions set **before** it is finished, and a certificate made for it in Citadel's own shape (`CN=Citadel Server`, this computer's name and `localhost`, ten years). |
+| A restart, a new cell version, an update, a rollback: the key kept | The kept key is opened by name. |
+| A `tls.pfx` appears in the cell's folder after a key is kept | Not used; an alarm in the log. The cell can write its own folder, so nothing there replaces the office's key. |
+| The key's permissions were changed | Set back, with an alarm in the log, and read back; if they still aren't exactly ours, the cell isn't started. |
+| The key is owned by anyone but the system or administrators | Refused: whoever owns it could always give itself access. |
+| Half the kept pair, or nothing kept although the cell has served before (`state\moved-from.json`) | Refused, with an alarm: a new key would change the pin every computer holds. Put `citadel-tls` back from a backup, or delete the mark to start again with a new certificate (every computer pairs afresh). |
+| The key and the certificate don't match | Refused. |
+
+## 6c. How the cell reaches an office (only one licensed for citadel)
+
+- **At install:** the office's private IT kit (from LatCon) carries LatCon's cell zip. After the Office Server is
+  installed with the office's licence, an administrator runs
+  `hyperview-server --install-citadel-cell "<zip>"`. It is refused unless the Office Server is installed, its licence
+  lists `citadel`, and the zip's SHA-256 is the pinned one; then only the pinned files are taken out and checked, and the
+  service restarts, checks the cell once more, puts it in place and starts it.
+- **On updates:** Fleet signs the cell part of each version (`tools/citadel_cell.py bundle`, then
+  `hyperview-release prepare|finish|bundle --platform windows-x64-citadel`) and pushes it over `POST /api/admin/update`
+  (the maintenance key) **only to installs licensed for citadel**. The server checks the signature, refuses it when its
+  licence doesn't list `citadel`, and keeps it in `citadel-parts\` (never among the seats' releases, so no seat is sent
+  it). When the server updates itself to that version, it checks the part's signature again and unpacks it; the new
+  server checks it against its own pin before the cell starts. A licensed server running the cell doesn't update until
+  Fleet has delivered that version's cell.
+- **Never:** View's public release, `publish.py sign` and `publish.py release` refuse `--citadel`. An office without
+  `citadel` (Mesa Fab) never downloads or holds the cell.
 
 ## 7. Rules (the guards; each one proven by a test that breaks it)
 
