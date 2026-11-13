@@ -223,7 +223,14 @@ function InstallOffice([string] $version, [switch] $Unlicensed) {
     $exe = Stick $version                                                       # WHAT: the kit. WHY: below.
     & $exe --install                                                            # WHAT: the elevated install, as the double-click runs it. WHY: the runner is an administrator.
     $code = $LASTEXITCODE                                                       # WHAT: its exit code. WHY: checked.
-    $report = [System.IO.File]::ReadAllText((Join-Path $OfficeHome 'last-install.txt'))   # WHAT: what it said, read once. WHY: lockdown.rs never leaves the folder without entries.
+    $reportFile = Join-Path $OfficeHome 'last-install.txt'                      # WHAT: the install's report. WHY: read below.
+    if (-not (Test-Path -LiteralPath $reportFile)) {                            # WHAT: no report at all. WHY: say everything that might explain it, then stop.
+        Write-Host "install exited $code and left no report; the folder and who may use it:"   # WHAT: said. WHY: the run page shows it.
+        & "$env:SystemRoot\System32\icacls.exe" $OfficeHome 2>&1 | ForEach-Object { Write-Host $_ }   # WHAT: its permissions. WHY: lockdown.rs sets them.
+        Get-ChildItem -Force -LiteralPath $OfficeHome -ErrorAction Continue | Format-Table -AutoSize | Out-String | Write-Host   # WHAT: what is there. WHY: likewise.
+        throw "FAILED: the install left no report (exit code $code)"            # WHAT: stop. WHY: said plainly.
+    }
+    $report = [System.IO.File]::ReadAllText($reportFile)                        # WHAT: what it said, read once. WHY: lockdown.rs never leaves the folder without entries.
     Write-Host "install exited $code and said: $report"                        # WHAT: shown. WHY: the log has it.
     Check ($code -eq 0 -and "$report".StartsWith('ok')) "the Office Server $version installed as a service from the USB kit"   # WHAT: installed. WHY: (b).
     Check ((ServiceState $OfficeService) -eq 'RUNNING') "the $OfficeService service is RUNNING"   # WHAT: running. WHY: started by install.

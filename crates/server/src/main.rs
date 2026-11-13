@@ -50,7 +50,9 @@ fn main() {
                 Err(why) => format!("error\n{why}\n"),
             };
             let _ = std::fs::create_dir_all(hyperview_server::winsvc::home());
-            let _ = std::fs::write(hyperview_server::winsvc::report_file(), report);
+            if let Err(e) = std::fs::write(hyperview_server::winsvc::report_file(), &report) {
+                eprintln!("  The install's report couldn't be written ({e}); it said: {report}"); // WHAT: said where a person or a script sees it. WHY: an install that leaves no report must still say why
+            }
             std::process::exit(if result.is_ok() { 0 } else { 1 });
         }
         #[cfg(windows)]
