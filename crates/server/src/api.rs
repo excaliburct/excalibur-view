@@ -388,14 +388,17 @@ pub const MIDDLING_BODY: usize = 64 * 1024 * 1024; // WHAT: 64 MiB. WHY: a whole
 /// before its route reads the body then answers a request already read, so
 /// the answer is never lost to a reset on a Mac. Bigger bodies (uploads) are
 /// left to their routes, read only after the gate, as before.
+/// How long a small body read before the doors may take to arrive whole.
+pub const SMALL_BODY_WITHIN: std::time::Duration = std::time::Duration::from_secs(10); // WHAT: ten seconds for at most 64 KiB. WHY: a declared small body must arrive within 10 s, so a trickling stranger can't hold a slot
+
 async fn small_bodies_read_first(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let declared = request.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<usize>().ok()); // WHAT: the length the request says its body has. WHY: only a small one is read here
     let Some(length) = declared.filter(|n| *n > 0 && *n <= REFUSAL_READS_UP_TO) else {
         return next.run(request).await; // WHAT: no body, a big one, or one of unsaid length. WHY: left to the route, as before
     };
     let (parts, body) = request.into_parts(); // WHAT: the request and its body apart. WHY: the body is read now
-    let Ok(bytes) = axum::body::to_bytes(body, length).await else {
-        let mut refused = Denied::wrong("The request's body didn't arrive whole.").into_response(); // WHAT: 400. WHY: it was shorter or longer than it said, or stopped arriving (the idle limit)
+    let Some(bytes) = tokio::time::timeout(SMALL_BODY_WITHIN, axum::body::to_bytes(body, length)).await.ok().and_then(Result::ok) else { // WHAT: read whole, within 10 s. WHY: a declared small body must arrive within 10 s, so a trickling stranger can't hold a slot
+        let mut refused = Denied::wrong("The request's body didn't arrive whole.").into_response(); // WHAT: 400. WHY: it was shorter or longer than it said, stopped arriving (the idle limit), or took longer than SMALL_BODY_WITHIN
         refused.headers_mut().insert(header::CONNECTION, header::HeaderValue::from_static("close")); // WHAT: the connection ends here. WHY: what is left of it can't be trusted
         return refused;
     };

@@ -593,3 +593,24 @@ fn upload(office: &Office, token: &str, project: &str, bytes: &[u8]) -> String {
         Err(_) => String::new(), // WHAT: refused or failed. WHY: the caller checks the server is alive.
     }
 }
+
+#[test]
+fn a_small_body_trickled_in_is_turned_away_within_ten_seconds() {
+    let office = an_office(); // WHAT: a running office. WHY: asked by a stranger.
+    let mut socket = TcpStream::connect(office.address).expect("a connection"); // WHAT: a plain connection. WHY: the body is sent a byte at a time.
+    socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap(); // WHAT: a short look for the answer between bytes. WHY: the trickle goes on meanwhile.
+    socket.write_all(b"POST /api/v1/auth/token HTTP/1.1\r\nHost: probe\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n").unwrap(); // WHAT: a head promising a small body. WHY: small bodies are read before any door.
+    let started = Instant::now(); // WHAT: when the trickle began. WHY: the answer must come near 10 s, not never.
+    let (mut answer, mut buffer) = (Vec::new(), [0u8; 1024]); // WHAT: what comes back. WHY: its first line is read.
+    while started.elapsed() < Duration::from_secs(40) && !answer.windows(2).any(|w| w == b"\r\n") {
+        let _ = socket.write_all(b"a"); // WHAT: one more byte, every two seconds. WHY: never idle long enough for the idle limit, never whole.
+        match socket.read(&mut buffer) {
+            Ok(0) => break, // WHAT: closed. WHY: nothing more will come.
+            Ok(n) => answer.extend_from_slice(&buffer[..n]), // WHAT: the answer. WHY: read.
+            Err(_) => {} // WHAT: nothing yet. WHY: the next byte goes.
+        }
+    }
+    let code = String::from_utf8_lossy(&answer).split_whitespace().nth(1).and_then(|c| c.parse::<u16>().ok()); // WHAT: the status. WHY: checked.
+    assert_eq!(code, Some(400), "a trickled body is refused, not waited for: {}", String::from_utf8_lossy(&answer)); // WHAT: 400. WHY: the slot is let go.
+    assert!(started.elapsed() >= Duration::from_secs(9) && started.elapsed() < Duration::from_secs(25), "refused at about {:?}, the 10 s limit", api::SMALL_BODY_WITHIN); // WHAT: at the limit. WHY: neither early nor never.
+}
