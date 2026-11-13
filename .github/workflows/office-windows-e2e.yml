@@ -34,7 +34,6 @@ jobs:
       CARGO_TERM_COLOR: always                      # WHAT: colour in cargo's log. WHY: easier to read.
       USB_SERVER_COMMIT: 84c83062a9f15db5e4b3faad9e141379b5e23e24   # WHAT: Citadel Server 1.0.1 as built for the USB of November 6. WHY: LatCon's own Windows test builds it from this commit.
       PUBLISH: -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=None -nologo   # WHAT: how Citadel Server's one-file exe is published. WHY: the USB build's switches.
-      CELL_TAG: citadel-server-1.1.0-cell           # WHAT: the release holding the pinned cell's zip. WHY: packaging/citadel-cell.json names it.
     steps:
       - name: Get View
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # WHAT: v4.4.0, 2026-07-20. WHY: pinned by commit, as View's other workflows.
@@ -89,7 +88,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}   # WHAT: the calling repository's read token. WHY: the cell's zip is a release asset there.
         run: |
-          gh release download $env:CELL_TAG --repo excaliburct/LatconEstimating --pattern '*.zip' --dir "$env:RUNNER_TEMP\cell-zip"   # WHAT: the pinned zip. WHY: checked against the pin next.
+          $url = (Get-Content -Raw view/packaging/citadel-cell.json | ConvertFrom-Json).source.url                                   # WHAT: where the pin says the zip is. WHY: the one source of truth.
+          if ($url -notmatch '^https://github\.com/excaliburct/LatconEstimating/releases/download/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+\.zip)$') { throw "The pin's source.url isn't a LatconEstimating release asset: $url" }   # WHAT: its release and file. WHY: downloaded with this repository's token.
+          gh release download $Matches[1] --repo excaliburct/LatconEstimating --pattern $Matches[2] --dir "$env:RUNNER_TEMP\cell-zip"   # WHAT: the pinned zip. WHY: checked against the pin next.
           if ($LASTEXITCODE -ne 0) { throw "The cell's zip couldn't be downloaded." }                                               # WHAT: stop. WHY: said plainly.
           $zip = (Get-ChildItem "$env:RUNNER_TEMP\cell-zip\*.zip" | Select-Object -First 1).FullName                                  # WHAT: its path. WHY: below.
           python view/tools/citadel_cell.py kit --out "$env:RUNNER_TEMP\kit" --from-zip $zip                                         # WHAT: the USB kit's citadel\ folder. WHY: install takes it.
