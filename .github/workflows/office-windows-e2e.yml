@@ -1,6 +1,8 @@
 # WHAT: the Office Server's install day at LatCon, end to end on a real Windows machine (deploy/windows-test/office-e2e.ps1):
-#       Citadel Server 1.0.1 as on the USB stick with a paired PC, the Office Server installed from its USB kit with the pinned
-#       Citadel cell and a test licence, the move at first start, two computers linked, an update, a rollback, a failed move.
+#       Citadel Server 1.0.1 as on the USB stick with a paired PC, the Office Server installed from its USB kit with a test
+#       licence, the pinned Citadel cell installed from LatCon's IT kit with --install-citadel-cell, the move and the key's
+#       import at the cell's first start, two computers linked, an update with its cell pushed as Fleet pushes it, a rollback,
+#       a failed move, and a server not licensed for citadel refusing the cell.
 # WHY:  the Linux build server can't run Windows services, the firewall, job objects or a restricted token, so the cell's
 #       install, move and update had only run against fakes. Called from LatCon Estimating's repository, which holds Citadel
 #       Server's source and the pinned cell; no repository secret is used, and every key is a test key made in the job.
@@ -84,7 +86,7 @@ jobs:
           dotnet build view/deploy/windows-test/office-device -c Release -nologo "-p:LatconRepo=$env:GITHUB_WORKSPACE\latcon" -o "$env:RUNNER_TEMP\office-device"   # WHAT: the two computers. WHY: (d).
           if ($LASTEXITCODE -ne 0) { throw 'office-device did not build.' }                              # WHAT: stop. WHY: said plainly.
 
-      - name: The pinned Citadel cell, the USB kit's folder and the release part
+      - name: The pinned Citadel cell, LatCon's IT kit and Fleet's cell part
         env:
           GH_TOKEN: ${{ github.token }}   # WHAT: the calling repository's read token. WHY: the cell's zip is a release asset there.
         run: |
@@ -93,9 +95,9 @@ jobs:
           gh release download $Matches[1] --repo excaliburct/LatconEstimating --pattern $Matches[2] --dir "$env:RUNNER_TEMP\cell-zip"   # WHAT: the pinned zip. WHY: checked against the pin next.
           if ($LASTEXITCODE -ne 0) { throw "The cell's zip couldn't be downloaded." }                                               # WHAT: stop. WHY: said plainly.
           $zip = (Get-ChildItem "$env:RUNNER_TEMP\cell-zip\*.zip" | Select-Object -First 1).FullName                                  # WHAT: its path. WHY: below.
-          python view/tools/citadel_cell.py kit --out "$env:RUNNER_TEMP\kit" --from-zip $zip                                         # WHAT: the USB kit's citadel\ folder. WHY: install takes it.
+          python view/tools/citadel_cell.py kit --out "$env:RUNNER_TEMP\kit" --from-zip $zip                                         # WHAT: the IT kit's copy of the pinned zip. WHY: --install-citadel-cell takes it.
           if ($LASTEXITCODE -ne 0) { throw 'citadel_cell.py kit failed.' }                                                          # WHAT: stop. WHY: said plainly.
-          python view/tools/citadel_cell.py bundle --out "$env:RUNNER_TEMP\ExcaliburOffice-Citadel.tar.gz" --from-zip $zip          # WHAT: the release's cell part. WHY: each test update carries it.
+          python view/tools/citadel_cell.py bundle --out "$env:RUNNER_TEMP\ExcaliburOffice-Citadel.tar.gz" --from-zip $zip          # WHAT: the cell part Fleet pushes. WHY: pushed before each test update.
           if ($LASTEXITCODE -ne 0) { throw 'citadel_cell.py bundle failed.' }                                                       # WHAT: stop. WHY: said plainly.
 
       - name: A test release key, built into this checkout only
@@ -134,6 +136,9 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "The Office Server $v did not build." }                                                               # WHAT: stop. WHY: said plainly.
             Copy-Item target/release/hyperview-server.exe "$env:RUNNER_TEMP\servers\ExcaliburView-Server-$v.exe"                                  # WHAT: kept by version. WHY: the install and the updates.
           }
+          cargo build --release -p hyperview-release                                                                                                   # WHAT: the release tool, with the test key built in. WHY: signs and bundles the cell part as Fleet's recipe does.
+          if ($LASTEXITCODE -ne 0) { throw 'hyperview-release did not build.' }                                                                      # WHAT: stop. WHY: said plainly.
+          Copy-Item target/release/hyperview-release.exe "$env:RUNNER_TEMP\hyperview-release.exe"                                                    # WHAT: kept. WHY: the script runs it.
           "first=$($versions[0])" >> $env:GITHUB_OUTPUT    # WHAT: handed on. WHY: the script names them.
           "second=$($versions[1])" >> $env:GITHUB_OUTPUT   # WHAT: as above. WHY: as above.
           "third=$($versions[2])" >> $env:GITHUB_OUTPUT    # WHAT: as above. WHY: as above.
@@ -147,7 +152,7 @@ jobs:
           ./view/deploy/windows-test/office-e2e.ps1
           -View "$env:GITHUB_WORKSPACE\view" -Latcon "$env:GITHUB_WORKSPACE\latcon"
           -Old "$env:RUNNER_TEMP\build-1.0.1\Citadel Server.exe" -Servers "$env:RUNNER_TEMP\servers"
-          -Kit "$env:RUNNER_TEMP\kit" -CellPart "$env:RUNNER_TEMP\ExcaliburOffice-Citadel.tar.gz"
+          -Kit "$env:RUNNER_TEMP\kit" -CellPart "$env:RUNNER_TEMP\ExcaliburOffice-Citadel.tar.gz" -Release "$env:RUNNER_TEMP\hyperview-release.exe"
           -Key "$env:RUNNER_TEMP\test-keys\test-release.key" -Device "$env:RUNNER_TEMP\office-device\OfficeDevice.exe"
           -Work "$env:RUNNER_TEMP\e2e" -First $env:FIRST -Second $env:SECOND -Third $env:THIRD
 

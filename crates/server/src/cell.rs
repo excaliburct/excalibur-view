@@ -743,6 +743,8 @@ pub fn end_for_update() -> bool {
 
 #[cfg(windows)]
 pub mod windows;
+#[cfg(windows)]
+mod tlskey; // WHAT: the cell's TLS key in Windows' key store. WHY: §6b; crate::cellkey decides, this hands it to Windows
 
 /// Starts supervising the cell, when the licence lists it and its program is
 /// there. Windows only; elsewhere there is no cell.

@@ -99,8 +99,7 @@ pub fn start(server: Shared) {
         let _ = std::fs::create_dir_all(&unpack); // WHAT: made; it inherits the locked service folder's ACL. WHY: the system and administrators only
         allow(&unpack, &super::extract_sddl(&sid), false); // WHAT: the cell may use it too. WHY: a restricted token unpacks there
         let environment = super::environment_block(std::env::vars_os(), super::EXTRACT_VARIABLE, unpack.as_os_str()); // WHAT: this server's environment, with .NET's unpacking folder set. WHY: review low 3
-        let mut launcher = Cell { server: server.clone(), program, line: String::new(), args, pipe: format!(r"\\.\pipe\{}", super::pipe_name(&install)), sid, process: None, serving: None, next: None, pin, data, environment };
-        launcher.line = super::command_line(&launcher.program, &launcher.args); // WHAT: the command line. WHY: written once
+        let mut launcher = Cell { server: server.clone(), program, home: folder.clone(), args, pipe: format!(r"\\.\pipe\{}", super::pipe_name(&install)), sid, process: None, serving: None, next: None, pin, data, environment }; // WHAT: the cell, ready to start. WHY: its command line is made at each start, with its key
         super::supervise(&mut launcher, &server.cell, &std::thread::sleep, &Instant::now, usize::MAX); // WHAT: run and restarted. WHY: §6a
     });
     if let Err(e) = spawned {
@@ -168,7 +167,7 @@ fn set_acl(folder: &Path, sddl: &str, protected: bool) -> std::io::Result<()> {
 struct Cell {
     server: Shared, // WHAT: the Office Server. WHY: the pipe's answers
     program: PathBuf, // WHAT: `citadel\Citadel Server.exe`. WHY: started
-    line: String, // WHAT: its command line. WHY: started with it
+    home: PathBuf, // WHAT: the Office Server's own folder. WHY: the cell's key's name and certificate are kept there (crate::cellkey)
     args: Vec<String>, // WHAT: its arguments. WHY: the line is made from them
     pipe: String, // WHAT: `\\.\pipe\excalibur-office-<install id>`. WHY: §6a
     sid: String, // WHAT: the cell's SID. WHY: the pipe and the token
@@ -184,13 +183,20 @@ impl super::Launcher for Cell {
     fn start(&mut self) -> std::io::Result<()> {
         crate::cellbundle::check_program(&self.program, &self.pin).map_err(std::io::Error::other)?; // WHAT: the pinned program, or not started. WHY: risk 8: checked before every start, a restart too
         super::give_the_cell_the_office_key(&self.data, self.server.config.maintenance_key.as_deref()).inspect_err(|e| tracing::error!("ALARM: the Citadel cell was not started: {e}"))?; // WHAT: only the Office Server's maintenance key opens the cell's admin routes; a link on the way stops the start. WHY: a key set on 1.0 moved in with its settings; review medium: never written through a link
+        let tls = super::tlskey::ready(&self.home, &self.data, &self.sid).map_err(|e| {
+            tracing::error!("ALARM: the Citadel cell was not started: its TLS key isn't ready: {e}"); // WHAT: the alarm. WHY: a cell without its key can't serve, and a key others could use is never handed over
+            std::io::Error::other(e)
+        })?; // WHAT: the cell's key made, imported or opened, owned by the system, locked to the cell's SID, and its certificate. WHY: §6b: the cell's restricted token can't keep a key Windows' TLS can use
+        let mut args = self.args.clone(); // WHAT: the fixed arguments. WHY: the key's two are added
+        args.extend(crate::cellkey::cell_args(&tls.name, &tls.certificate).map_err(std::io::Error::other)?); // WHAT: --tls-key and --tls-cert. WHY: the cell opens its key by name and serves that certificate
+        let line = super::command_line(&self.program, &args); // WHAT: the whole command line. WHY: made at each start, so a key set back after tampering is the one used
         let pipe = match self.next.take() {
             Some(pipe) => pipe, // WHAT: the instance made while the last one was still held. WHY: the name was never free
             None => make_pipe(&self.pipe, &self.sid, true)?, // WHAT: the first instance, made only if nobody made it first. WHY: a name somebody else holds is an alarm (AddrInUse), not a restart
         };
         let (server, name, sid) = (self.server.clone(), self.pipe.clone(), self.sid.clone()); // WHAT: the server, the pipe's name and the cell's SID, for the thread. WHY: its answers, and the next instance
         self.serving = Some(std::thread::Builder::new().name("citadel-pipe".into()).spawn(move || serve(pipe, &server, &name, &sid))?); // WHAT: the pipe answered on its own thread. WHY: the supervisor waits on the process meanwhile
-        match restricted_process(&self.program, &self.line, &self.sid, &self.environment) {
+        match restricted_process(&self.program, &line, &self.sid, &self.environment) {
             Ok(process) => {
                 self.process = Some(process); // WHAT: kept. WHY: waited for
                 Ok(())

@@ -73,16 +73,22 @@ class Cell(unittest.TestCase):
         with self.assertRaises(SystemExit):
             citadel_cell.check_part(planted, self.pin)  # WHAT: refused. WHY: nothing unnamed
 
-    def test_the_release_signs_the_cell_beside_the_server_and_only_with_it(self):
-        part = self._write(publish.CITADEL_FILE, citadel_cell.pack({"Citadel Server.exe": CELL}))  # WHAT: the cell part. WHY: in the release
+    def test_the_public_release_never_carries_the_cell(self):
+        part = self._write(publish.CITADEL_FILE, citadel_cell.pack({"Citadel Server.exe": CELL}))  # WHAT: the cell part. WHY: offered to the release
         app, server = self._write("a.exe", b"MZ app"), self._write("s.exe", b"MZ server")  # WHAT: stand-in programs. WHY: the release
-        patched = mock.patch.object(citadel_cell, "PIN", self.pin_path)  # WHAT: the test's pin. WHY: the committed one pins nothing yet
-        with patched, mock.patch.object(publish, "citadel_cell", lambda: citadel_cell):
-            manifest = publish.unsigned_manifest("0.7.0", "stable", "", "2026-11-12T00:00:00Z", 1, {publish.APP_PLATFORM: app, publish.SERVER_PLATFORM: server, publish.CITADEL_PLATFORM: part})  # WHAT: the manifest. WHY: what gets signed
-            self.assertEqual([r["platform"] for r in manifest["servers"]], ["windows-x64-server", "windows-x64-citadel"])  # WHAT: the server, then its cell. WHY: one release, one key
-            self.assertEqual(manifest["server"]["platform"], "windows-x64-server")  # WHAT: where older servers read. WHY: unchanged
-            with self.assertRaises(SystemExit):
-                publish.unsigned_manifest("0.7.0", "stable", "", "x", 1, {publish.APP_PLATFORM: app, publish.CITADEL_PLATFORM: part})  # WHAT: a cell without its server. WHY: refused
+        manifest = publish.unsigned_manifest("0.7.1", "stable", "", "2026-11-13T00:00:00Z", 1, {publish.APP_PLATFORM: app, publish.SERVER_PLATFORM: server})  # WHAT: the release without the cell. WHY: needs no --citadel any more
+        self.assertNotIn("servers", manifest)  # WHAT: no cell part listed. WHY: the public feed never names it
+        self.assertEqual(manifest["server"]["platform"], "windows-x64-server")  # WHAT: the server where every server reads it. WHY: unchanged
+        with self.assertRaises(SystemExit) as refused:
+            publish.unsigned_manifest("0.7.1", "stable", "", "x", 1, {publish.APP_PLATFORM: app, publish.SERVER_PLATFORM: server, publish.CITADEL_PLATFORM: part})  # WHAT: the cell offered. WHY: refused
+        self.assertIn("never goes in View's public release", str(refused.exception))  # WHAT: said. WHY: plain
+
+    def test_the_kit_holds_the_pinned_zip_itself(self):
+        out = os.path.join(self.dir, "kit")  # WHAT: the IT kit's folder. WHY: the zip goes in it
+        with mock.patch.object(citadel_cell, "PIN", self.pin_path):
+            citadel_cell.main(["kit", "--out", out, "--from-zip", self._write("z.zip", self.zip)])  # WHAT: the kit made. WHY: the install command takes the zip
+        with open(os.path.join(out, "latcon.zip"), "rb") as f:
+            self.assertEqual(f.read(), self.zip)  # WHAT: the pinned zip, as it was. WHY: the server checks its SHA-256 against the pin
 
     def _write(self, name, data):
         path = os.path.join(self.dir, name)  # WHAT: a file in the scratch folder. WHY: the tools read files

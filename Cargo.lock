@@ -2127,6 +2127,7 @@ dependencies = [
  "plugin-host",
  "rand 0.8.8",
  "rcgen",
+ "ring",
  "rusqlite",
  "rustls",
  "serde",
@@ -2145,6 +2146,7 @@ dependencies = [
  "wat",
  "windows-service",
  "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]

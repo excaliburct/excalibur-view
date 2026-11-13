@@ -418,6 +418,10 @@ async fn update(
         ))));
     }
 
+    if push.release.platform == hub::feed::CITADEL_PLATFORM {
+        return Ok(Json(take_cell(&server, &push.release, &installer))); // WHAT: the Citadel cell, kept apart from the seats' releases. WHY: it is never offered to a seat, and only a licensed office takes it
+    }
+
     let digest = push.release.digest.to_lowercase();
     if let Err(e) = server.store.put_blob(&installer) {
         return Ok(Json(refused_owned(format!("could not store it: {e}"))));
@@ -470,6 +474,37 @@ async fn update(
             format!("{version} is on the server, held back until somebody marks it ready.")
         },
     }))
+}
+
+/// Takes a pushed Citadel cell part (its signature already checked): only
+/// when this office's licence lists `citadel`; kept beside the server until
+/// it updates to that version, or, for the version running now, put in place
+/// at the next start. Never stored with the seats' releases, so no seat is
+/// ever offered or sent it.
+fn take_cell(server: &Server, release: &Release, part: &[u8]) -> Landed {
+    if !crate::office::licensed(server).contains(&hub::license::Module::Citadel) {
+        tracing::warn!("refused a pushed Citadel cell {}: {}", release.version, crate::cellbundle::NOT_LICENSED); // WHAT: said. WHY: an unlicensed office never holds the cell
+        return refused(crate::cellbundle::NOT_LICENSED); // WHAT: refused. WHY: Creede, 2026-11-13: only offices licensed for citadel
+    }
+    let Some(home) = server.config.program_folder.clone().or_else(|| std::env::current_exe().ok().and_then(|p| p.parent().map(std::path::Path::to_path_buf))) else {
+        return refused("this server doesn't know its own folder"); // WHAT: refused. WHY: nowhere to keep it
+    };
+    if let Err(why) = crate::cellbundle::keep_pushed(&home, release, part) {
+        return refused_owned(why); // WHAT: refused, said. WHY: never half kept
+    }
+    let now = release.version == VERSION; // WHAT: the cell for the version running. WHY: put in place at the next start rather than waiting for an update
+    if now {
+        if let Err(why) = crate::cellbundle::stage_bundle(part, &home) {
+            return refused_owned(format!("version {}'s Citadel cell: {why}", release.version)); // WHAT: refused, said. WHY: only a whole cell ever waits
+        }
+    }
+    tracing::info!("took the Citadel cell {} ({})", release.version, if now { "put in place at the next start" } else { "kept for that version's update" }); // WHAT: said. WHY: the log shows it came
+    Landed {
+        written: vec![format!("{} ({})", release.version, release.platform)], // WHAT: what was kept. WHY: the Fleet counts it
+        skipped: Vec::new(),
+        restarting: false, // WHAT: no restart. WHY: it waits for the next start or the update
+        message: if now { format!("The Citadel cell {} is on the server and is put in place when the service next starts.", release.version) } else { format!("The Citadel cell {} is on the server, kept for the update to that version.", release.version) },
+    }
 }
 
 /// Reads a push's body, no further than [`LARGEST_PUSH`].
@@ -996,5 +1031,28 @@ mod tests {
         assert_eq!(landed.written, Vec::<String>::new()); // WHAT: nothing written. WHY: a failure shows what was
         assert!(landed.skipped.is_empty(), "not a failure: {:?}", landed.skipped);
         assert!(landed.message.contains("nothing to withdraw"), "{}", landed.message);
+    }
+
+    #[test]
+    fn a_cell_part_pushed_to_an_office_not_licensed_for_citadel_is_refused_and_never_kept() {
+        let n: u64 = rand::random(); // WHAT: a fresh name. WHY: tests run side by side
+        let folder = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("fleet-cell-{n:016x}")); // WHAT: the service's folder. WHY: never a shared temporary folder
+        std::fs::create_dir_all(&folder).unwrap(); // WHAT: made. WHY: a part would be kept in it
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]); // WHAT: a test licence key. WHY: only this test's server trusts it
+        let config = crate::Config { program_folder: Some(folder.clone()), data: folder.join("data"), license_keys_for_tests: vec![("fleet-cell-test".into(), signing.verifying_key().to_bytes())], ..crate::Config::default() }; // WHAT: a server with its folder. WHY: where a part would go
+        let store = crate::Store::open(&config.database(), &config.blobs()).expect("a store"); // WHAT: its store. WHY: the licence
+        let server = Server::new(store, config); // WHAT: the server. WHY: below
+        let release: Release = serde_json::from_value(serde_json::json!({"version":"9.1.0","channel":"stable","platform":hub::feed::CITADEL_PLATFORM,"published":"","notes":"","bytes":4,"digest":"00","download":"","signature":"","key":"","minimum_api_version":1})).unwrap(); // WHAT: a cell part's manifest (its signature is checked before this step). WHY: below
+        let landed = take_cell(&server, &release, b"part"); // WHAT: pushed to an office with no licence for citadel. WHY: Mesa Fab's case
+        assert!(landed.written.is_empty() && landed.skipped.iter().any(|s| s.contains(crate::cellbundle::NOT_LICENSED)), "refused: {:?}", landed.skipped); // WHAT: refused, said. WHY: Creede, 2026-11-13
+        assert!(!folder.join(crate::cellbundle::PARTS).exists(), "nothing of the cell is kept"); // WHAT: nothing held. WHY: an unlicensed office never holds the cell
+        let mut licence = hub::license::License { id: "evl_cell".into(), company: "Example Steel".into(), edition: hub::license::Edition::Office, users: 0, updates_through: "2099-12-31".into(), issued: "2026-11-13".into(), note: String::new(), modules: vec!["citadel".into()], key: "fleet-cell-test".into(), signature: String::new() }; // WHAT: a licence listing citadel. WHY: LatCon's case
+        licence.signature = hub::update::hex(&ed25519_dalek::Signer::sign(&signing, &licence.signing_payload()).to_bytes()); // WHAT: signed with the test key. WHY: trusted by this server only
+        crate::license::install(&server, &serde_json::to_string(&licence).unwrap()).expect("the licence"); // WHAT: installed. WHY: the office is now licensed
+        let landed = take_cell(&server, &release, b"part"); // WHAT: pushed again. WHY: now taken
+        assert_eq!(landed.written, vec![format!("9.1.0 ({})", hub::feed::CITADEL_PLATFORM)], "kept: {:?}", landed.skipped); // WHAT: kept. WHY: for that version's update
+        assert!(crate::cellbundle::pushed(&folder, "9.1.0").is_some(), "kept beside the server"); // WHAT: there. WHY: the update takes it
+        assert!(!server.store.with(|db| Ok(db.query_row("SELECT count(*) FROM releases", [], |r| r.get::<_, i64>(0))?)).is_ok_and(|n| n > 0), "never among the seats' releases"); // WHAT: not offered to seats. WHY: no seat is ever sent the cell
+        let _ = std::fs::remove_dir_all(&folder); // WHAT: tidied. WHY: a test leaves nothing
     }
 }

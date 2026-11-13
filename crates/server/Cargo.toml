@@ -17,6 +17,7 @@ path = "src/lib.rs"
 # With its client: the server reads the publisher's release feed itself.
 hub = { path = "../hub" }
 plugin-api = { path = "../plugin-api" }
+ring = "0.17" # WHAT: P-256 keys in tests, the version already built for rustls and rcgen. WHY: the cell key's signature conversion and certificate are checked against a real key (crate::cellkey)
 plugin-host = { path = "../plugin-host" }
 annot = { path = "../annot" }
 pdf = { path = "../pdf" }
@@ -56,6 +57,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-graceful"] } # WHAT: with polite shutdown of open connections. WHY: a stopping server closes idle seats' connections at once instead of waiting them out
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+zip = { version = "9.0", default-features = false, features = ["deflate"] } # WHAT: reading the Citadel cell's zip, as the desktop app's Excel writer already builds it (no new crate). WHY: hyperview-server --install-citadel-cell takes the pinned zip from the IT kit
 
 # Being a real Windows service: answering the service manager, so Windows
 # starts it at boot, stops it cleanly at shutdown, and restarts it after an
@@ -65,7 +67,7 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 windows-service = "0.7"
 # WHAT: Windows' own security calls. WHY: the drill's folder is made with its permissions already in place, and the
 # off-site work folder is locked and checked; already in the build through tokio and others.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Pipes", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_StationsAndDesktops", "Win32_Graphics_Gdi"] } # WHAT: with named pipes and job objects added, and window stations (CreateDesktopW needs Gdi's DEVMODEW). WHY: the Citadel cell asks the Office Server over one (crate::cell), and runs on a desktop of its own
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Pipes", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_StationsAndDesktops", "Win32_Graphics_Gdi", "Win32_Security_Cryptography"] } # WHAT: with named pipes and job objects added, window stations (CreateDesktopW needs Gdi's DEVMODEW), and CNG keys and certificates (the cell's TLS key). WHY: the Citadel cell asks the Office Server over one (crate::cell), and runs on a desktop of its own
 
 # WHAT: this process's own account, through a safe call. WHY: the off-site work folder trusts only files that root or
 # this account owns; already in the build through ctrlc.

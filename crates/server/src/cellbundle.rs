@@ -6,17 +6,23 @@
 //! with `packaging/citadel-cell.json` inside it: the cell's files and the
 //! SHA-256 of each. A cell program is run only when its SHA-256 is that one.
 //!
-//! Where the files come from:
+//! The cell is never on the public release feed: Excalibur View's releases
+//! carry only its pin. It reaches an office two ways, both only when the
+//! office's licence lists `citadel` (Creede, 2026-11-13):
 //!
-//! - **installing:** the `citadel\` folder beside the server program being
-//!   installed (the USB kit carries it), checked file by file against the pin
-//!   and copied into `citadel.new`, then put in place;
-//! - **updating:** the release's cell part (platform
-//!   [`hub::feed::CITADEL_PLATFORM`]), signed with the same key and checked
-//!   the same way as the server itself, unpacked into `citadel.new` by the
-//!   server doing the update; the new server checks it against its own pin at
-//!   its first start, before the cell starts, and puts it in place. The cell
-//!   is never running while its folder is replaced.
+//! - **installing:** `hyperview-server --install-citadel-cell "<zip>"`, run
+//!   by an administrator with the zip from the office's private IT kit. The
+//!   zip must be the pinned one (`source.sha256`), and every file taken from
+//!   it is checked against the pin, copied into `citadel.new`, and put in
+//!   place at the service's next start ([`stage_zip`]);
+//! - **updating:** Fleet pushes the cell part of the next version (platform
+//!   [`hub::feed::CITADEL_PLATFORM`], signed with the release key) over the
+//!   key-gated maintenance channel, to licensed installs only. The server
+//!   keeps it in `citadel-parts\` ([`keep_pushed`]); when it updates itself
+//!   to that version it checks the part's signature again and unpacks it
+//!   into `citadel.new`, and the new server checks it against its own pin
+//!   before the cell starts, and puts it in place. The cell is never running
+//!   while its folder is replaced.
 //!
 //! The cell part is a gzipped tar: each file named by its own SHA-256, and
 //! `names.json` saying what each is called. Named by fingerprint, so the
@@ -26,7 +32,7 @@
 //! `Hyperview-Server.exe.old`, for a rollback (`crate::kept`).
 
 use std::collections::BTreeMap; // WHAT: sorted maps. WHY: the pin's files, in one order
-use std::io::Read; // WHAT: byte streams. WHY: files are hashed as they are read
+use std::io::Read; // WHAT: byte streams. WHY: files are hashed as they are read, and bounded as they come out of a zip
 use std::path::{Path, PathBuf}; // WHAT: file paths. WHY: Windows and Linux both
 
 use serde::Deserialize; // WHAT: JSON in. WHY: the pin and the bundle's names
@@ -63,7 +69,27 @@ pub struct Pin {
     pub version: String, // WHAT: the cell's version. WHY: said in the log
     #[serde(default)]
     pub files: BTreeMap<String, String>, // WHAT: each file's name in `citadel\` and its SHA-256. WHY: the only files run or kept there
+    #[serde(default)]
+    pub source: Option<Source>, // WHAT: where the cell's zip comes from and its SHA-256. WHY: the install command takes only that zip
 }
+
+/// The pinned cell's zip.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    #[serde(default)]
+    pub url: String, // WHAT: the private LatCon release asset. WHY: where the IT kit and Fleet fetch it
+    #[serde(default)]
+    pub sha256: String, // WHAT: the zip's SHA-256. WHY: checked before anything in it is used
+}
+
+/// Where the cell parts Fleet pushed wait, beside the server.
+pub const PARTS: &str = "citadel-parts"; // WHAT: `<service folder>\citadel-parts`. WHY: kept until the server updates to their version
+
+/// The words a server without `citadel` on its licence answers with.
+pub const NOT_LICENSED: &str = "this office's licence doesn't list citadel, so it never takes the Citadel cell"; // WHAT: the refusal. WHY: the cell is only for licensed offices
+
+/// The largest cell zip taken.
+pub const ZIP_MOST: u64 = 400 * 1024 * 1024; // WHAT: 400 MB. WHY: the zip is about 60 MB; a planted giant is never read whole
 
 impl Pin {
     /// The program's fingerprint.
@@ -302,6 +328,86 @@ pub fn pack(files: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
 }
 
 /// The cell's program in `home`.
+/// Takes the pinned cell's zip (the install command's): checked whole
+/// against the pin's `source.sha256`, each pinned file taken out and checked,
+/// and the whole cell left in `citadel.new` for the service's next start to
+/// check again and put in place. Nothing else in the zip is taken.
+///
+/// # Errors
+///
+/// When the zip isn't the pinned one, a pinned file is missing or wrong, or
+/// a file can't be written.
+pub fn stage_zip(zip: &[u8], home: &Path, pin: &Pin) -> Result<(), String> {
+    let want = pin.source.as_ref().map(|s| s.sha256.to_ascii_lowercase()).filter(|s| crate::store::is_digest(s)).ok_or("this build's pin names no zip, so no cell zip is taken")?; // WHAT: the pinned zip's SHA-256. WHY: only that zip
+    let found = hub::update::hex(&Sha256::digest(zip)); // WHAT: this zip's. WHY: compared
+    if found != want {
+        return Err(format!("that zip isn't the Citadel cell this Office Server was built with (SHA-256 {found}, not {want}); nothing was installed")); // WHAT: refused. WHY: risk 8: only the pinned cell
+    }
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).map_err(|e| format!("the zip doesn't read ({e})"))?; // WHAT: the zip. WHY: the pinned files are taken from it
+    let staged = home.join(STAGED); // WHAT: where the cell waits. WHY: swapped in at the next start
+    let _ = std::fs::remove_dir_all(&staged); // WHAT: an older waiting cell gone. WHY: the one installed now is the one put in place
+    std::fs::create_dir_all(&staged).map_err(|e| format!("could not make {} ({e})", staged.display()))?; // WHAT: made. WHY: the files go in it
+    let taken = (|| -> Result<(), String> {
+        for (name, sha) in &pin.files {
+            let mut entry = archive.by_name(name).map_err(|_| format!("the zip has no {name}"))?; // WHAT: the pinned file, by its exact name at the zip's root. WHY: nothing else is taken
+            if entry.size() > LARGEST {
+                return Err(format!("{name} in the zip is too big")); // WHAT: refused. WHY: never fills the disk
+            }
+            let to = staged.join(name); // WHAT: where it goes. WHY: a plain name, checked when the pin was read
+            let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(&to).map_err(|e| format!("could not write {name} ({e})"))?; // WHAT: a new file. WHY: never through anything already there
+            std::io::copy(&mut (&mut entry).take(LARGEST + 1), &mut out).map_err(|e| format!("could not take {name} out of the zip ({e})"))?; // WHAT: copied, bounded. WHY: as above
+            drop(out); // WHAT: closed. WHY: hashed next
+            if sha256_file(&to).map_err(|e| e.to_string())? != *sha {
+                return Err(format!("{name} in the zip isn't the pinned one")); // WHAT: refused. WHY: every file checked as it comes out
+            }
+        }
+        check_folder(&staged, pin) // WHAT: the whole cell, nothing else. WHY: the same check the start makes
+    })();
+    if taken.is_err() {
+        let _ = std::fs::remove_dir_all(&staged); // WHAT: the half cell gone. WHY: only a whole, checked cell ever waits
+    }
+    taken
+}
+
+/// Whether a version is plain: digits and dots, at most 32. Used as a file name.
+fn plain_version(version: &str) -> bool {
+    !version.is_empty() && version.len() <= 32 && version.chars().all(|c| c.is_ascii_digit() || c == '.') && !version.contains("..") // WHAT: 1.2.3 and the like. WHY: never a path
+}
+
+/// Keeps a cell part Fleet pushed (already checked against the release
+/// signature by the caller) in `citadel-parts\`, with its signed manifest,
+/// until the server updates to its version.
+///
+/// # Errors
+///
+/// When it isn't a cell part, its version isn't plain, or it can't be written.
+pub fn keep_pushed(home: &Path, release: &hub::update::Release, bytes: &[u8]) -> Result<PathBuf, String> {
+    if release.platform != hub::feed::CITADEL_PLATFORM || !plain_version(&release.version) {
+        return Err("that isn't a Citadel cell part with a plain version".to_string()); // WHAT: refused. WHY: only cell parts are kept here
+    }
+    let parts = home.join(PARTS); // WHAT: the parts' folder. WHY: beside the server, in its locked folder
+    std::fs::create_dir_all(&parts).map_err(|e| format!("could not make {} ({e})", parts.display()))?; // WHAT: made. WHY: below
+    let manifest = serde_json::to_vec(release).map_err(|e| e.to_string())?; // WHAT: the signed manifest. WHY: checked again when it is used
+    for (name, body) in [(format!("{}.tar.gz", release.version), bytes), (format!("{}.json", release.version), manifest.as_slice())] {
+        let part = parts.join(format!("{name}.part")); // WHAT: a new copy. WHY: renamed into place whole
+        std::fs::write(&part, body).map_err(|e| format!("could not write {name} ({e})"))?; // WHAT: written. WHY: below
+        std::fs::rename(&part, parts.join(&name)).map_err(|e| format!("could not keep {name} ({e})"))?; // WHAT: in place, the manifest last. WHY: a manifest only ever names a whole part
+    }
+    Ok(parts.join(format!("{}.tar.gz", release.version)))
+}
+
+/// The cell part Fleet pushed for `version`, with its manifest, if one waits.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn pushed(home: &Path, version: &str) -> Option<(hub::update::Release, Vec<u8>)> {
+    if !plain_version(version) {
+        return None; // WHAT: never a path. WHY: the version names the file
+    }
+    let parts = home.join(PARTS); // WHAT: the parts' folder. WHY: read
+    let release: hub::update::Release = serde_json::from_slice(&std::fs::read(parts.join(format!("{version}.json"))).ok()?).ok()?; // WHAT: its manifest. WHY: checked by the caller
+    let bytes = std::fs::read(parts.join(format!("{version}.tar.gz"))).ok()?; // WHAT: the part. WHY: likewise
+    Some((release, bytes))
+}
+
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn program_in(home: &Path) -> PathBuf {
     home.join(FOLDER).join(PROGRAM) // WHAT: `citadel\Citadel Server.exe`. WHY: §6a
@@ -428,6 +534,67 @@ mod tests {
         let home = dir.join("home"); // WHAT: the service's folder. WHY: unpacked beside
         stage_bundle(include_bytes!("cellbundle/made-by-citadel_cell.py.tar.gz"), &home).unwrap(); // WHAT: a part made by tools/citadel_cell.py's pack. WHY: the publishing side and this reader must agree on the format
         assert_eq!(std::fs::read(home.join(STAGED).join(PROGRAM)).unwrap(), b"a cell packed by tools/citadel_cell.py", "the program comes out under its name"); // WHAT: unpacked. WHY: as published
+        let _ = std::fs::remove_dir_all(&dir); // WHAT: tidied. WHY: a test leaves nothing
+    }
+
+    /// A zip holding `files`, deflated, as .NET's ZipFile makes the cell's.
+    fn a_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write as _; // WHAT: writing entries. WHY: below
+        let mut out = std::io::Cursor::new(Vec::new()); // WHAT: the zip in memory. WHY: returned
+        {
+            let mut zip = zip::ZipWriter::new(&mut out); // WHAT: the writer. WHY: below
+            for (name, body) in files {
+                zip.start_file(*name, zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)).unwrap(); // WHAT: one file at the root. WHY: as the cell's zip has it
+                zip.write_all(body).unwrap(); // WHAT: its bytes. WHY: taken out by the install
+            }
+            zip.finish().unwrap(); // WHAT: closed. WHY: a whole zip
+        }
+        out.into_inner()
+    }
+
+    fn pin_for(zip: &[u8], program: &[u8]) -> Pin {
+        read_pin(&format!("{{\"version\":\"1.1.2\",\"source\":{{\"url\":\"https://example\",\"sha256\":\"{}\"}},\"files\":{{\"{PROGRAM}\":\"{}\"}}}}", hub::update::hex(&Sha256::digest(zip)), hub::update::hex(&Sha256::digest(program)))).unwrap() // WHAT: a pin naming the zip and the program. WHY: as packaging/citadel-cell.json does
+    }
+
+    #[test]
+    fn the_install_command_takes_only_the_pinned_zip_and_only_the_pinned_files_from_it() {
+        let dir = folder("zip"); // WHAT: a fresh folder. WHY: its own files
+        let home = dir.join("home"); // WHAT: the service's folder. WHY: the cell waits there
+        std::fs::create_dir_all(&home).unwrap(); // WHAT: made. WHY: below
+        let zip = a_zip(&[(PROGRAM, b"the real cell"), ("Citadel Server.pdb", b"not pinned")]); // WHAT: the IT kit's zip, with an extra file. WHY: only the pinned files are taken
+        let pin = pin_for(&zip, b"the real cell"); // WHAT: its pin. WHY: as the build carries it
+        stage_zip(&zip, &home, &pin).unwrap(); // WHAT: taken. WHY: the pinned zip
+        assert_eq!(std::fs::read(home.join(STAGED).join(PROGRAM)).unwrap(), b"the real cell", "the program waits"); // WHAT: there. WHY: put in place at the next start
+        assert!(!home.join(STAGED).join("Citadel Server.pdb").exists(), "nothing unpinned is taken"); // WHAT: left behind. WHY: a planted file would load with the cell
+        assert!(swap_staged(&home, &pin).unwrap(), "and the start puts it in place"); // WHAT: swapped. WHY: the same step as an update
+        let other = a_zip(&[(PROGRAM, b"someone else's cell")]); // WHAT: any other zip. WHY: refused
+        let why = stage_zip(&other, &home, &pin).unwrap_err(); // WHAT: refused. WHY: not the pinned zip
+        assert!(why.contains("isn't the Citadel cell this Office Server was built with"), "{why}"); // WHAT: said. WHY: plain
+        let wrong_inside = a_zip(&[(PROGRAM, b"swapped program")]); // WHAT: a zip pinned by its hash, but its program isn't the pinned one. WHY: both checks hold
+        assert!(stage_zip(&wrong_inside, &home, &pin_for(&wrong_inside, b"the real cell")).unwrap_err().contains("isn't the pinned one"), "a program that isn't pinned is refused"); // WHAT: refused. WHY: every file checked
+        let missing = a_zip(&[("readme.txt", b"no program")]); // WHAT: a zip without the program. WHY: refused
+        assert!(stage_zip(&missing, &home, &pin_for(&missing, b"x")).unwrap_err().contains("has no"), "a zip without the program"); // WHAT: refused. WHY: nothing to run
+        assert!(!home.join(STAGED).exists(), "nothing half-made waits"); // WHAT: tidied. WHY: only a whole cell waits
+        let mut unpinned = pin.clone();
+        unpinned.source = None; // WHAT: a pin with no zip. WHY: refused
+        assert!(stage_zip(&zip, &home, &unpinned).is_err(), "no source, no zip"); // WHAT: refused. WHY: only the pinned zip
+        let _ = std::fs::remove_dir_all(&dir); // WHAT: tidied. WHY: a test leaves nothing
+    }
+
+    #[test]
+    fn a_pushed_cell_part_is_kept_by_plain_version_only() {
+        let dir = folder("pushed"); // WHAT: a fresh folder. WHY: its own files
+        let release: hub::update::Release = serde_json::from_value(serde_json::json!({"version":"9.1.0","channel":"stable","platform":hub::feed::CITADEL_PLATFORM,"published":"","notes":"","bytes":4,"digest":"00","download":"","signature":"","key":"","minimum_api_version":1})).unwrap(); // WHAT: a cell part's manifest. WHY: kept with it
+        keep_pushed(&dir, &release, b"part").unwrap(); // WHAT: kept. WHY: until the update
+        let (back, bytes) = pushed(&dir, "9.1.0").unwrap(); // WHAT: read back. WHY: the update uses it
+        assert_eq!((back.version.as_str(), bytes.as_slice()), ("9.1.0", b"part".as_slice()), "as kept"); // WHAT: the same. WHY: checked again when used
+        assert!(pushed(&dir, "9.2.0").is_none() && pushed(&dir, "../9.1.0").is_none(), "only that version, never a path"); // WHAT: none. WHY: plain versions only
+        let mut odd = release.clone();
+        odd.version = "..\\x".into(); // WHAT: a version that is a path. WHY: refused
+        assert!(keep_pushed(&dir, &odd, b"x").is_err(), "a version that is a path"); // WHAT: refused. WHY: never written outside
+        let mut server = release;
+        server.platform = hub::feed::SERVER_PLATFORM.into(); // WHAT: the server's own part. WHY: never kept here
+        assert!(keep_pushed(&dir, &server, b"x").is_err(), "only cell parts"); // WHAT: refused. WHY: as above
         let _ = std::fs::remove_dir_all(&dir); // WHAT: tidied. WHY: a test leaves nothing
     }
 }

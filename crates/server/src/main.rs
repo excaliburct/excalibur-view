@@ -107,6 +107,20 @@ fn main() {
         }
         "--reopen-claim" | "--make-admin" | "--reset-admins" | "--retry-citadel-move" => device_console(&first, Some(given.get(2..).map(|rest| rest.join(" ")).unwrap_or_default().as_str()).filter(|code| !code.is_empty())), // WHAT: the device list's console commands. WHY: §3 and the security review's M3; on the server itself
         #[cfg(windows)]
+        "--install-citadel-cell" => { // WHAT: the Citadel cell installed from the office's private IT kit. WHY: View's public release never carries it (Creede, 2026-11-13)
+            let Some(zip) = std::env::args_os().nth(2) else {
+                eprintln!("  Say which zip: hyperview-server --install-citadel-cell \"D:\\CitadelServer-1.1.2-win-x64-cell.zip\""); // WHAT: how to use it. WHY: a person types it
+                std::process::exit(2);
+            };
+            match hyperview_server::winsvc::install_citadel_cell(std::path::Path::new(&zip)) {
+                Ok(said) => println!("  {said}"), // WHAT: what was done. WHY: a person reads it
+                Err(why) => {
+                    eprintln!("  {why}"); // WHAT: why not. WHY: said plainly
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(windows)]
         "--roll-back" => match hyperview_server::winsvc::roll_back() { // WHAT: the version before the last update put back, server and cell together. WHY: critical 4: the documented rollback, for real
             Ok(said) => println!("  {said}"), // WHAT: what was done. WHY: a person reads it
             Err(why) => {

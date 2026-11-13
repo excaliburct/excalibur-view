@@ -130,14 +130,10 @@ pub fn install() -> Result<(), String> {
         .map_err(|e| format!("could not put the server in {}: {e}", home.display()))?;
     }
 
-    // The Citadel cell, from the `citadel\` folder the USB kit carries beside
-    // this program: checked file by file against the pin this program was
-    // built with, and put in place. Without that folder an installed cell is
-    // left as it is (an update brings the cell with the server).
-    if let Some(kit) = me.parent().map(|d| d.join(crate::cellbundle::FOLDER)).filter(|kit| kit.is_dir() && !same_file(kit, &home.join(crate::cellbundle::FOLDER))) {
-        let pin = crate::cellbundle::pinned().map_err(|why| format!("a citadel folder is beside this program, but {why}; nothing was installed"))?; // WHAT: this build's pin. WHY: critical 3: only the pinned cell is installed
-        crate::cellbundle::place_from(&kit, &home, &pin).map_err(|why| format!("the Citadel cell couldn't be installed: {why}"))?; // WHAT: checked and put in place. WHY: critical 3: install puts the cell in place
-    }
+    // The Citadel cell is never installed from here: it isn't in View's public
+    // release. An office licensed for it installs it afterwards with
+    // `--install-citadel-cell` and the zip from its private IT kit; an
+    // installed cell is left as it is (Fleet delivers it with each update).
 
     // Somebody may have run the plain program first and already set up an
     // office on it. Those drawings come along rather than being left behind
@@ -263,6 +259,42 @@ pub fn roll_back() -> Result<String, String> {
         (Ok(said), Err(e)) => Err(format!("{said}, but the service didn't start again ({e}); start \"{DISPLAY}\" in Services")), // WHAT: said. WHY: someone must act
         (Err(why), _) => Err(why), // WHAT: refused or failed; the service started again as it was. WHY: said
     }
+}
+
+/// `hyperview-server --install-citadel-cell "<zip>"`: an administrator
+/// installs the Citadel cell from the office's private IT kit. Refused unless
+/// the Office Server is installed, its licence lists `citadel`, and the zip is
+/// the one this build pins; then the pinned files are checked, left waiting
+/// as `citadel.new`, and the service is restarted, which checks the cell once
+/// more, puts it in place and starts it. What was done, in words.
+///
+/// # Errors
+///
+/// When any of those isn't so; nothing is installed then.
+pub fn install_citadel_cell(zip: &Path) -> Result<String, String> {
+    if !installed_program().is_file() {
+        return Err("the Office Server isn't installed here yet; install it first, then the Citadel cell".to_string()); // WHAT: refused. WHY: the cell runs inside the installed service
+    }
+    let mut config = crate::Config::from_environment(); // WHAT: the server's settings. WHY: its licence keys and data
+    config.data = data_folder(); // WHAT: the installed service's data. WHY: its licence is there
+    config.program_folder = Some(home()); // WHAT: the service's folder. WHY: the cell goes beside it
+    let store = crate::Store::open(&config.database(), &config.blobs()).map_err(|e| format!("the Office Server's data couldn't be opened ({e})"))?; // WHAT: its store. WHY: the licence it holds
+    let server = crate::api::Server::new(store, config); // WHAT: the server's view of its licence, the data folder's licence file taken as at a start. WHY: the same rule the service applies
+    if !crate::office::licensed(&server).contains(&hub::license::Module::Citadel) {
+        return Err(format!("{}; nothing was installed. Put the office's licence (listing citadel) in {} and run this again.", crate::cellbundle::NOT_LICENSED, data_folder().display())); // WHAT: refused. WHY: Creede, 2026-11-13: only licensed offices hold the cell
+    }
+    let size = std::fs::metadata(zip).map_err(|e| format!("{} couldn't be read ({e})", zip.display()))?.len(); // WHAT: its size. WHY: checked before it is read
+    if size > crate::cellbundle::ZIP_MOST {
+        return Err(format!("{} is too big to be the Citadel cell's zip", zip.display())); // WHAT: refused. WHY: never read whole
+    }
+    let bytes = std::fs::read(zip).map_err(|e| format!("{} couldn't be read ({e})", zip.display()))?; // WHAT: the zip. WHY: checked against the pin
+    let pin = crate::cellbundle::pinned()?; // WHAT: the cell this build pins. WHY: only that one
+    crate::cellbundle::stage_zip(&bytes, &home(), &pin)?; // WHAT: checked and waiting. WHY: put in place by the service's next start
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).map_err(|e| format!("the cell waits, but Windows would not let this reach the service manager ({e}); restart \"{DISPLAY}\" in Services"))?; // WHAT: the service manager. WHY: restarted next
+    let service = manager.open_service(NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::START).map_err(|e| format!("the cell waits, but the service couldn't be opened ({e}); restart \"{DISPLAY}\" in Services"))?; // WHAT: the service. WHY: likewise
+    stop_and_wait(&service); // WHAT: stopped. WHY: the cell's folder is swapped at the next start
+    service.start::<&str>(&[]).map_err(|e| format!("the cell waits, but the service didn't start again ({e}); start \"{DISPLAY}\" in Services"))?; // WHAT: started. WHY: it puts the cell in place and starts it
+    Ok(format!("The Citadel cell {} was checked against this Office Server's pin and installed. The service restarted, and starts the cell now.", pin.version)) // WHAT: said. WHY: a person reads it
 }
 
 fn stop_and_wait(service: &windows_service::service::Service) {

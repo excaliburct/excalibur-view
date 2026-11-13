@@ -2,16 +2,21 @@
 WHAT: the Office Server's install day at LatCon, end to end, on a throwaway GitHub Windows runner:
        a. Citadel Server 1.0.1 installed as the November 6 USB stick had it (built from its commit), and one LatCon PC paired
           with it, which moves its jobs up, so the server has data and a certificate the PCs have pinned;
-       b. the Office Server (built with the pinned Citadel cell) installed as a service from the USB kit that
-          tools/citadel_cell.py kit makes, with a TEST licence listing the citadel part, signed with a key made in the job;
-       c. at its first start: 1.0 stopped and disabled, its data moved into the cell, the certificate's SHA-256 unchanged,
-          1.0's service, its 03:30 task and its firewall rule removed, the cell's 47110 rule there, and the cell running in
-          its job object; the PC paired with 1.0 opens and saves its job on the cell, through the Office Server's list;
+       b. the Office Server installed as a service from its USB kit (no cell in it: View's release carries only the pin),
+          with a TEST licence listing the citadel part, signed with a key made in the job; then the cell installed by
+          hyperview-server --install-citadel-cell from the zip in LatCon's IT kit (tools/citadel_cell.py kit);
+       c. at the cell's first start: 1.0 stopped and disabled, its data moved into the cell, tls.pfx imported into the
+          machine's key store by the Office Server and kept byte for byte out of the cell's reach, 1.0's service, its
+          03:30 task and its firewall rule removed, the cell's 47110 rule there, the cell running in its job object and
+          showing 1.0.1's pin over TLS; the PC paired with 1.0 opens and saves its job on the cell;
        d. a first computer claims the office as its admin, approves a second, the second reaches a project, and the cell
           answers a device check for the second (office-device, LatCon Estimating's own client code);
        e. a failed move on a fresh install: 1.0 started again and the cell held; then the retry moves it;
-       f. an update to the next version through a stand-in feed (the cell with it), --roll-back putting the server and
-          its cell back, the version rolled back from not taken again, and a newer one taken.
+       f. an update to the next version through a stand-in feed, its cell pushed first over the maintenance channel as
+          Fleet pushes it, --roll-back putting the server and its cell back, the version rolled back from not taken
+          again, and a newer one taken;
+       g. a server not licensed for citadel refuses the cell, from the install command and from a push; then, licensed,
+          the same server makes a new key for a new office's cell, and keeps it across a restart.
 WHY:  none of this can run on the Linux build server (Windows services, the firewall, Task Scheduler, job objects, a
       restricted token, DPAPI). The Office Server's own tests use fakes for every Windows step.
 
@@ -19,15 +24,16 @@ Only on a GitHub runner: it installs services, opens firewall rules and runs a f
 the runner. No repository secret is used; every key here is made in the job and is a test key.
 
     pwsh -File deploy/windows-test/office-e2e.ps1 -View VIEW -Latcon LATCON -Old OLD.exe -Servers SERVERS -Kit KIT
-         -CellPart PART -Key KEY -Device DEVICE.exe -Work WORK
+         -CellPart PART -Release hyperview-release.exe -Key KEY -Device DEVICE.exe -Work WORK
 #>
 param(
     [Parameter(Mandatory = $true)][string] $View,       # WHAT: the View checkout. WHY: publish.py, test-feed.py.
     [Parameter(Mandatory = $true)][string] $Latcon,     # WHAT: the LatCon Estimating checkout, its client tests built. WHY: the PC paired with 1.0.
     [Parameter(Mandatory = $true)][string] $Old,        # WHAT: the USB's Citadel Server 1.0.1 "Citadel Server.exe". WHY: what the office server has.
     [Parameter(Mandatory = $true)][string] $Servers,    # WHAT: a folder of ExcaliburView-Server-<version>.exe. WHY: the install and the two updates.
-    [Parameter(Mandatory = $true)][string] $Kit,        # WHAT: citadel_cell.py kit's folder (it holds citadel\). WHY: the USB kit's cell.
-    [Parameter(Mandatory = $true)][string] $CellPart,   # WHAT: citadel_cell.py bundle's part. WHY: signed into each update.
+    [Parameter(Mandatory = $true)][string] $Kit,        # WHAT: citadel_cell.py kit's folder (it holds the pinned zip). WHY: LatCon's IT kit.
+    [Parameter(Mandatory = $true)][string] $CellPart,   # WHAT: citadel_cell.py bundle's part. WHY: pushed before each update, as Fleet pushes it.
+    [Parameter(Mandatory = $true)][string] $Release,    # WHAT: hyperview-release.exe, built with the test key. WHY: signs and bundles the cell part as Fleet's recipe does.
     [Parameter(Mandatory = $true)][string] $Key,        # WHAT: make-test-key.ps1's key file. WHY: signs the licence and the updates.
     [Parameter(Mandatory = $true)][string] $Device,     # WHAT: office-device's program. WHY: the two computers of part d.
     [Parameter(Mandatory = $true)][string] $Work,       # WHAT: a folder for sticks, the feed and the logs. WHY: the runner's temp.
@@ -66,6 +72,10 @@ $State = Join-Path $Work 'latcon-pc'                                          # 
 $Feed = Join-Path $Work 'feed'                                                # WHAT: the stand-in feed's releases. WHY: one folder each.
 New-Item -ItemType Directory -Force -Path $Work, $Logs, $State, $Feed | Out-Null   # WHAT: the folders. WHY: made before anything writes.
 $script:feedProcess = $null                                                   # WHAT: the feed's process. WHY: stopped at the end.
+$CellZip = (Get-ChildItem -LiteralPath $Kit -Filter '*.zip' | Select-Object -First 1).FullName   # WHAT: the pinned cell's zip in the IT kit. WHY: --install-citadel-cell takes it.
+$PinnedCell = ((Get-Content -Raw (Join-Path $View 'packaging/citadel-cell.json') | ConvertFrom-Json).files.'Citadel Server.exe')   # WHAT: the program's pinned SHA-256. WHY: the installed cell must be it.
+$MaintenanceKey = [Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(24)).ToLowerInvariant()   # WHAT: a test maintenance key. WHY: the cell part is pushed on the channel Fleet uses.
+$OfficeTls = Join-Path $OfficeHome 'citadel-tls'                              # WHAT: where the Office Server keeps the cell's key's name, certificate and the moved tls.pfx. WHY: cellkey.rs FOLDER.
 
 # WHAT: Windows' own answer to "is this process in a job?". WHY: the cell must run inside the Office Server's job object.
 Add-Type -Namespace E2E -Name Native -MemberDefinition @'
@@ -82,14 +92,9 @@ function Check([bool] $ok, [string] $what) {
     Write-Host "ok   $what"                   # WHAT: said. WHY: the log reads as the list of what was proved.
 }
 
-# WHAT: a file's SHA-256, asked again for up to ten seconds while it can't be read. WHY: at each start the Office Server
-# locks its own folder again (lockdown.rs, icacls step by step), and for a moment not even an administrator can read in it.
-function Sha([string] $path) {
-    for ($i = 0; ; $i++) {
-        try { return (Get-FileHash -Algorithm SHA256 -LiteralPath $path -ErrorAction Stop).Hash.ToLowerInvariant() }   # WHAT: the hash. WHY: compared byte for byte.
-        catch { if ($i -ge 20 -or $_.Exception -isnot [System.UnauthorizedAccessException]) { throw }; Start-Sleep -Milliseconds 500 }   # WHAT: tried again only while access is refused. WHY: anything else is a real failure.
-    }
-}
+# WHAT: a file's SHA-256. WHY: compared byte for byte. Read once: since 0.7.1 the Office Server locks its folder in one
+# Windows call per file, so an administrator can always read in it (before, a start left it unreadable for a moment).
+function Sha([string] $path) { (Get-FileHash -Algorithm SHA256 -LiteralPath $path -ErrorAction Stop).Hash.ToLowerInvariant() }
 
 # WHAT: waits for a condition, up to a limit. WHY: services and updates take a moment; never forever.
 function WaitFor([scriptblock] $condition, [int] $seconds, [string] $what) {
@@ -170,14 +175,10 @@ function OfficeVersion {
 
 # WHAT: the service's log, read while it is being written. WHY: the move's and the updates' lines are checked in it.
 function OfficeLogText {
-    for ($i = 0; $i -lt 20; $i++) {
-        try {
-            $stream = [System.IO.File]::Open($OfficeLog, 'Open', 'Read', 'ReadWrite, Delete')   # WHAT: opened beside the writer. WHY: the service holds it open.
-            try { return [System.IO.StreamReader]::new($stream).ReadToEnd() } finally { $stream.Dispose() }   # WHAT: all of it. WHY: searched.
-        } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { return '' }   # WHAT: none yet. WHY: nothing to read.
-        catch { Start-Sleep -Milliseconds 500 }                                 # WHAT: refused for a moment. WHY: the folder is being locked again at a start.
-    }
-    return ''                                                                   # WHAT: nothing readable. WHY: the caller waits on and asks again.
+    try {
+        $stream = [System.IO.File]::Open($OfficeLog, 'Open', 'Read', 'ReadWrite, Delete')   # WHAT: opened beside the writer. WHY: the service holds it open.
+        try { return [System.IO.StreamReader]::new($stream).ReadToEnd() } finally { $stream.Dispose() }   # WHAT: all of it. WHY: searched.
+    } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { return '' }   # WHAT: none yet. WHY: nothing to read; any other failure is a real one.
 }
 
 # WHAT: whether a program file carries a version's build mark. WHY: which version a kept .old is (hub::build_mark).
@@ -204,34 +205,59 @@ function LatCon([string] $phase, [string] $pin) {
     Check (Test-Path -LiteralPath (Join-Path $State "$phase.done")) "LatCon's $phase step really ran"   # WHAT: its done file. WHY: a skipped step can't pass.
 }
 
-# WHAT: the USB kit: the server program and the citadel\ folder beside it. WHY: what IT runs on install day.
+# WHAT: the USB kit: the server program alone. WHY: what IT runs on install day; the cell comes from LatCon's IT kit.
 function Stick([string] $version) {
     $stick = Join-Path $Work "usb-office-$version"                              # WHAT: the stick's folder. WHY: one per version.
-    if (-not (Test-Path -LiteralPath $stick)) {                                 # WHAT: made once. WHY: the same stick is used again in (e).
+    if (-not (Test-Path -LiteralPath $stick)) {                                 # WHAT: made once. WHY: the same stick is used again in (e) and (g).
         New-Item -ItemType Directory -Path $stick | Out-Null                    # WHAT: made. WHY: filled below.
         Copy-Item -LiteralPath (Join-Path $Servers "ExcaliburView-Server-$version.exe") -Destination (Join-Path $stick 'ExcaliburView-Server.exe')   # WHAT: the server. WHY: the kit's program.
-        Copy-Item -LiteralPath (Join-Path $Kit 'citadel') -Destination (Join-Path $stick 'citadel') -Recurse   # WHAT: citadel\ beside it. WHY: install checks it against the pin.
     }
     return (Join-Path $stick 'ExcaliburView-Server.exe')                        # WHAT: the program to run. WHY: --install.
 }
 
-# WHAT: the Office Server installed from the stick, with the test licence left in its data folder first. WHY: as IT does it, licensed for citadel.
-function InstallOffice([string] $version) {
+# WHAT: the Office Server installed from the stick, with the test licence left in its data folder first (unless -Unlicensed).
+# WHY:  as IT does it. Its report is read once: the folder is never unreadable now, even while the service locks it.
+function InstallOffice([string] $version, [switch] $Unlicensed) {
     New-Item -ItemType Directory -Force -Path $OfficeData | Out-Null            # WHAT: the data folder. WHY: the licence goes in before the first start.
-    Copy-Item -LiteralPath $script:licence -Destination $OfficeData -Force      # WHAT: the licence. WHY: picked up at start (license.rs).
+    if (-not $Unlicensed) { Copy-Item -LiteralPath $script:licence -Destination $OfficeData -Force }   # WHAT: the licence. WHY: picked up at start (license.rs).
     $exe = Stick $version                                                       # WHAT: the kit. WHY: below.
     & $exe --install                                                            # WHAT: the elevated install, as the double-click runs it. WHY: the runner is an administrator.
     $code = $LASTEXITCODE                                                       # WHAT: its exit code. WHY: checked.
-    $report = $null                                                             # WHAT: what it says. WHY: the reason, if it failed.
-    for ($i = 0; $i -lt 20 -and -not $report; $i++) {                           # WHAT: up to ten seconds. WHY: run 3 and 4 found the report there but not readable at first; each try's error is shown.
-        try { $report = [System.IO.File]::ReadAllText((Join-Path $OfficeHome 'last-install.txt')) }   # WHAT: read. WHY: below.
-        catch { Write-Host "reading last-install.txt, try $($i + 1): $($_.Exception.Message)"; Start-Sleep -Milliseconds 500 }   # WHAT: why not. WHY: the log says what kept it.
-    }
+    $report = [System.IO.File]::ReadAllText((Join-Path $OfficeHome 'last-install.txt'))   # WHAT: what it said, read once. WHY: lockdown.rs never leaves the folder without entries.
     Write-Host "install exited $code and said: $report"                        # WHAT: shown. WHY: the log has it.
-    if (-not $report) { Get-ChildItem -Force -LiteralPath $OfficeHome -ErrorAction Continue | Format-Table -AutoSize | Out-String | Write-Host }   # WHAT: what the install left. WHY: an install that says nothing must say something here.
     Check ($code -eq 0 -and "$report".StartsWith('ok')) "the Office Server $version installed as a service from the USB kit"   # WHAT: installed. WHY: (b).
     Check ((ServiceState $OfficeService) -eq 'RUNNING') "the $OfficeService service is RUNNING"   # WHAT: running. WHY: started by install.
-    Check ((Sha (Join-Path $OfficeHome 'citadel\Citadel Server.exe')) -eq (Sha (Join-Path $Kit 'citadel\Citadel Server.exe'))) "the kit's pinned cell is installed beside it"   # WHAT: the cell in place. WHY: critical 3.
+    Check (-not (Test-Path -LiteralPath (Join-Path $OfficeHome 'citadel'))) 'the USB kit installed no cell'   # WHAT: none yet. WHY: View's release never carries it.
+}
+
+# WHAT: the cell installed from LatCon's IT kit with the administrator command. WHY: (b); the only way in at install.
+function InstallCell {
+    $said = & $OfficeExe --install-citadel-cell $CellZip 2>&1 | Out-String    # WHAT: run, as IT runs it. WHY: the runner is an administrator.
+    Write-Host $said.TrimEnd()                                                  # WHAT: shown. WHY: the log has it.
+    Check ($LASTEXITCODE -eq 0 -and $said.Contains('was checked against this Office Server')) 'the pinned cell installed with --install-citadel-cell'   # WHAT: done. WHY: (b).
+    WaitFor { Test-Path -LiteralPath $CellExe } 60 'the cell put in place at the restart'   # WHAT: swapped in. WHY: the service's start puts it in place.
+    Check ((Sha $CellExe) -eq $PinnedCell) "the installed cell is the pinned one ($PinnedCell)"   # WHAT: the pinned program. WHY: critical 3.
+}
+
+# WHAT: the cell part for a version, signed with the test key and bundled as Fleet's recipe does, pushed over the maintenance
+#       channel as Fleet pushes it; the server's answer. WHY: (f) and (g): the cell never comes from the public feed.
+function PushCell([string] $version) {
+    $folder = Join-Path $Work "cell-push-$version"                              # WHAT: its own folder. WHY: one per version.
+    New-Item -ItemType Directory -Force -Path $folder | Out-Null                # WHAT: made. WHY: below.
+    & $Release sign --key $Key --version $version --platform windows-x64-citadel --out (Join-Path $folder 'manifest.json') $CellPart | Out-Host   # WHAT: signed. WHY: the same key as the server.
+    Check ($LASTEXITCODE -eq 0) "the cell part $version is signed"            # WHAT: signed. WHY: below.
+    & $Release bundle --version $version $CellPart (Join-Path $folder 'manifest.json') --wave stable --out (Join-Path $folder 'cell.avpkg') | Out-Host   # WHAT: bundled for the shelf. WHY: what Fleet pushes.
+    Check ($LASTEXITCODE -eq 0) "the cell part $version is bundled for Fleet's shelf"   # WHAT: bundled. WHY: below.
+    $body = Join-Path $folder 'push.json'                                       # WHAT: the package's payload. WHY: the body Fleet posts.
+    & $Python -c "import json,sys; json.dump(json.load(open(sys.argv[1]))['payload'], open(sys.argv[2], 'w'))" (Join-Path $folder 'cell.avpkg') $body   # WHAT: the payload taken out. WHY: posted as it is.
+    $answer = & "$env:SystemRoot\System32\curl.exe" -s -X POST -H "x-av-update-key: $MaintenanceKey" -H 'Content-Type: application/json' --data-binary "@$body" "http://127.0.0.1:$OfficePort/api/admin/update" | Out-String   # WHAT: pushed. WHY: the maintenance channel.
+    Write-Host "push of the cell part $version answered: $($answer.Trim())"    # WHAT: shown. WHY: the log has it.
+    return ($answer | ConvertFrom-Json)                                         # WHAT: the answer. WHY: checked by the caller.
+}
+
+# WHAT: the service's environment: the stand-in feed and the test maintenance key. WHY: the server reads the feed and opens the channel.
+function ServiceEnvironment {
+    New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$OfficeService" -Name Environment -PropertyType MultiString -Value @("HYPERVIEW_RELEASE_FEED=http://127.0.0.1:$FeedPort/releases", "HYPERVIEW_MAINTENANCE_KEY=$MaintenanceKey") -Force | Out-Null   # WHAT: set. WHY: never the public feed
 }
 
 # WHAT: a signed release for the stand-in feed: the server, its cell part and a stand-in desktop app. WHY: (f) updates through it.
@@ -239,13 +265,13 @@ function Publish([string] $version) {
     $folder = Join-Path $Feed "v$version"                                       # WHAT: the release's folder. WHY: its tag.
     $build = Join-Path $Work "release-$version"                                 # WHAT: where it is put together. WHY: moved in whole.
     New-Item -ItemType Directory -Force -Path $build | Out-Null                 # WHAT: made. WHY: filled below.
-    $app = Join-Path $build 'ExcaliburView.exe'                                 # WHAT: a stand-in desktop app. WHY: a release always names one; the server takes its own part first.
+    $app = Join-Path $build 'ExcaliburView.exe'                                 # WHAT: a stand-in desktop app. WHY: a release always names one; the server takes its own part first. No cell part: the public release never carries it.
     [System.IO.File]::WriteAllText($app, "MZ a stand-in for the desktop app $version")   # WHAT: written. WHY: signed like any file.
     Copy-Item -LiteralPath (Join-Path $Servers "ExcaliburView-Server-$version.exe") -Destination (Join-Path $build 'ExcaliburView-Server.exe')   # WHAT: the server. WHY: the update.
-    Copy-Item -LiteralPath $CellPart -Destination (Join-Path $build 'ExcaliburOffice-Citadel.tar.gz')   # WHAT: the cell part. WHY: the cell updates with the server.
     & $Python (Join-Path $View 'tools/publish.py') sign --key $Key --version $version --channel stable --app $app `
-        --server (Join-Path $build 'ExcaliburView-Server.exe') --citadel (Join-Path $build 'ExcaliburOffice-Citadel.tar.gz') --out (Join-Path $build 'release.json')   # WHAT: signed, as a real release is. WHY: publish.py's own sign.
-    Check ($LASTEXITCODE -eq 0) "release $version signed with the test key, its cell part checked against the pin"   # WHAT: signed. WHY: (f).
+        --server (Join-Path $build 'ExcaliburView-Server.exe') --out (Join-Path $build 'release.json')   # WHAT: signed, as a real release is, with no --citadel. WHY: publish.py's own sign.
+    Check ($LASTEXITCODE -eq 0) "release $version signed with the test key, with no cell in it"   # WHAT: signed. WHY: (f).
+    Check (-not (Get-Content -Raw (Join-Path $build 'release.json')).Contains('windows-x64-citadel')) "release $version names no cell part"   # WHAT: nothing of the cell. WHY: View's releases are public.
     New-Item -ItemType Directory -Force -Path $folder | Out-Null                # WHAT: the feed's folder. WHY: the files go in first.
     Get-ChildItem -LiteralPath $build | Where-Object Name -ne 'release.json' | Copy-Item -Destination $folder   # WHAT: the files. WHY: before the manifest.
     Copy-Item -LiteralPath (Join-Path $build 'release.json') -Destination $folder   # WHAT: the manifest last. WHY: the feed lists a release only once it has one.
@@ -294,10 +320,11 @@ try {
     Check (RuleThere $CitadelRule) "1.0.1's '$CitadelRule' firewall rule is there"   # WHAT: its rule. WHY: it must go after the move.
     LatCon 'move' $pin                                                          # WHAT: a PC pairs with the 6-digit code and moves its jobs up. WHY: data on 1.0.1.
 
-    Step '(b) the Office Server installed from the USB kit, licensed for citadel'
+    Step '(b) the Office Server installed from the USB kit, licensed for citadel; the cell from LatCon''s IT kit'
     InstallOffice $First                                                        # WHAT: installed. WHY: below.
+    InstallCell                                                                 # WHAT: the cell installed. WHY: (b).
 
-    Step '(c) its first start: 1.0''s data moved into the cell, 1.0 taken away'
+    Step '(c) the cell''s first start: 1.0''s data moved into the cell, its key imported, 1.0 taken away'
     WaitForCell 600 0                                                           # WHAT: the move, then the cell. WHY: the move copies every file first.
     $log = OfficeLogText                                                        # WHAT: the service's log. WHY: checked below.
     Check ($log.Contains('was stopped and disabled for the move')) '1.0 was stopped and disabled before the move'   # WHAT: stopped first. WHY: two servers never run over the same data.
@@ -307,7 +334,9 @@ try {
     Check (-not (RuleThere $CitadelRule)) "1.0's firewall rule is removed"      # WHAT: gone. WHY: nothing open for a program that doesn't run.
     Check (RuleThere $CellRule) "the cell's 47110 rule is there"                # WHAT: there. WHY: the PCs reach the cell.
     Check (-not (Test-Path -LiteralPath $CitadelData)) "1.0's data folder isn't where it was (kept renamed)"   # WHAT: renamed. WHY: never read again.
-    Check ((Sha (Join-Path $CellData 'tls.pfx')) -eq $pfx) "the certificate file moved byte for byte (SHA-256 $pfx)"   # WHAT: the same file. WHY: the PCs' pins.
+    Check ((Sha (Join-Path $OfficeTls 'tls.pfx')) -eq $pfx) "the certificate file was imported and kept byte for byte in the Office Server's folder (SHA-256 $pfx)"   # WHAT: the same file. WHY: the PCs' pins.
+    Check (-not (Test-Path -LiteralPath (Join-Path $CellData 'tls.pfx'))) 'tls.pfx is no longer in the cell''s folder'   # WHAT: out of the cell's reach. WHY: the cell only uses its key.
+    Check ((Get-Content -Raw (Join-Path $OfficeTls 'key-name.txt')).Trim().Length -gt 0) 'the Office Server keeps the key''s name'   # WHAT: kept. WHY: opened at every start.
     Check ((Pin $Port) -eq $pin) "the cell shows 1.0.1's certificate on 47110 ($pin)"   # WHAT: the same pin on the wire. WHY: no PC pairs again.
     Check (Test-Path -LiteralPath (Join-Path $CellData 'state\moved-from.json')) "the cell's folder is marked as moved"   # WHAT: marked. WHY: never moved twice.
     $cell = CellProcess                                                         # WHAT: the cell's process. WHY: checked below.
@@ -321,9 +350,14 @@ try {
 
     Step '(f) an update through the feed, --roll-back, and a newer update'
     $script:feedProcess = Start-Process -FilePath $Python -ArgumentList @("`"$(Join-Path $View 'deploy/windows-test/test-feed.py')`"", "`"$Feed`"", $FeedPort, "`"$(Join-Path $Logs 'test-feed.log')`"") -PassThru -WindowStyle Hidden   # WHAT: the stand-in feed. WHY: the server reads it.
-    Publish $Second                                                             # WHAT: the next version, signed. WHY: the update.
-    New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$OfficeService" -Name Environment -PropertyType MultiString -Value @("HYPERVIEW_RELEASE_FEED=http://127.0.0.1:$FeedPort/releases") -Force | Out-Null   # WHAT: the service reads the stand-in feed. WHY: never the public one.
-    Restart-Service -Name $OfficeService -Force                                 # WHAT: restarted with it. WHY: the feed is looked at 20 s after a start.
+    ServiceEnvironment                                                          # WHAT: the stand-in feed and the maintenance key. WHY: below.
+    Restart-Service -Name $OfficeService -Force                                 # WHAT: restarted with them. WHY: the channel opens and the feed is read after a start.
+    OfficeAt $First 300                                                         # WHAT: back, with its cell, before anything is pushed. WHY: a restart keeps the key.
+    Check ((Pin $Port) -eq $pin) 'the cell shows the same certificate after a restart'   # WHAT: unchanged. WHY: the kept key reused.
+    $pushed = PushCell $Second                                                  # WHAT: the next version's cell, pushed as Fleet does. WHY: an update never strands the cell.
+    Check ($pushed.written.Count -eq 1 -and $pushed.skipped.Count -eq 0) "the cell part $Second is kept for the update"   # WHAT: taken. WHY: a licensed office.
+    Publish $Second                                                             # WHAT: the next version on the feed, signed, after its cell was delivered. WHY: the update.
+    Restart-Service -Name $OfficeService -Force                                 # WHAT: restarted. WHY: the feed is looked at 20 s after a start.
     OfficeAt $Second 300                                                        # WHAT: updated, cell and all. WHY: (f).
     Check (MarkedAs $OfficeKept $First) "the server before ($First) is kept as Hyperview-Server.old"   # WHAT: kept. WHY: for a rollback.
     Check (Test-Path -LiteralPath (Join-Path $OfficeHome 'citadel.old\Citadel Server.exe')) 'the cell before is kept as citadel.old'   # WHAT: kept. WHY: put back with the server.
@@ -336,6 +370,8 @@ try {
     Check ((Test-Path -LiteralPath (Join-Path $OfficeHome 'citadel\Citadel Server.exe')) -and (Test-Path -LiteralPath (Join-Path $OfficeHome 'citadel.old\Citadel Server.exe'))) 'the cell was swapped back with it'   # WHAT: both cells. WHY: put back together.
     WaitFor { (OfficeLogText).Contains("version $Second is not taken") } 180 "the server to look at the feed and leave $Second"   # WHAT: held. WHY: a rollback holds.
     Check ((OfficeVersion) -eq $First) "$Second is not taken again"             # WHAT: still the version before. WHY: (f).
+    $pushed = PushCell $Third                                                   # WHAT: its cell, pushed first. WHY: as above.
+    Check ($pushed.written.Count -eq 1) "the cell part $Third is kept for the update"   # WHAT: taken. WHY: below.
     Publish $Third                                                              # WHAT: a newer one. WHY: taken.
     Restart-Service -Name $OfficeService -Force                                 # WHAT: restarted. WHY: looked at 20 s after.
     OfficeAt $Third 300                                                         # WHAT: the newer one taken. WHY: (f).
@@ -354,7 +390,9 @@ try {
     $pfx2 = Sha (Join-Path $CitadelData 'tls.pfx')                              # WHAT: its file. WHY: likewise.
     $link = Join-Path $CitadelData 'e2e-link'                                   # WHAT: a junction inside 1.0's folder. WHY: the move refuses a folder holding a link.
     New-Item -ItemType Junction -Path $link -Target $env:TEMP | Out-Null        # WHAT: made. WHY: the move fails, as a bad folder would.
-    InstallOffice $First                                                        # WHAT: the Office Server again. WHY: its first start tries the move.
+    InstallOffice $First                                                        # WHAT: the Office Server again. WHY: below.
+    $said = & $OfficeExe --install-citadel-cell $CellZip 2>&1 | Out-String    # WHAT: the cell, as in (b). WHY: its first start tries the move.
+    Write-Host $said.TrimEnd()                                                  # WHAT: shown. WHY: the log has it.
     WaitFor { (OfficeLogText).Contains("ALARM: Citadel Server 1.0's data couldn't be moved") } 300 'the failed move''s alarm'   # WHAT: the alarm. WHY: (e).
     WaitFor { (ServiceState $CitadelService) -eq 'RUNNING' -and "$(ListenerPath $Port)" -ilike "$CitadelFolder\*" } 120 '1.0 to answer on 47110 again'   # WHAT: 1.0's program back on its port. WHY: (e).
     Check ((ServiceState $CitadelService) -eq 'RUNNING') '1.0 was started again'   # WHAT: running. WHY: estimating carries on.
@@ -372,8 +410,38 @@ try {
     Check ((Pin $Port) -eq $pin2) 'the cell shows the certificate 1.0 had'      # WHAT: the same pin. WHY: no PC pairs again.
     Check (InJob (CellProcess).ProcessId) 'the cell runs inside the Office Server''s job object'   # WHAT: in its job. WHY: as before.
 
+    Check ((Sha (Join-Path $OfficeTls 'tls.pfx')) -eq $pfx2) 'the retry imported 1.0''s certificate and kept it'   # WHAT: the same file. WHY: the pins.
+
+    Step '(g) a server not licensed for citadel refuses the cell; licensed, a new office''s cell gets a new key and keeps it'
+    & $OfficeExe --uninstall                                                    # WHAT: the Office Server taken off. WHY: an office without citadel next.
+    Check ($LASTEXITCODE -eq 0) 'the Office Server is uninstalled'              # WHAT: gone. WHY: below.
+    WaitFor { (Running $CellExe).Count -eq 0 } 30 'the cell to end with its server'   # WHAT: the job ended. WHY: it dies with the server.
+    Copy-Item -LiteralPath $OfficeLog -Destination (Join-Path $Logs 'hyperview-server-before-g.log')   # WHAT: the log so far, kept. WHY: its folder is removed next.
+    Remove-Item -LiteralPath (Join-Path $env:ProgramData 'Excalibur Hyperview'), (Join-Path $env:ProgramData 'Excalibur Office') -Recurse -Force   # WHAT: its folders gone. WHY: a new office, Mesa Fab's shape.
+    InstallOffice $First -Unlicensed                                            # WHAT: installed with no licence. WHY: View only.
+    $said = & $OfficeExe --install-citadel-cell $CellZip 2>&1 | Out-String    # WHAT: the cell offered anyway. WHY: refused.
+    Write-Host $said.TrimEnd()                                                  # WHAT: shown. WHY: the log has it.
+    Check ($LASTEXITCODE -ne 0 -and $said.Contains("doesn't list citadel")) 'the install command refuses the cell without a licence for it'   # WHAT: refused. WHY: Creede, 2026-11-13.
+    Check (-not (Test-Path -LiteralPath (Join-Path $OfficeHome 'citadel')) -and -not (Test-Path -LiteralPath (Join-Path $OfficeHome 'citadel.new'))) 'no cell is held'   # WHAT: nothing kept. WHY: an unlicensed office never holds it.
+    ServiceEnvironment                                                          # WHAT: the maintenance key. WHY: the push below.
+    Restart-Service -Name $OfficeService -Force                                 # WHAT: restarted with it. WHY: the channel opens.
+    WaitFor { (OfficeVersion) -eq $First } 120 'the unlicensed server answering'   # WHAT: up. WHY: below.
+    $pushed = PushCell $First                                                   # WHAT: the cell pushed to it, as Fleet must never do. WHY: refused anyway.
+    Check ($pushed.written.Count -eq 0 -and "$($pushed.skipped)".Contains("doesn't list citadel")) 'a pushed cell is refused without a licence for it'   # WHAT: refused. WHY: as above.
+    Check (-not (Test-Path -LiteralPath (Join-Path $OfficeHome 'citadel-parts'))) 'nothing of the pushed cell is kept'   # WHAT: nothing held. WHY: as above.
+    Copy-Item -LiteralPath $script:licence -Destination $OfficeData -Force      # WHAT: the licence now. WHY: the same server, licensed.
+    $from = (OfficeLogText).Length                                              # WHAT: where the log is now. WHY: only new alarms count.
+    InstallCell                                                                 # WHAT: the cell installed. WHY: a new office's first start.
+    WaitForCell 300 $from                                                       # WHAT: up, with a new key. WHY: nothing to move.
+    $pin3 = Pin $Port                                                           # WHAT: the new office's pin. WHY: kept across a restart.
+    Check ($pin3 -ne $pin -and $pin3 -ne $pin2) 'a new office''s cell has a key of its own'   # WHAT: new. WHY: made by the Office Server.
+    Check (-not (Test-Path -LiteralPath (Join-Path $OfficeTls 'tls.pfx'))) 'no tls.pfx: the key was made in the machine''s store, never in a file'   # WHAT: none. WHY: the key never leaves Windows.
+    Restart-Service -Name $OfficeService -Force                                 # WHAT: restarted. WHY: the key is reused.
+    OfficeAt $First 120                                                         # WHAT: back with its cell. WHY: below.
+    Check ((Pin $Port) -eq $pin3) 'the new office''s cell keeps its certificate across a restart'   # WHAT: unchanged. WHY: the PCs pin it.
+
     Step 'Passed'
-    Write-Host 'Office Server end to end on Windows: 1.0.1 moved into the cell at first start, two computers linked, a project and the cell reached, an update rolled back and a newer one taken, a failed move held and retried.'   # WHAT: the summary. WHY: one line for the run page.
+    Write-Host 'Office Server end to end on Windows: the cell installed from the IT kit, 1.0.1 moved into it and its key imported, two computers linked, a project and the cell reached, an update with its pushed cell rolled back and a newer one taken, a failed move held and retried, an unlicensed server refusing the cell, and a new office''s key made and kept.'   # WHAT: the summary. WHY: one line for the run page.
 } catch {
     Write-Host '--- the end of the Office Server''s log ---'                    # WHAT: a heading. WHY: the failure's cause is usually there.
     (OfficeLogText) -split "`n" | Select-Object -Last 80 | ForEach-Object { Write-Host $_ }   # WHAT: its last lines. WHY: read on the run page without downloading.
