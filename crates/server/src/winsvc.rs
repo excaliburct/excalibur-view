@@ -278,6 +278,22 @@ pub fn install_citadel_cell(zip: &Path) -> Result<String, String> {
     if !installed_program().is_file() {
         return Err("the Office Server isn't installed here yet; install it first, then the Citadel cell".to_string()); // WHAT: refused. WHY: the cell runs inside the installed service
     }
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).map_err(|e| format!("Windows would not let this reach the service manager ({e}); run it as an administrator"))?; // WHAT: the service manager. WHY: the service is stopped while its data is read
+    let service = manager.open_service(NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::START).map_err(|e| format!("the Office Server's service couldn't be opened ({e}); run this as an administrator"))?; // WHAT: the service. WHY: stopped and started again
+    stop_and_wait(&service); // WHAT: stopped first. WHY: its database is opened here; a running service holding it made the open fail (the Windows end-to-end test, try 19)
+    let done = stage_citadel_cell(zip); // WHAT: checked and waiting, or refused. WHY: below
+    let started = service.start::<&str>(&[]); // WHAT: started again, whatever happened. WHY: the office is never left without its server; it puts a waiting cell in place and starts it
+    match (done, started) {
+        (Ok(version), Ok(())) => Ok(format!("The Citadel cell {version} was checked against this Office Server's pin and installed. The service restarted, and starts the cell now.")), // WHAT: said. WHY: a person reads it
+        (Ok(_), Err(e)) => Err(format!("the cell waits, but the service didn't start again ({e}); start \"{DISPLAY}\" in Services")), // WHAT: said. WHY: someone must act
+        (Err(why), _) => Err(why), // WHAT: refused; the service runs as before. WHY: said
+    }
+}
+
+/// The work of [`install_citadel_cell`], with the service stopped: the
+/// licence checked, the zip checked against the pin and its files left
+/// waiting. The cell's version.
+fn stage_citadel_cell(zip: &Path) -> Result<String, String> {
     let mut config = crate::Config::from_environment(); // WHAT: the server's settings. WHY: its licence keys and data
     config.data = data_folder(); // WHAT: the installed service's data. WHY: its licence is there
     config.program_folder = Some(home()); // WHAT: the service's folder. WHY: the cell goes beside it
@@ -286,6 +302,7 @@ pub fn install_citadel_cell(zip: &Path) -> Result<String, String> {
     if !crate::office::licensed(&server).contains(&hub::license::Module::Citadel) {
         return Err(format!("{}; nothing was installed. Put the office's licence (listing citadel) in {} and run this again.", crate::cellbundle::NOT_LICENSED, data_folder().display())); // WHAT: refused. WHY: Creede, 2026-11-13: only licensed offices hold the cell
     }
+    drop(server); // WHAT: the database let go. WHY: before the service starts again
     let size = std::fs::metadata(zip).map_err(|e| format!("{} couldn't be read ({e})", zip.display()))?.len(); // WHAT: its size. WHY: checked before it is read
     if size > crate::cellbundle::ZIP_MOST {
         return Err(format!("{} is too big to be the Citadel cell's zip", zip.display())); // WHAT: refused. WHY: never read whole
@@ -293,11 +310,7 @@ pub fn install_citadel_cell(zip: &Path) -> Result<String, String> {
     let bytes = std::fs::read(zip).map_err(|e| format!("{} couldn't be read ({e})", zip.display()))?; // WHAT: the zip. WHY: checked against the pin
     let pin = crate::cellbundle::pinned()?; // WHAT: the cell this build pins. WHY: only that one
     crate::cellbundle::stage_zip(&bytes, &home(), &pin)?; // WHAT: checked and waiting. WHY: put in place by the service's next start
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).map_err(|e| format!("the cell waits, but Windows would not let this reach the service manager ({e}); restart \"{DISPLAY}\" in Services"))?; // WHAT: the service manager. WHY: restarted next
-    let service = manager.open_service(NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::START).map_err(|e| format!("the cell waits, but the service couldn't be opened ({e}); restart \"{DISPLAY}\" in Services"))?; // WHAT: the service. WHY: likewise
-    stop_and_wait(&service); // WHAT: stopped. WHY: the cell's folder is swapped at the next start
-    service.start::<&str>(&[]).map_err(|e| format!("the cell waits, but the service didn't start again ({e}); start \"{DISPLAY}\" in Services"))?; // WHAT: started. WHY: it puts the cell in place and starts it
-    Ok(format!("The Citadel cell {} was checked against this Office Server's pin and installed. The service restarted, and starts the cell now.", pin.version)) // WHAT: said. WHY: a person reads it
+    Ok(pin.version) // WHAT: its version. WHY: said
 }
 
 fn stop_and_wait(service: &windows_service::service::Service) {
