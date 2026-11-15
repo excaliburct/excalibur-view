@@ -1,11 +1,11 @@
 {
   "_readme": "The Citadel cell this Office Server build runs, pinned. View's public releases carry only this pin, never the cell: the zip is a private LatCon Estimating release. The server is built with this file inside it: --install-citadel-cell takes only the zip whose SHA-256 is 'source.sha256', and only the files in 'files', each checked against its SHA-256; the cell program is run only when its SHA-256 is the one here. tools/citadel_cell.py makes the IT kit's copy of the zip and the cell part Fleet signs and pushes to licensed offices. An empty 'files' means this build runs no cell. Fill in all four at once, in one commit, from a LatCon Estimating release that has been tested end to end.",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "source": {
-    "url": "https://github.com/excaliburct/LatconEstimating/releases/download/citadel-server-1.1.4-cell/CitadelServer-1.1.4-win-x64-cell.zip",
-    "sha256": "c367272fed338c493588acfb6335b6d34b104418631720c224878c9d4bea2747"
+    "url": "https://github.com/excaliburct/LatconEstimating/releases/download/citadel-server-1.1.5-cell/CitadelServer-1.1.5-win-x64-cell.zip",
+    "sha256": "056aa2cdd5ee0970809a9024c6a884642722bc65a42d22f46da24253308ead43"
   },
   "files": {
-    "Citadel Server.exe": "f456c9931306232e87dd2c3361a76b1fd8085a0ba55ffac37a3409b43bd457b7"
+    "Citadel Server.exe": "83a47aa90efe5c973c9efacf15b18d6c2ff523a0c374bbb355c58e5ce3d57a98"
   }
 }
