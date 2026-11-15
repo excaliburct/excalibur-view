@@ -254,19 +254,41 @@ pub struct Measure {
     pub volume: Vec<Format>,
 }
 
+/// The most number formats read from any one list of a `/Measure`. A real
+/// one has one to three (feet, then inches); a file listing thousands is
+/// read no further than this.
+pub const MOST_FORMATS: usize = 8; // WHAT: eight per list. WHY: security review M1: a hostile list of a million entries can't cost a million reads
+
 impl Measure {
+    /// A `/Measure` whose number formats are all written inline.
     pub fn read(dict: &Dict) -> Option<Measure> {
-        let list = |key: &str| -> Vec<Format> {
-            dict.get(key)
-                .and_then(|o| o.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|o| o.as_dict())
-                        .map(Format::read)
-                        .collect()
+        Measure::from_lists(dict, |key| {
+            dict.get(key).and_then(|o| o.as_array()).map(|a| a.iter().take(MOST_FORMATS).filter_map(|o| o.as_dict()).map(Format::read).collect()).unwrap_or_default() // WHAT: up to eight inline formats. WHY: as before, bounded
+        })
+    }
+
+    /// A `/Measure` read from `doc`, its format lists and the formats in them
+    /// followed through any references. Nothing is copied whole: each format
+    /// is read where it is.
+    pub fn read_in(doc: &pdf::Document, dict: &Dict) -> Option<Measure> {
+        let formats = |list: &[Object]| -> Vec<Format> {
+            list.iter()
+                .take(MOST_FORMATS) // WHAT: eight at most. WHY: security review M1
+                .filter_map(|o| match o {
+                    Object::Ref(_) => doc.follow(o).as_dict().map(Format::read), // WHAT: a format kept as its own object, read in place. WHY: some exporters write them so; the object is shared, never cloned
+                    inline => inline.as_dict().map(Format::read), // WHAT: an inline format. WHY: the usual case
                 })
-                .unwrap_or_default()
+                .collect()
         };
+        Measure::from_lists(dict, |key| match dict.get(key) {
+            Some(Object::Ref(_)) => doc.at(dict, key).as_array().map(formats).unwrap_or_default(), // WHAT: a list kept as its own object. WHY: read through its reference
+            Some(list) => list.as_array().map(formats).unwrap_or_default(), // WHAT: an inline list. WHY: borrowed, not copied
+            None => Vec::new(), // WHAT: no such list. WHY: most measures have only some
+        })
+    }
+
+    /// A measure from its format lists, `None` without an X list.
+    fn from_lists(dict: &Dict, list: impl Fn(&str) -> Vec<Format>) -> Option<Measure> {
         let x = list("X");
         if x.is_empty() {
             return None;

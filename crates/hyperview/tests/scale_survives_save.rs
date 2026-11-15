@@ -151,8 +151,8 @@ fn an_autocad_sheet_with_its_own_viewports_keeps_the_new_scale_and_its_details()
     ); // WHAT: a plan at 1/8" inside the margins and a 1" detail. WHY: an architect's set as exported
     let again = survives("autocad", &classic(&bodies(&vp, &[]))); // WHAT: set 1/4", save, reopen. WHY: the sheet-wide one is written last and must still be the one read
     assert_eq!(inch_at(&again, [2300.0, 1000.0]), "1 ft", "the detail keeps its own 1\" scale"); // WHAT: inside the detail. WHY: never overwritten
-    assert_eq!(inch_at(&again, [1000.0, 800.0]), "4'-0\"", "the plan measures at the 1/4\" just set, not AutoCAD's 1/8\""); // WHAT: inside the plan viewport. WHY: the plan is the sheet; a measurement there must use the scale the person set
-    assert_eq!(annot::viewport::regions(&again.file, &again.file.page(0).unwrap()).len(), 2, "the sheet's scale and the detail, the plan's 1/8\" replaced"); // WHAT: two regions. WHY: never three disagreeing
+    assert_eq!(inch_at(&again, [1000.0, 800.0]), "8 ft", "the plan viewport keeps its own 1/8\", as main kept it"); // WHAT: inside the plan. WHY: security review L4: only the covering region is replaced
+    assert_eq!(annot::viewport::regions(&again.file, &again.file.page(0).unwrap()).len(), 3, "the sheet's scale first, the plan and the detail kept"); // WHAT: three regions. WHY: nothing but the covering one replaced
 }
 
 #[test]

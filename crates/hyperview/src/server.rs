@@ -288,7 +288,10 @@ pub enum Told {
     /// A kept sign-in couldn't be checked because the server didn't answer
     /// (off, asleep, or a tunnel still reconnecting). The sign-in is kept and
     /// the window tries again a little later.
-    Unreachable { why: String }, // WHAT: what got in the way, in words. WHY: an iPad reopening before its VPN is back must not lose its server and sign-in
+    Unreachable { why: String, retry: bool }, // WHAT: what got in the way, in words, and whether to try again by itself. WHY: an iPad reopening before its VPN is back must not lose its server and sign-in; only a pinned server is retried (security review L1)
+    /// A kept sign-in would have gone to a server this computer holds no
+    /// pin for, so it wasn't sent: the person signs in again, which links it.
+    SignInAgain { why: String }, // WHAT: the reason, in words. WHY: security review L1: no kept token over a connection first trusted on the way
     /// What the server says about reaching it from outside the shop.
     RemoteIs(Box<hub::Remote>),
     Projects(Vec<Project>),
@@ -508,9 +511,15 @@ fn move_key_once(from: &std::path::Path, to: &std::path::Path) -> std::io::Resul
 /// shared with the other Excalibur apps on this computer; every request
 /// signed by this computer's device key.
 fn open(base: &str) -> Result<Client, hub::client::Trouble> {
+    open_as(base, false) // WHAT: a first contact allowed. WHY: signing in, joining or setting up is how a server gets linked
+}
+
+/// [`open`], refusing a first contact when `kept_sign_in` is set: a kept
+/// token only ever goes to a server this computer already holds a pin for.
+fn open_as(base: &str, kept_sign_in: bool) -> Result<Client, hub::client::Trouble> {
     let shared = hub::office::shared_file(); // WHAT: the office.json every app shares. WHY: §2.3
     let pin = confirmed(base); // WHAT: the new server's pin the person confirmed for this address, if any. WHY: only that very pin may take the place of the one this computer knows
-    let also = hub::secure::Also { shared: shared.as_deref(), office_keys: crate::trust::OFFICE_KEYS, confirmed: pin.as_deref() }; // WHAT: the shared file, the office keys, and the confirmed pin. WHY: guards 5 and 6, and the client review
+    let also = hub::secure::Also { shared: shared.as_deref(), office_keys: crate::trust::OFFICE_KEYS, confirmed: pin.as_deref(), no_first_contact: kept_sign_in }; // WHAT: the shared file, the office keys, and the confirmed pin. WHY: guards 5 and 6, and the client review
     let client = hub::secure::open_with(base, &pin_book(), also)?; // WHAT: moved to HTTPS and kept there. WHY: sign-ins and drawings encrypted on the office network
     Ok(match device() {
         Some(key) => client.with_device(key), // WHAT: signed. WHY: §4
@@ -617,6 +626,8 @@ struct Resuming {
     rejected: bool, // WHAT: a server said the token is no good. WHY: the only failure that forgets the sign-in
     refused: Option<String>, // WHAT: a server that answered but couldn't be trusted, or empty while waiting for approval. WHY: said, rather than signing the person out quietly
     unreachable: Option<String>, // WHAT: why the last address didn't answer. WHY: said while the window tries again
+    first_contact: Option<String>, // WHAT: the kept sign-in would have gone to a server this computer holds no pin for. WHY: security review L1: the person signs in instead
+    pinned: bool, // WHAT: the shop's server is held to a pin. WHY: security review L1: only then is a kept sign-in tried again by itself
 }
 
 impl Resuming {
@@ -624,6 +635,10 @@ impl Resuming {
     /// tried with the sign-in.
     fn open_failed(&mut self, e: hub::client::Trouble, pinned_base: bool) -> bool {
         match e {
+            hub::client::Trouble::Refused(p) if p.error == hub::secure::FIRST_CONTACT => {
+                self.first_contact = Some(p.message); // WHAT: never sent. WHY: no kept token over a connection first trusted on the way
+                true
+            }
             e @ hub::client::Trouble::Refused(_) => {
                 self.refused = Some(e.to_string()); // WHAT: a changed certificate, or not the office server. WHY: never connected to
                 false
@@ -671,10 +686,13 @@ impl Resuming {
         if self.rejected {
             return Some(Told::SignedOut); // WHAT: forgotten. WHY: the server said the sign-in is over
         }
+        if let Some(why) = self.first_contact {
+            return Some(Told::SignInAgain { why }); // WHAT: the sign-in window. WHY: linking a server is the person's step, never a kept token's
+        }
         match self.refused {
             Some(why) if why.is_empty() => None, // WHAT: waiting. WHY: the waiting screen is open
             Some(why) => Some(Told::Trouble(why)), // WHAT: the reason. WHY: a person can act on it
-            None => Some(Told::Unreachable { why: self.unreachable.unwrap_or_else(|| "nothing answered".into()) }), // WHAT: kept, and tried again. WHY: not reaching a server is never a sign-out
+            None => Some(Told::Unreachable { why: self.unreachable.unwrap_or_else(|| "nothing answered".into()), retry: self.pinned }), // WHAT: kept, and tried again when pinned. WHY: not reaching a server is never a sign-out; only a pinned server is retried by itself
         }
     }
 }
@@ -685,6 +703,20 @@ impl Resuming {
 pub fn resume_wait(tries: u32) -> std::time::Duration {
     let seconds = 5u64.saturating_mul(1u64 << tries.saturating_sub(1).min(10)); // WHAT: 5, 10, 20, 40... WHY: quick while a tunnel reconnects, gentle after
     std::time::Duration::from_secs(seconds.min(300)) // WHAT: at most 5 minutes. WHY: a seat offline for hours still comes back by itself soon after the network does
+}
+
+/// `wait` plus up to a fifth more, from `random`.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn with_jitter(wait: std::time::Duration, random: u64) -> std::time::Duration {
+    let spread = u64::try_from(wait.as_millis() / 5).unwrap_or(u64::MAX); // WHAT: a fifth of the wait, in milliseconds. WHY: enough to spread seats out, not enough to keep anybody waiting
+    wait + std::time::Duration::from_millis(random % spread.saturating_add(1)) // WHAT: the wait, nudged. WHY: security review L5: a whole office whose VPN comes back at once doesn't knock in step
+}
+
+/// A random number, from the standard library's own randomly keyed hasher.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn random() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    std::collections::hash_map::RandomState::new().build_hasher().finish() // WHAT: a fresh random key's hash of nothing. WHY: jitter needs no more than this, and no new dependency
 }
 
 /// Every computer, said to the panel, with what was just done.
@@ -865,9 +897,9 @@ pub fn start(repaint: egui::Context) -> Link {
                             }
                         }
                         let mut resumed = None;
-                        let mut went = Resuming::default(); // WHAT: how each address answered. WHY: only a 401 forgets the sign-in; not answering never does
+                        let mut went = Resuming { pinned, ..Resuming::default() }; // WHAT: how each address answered, and whether the server is pinned. WHY: only a 401 forgets the sign-in; not answering never does
                         for address in &tried {
-                            let fresh = match open(address) {
+                            let fresh = match open_as(address, true) {
                                 Ok(c) => c.with_token(&token),
                                 Err(e) => {
                                     if went.open_failed(e, pinned && address == &base) {
@@ -2204,12 +2236,45 @@ impl Standing {
     /// The kept sign-in couldn't reach the server: books the next try and
     /// says how long until it. The server, its name and the sign-in are left
     /// exactly as they are.
-    pub fn cannot_reach(&mut self, now: std::time::Instant) -> std::time::Duration {
+    pub fn cannot_reach(&mut self, now: std::time::Instant, random: u64) -> std::time::Duration {
         self.resume_tries = self.resume_tries.saturating_add(1); // WHAT: one more failed try. WHY: the wait grows with them
-        let wait = resume_wait(self.resume_tries); // WHAT: how long to wait. WHY: quick at first, gentle after
+        let wait = with_jitter(resume_wait(self.resume_tries), random); // WHAT: how long to wait, nudged. WHY: quick at first, gentle after, never in step with every other seat
         self.resume_at = Some(now + wait); // WHAT: the next try. WHY: the window makes it when due
         wait
     }
+
+    /// What to do about a booked try of the kept sign-in, this frame.
+    /// While the sign-in window is open the try stays booked, so closing the
+    /// window without signing in brings the retries back.
+    pub fn resume_step(&mut self, signing_in: bool, now: std::time::Instant) -> ResumeStep {
+        let Some(due) = self.resume_at else { return ResumeStep::Nothing }; // WHAT: no try booked. WHY: nothing to do
+        if self.who.is_some() {
+            self.resume_at = None; // WHAT: no more tries. WHY: already signed in
+            return ResumeStep::Nothing;
+        }
+        if signing_in {
+            return ResumeStep::Nothing; // WHAT: held, still booked. WHY: the person is signing in by hand; security review L2: the retries come back if they close the window
+        }
+        if now < due {
+            return ResumeStep::Wait(due - now); // WHAT: not yet. WHY: woken then
+        }
+        self.resume_at = None; // WHAT: this try taken. WHY: the answer books the next one if it's needed
+        ResumeStep::Now
+    }
+}
+
+/// What [`Standing::resume_step`] says to do.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ResumeStep {
+    Nothing, // WHAT: nothing this frame. WHY: none booked, signed in, or the sign-in window is open
+    Wait(std::time::Duration), // WHAT: wake again after this. WHY: an untouched window isn't redrawn otherwise
+    Now, // WHAT: try the kept sign-in now. WHY: its wait is over
+}
+
+/// The status line while the server isn't answering.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn cannot_reach_words(server: &str) -> String {
+    format!("Can't reach {server}. Your sign-in is kept; nothing syncs until it reconnects.") // WHAT: what is happening and what it means. WHY: security review L2: plain, and no promise of a retry that may not come
 }
 
 #[cfg(test)]
@@ -2384,8 +2449,8 @@ mod tests {
         assert_eq!(resume_wait(u32::MAX).as_secs(), 300); // WHAT: never overflows. WHY: a seat offline for days
         let mut standing = Standing { base: "https://office.example.com".into(), name: "Example Steel".into(), ..Standing::default() }; // WHAT: a seat with its kept server. WHY: as at start-up
         let now = std::time::Instant::now(); // WHAT: now. WHY: the try is booked from it
-        assert_eq!(standing.cannot_reach(now).as_secs(), 5); // WHAT: the first wait. WHY: quick while a tunnel reconnects
-        assert_eq!(standing.cannot_reach(now).as_secs(), 10); // WHAT: the second. WHY: doubled
+        assert_eq!(standing.cannot_reach(now, 0).as_secs(), 5); // WHAT: the first wait. WHY: quick while a tunnel reconnects
+        assert_eq!(standing.cannot_reach(now, 0).as_secs(), 10); // WHAT: the second. WHY: doubled
         assert_eq!(standing.resume_at, Some(now + std::time::Duration::from_secs(10))); // WHAT: booked. WHY: the window tries then
         assert_eq!(standing.base, "https://office.example.com", "the server is kept"); // WHAT: untouched. WHY: never forgotten for not answering
         assert_eq!(standing.name, "Example Steel"); // WHAT: untouched. WHY: likewise
@@ -2429,4 +2494,54 @@ mod tests {
         assert!(matches!(said, Told::Unreachable { .. }), "an unreachable server must never sign the person out"); // WHAT: kept, retried. WHY: the bug
         let _ = link.to.send(Ask::Quit); // WHAT: the worker stops. WHY: tidy
     }
+
+    #[test]
+    fn a_kept_sign_in_is_only_retried_by_itself_for_a_pinned_server() {
+        for pinned in [true, false] {
+            let mut went = Resuming { pinned, ..Resuming::default() }; // WHAT: a resume, pinned or not. WHY: both cases
+            went.open_failed(hub::client::Trouble::Unreachable("off".into()), pinned); // WHAT: not answering. WHY: the retry case
+            match went.told() {
+                Some(Told::Unreachable { retry, .. }) => assert_eq!(retry, pinned, "retried by itself only when pinned"), // WHAT: the flag. WHY: security review L1
+                _ => panic!("not answering is never a sign-out"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_kept_sign_in_that_would_make_a_first_contact_opens_the_sign_in_window_instead() {
+        let mut went = Resuming::default(); // WHAT: a resume of a server this computer holds no pin for. WHY: the first-contact case
+        let first = hub::client::Trouble::Refused(hub::Problem::new(hub::secure::FIRST_CONTACT, "sign in to link it")); // WHAT: what open_with says when stopped. WHY: as hub gives it
+        assert!(went.open_failed(first, false), "nothing else is tried with the kept sign-in"); // WHAT: stops. WHY: the token goes nowhere
+        match went.told() {
+            Some(Told::SignInAgain { why }) => assert_eq!(why, "sign in to link it"), // WHAT: the sign-in window, with the reason. WHY: security review L1
+            _ => panic!("a first contact must ask for a sign-in, never send the kept token or sign out"),
+        }
+    }
+
+    #[test]
+    fn closing_the_sign_in_window_brings_the_retries_back() {
+        let now = std::time::Instant::now(); // WHAT: now. WHY: the steps are timed from it
+        let mut standing = Standing::default(); // WHAT: a seat whose server isn't answering. WHY: a try is booked
+        let wait = standing.cannot_reach(now, 0); // WHAT: the first try booked. WHY: 5 s
+        assert_eq!(standing.resume_step(true, now + wait), ResumeStep::Nothing, "held while the sign-in window is open"); // WHAT: nothing. WHY: the person is signing in by hand
+        assert!(standing.resume_at.is_some(), "still booked"); // WHAT: kept. WHY: security review L2: it used to be thrown away here
+        assert_eq!(standing.resume_step(false, now), ResumeStep::Wait(wait), "window closed early: waits out the rest"); // WHAT: the rest of the wait. WHY: woken then
+        assert_eq!(standing.resume_step(false, now + wait), ResumeStep::Now, "window closed: the try comes back"); // WHAT: tried. WHY: the retries resume by themselves
+        assert_eq!(standing.resume_step(false, now + wait), ResumeStep::Nothing, "taken once"); // WHAT: nothing more. WHY: the answer books the next
+        standing.cannot_reach(now, 0); // WHAT: booked again. WHY: a signed-in seat next
+        standing.who = Some(Arc::new(User { id: "u1".into(), name: "Sam".into(), email: "sam@example.com".into(), role: hub::Role::Estimator })); // WHAT: signed in. WHY: no more tries
+        assert_eq!(standing.resume_step(false, now + wait * 4), ResumeStep::Nothing); // WHAT: nothing. WHY: signed in
+        assert!(standing.resume_at.is_none(), "cleared once signed in"); // WHAT: cleared. WHY: done
+    }
+
+    #[test]
+    fn the_wait_is_nudged_by_up_to_a_fifth_and_no_more() {
+        let wait = std::time::Duration::from_secs(10); // WHAT: a ten-second wait. WHY: easy numbers
+        assert_eq!(with_jitter(wait, 0), wait); // WHAT: no nudge. WHY: the floor
+        assert_eq!(with_jitter(wait, 2000), wait + std::time::Duration::from_secs(2)); // WHAT: the most. WHY: a fifth
+        assert!((0..1000).map(|_| with_jitter(wait, random())).all(|w| w >= wait && w <= wait + std::time::Duration::from_secs(2)), "always within a fifth"); // WHAT: many random nudges. WHY: never shorter, never more than a fifth longer
+        assert!((0..50).map(|_| with_jitter(wait, random())).collect::<std::collections::HashSet<_>>().len() > 1, "and really spread"); // WHAT: not all the same. WHY: security review L5
+        assert_eq!(cannot_reach_words("Example Steel"), "Can't reach Example Steel. Your sign-in is kept; nothing syncs until it reconnects."); // WHAT: the status line. WHY: security review L2's words
+    }
 }
+

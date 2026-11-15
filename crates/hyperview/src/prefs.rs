@@ -255,10 +255,10 @@ impl Prefs {
             return Prefs::default();
         };
         if let Some(old) = earlier_folder() {
-            match copied_once(&old.join(FILE), &path) {
-                Ok(true) => log::info!("settings copied from {} to {}", old.display(), path.display()), // WHAT: noted. WHY: the move is visible in the log
-                Ok(false) => {} // WHAT: nothing to copy. WHY: a new install, or copied before
-                Err(e) => log::warn!("couldn't copy the settings from {}: {e}", old.display()), // WHAT: said. WHY: the program still starts, with its usual settings
+            match hub::office::move_once(&old.join(FILE), &path) {
+                Ok(true) => log::info!("settings moved from {} to {}", old.display(), path.display()), // WHAT: noted. WHY: the move is visible in the log
+                Ok(false) => {} // WHAT: nothing to move. WHY: a new install, moved before, or newer settings already there
+                Err(e) => log::warn!("couldn't move the settings from {}: {e}", old.display()), // WHAT: said. WHY: the program still starts, with its usual settings
             }
         }
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -313,24 +313,7 @@ pub fn earlier_folder() -> Option<PathBuf> {
     if !cfg!(target_os = "ios") {
         return None; // WHAT: nothing moved. WHY: only iOS changed place
     }
-    folder_for(None, std::env::var_os("HOME").map(PathBuf::from), false) // WHAT: ~/.config/Excalibur Hyperview. WHY: the old rule, for the one-time copy
-}
-
-/// Copies `old` to `new` once: only when `old` is there and `new` isn't. The
-/// old file is left where it is. True when it copied.
-///
-/// # Errors
-///
-/// When the new folder can't be made or the copy fails.
-pub fn copied_once(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<bool> {
-    if new.exists() || !old.is_file() {
-        return Ok(false); // WHAT: nothing to do. WHY: never over newer settings, and nothing to copy from
-    }
-    if let Some(dir) = new.parent() {
-        std::fs::create_dir_all(dir)?; // WHAT: the new folder. WHY: a fresh install has none yet
-    }
-    std::fs::copy(old, new)?; // WHAT: the old settings, with the sign-in, to the new place. WHY: an upgrade keeps everything
-    Ok(true)
+    folder_for(None, std::env::var_os("HOME").map(PathBuf::from), false) // WHAT: ~/.config/Excalibur Hyperview. WHY: the old rule, for the one-time move
 }
 
 #[cfg(test)]
@@ -418,21 +401,22 @@ mod tests {
     }
 
     #[test]
-    fn settings_kept_by_an_earlier_ipad_build_are_copied_once_and_never_over_newer_ones() {
+    fn settings_kept_by_an_earlier_ipad_build_are_moved_once_and_never_over_newer_ones() {
         let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()); // WHAT: a fresh name. WHY: tests run side by side
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("prefs-move-{n}-{}", std::process::id())); // WHAT: a folder under the build's own. WHY: never a shared temporary folder
-        let old = base.join(".config/Excalibur Hyperview").join(FILE); // WHAT: where 0.7.0 kept it on iOS. WHY: the old place
-        let new = base.join("Library/Application Support/Excalibur Hyperview").join(FILE); // WHAT: where it goes now. WHY: the new place
-        assert!(!copied_once(&old, &new).unwrap(), "nothing to copy"); // WHAT: no old file. WHY: a fresh install
+        let old = folder_for(None, Some(base.clone()), false).unwrap().join(FILE); // WHAT: where 0.7.0 kept it on iOS. WHY: the old place, by the old rule
+        let new = folder_for(None, Some(base.clone()), true).unwrap().join(FILE); // WHAT: where it goes now. WHY: the new place, by the iOS rule
         std::fs::create_dir_all(old.parent().unwrap()).unwrap(); // WHAT: the old folder. WHY: an earlier build made it
         std::fs::write(&old, r#"{"server":{"base":"https://office.example.com","token":"kept","name":"Example Steel","user":"Sam"}}"#).unwrap(); // WHAT: an old file with a sign-in. WHY: what must survive
-        assert!(copied_once(&old, &new).unwrap(), "copied"); // WHAT: copied. WHY: none in the new place
+        std::fs::create_dir_all(new.parent().unwrap()).unwrap(); // WHAT: the new folder. WHY: newer settings go in it first
+        std::fs::write(&new, "{}").unwrap(); // WHAT: newer settings in the new place. WHY: must never be overwritten
+        assert!(!hub::office::move_once(&old, &new).unwrap(), "newer settings win"); // WHAT: not moved. WHY: never over newer
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "{}"); // WHAT: unchanged. WHY: likewise
+        std::fs::remove_file(&new).unwrap(); // WHAT: the new place empty. WHY: the move itself, next
+        assert!(hub::office::move_once(&old, &new).unwrap(), "moved"); // WHAT: moved. WHY: nothing in the new place
         let p: Prefs = serde_json::from_str(&std::fs::read_to_string(&new).unwrap()).unwrap(); // WHAT: read back. WHY: the sign-in came across
         assert_eq!((p.server.base.as_str(), p.server.token.as_str()), ("https://office.example.com", "kept")); // WHAT: the same server and token. WHY: an upgrade keeps them
-        assert!(old.exists(), "the old file is left alone"); // WHAT: not deleted. WHY: nothing is deleted
-        std::fs::write(&new, "{}").unwrap(); // WHAT: newer settings in the new place. WHY: must never be overwritten
-        assert!(!copied_once(&old, &new).unwrap(), "once"); // WHAT: not copied again. WHY: newer wins
-        assert_eq!(std::fs::read_to_string(&new).unwrap(), "{}"); // WHAT: unchanged. WHY: likewise
+        assert!(!old.exists(), "no second copy of the sign-in left behind"); // WHAT: removed. WHY: security review L3
         let _ = std::fs::remove_dir_all(&base); // WHAT: tidied. WHY: a test leaves nothing
     }
 

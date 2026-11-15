@@ -33,12 +33,10 @@ pub struct Saved {
 pub fn folder() -> Option<PathBuf> {
     let here = crate::prefs::folder()?.join("signatures"); // WHAT: beside this user's settings. WHY: on iOS that is Library/Application Support, where an app may write
     if let Some(old) = crate::prefs::earlier_folder().map(|f| f.join("signatures")) {
-        if !here.exists() {
-            for entry in std::fs::read_dir(&old).into_iter().flatten().flatten() {
-                if let Err(e) = crate::prefs::copied_once(&entry.path(), &here.join(entry.file_name())) {
-                    log::warn!("couldn't copy the signature {}: {e}", entry.path().display()); // WHAT: said. WHY: the rest are still copied
-                } // WHAT: each signature an earlier iOS build kept, copied once. WHY: an upgrade keeps them
-            }
+        for entry in std::fs::read_dir(&old).into_iter().flatten().flatten() {
+            if let Err(e) = hub::office::move_once(&entry.path(), &here.join(entry.file_name())) {
+                log::warn!("couldn't move the signature {}: {e}", entry.path().display()); // WHAT: said. WHY: the rest are still moved
+            } // WHAT: each signature an earlier iOS build kept, moved once, never over one already here, the old copy removed. WHY: an upgrade keeps them, and leaves no second copy
         }
     }
     Some(here)
