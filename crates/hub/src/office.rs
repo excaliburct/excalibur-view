@@ -127,7 +127,14 @@ pub fn move_once(old: &Path, new: &Path) -> std::io::Result<bool> {
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()); // WHAT: a unique part for the temporary name. WHY: two starts at once never share one
     let name = new.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(); // WHAT: the file's own name. WHY: the temporary sits beside it, named after it
     let temporary = new.with_file_name(format!(".{name}.moving-{}-{stamp}", std::process::id())); // WHAT: a temporary file beside the target. WHY: same folder, so the link can't cross volumes
-    let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?; // WHAT: a brand-new file. WHY: create_new never opens an existing file or a link
+    let mut fresh = std::fs::OpenOptions::new();
+    fresh.write(true).create_new(true); // WHAT: a brand-new file. WHY: create_new never opens an existing file or a link
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fresh.mode(0o600); // WHAT: readable and writable by this user only. WHY: security review: it may hold a sign-in or a pin
+    }
+    let mut out = fresh.open(&temporary)?; // WHAT: the temporary, made. WHY: copied into below
     let placed = std::io::copy(&mut source, &mut out).and_then(|_| out.sync_all()).and_then(|()| std::fs::hard_link(&temporary, new)); // WHAT: copied, flushed, and linked into place. WHY: the link fails if anything is at the target, so a newer record is never replaced
     let _ = std::fs::remove_file(&temporary); // WHAT: the temporary name gone. WHY: the record lives on under its own name, or wasn't placed
     match placed {
@@ -148,7 +155,7 @@ fn open_plain(path: &Path) -> std::io::Result<Option<std::fs::File>> {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW); // WHAT: refuse a link at the last step. WHY: security review: the check and the read are one step, so nothing can be swapped in between
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK); // WHAT: refuse a link at the last step, and never wait on the open. WHY: security review: the check and the read are one step; a FIFO in the old place can't hang start-up (it is then refused as not a plain file)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -378,6 +385,32 @@ mod tests {
         assert!(!move_once(&old, &new).unwrap(), "a link to nothing still counts as something there"); // WHAT: refused. WHY: the hard link never goes through a link
         assert!(!base.join("nowhere.json").exists(), "nothing written through the link"); // WHAT: nothing created. WHY: create_new and the hard link never follow it
         assert_eq!(std::fs::read(&elsewhere).unwrap(), b"someone else's file"); // WHAT: untouched. WHY: never read or written
+        let _ = std::fs::remove_dir_all(&base); // WHAT: tidied. WHY: a test leaves nothing
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_fifo_in_the_old_place_never_hangs_and_a_moved_file_is_this_users_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(); // WHAT: a fresh name. WHY: tests run side by side
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("office-fifo-{n}-{}", std::process::id())); // WHAT: under the build's own folder. WHY: never a shared temporary folder
+        std::fs::create_dir_all(&base).unwrap(); // WHAT: made. WHY: the files go in it
+        let (fifo, new) = (base.join("old.json"), base.join("new").join("office.json")); // WHAT: the two places. WHY: the FIFO case first
+        let name = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap(); // WHAT: its path for the system call. WHY: mkfifo takes a C string
+        // SAFETY: `name` is a valid NUL-terminated path that outlives the call; mkfifo only reads it.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "a FIFO made"); // WHAT: a named pipe nobody writes to. WHY: an open without O_NONBLOCK would wait for ever
+        let (told, heard) = std::sync::mpsc::channel(); // WHAT: a way back. WHY: a deadline
+        let (from, to) = (fifo.clone(), new.clone()); // WHAT: copies for the thread. WHY: moved into it
+        std::thread::spawn(move || {
+            let _ = told.send(move_once(&from, &to).map_err(|e| e.to_string())); // WHAT: the move tried. WHY: on its own thread, so a hang is a failure, not a stuck test run
+        });
+        let got = heard.recv_timeout(std::time::Duration::from_secs(5)).expect("returned within 5 s: a FIFO never hangs start-up"); // WHAT: the answer. WHY: O_NONBLOCK
+        assert_eq!(got, Ok(false), "a FIFO is not a record"); // WHAT: refused. WHY: not a plain file
+        std::fs::remove_file(&fifo).unwrap(); // WHAT: the FIFO gone. WHY: a real file next
+        std::fs::write(&fifo, b"{}").unwrap(); // WHAT: an ordinary old file. WHY: made with the usual 0644
+        std::fs::set_permissions(&fifo, std::fs::Permissions::from_mode(0o644)).unwrap(); // WHAT: readable by everybody. WHY: the move must not carry that across
+        assert!(move_once(&fifo, &new).unwrap(), "moved"); // WHAT: moved. WHY: nothing in the new place
+        assert_eq!(std::fs::metadata(&new).unwrap().permissions().mode() & 0o777, 0o600, "this user's alone"); // WHAT: 0600. WHY: it may hold a sign-in or a pin
         let _ = std::fs::remove_dir_all(&base); // WHAT: tidied. WHY: a test leaves nothing
     }
 

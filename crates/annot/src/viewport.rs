@@ -389,5 +389,30 @@ mod tests {
         assert_eq!(count, MOST_REGIONS, "no more than the cap read"); // WHAT: 64. WHY: bounded
         assert_eq!(ratio.as_deref(), Some("hostile"), "still read, just not without end"); // WHAT: the scale. WHY: a long list isn't refused, only bounded
     }
+
+    #[test]
+    fn a_huge_unit_or_ratio_is_read_no_further_than_its_cap() {
+        let huge = "x".repeat(8 * 1024 * 1024 + 1); // WHAT: an 8 MB string. WHY: security review M1-residual
+        let more = vec![
+            "<</BBox[0 0 3024 2160]/Measure 5 0 R>>".to_string(), // WHAT: object 4, a viewport. WHY: listed eight times
+            format!("<</Type/Measure/Subtype/RL/R({huge})/X 6 0 R/D 6 0 R/A 6 0 R>>"), // WHAT: object 5, an 8 MB ratio and lists of references. WHY: every slot reaches the huge unit
+            format!("[{}]", "7 0 R ".repeat(8)), // WHAT: object 6, eight references to the format. WHY: as many as are read
+            format!("<</Type/NumberFormat/U({huge})/PS({huge})/SS({huge})/RT({huge})/RD({huge})/C 1/D 100>>"), // WHAT: object 7, every text field 8 MB. WHY: each would be copied in every slot
+        ];
+        let bytes = sheet_with(&format!("[{}]", "4 0 R ".repeat(8)), &more); // WHAT: the hostile drawing. WHY: read below
+        let (told, heard) = std::sync::mpsc::channel(); // WHAT: a way back. WHY: a deadline
+        std::thread::spawn(move || {
+            let doc = Document::from_bytes(bytes); // WHAT: opened. WHY: on its own thread
+            let page = doc.page(0).unwrap(); // WHAT: its sheet. WHY: read below
+            let all = regions(&doc, &page); // WHAT: every region. WHY: each format read in every slot
+            let longest = all.iter().flat_map(|r| r.measure.x.iter().chain(&r.measure.distance).chain(&r.measure.area)).map(|f| [&f.unit, &f.prefix, &f.suffix, &f.thousands, &f.decimal_point].iter().map(|t| t.chars().count()).max().unwrap_or(0)).max().unwrap_or(0); // WHAT: the longest text field read anywhere. WHY: checked against the cap
+            let ratio = all.iter().map(|r| r.measure.ratio.chars().count()).max().unwrap_or(0); // WHAT: the longest ratio read. WHY: likewise
+            let _ = told.send((all.len(), longest, ratio)); // WHAT: the answer. WHY: back to the test
+        });
+        let (count, longest, ratio) = heard.recv_timeout(std::time::Duration::from_secs(30)).expect("read within 30 s"); // WHAT: the answer. WHY: bounded
+        assert_eq!(count, 8, "every viewport read"); // WHAT: eight. WHY: a long string isn't refused, only cut
+        assert!(longest <= crate::measure::MOST_TEXT, "units and separators cut to {} characters, got {longest}", crate::measure::MOST_TEXT); // WHAT: capped. WHY: never 8 MB a slot
+        assert!(ratio <= crate::measure::MOST_RATIO, "the ratio cut to {} characters, got {ratio}", crate::measure::MOST_RATIO); // WHAT: capped. WHY: likewise
+    }
 }
 

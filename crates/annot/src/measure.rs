@@ -68,14 +68,29 @@ impl Default for Format {
     }
 }
 
+/// The most characters read from a number format's unit or separator. A
+/// real one is a few characters ("ft", "in", "sq ft").
+pub const MOST_TEXT: usize = 32; // WHAT: thirty-two characters. WHY: security review M1: a megabyte unit referenced from every slot can't exhaust memory
+
+/// The most characters read from a measure's scale ratio (`/R`).
+pub const MOST_RATIO: usize = 64; // WHAT: sixty-four characters. WHY: "1/4\" = 1'-0\"" and the longest real ones fit with room to spare
+
+/// A text string's first `most` characters, decoding no more of it than
+/// that needs: a byte-order mark and up to four bytes a character.
+fn short_text(object: Option<&Object>, most: usize) -> Option<String> {
+    let bytes = object?.as_string()?; // WHAT: the string's bytes, borrowed. WHY: never copied whole
+    let head = &bytes[..bytes.len().min(2 + most.saturating_mul(4))]; // WHAT: only as much as `most` characters can take. WHY: a huge string costs nothing beyond this
+    Some(pdf::text::decode(head).chars().take(most).collect()) // WHAT: decoded and cut to `most` characters. WHY: the bound holds whatever the encoding
+}
+
 impl Format {
     pub fn read(dict: &Dict) -> Format {
-        let text = |key: &str| dict.get(key).and_then(|o| o.as_text()).unwrap_or_default();
+        let text = |key: &str| short_text(dict.get(key), MOST_TEXT).unwrap_or_default(); // WHAT: a unit or separator, at most 32 characters. WHY: security review M1: a huge string is never copied whole
         // The separator between the number and its unit defaults to a space.
         // Writing /PS() explicitly, as Bluebeam does for feet and inches, is
         // what removes it — which is the difference between `20'` and `20 '`.
         let prefix = match dict.get("PS") {
-            Some(value) => value.as_text().unwrap_or_default(),
+            Some(value) => short_text(Some(value), MOST_TEXT).unwrap_or_default(), // WHAT: the separator, bounded. WHY: likewise
             None => " ".to_string(),
         };
         Format {
@@ -294,7 +309,7 @@ impl Measure {
             return None;
         }
         Some(Measure {
-            ratio: dict.get("R").and_then(|o| o.as_text()).unwrap_or_default(),
+            ratio: short_text(dict.get("R"), MOST_RATIO).unwrap_or_default(), // WHAT: the scale's words, at most 64 characters. WHY: security review M1
             x,
             distance: list("D"),
             area: list("A"),
