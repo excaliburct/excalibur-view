@@ -1,7 +1,8 @@
 //! What every Excalibur app on one computer shares about the office's server
 //! (docs/OFFICE-ENROLLMENT.md §2): its address and certificate pin, kept in
 //! one per-user file, `%LocalAppData%\Excalibur\office.json` on Windows or
-//! `~/.config/Excalibur/office.json` elsewhere, so the second app on a PC
+//! `~/.config/Excalibur/office.json` elsewhere (on iOS, the app's own
+//! `Library/Application Support/Excalibur/office.json`), so the second app on a PC
 //! never asks again; whether its office certificate was ever seen verified;
 //! and which addresses a first contact may take a pin from.
 //!
@@ -36,14 +37,85 @@ pub struct Shared {
     pub other: serde_json::Map<String, serde_json::Value>, // WHAT: every other field in the file, as it was. WHY: another app (View, CAD, Archetype, LatCon Estimating) may keep more there, and no app loses it
 }
 
-/// Where the shared file is for this user.
+/// Where the shared file is for this user. On an iPad or iPhone, a file an
+/// earlier build kept under `$HOME/.config` is copied across once.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn shared_file() -> Option<PathBuf> {
-    #[cfg(windows)]
-    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from); // WHAT: %LocalAppData%. WHY: §2.3
-    #[cfg(not(windows))]
-    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))); // WHAT: ~/.config. WHY: §2.3
+    let var = |name: &str| std::env::var_os(name).map(PathBuf::from); // WHAT: one environment variable, as a path. WHY: read the same way each time
+    let here = shared_file_for(&Homes { local_app_data: var("LOCALAPPDATA"), xdg_config: var("XDG_CONFIG_HOME"), home: var("HOME") }, Platform::this())?; // WHAT: this system's place for it. WHY: §2.3, and Library/Application Support on iOS
+    if Platform::this() == Platform::Ios {
+        if let Some(old) = shared_file_for(&Homes { local_app_data: None, xdg_config: None, home: var("HOME") }, Platform::Unix) {
+            match copied_once(&old, &here) {
+                Ok(true) => eprintln!("the office server's shared record was copied from {} to {}", old.display(), here.display()), // WHAT: noted in the log. WHY: the move can be seen
+                Ok(false) => {} // WHAT: nothing to copy. WHY: a new install, or copied before
+                Err(e) => eprintln!("the office server's shared record couldn't be copied from {}: {e}", old.display()), // WHAT: said. WHY: the app still connects by its own pin book
+            }
+        }
+    }
+    Some(here)
+}
+
+/// The variables a home folder is found from.
+#[derive(Debug, Default)]
+struct Homes {
+    local_app_data: Option<PathBuf>, // WHAT: %LocalAppData%. WHY: Windows
+    xdg_config: Option<PathBuf>, // WHAT: $XDG_CONFIG_HOME. WHY: Linux, and Android, whose app sets it
+    home: Option<PathBuf>, // WHAT: $HOME. WHY: everything else
+}
+
+/// Which rule finds the shared file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Platform {
+    Windows, // WHAT: %LocalAppData%. WHY: §2.3
+    Ios, // WHAT: the app's Library/Application Support. WHY: an iOS app may only make folders in Documents, Library and tmp
+    Unix, // WHAT: ~/.config, or $XDG_CONFIG_HOME. WHY: §2.3; Linux, the Mac and Android
+}
+
+impl Platform {
+    /// The one this program was built for.
+    fn this() -> Platform {
+        if cfg!(windows) {
+            Platform::Windows // WHAT: Windows. WHY: as built
+        } else if cfg!(target_os = "ios") {
+            Platform::Ios // WHAT: iOS. WHY: as built
+        } else {
+            Platform::Unix // WHAT: the rest. WHY: as built
+        }
+    }
+}
+
+/// Where the shared file is, given the home variables and the platform.
+///
+/// On iOS `$HOME` is the app's sandbox container. Apple's File System
+/// Programming Guide lets an app make folders only inside its `Documents`,
+/// `Library` and `tmp` folders, and puts configuration files in
+/// `Library/Application Support`; a `.config` folder at the container's top
+/// is outside all three, so the record was never kept there.
+fn shared_file_for(homes: &Homes, platform: Platform) -> Option<PathBuf> {
+    let base = match platform {
+        Platform::Windows => homes.local_app_data.clone(), // WHAT: %LocalAppData%. WHY: §2.3
+        Platform::Ios => homes.home.as_ref().map(|h| h.join("Library").join("Application Support")), // WHAT: Library/Application Support. WHY: where an iOS app may keep its own files
+        Platform::Unix => homes.xdg_config.clone().or_else(|| homes.home.as_ref().map(|h| h.join(".config"))), // WHAT: ~/.config. WHY: §2.3, unchanged
+    };
     base.map(|b| b.join("Excalibur").join("office.json")) // WHAT: `Excalibur\office.json`. WHY: §2.3
+}
+
+/// Copies `old` to `new` once: only when `old` is a plain file and `new`
+/// isn't there. The old file is left where it is. True when it copied.
+///
+/// # Errors
+///
+/// When the new folder can't be made or the copy fails.
+fn copied_once(old: &Path, new: &Path) -> std::io::Result<bool> {
+    let plain = std::fs::symlink_metadata(old).is_ok_and(|m| m.is_file()); // WHAT: a real file, not a link or a folder. WHY: a pin record is only ever taken from a file of our own
+    if !plain || std::fs::symlink_metadata(new).is_ok() {
+        return Ok(false); // WHAT: nothing to do. WHY: never over a newer record (a pin or a verified flag is never replaced by an older one), and nothing to copy from
+    }
+    if let Some(dir) = new.parent() {
+        std::fs::create_dir_all(dir)?; // WHAT: the new folder. WHY: a fresh install has none yet
+    }
+    std::fs::copy(old, new)?; // WHAT: the old record, pin and all. WHY: the app stays linked to the same server after the upgrade
+    Ok(true)
 }
 
 /// The shared file, read: `Ok(None)` when there is none, `Err` when it is
@@ -193,6 +265,37 @@ mod tests {
         }
         assert!(host_is_local("[fe80::1]", 8714));
         assert!(!host_is_local("no-such-host.invalid", 8714), "a name that resolves to nothing is not local");
+    }
+
+    #[test]
+    fn an_ipad_keeps_the_shared_record_in_application_support_and_the_rest_are_unchanged() {
+        let home = PathBuf::from("/var/mobile/Containers/Data/Application/APP"); // WHAT: an iOS app's container, as $HOME. WHY: the iPad case
+        let homes = Homes { local_app_data: Some(PathBuf::from(r"C:\Users\sam\AppData\Local")), xdg_config: None, home: Some(home.clone()) }; // WHAT: every variable set. WHY: each platform takes its own
+        assert_eq!(shared_file_for(&homes, Platform::Ios), Some(home.join("Library/Application Support/Excalibur/office.json"))); // WHAT: Library/Application Support. WHY: an iOS app can't make .config at its container's top
+        assert_eq!(shared_file_for(&homes, Platform::Unix), Some(home.join(".config/Excalibur/office.json"))); // WHAT: ~/.config. WHY: unchanged
+        assert_eq!(shared_file_for(&Homes { xdg_config: Some(PathBuf::from("/x")), ..Homes::default() }, Platform::Unix), Some(PathBuf::from("/x/Excalibur/office.json"))); // WHAT: $XDG_CONFIG_HOME first. WHY: unchanged, and how Android finds it
+        assert_eq!(shared_file_for(&homes, Platform::Windows), Some(PathBuf::from(r"C:\Users\sam\AppData\Local").join("Excalibur").join("office.json"))); // WHAT: %LocalAppData%. WHY: unchanged
+        assert_eq!(shared_file_for(&Homes::default(), Platform::Ios), None); // WHAT: no home. WHY: nowhere, rather than a guess
+    }
+
+    #[test]
+    fn a_record_kept_by_an_earlier_ipad_build_is_copied_once_and_never_over_a_newer_one() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(); // WHAT: a fresh name. WHY: tests run side by side
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("office-move-{n}-{}", std::process::id())); // WHAT: under the build's own folder. WHY: never a shared temporary folder
+        let homes = Homes { home: Some(base.clone()), ..Homes::default() }; // WHAT: this folder as $HOME. WHY: both places under it
+        let old = shared_file_for(&homes, Platform::Unix).unwrap(); // WHAT: where 0.7.0 kept it on iOS. WHY: the old place
+        let new = shared_file_for(&homes, Platform::Ios).unwrap(); // WHAT: where it goes now. WHY: the new place
+        assert!(!copied_once(&old, &new).unwrap(), "nothing to copy"); // WHAT: no old record. WHY: a fresh install
+        let kept = Shared { address: "https://192.168.1.10:8714".into(), pin: "a".repeat(64), verified: true, other: serde_json::Map::new() }; // WHAT: an old record, verified. WHY: what must survive
+        write(&old, &kept).unwrap(); // WHAT: written in the old place. WHY: as 0.7.0 tried to
+        assert!(copied_once(&old, &new).unwrap(), "copied"); // WHAT: copied. WHY: none in the new place
+        assert_eq!(read(&new), Ok(Some(kept.clone())), "the same pin and verified flag"); // WHAT: read back. WHY: the iPad stays linked to the same server
+        assert!(old.exists(), "the old record is left alone"); // WHAT: not deleted. WHY: nothing is deleted
+        let newer = Shared { pin: "b".repeat(64), verified: false, ..kept.clone() }; // WHAT: a newer record in the new place. WHY: must never be overwritten
+        write(&new, &newer).unwrap(); // WHAT: written. WHY: as an app linking later would
+        assert!(!copied_once(&old, &new).unwrap(), "once"); // WHAT: not copied again. WHY: the newer one wins
+        assert_eq!(read(&new), Ok(Some(newer)), "the newer record is untouched"); // WHAT: unchanged. WHY: an older pin never replaces a newer one
+        let _ = std::fs::remove_dir_all(&base); // WHAT: tidied. WHY: a test leaves nothing
     }
 
     #[test]
