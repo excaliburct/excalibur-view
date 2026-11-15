@@ -627,7 +627,7 @@ struct Resuming {
     refused: Option<String>, // WHAT: a server that answered but couldn't be trusted, or empty while waiting for approval. WHY: said, rather than signing the person out quietly
     unreachable: Option<String>, // WHAT: why the last address didn't answer. WHY: said while the window tries again
     first_contact: Option<String>, // WHAT: the kept sign-in would have gone to a server this computer holds no pin for. WHY: security review L1: the person signs in instead
-    pinned: bool, // WHAT: the shop's server is held to a pin. WHY: security review L1: only then is a kept sign-in tried again by itself
+    pinned: bool, // WHAT: the shop's server is held to a pin, or checked by its certificate authority (https). WHY: security review L1: only then is a kept sign-in tried again by itself
 }
 
 impl Resuming {
@@ -695,6 +695,14 @@ impl Resuming {
             None => Some(Told::Unreachable { why: self.unreachable.unwrap_or_else(|| "nothing answered".into()), retry: self.pinned }), // WHAT: kept, and tried again when pinned. WHY: not reaching a server is never a sign-out; only a pinned server is retried by itself
         }
     }
+}
+
+/// Whether a kept sign-in to `base` is tried again by itself: when the
+/// server is held to a pin, or its address is https, checked by its
+/// certificate authority. A plain-http server with no pin never is.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn retries_by_itself(base: &str, pinned: bool) -> bool {
+    pinned || base.trim().to_ascii_lowercase().starts_with("https://") // WHAT: pinned, or https. WHY: security review L1: never a connection that could be trusted on first sight
 }
 
 /// How long to wait before trying a kept sign-in again, after `tries`
@@ -897,7 +905,7 @@ pub fn start(repaint: egui::Context) -> Link {
                             }
                         }
                         let mut resumed = None;
-                        let mut went = Resuming { pinned, ..Resuming::default() }; // WHAT: how each address answered, and whether the server is pinned. WHY: only a 401 forgets the sign-in; not answering never does
+                        let mut went = Resuming { pinned: retries_by_itself(&base, pinned), ..Resuming::default() }; // WHAT: how each address answered, and whether a pinned or https server may be retried by itself. WHY: only a 401 forgets the sign-in; not answering never does
                         for address in &tried {
                             let fresh = match open_as(address, true) {
                                 Ok(c) => c.with_token(&token),
@@ -2542,6 +2550,15 @@ mod tests {
         assert!((0..1000).map(|_| with_jitter(wait, random())).all(|w| w >= wait && w <= wait + std::time::Duration::from_secs(2)), "always within a fifth"); // WHAT: many random nudges. WHY: never shorter, never more than a fifth longer
         assert!((0..50).map(|_| with_jitter(wait, random())).collect::<std::collections::HashSet<_>>().len() > 1, "and really spread"); // WHAT: not all the same. WHY: security review L5
         assert_eq!(cannot_reach_words("Example Steel"), "Can't reach Example Steel. Your sign-in is kept; nothing syncs until it reconnects."); // WHAT: the status line. WHY: security review L2's words
+    }
+
+    #[test]
+    fn a_pinned_or_https_server_is_retried_by_itself_and_plain_http_is_not() {
+        assert!(retries_by_itself("http://192.168.1.10:8714", true), "pinned"); // WHAT: the office's pinned server. WHY: retried
+        assert!(retries_by_itself("https://drawings.example.com", false), "https, checked by its authority"); // WHAT: a saved https address. WHY: retried (coordinator's decision)
+        assert!(retries_by_itself(" HTTPS://Drawings.example.com", false), "however it was typed"); // WHAT: case and spaces. WHY: the same address
+        assert!(!retries_by_itself("http://192.168.1.10:8714", false), "plain http with no pin"); // WHAT: never pinned. WHY: never retried by itself
+        assert!(!retries_by_itself("http://https.example.com", false), "https only as a name"); // WHAT: the scheme decides. WHY: not fooled by a host name
     }
 }
 
