@@ -2051,12 +2051,14 @@ impl eframe::App for App {
             // current while it is open; this is the backstop for the seat
             // that had it closed, so a list can never be stale for longer
             // than it takes to look at it.
-            if !self.standing.base.is_empty() {
+            if self.standing.signed_in() {
+                // WHAT: only once signed in. WHY: a seat whose server isn't answering keeps its address, and asking would say "Not signed in" over and over
                 self.ask(crate::server::Ask::Chests);
                 self.ask(crate::server::Ask::Plugins);
                 self.ask(crate::server::Ask::Projects);
             }
         }
+        self.resume_when_due(ctx); // WHAT: the kept sign-in tried again when its wait is over. WHY: a seat reconnects by itself once the network is back
         self.take_dropped_files(ctx);
         self.keyboard(ctx);
 

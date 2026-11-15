@@ -381,6 +381,15 @@ impl App {
                     self.standing = kept;
                     self.forget_server();
                 }
+                Told::Unreachable { why } => {
+                    // The kept server and sign-in stay exactly as they are:
+                    // only a real sign-out or a 401 forgets them. An iPad
+                    // opened before its VPN is back simply tries again.
+                    let wait = self.standing.cannot_reach(std::time::Instant::now()); // WHAT: the next try booked. WHY: each wait a little longer, at most 5 minutes
+                    log::info!("the office server didn't answer ({why}); trying again in {} s", wait.as_secs()); // WHAT: noted in the log. WHY: somebody asking why it's offline can find out
+                    let name = if self.standing.name.is_empty() { self.standing.base.clone() } else { self.standing.name.clone() }; // WHAT: what to call the server. WHY: its name when known, otherwise its address
+                    self.status = format!("Can't reach {name} just now. Trying again in {} s; you're still signed in.", wait.as_secs()); // WHAT: said plainly in the status line. WHY: not a box to dismiss each time it tries
+                }
                 Told::Projects(list) => {
                     self.standing.busy = None;
                     self.standing.projects = list;
@@ -765,6 +774,27 @@ impl App {
     fn forget_server(&mut self) {
         self.prefs.server = Default::default();
         let _ = self.prefs.save();
+    }
+
+    /// Tries the kept sign-in again once its wait is over, while the server
+    /// isn't answering. Called every frame; wakes the window when it's due.
+    pub fn resume_when_due(&mut self, ctx: &egui::Context) {
+        let Some(due) = self.standing.resume_at else { return }; // WHAT: no try booked. WHY: nothing to do
+        if self.standing.who.is_some() || self.signing_in.is_some() {
+            self.standing.resume_at = None; // WHAT: no more tries. WHY: already signed in, or the person is signing in by hand and their choice wins
+            return;
+        }
+        let now = std::time::Instant::now(); // WHAT: the time. WHY: compared with the try's
+        if now < due {
+            ctx.request_repaint_after(due - now); // WHAT: wake then. WHY: an untouched window isn't redrawn otherwise
+            return;
+        }
+        self.standing.resume_at = None; // WHAT: this try taken. WHY: the answer books the next one if it's needed
+        let kept = self.prefs.server.clone(); // WHAT: the remembered server and sign-in. WHY: tried as they were kept
+        if kept.base.is_empty() || kept.token.is_empty() {
+            return; // WHAT: nothing kept. WHY: nothing to try
+        }
+        self.ask(Ask::Resume { base: kept.base, token: kept.token, reachable_at: kept.reachable_at }); // WHAT: tried again. WHY: the network may be back
     }
 
     // ---- the connect window ----------------------------------------------

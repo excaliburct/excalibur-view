@@ -285,6 +285,10 @@ pub enum Told {
     },
     SignedIn(Box<Session>),
     SignedOut,
+    /// A kept sign-in couldn't be checked because the server didn't answer
+    /// (off, asleep, or a tunnel still reconnecting). The sign-in is kept and
+    /// the window tries again a little later.
+    Unreachable { why: String }, // WHAT: what got in the way, in words. WHY: an iPad reopening before its VPN is back must not lose its server and sign-in
     /// What the server says about reaching it from outside the shop.
     RemoteIs(Box<hub::Remote>),
     Projects(Vec<Project>),
@@ -545,7 +549,7 @@ enum Admission {
 /// let in (the session the client holds goes with it, so a seat signed in
 /// before 0.7.0 comes over approved). A computer already listed asks how it
 /// stands instead of asking again: every ask is counted by the server.
-fn admitted(client: &Client) -> Result<Admission, String> {
+fn admitted(client: &Client) -> Result<Admission, Stop> {
     if client.device().is_none() {
         return Ok(Admission::In); // WHAT: no key. WHY: the server says no itself if it needs one
     }
@@ -553,24 +557,134 @@ fn admitted(client: &Client) -> Result<Admission, String> {
         Ok(me) => return standing(&me, client.device().map(|d| d.key().id()).unwrap_or_default()), // WHAT: already on the list. WHY: answered as it stands
         Err(hub::client::Trouble::Refused(p)) if p.error == "device_unknown" => {} // WHAT: not on the list. WHY: ask below
         Err(hub::client::Trouble::Refused(p)) if p.error == "not_found" || p.error == "http_error" => return Ok(Admission::In), // WHAT: an older server. WHY: nothing to ask
-        Err(e) => return Err(e.to_string()),
+        Err(e) => return Err(Stop::from(e)), // WHAT: refused, or not reached. WHY: told apart, so a resume keeps its sign-in when the server just didn't answer
     }
     match client.ask_to_be_let_in("view", &hub::device::os_user()) {
         Ok(None) => Ok(Admission::In), // WHAT: an older server. WHY: nothing to ask
         Ok(Some(answer)) => standing(&hub::device::Me { state: answer.state, ..hub::device::Me::default() }, answer.device_id), // WHAT: how the ask came out. WHY: the same words as /devices/me
         Err(hub::client::Trouble::Refused(p)) if p.error == "not_on_the_office_network" => Ok(Admission::Outside), // WHAT: from outside. WHY: told apart
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(Stop::from(e)), // WHAT: refused, or not reached. WHY: likewise
+    }
+}
+
+/// Why this computer can't go on with the server just now.
+#[derive(Debug, PartialEq, Eq)]
+enum Stop {
+    Unreachable(String), // WHAT: the server didn't answer, or the connection dropped. WHY: worth trying again later; a kept sign-in is kept
+    Said(String), // WHAT: the server answered and said no. WHY: a person has to act on it
+}
+
+impl From<hub::client::Trouble> for Stop {
+    fn from(e: hub::client::Trouble) -> Stop {
+        match e {
+            hub::client::Trouble::Unreachable(_) => Stop::Unreachable(e.to_string()), // WHAT: not reached. WHY: nothing was said, so nothing is decided
+            other => Stop::Said(other.to_string()), // WHAT: an answer. WHY: said as always
+        }
+    }
+}
+
+impl std::fmt::Display for Stop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Stop::Unreachable(why) | Stop::Said(why) => f.write_str(why), // WHAT: the words alone. WHY: the window shows them as before
+        }
     }
 }
 
 /// What a device's state means for carrying on.
-fn standing(me: &hub::device::Me, id: String) -> Result<Admission, String> {
+fn standing(me: &hub::device::Me, id: String) -> Result<Admission, Stop> {
     match me.state.as_str() {
         "approved" => Ok(Admission::In), // WHAT: let in. WHY: carry on
         "waiting" => Ok(Admission::Waiting(id)), // WHAT: waiting. WHY: an admin decides
-        "refused" => Err("An admin turned this computer away. Ask them to approve it in Studio, Office, Computers.".into()), // WHAT: said plainly. WHY: only an admin brings it back
-        _ => Err("This computer was taken off the office's list. Ask an admin to approve it again in Studio, Office, Computers.".into()), // WHAT: removed. WHY: likewise
+        "refused" => Err(Stop::Said("An admin turned this computer away. Ask them to approve it in Studio, Office, Computers.".into())), // WHAT: said plainly. WHY: only an admin brings it back
+        _ => Err(Stop::Said("This computer was taken off the office's list. Ask an admin to approve it again in Studio, Office, Computers.".into())), // WHAT: removed. WHY: likewise
     }
+}
+
+/// Whether a failed `/me` means the kept sign-in itself is no good: a 401.
+/// The server answers a bad, expired or signed-out token with 401
+/// `unauthorised`, and a bare 401 is read as the same word. A 403 is not
+/// taken as this: the server never answers `/me` with one for a token, and a
+/// 403 from something in between (a VPN's or a tunnel's own gate) says
+/// nothing about the sign-in.
+fn token_rejected(e: &hub::client::Trouble) -> bool {
+    matches!(e, hub::client::Trouble::Refused(p) if p.error == "unauthorised") // WHAT: 401 only. WHY: only then is the kept sign-in forgotten
+}
+
+/// How a resume with a kept sign-in went, address by address.
+#[derive(Debug, Default)]
+struct Resuming {
+    rejected: bool, // WHAT: a server said the token is no good. WHY: the only failure that forgets the sign-in
+    refused: Option<String>, // WHAT: a server that answered but couldn't be trusted, or empty while waiting for approval. WHY: said, rather than signing the person out quietly
+    unreachable: Option<String>, // WHAT: why the last address didn't answer. WHY: said while the window tries again
+}
+
+impl Resuming {
+    /// An address that couldn't be opened. True when nothing else may be
+    /// tried with the sign-in.
+    fn open_failed(&mut self, e: hub::client::Trouble, pinned_base: bool) -> bool {
+        match e {
+            e @ hub::client::Trouble::Refused(_) => {
+                self.refused = Some(e.to_string()); // WHAT: a changed certificate, or not the office server. WHY: never connected to
+                false
+            }
+            e @ hub::client::Trouble::Unreachable(_) if pinned_base => {
+                self.unreachable = Some(e.to_string()); // WHAT: the pinned server didn't answer at all (a changed certificate comes as Refused, above). WHY: tried again later; nothing else is tried with the sign-in
+                true
+            }
+            e if pinned_base => {
+                self.refused = Some(e.to_string()); // WHAT: the pinned server didn't answer safely. WHY: said, and nothing else is tried with the sign-in
+                true
+            }
+            e @ (hub::client::Trouble::NewServer { .. } | hub::client::Trouble::Mismatch { .. }) => {
+                self.refused = Some(e.to_string()); // WHAT: another server, or one this build can't talk to. WHY: trying again changes nothing; a person decides
+                false
+            }
+            e => {
+                self.unreachable = Some(e.to_string()); // WHAT: not reachable this way. WHY: the next address is tried, and later all of them again
+                false
+            }
+        }
+    }
+
+    /// The device check failed.
+    fn not_admitted(&mut self, e: Stop) {
+        match e {
+            Stop::Unreachable(why) => self.unreachable = Some(why), // WHAT: not reached. WHY: tried again later
+            Stop::Said(why) => self.refused = Some(why), // WHAT: said. WHY: a person can act on it
+        }
+    }
+
+    /// `/me` failed. True when nothing else may be tried with the sign-in.
+    fn me_failed(&mut self, e: &hub::client::Trouble) -> bool {
+        if token_rejected(e) {
+            self.rejected = true; // WHAT: the token is no good. WHY: a real sign-out; it is forgotten
+            return true;
+        }
+        self.unreachable = Some(e.to_string()); // WHAT: a dropped connection, a 5xx, or a gate in between. WHY: the token wasn't refused, so it is kept and tried again
+        false
+    }
+
+    /// What the window is told when no address let the sign-in back in, or
+    /// `None` while the waiting screen is open.
+    fn told(self) -> Option<Told> {
+        if self.rejected {
+            return Some(Told::SignedOut); // WHAT: forgotten. WHY: the server said the sign-in is over
+        }
+        match self.refused {
+            Some(why) if why.is_empty() => None, // WHAT: waiting. WHY: the waiting screen is open
+            Some(why) => Some(Told::Trouble(why)), // WHAT: the reason. WHY: a person can act on it
+            None => Some(Told::Unreachable { why: self.unreachable.unwrap_or_else(|| "nothing answered".into()) }), // WHAT: kept, and tried again. WHY: not reaching a server is never a sign-out
+        }
+    }
+}
+
+/// How long to wait before trying a kept sign-in again, after `tries`
+/// failed tries: 5 s, then doubling, never more than 5 minutes.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn resume_wait(tries: u32) -> std::time::Duration {
+    let seconds = 5u64.saturating_mul(1u64 << tries.saturating_sub(1).min(10)); // WHAT: 5, 10, 20, 40... WHY: quick while a tunnel reconnects, gentle after
+    std::time::Duration::from_secs(seconds.min(300)) // WHAT: at most 5 minutes. WHY: a seat offline for hours still comes back by itself soon after the network does
 }
 
 /// Every computer, said to the panel, with what was just done.
@@ -642,7 +756,7 @@ pub fn start(repaint: egui::Context) -> Link {
                                 continue;
                             }
                             Err(e) => {
-                                say(&told, Told::Trouble(e));
+                                say(&told, Told::Trouble(e.to_string())); // WHAT: the reason, in words. WHY: said as always
                                 continue;
                             }
                             Ok(_) => {} // WHAT: let in. WHY: carry on
@@ -680,7 +794,7 @@ pub fn start(repaint: egui::Context) -> Link {
                                 continue;
                             }
                             Err(e) => {
-                                say(&told, Told::Trouble(e));
+                                say(&told, Told::Trouble(e.to_string())); // WHAT: the reason, in words. WHY: said as always
                                 continue;
                             }
                             Ok(Admission::Outside) => true, // WHAT: from outside. WHY: the join admits the computer too
@@ -719,7 +833,7 @@ pub fn start(repaint: egui::Context) -> Link {
                                 continue;
                             }
                             Err(e) => {
-                                say(&told, Told::Trouble(e));
+                                say(&told, Told::Trouble(e.to_string())); // WHAT: the reason, in words. WHY: said as always
                                 continue;
                             }
                             Ok(_) => {} // WHAT: let in, or outside where the server decides. WHY: carry on
@@ -751,29 +865,26 @@ pub fn start(repaint: egui::Context) -> Link {
                             }
                         }
                         let mut resumed = None;
-                        let mut refused = None; // WHAT: a server that answered but couldn't be trusted. WHY: said, rather than signing the person out quietly
+                        let mut went = Resuming::default(); // WHAT: how each address answered. WHY: only a 401 forgets the sign-in; not answering never does
                         for address in &tried {
                             let fresh = match open(address) {
                                 Ok(c) => c.with_token(&token),
-                                Err(e @ hub::client::Trouble::Refused(_)) => {
-                                    refused = Some(e.to_string()); // WHAT: a changed certificate. WHY: never connected to
-                                    continue;
+                                Err(e) => {
+                                    if went.open_failed(e, pinned && address == &base) {
+                                        break; // WHAT: stop. WHY: a pinned server's sign-in is tried nowhere else
+                                    }
+                                    continue; // WHAT: the next address. WHY: it may answer where this one didn't
                                 }
-                                Err(e) if pinned && address == &base => {
-                                    refused = Some(e.to_string()); // WHAT: the pinned server didn't answer safely. WHY: said, and nothing else is tried with the sign-in
-                                    break;
-                                }
-                                Err(_) => continue, // WHAT: not reachable this way. WHY: the next address is tried
                             };
                             match admitted(&fresh) {
                                 Ok(Admission::Waiting(device)) => {
                                     waiting = Some((base.clone(), Ask::Resume { base: base.clone(), token: token.clone(), reachable_at: None })); // WHAT: kept. WHY: resumed once approved
                                     say(&told, Told::Waiting { device });
-                                    refused = Some(String::new()); // WHAT: nothing more to try. WHY: the waiting screen says why
+                                    went.refused = Some(String::new()); // WHAT: nothing more to try. WHY: the waiting screen says why
                                     break;
                                 }
                                 Err(e) => {
-                                    refused = Some(e); // WHAT: said. WHY: a person can act on it
+                                    went.not_admitted(e); // WHAT: refused, or not reached. WHY: said, or tried again later
                                     continue;
                                 }
                                 Ok(_) => {} // WHAT: let in. WHY: carry on
@@ -781,9 +892,16 @@ pub fn start(repaint: egui::Context) -> Link {
                             // A kept token is checked before it is trusted,
                             // so a week-old one fails here rather than in the
                             // middle of saving somebody's takeoff.
-                            if let Ok(user) = fresh.me() {
-                                resumed = Some((fresh, user, address.clone()));
-                                break;
+                            match fresh.me() {
+                                Ok(user) => {
+                                    resumed = Some((fresh, user, address.clone())); // WHAT: let back in. WHY: the token still works
+                                    break;
+                                }
+                                Err(e) => {
+                                    if went.me_failed(&e) {
+                                        break; // WHAT: the token was refused. WHY: it isn't sent anywhere else
+                                    }
+                                }
                             }
                         }
                         match resumed {
@@ -806,11 +924,11 @@ pub fn start(repaint: egui::Context) -> Link {
                                 client = Some(fresh);
                                 say(&told, Told::SignedIn(Box::new(session)));
                             }
-                            None => match refused {
-                                Some(why) if why.is_empty() => {} // WHAT: waiting. WHY: the waiting screen is open
-                                Some(why) => say(&told, Told::Trouble(why)), // WHAT: the reason. WHY: a person can act on it
-                                None => say(&told, Told::SignedOut),
-                            },
+                            None => {
+                                if let Some(said) = went.told() {
+                                    say(&told, said); // WHAT: signed out (401 only), the reason, or "can't reach it, trying again". WHY: a kept sign-in is forgotten only when the server refuses it
+                                }
+                            }
                         }
                     }
 
@@ -2068,6 +2186,10 @@ pub struct Standing {
     /// The server was still fetching a new version when it last answered, so
     /// it is asked again in a minute or two rather than half an hour.
     pub update_looking: bool,
+    /// How many times in a row the kept sign-in couldn't reach the server.
+    pub resume_tries: u32, // WHAT: failed tries so far. WHY: each wait is longer than the last
+    /// When to try the kept sign-in again, while the server isn't answering.
+    pub resume_at: Option<std::time::Instant>, // WHAT: the next try, if one is due. WHY: a seat reconnects by itself once the network is back
     pub pinned_to: Option<String>,
     /// The office's Excalibur View Office license, as the server last said.
     /// `None` until it has said, and from a server older than licensing.
@@ -2077,6 +2199,16 @@ pub struct Standing {
 impl Standing {
     pub fn signed_in(&self) -> bool {
         self.who.is_some()
+    }
+
+    /// The kept sign-in couldn't reach the server: books the next try and
+    /// says how long until it. The server, its name and the sign-in are left
+    /// exactly as they are.
+    pub fn cannot_reach(&mut self, now: std::time::Instant) -> std::time::Duration {
+        self.resume_tries = self.resume_tries.saturating_add(1); // WHAT: one more failed try. WHY: the wait grows with them
+        let wait = resume_wait(self.resume_tries); // WHAT: how long to wait. WHY: quick at first, gentle after
+        self.resume_at = Some(now + wait); // WHAT: the next try. WHY: the window makes it when due
+        wait
     }
 }
 
@@ -2183,5 +2315,118 @@ mod tests {
     #[test]
     fn nobody_is_signed_in_to_begin_with() {
         assert!(!Standing::default().signed_in());
+    }
+
+    // ---- a kept sign-in, reopened (a field iPad, 2026-11-13) ------------------
+
+    fn problem(word: &str) -> hub::client::Trouble {
+        hub::client::Trouble::Refused(hub::Problem::new(word, format!("said {word}"))) // WHAT: a refusal with the server's word. WHY: as the client reads one
+    }
+
+    #[test]
+    fn a_server_that_does_not_answer_keeps_the_sign_in_and_tries_again() {
+        let mut went = Resuming::default(); // WHAT: a resume under way. WHY: as the worker keeps it
+        assert!(!went.open_failed(hub::client::Trouble::Unreachable("nothing answered".into()), false), "the next address is tried"); // WHAT: the shop's address is down. WHY: the outside one may answer
+        assert!(!went.open_failed(hub::client::Trouble::Unreachable("dns".into()), false)); // WHAT: the outside one too. WHY: a tunnel still reconnecting
+        assert!(matches!(went.told(), Some(Told::Unreachable { .. })), "never SignedOut"); // WHAT: kept and retried. WHY: SignedOut is what wiped prefs.server
+    }
+
+    #[test]
+    fn a_dropped_connection_or_a_gate_in_between_on_me_keeps_the_sign_in() {
+        for e in [hub::client::Trouble::Unreachable("dropped".into()), problem("server_error"), problem("forbidden"), hub::client::Trouble::Unreadable("a login page".into())] {
+            let mut went = Resuming::default(); // WHAT: a fresh resume. WHY: one failure each
+            assert!(!went.me_failed(&e), "{e} doesn't end the tries"); // WHAT: not a refusal of the token. WHY: kept
+            assert!(matches!(went.told(), Some(Told::Unreachable { .. })), "{e} keeps the sign-in"); // WHAT: retried. WHY: only a 401 forgets
+        }
+    }
+
+    #[test]
+    fn a_401_forgets_the_sign_in() {
+        let mut went = Resuming::default(); // WHAT: a resume under way. WHY: as the worker keeps it
+        assert!(!went.open_failed(hub::client::Trouble::Unreachable("down".into()), false)); // WHAT: one address down first. WHY: a 401 still wins over it
+        assert!(went.me_failed(&problem("unauthorised")), "a refused token is sent nowhere else"); // WHAT: the 401. WHY: stop at once
+        assert!(matches!(went.told(), Some(Told::SignedOut)), "forgotten"); // WHAT: SignedOut. WHY: the server ended the sign-in
+    }
+
+    #[test]
+    fn a_pinned_server_showing_another_certificate_is_still_refused() {
+        let changed = problem("certificate_changed"); // WHAT: what hub::secure says for a changed certificate. WHY: the refusal kept exactly
+        let mut went = Resuming::default(); // WHAT: a resume. WHY: one failure
+        assert!(!went.open_failed(changed, true)); // WHAT: refused, as before (Refused never stopped the loop; nothing else is in it for a pinned server). WHY: unchanged
+        match went.told() {
+            Some(Told::Trouble(why)) => assert_eq!(why, "said certificate_changed"), // WHAT: said in words. WHY: a person compares the pins
+            _ => panic!("a changed certificate must be refused, never retried or signed out"),
+        }
+        let mut went = Resuming::default(); // WHAT: a damaged pin record. WHY: the other pinned refusal
+        assert!(went.open_failed(hub::client::Trouble::Unreadable("damaged".into()), true), "nothing else is tried"); // WHAT: stops. WHY: as before
+        assert!(matches!(went.told(), Some(Told::Trouble(_)))); // WHAT: said. WHY: as before
+        let mut went = Resuming::default(); // WHAT: the pinned server simply off. WHY: the one pinned case that now retries
+        assert!(went.open_failed(hub::client::Trouble::Unreachable("off".into()), true), "the sign-in still goes nowhere else"); // WHAT: stops. WHY: a pinned sign-in is tried nowhere else
+        assert!(matches!(went.told(), Some(Told::Unreachable { .. }))); // WHAT: kept, retried. WHY: off isn't refused
+    }
+
+    #[test]
+    fn another_server_or_waiting_for_approval_is_never_a_sign_out() {
+        let mut went = Resuming::default(); // WHAT: a different server at the address. WHY: a person decides
+        went.open_failed(hub::client::Trouble::NewServer { seen: "x".into(), message: "another server".into() }, false); // WHAT: refused. WHY: never quietly re-pinned
+        assert!(matches!(went.told(), Some(Told::Trouble(_)))); // WHAT: said. WHY: a person acts on it
+        let mut went = Resuming::default(); // WHAT: the device check didn't answer. WHY: as on a reconnecting tunnel
+        went.not_admitted(Stop::Unreachable("dropped".into())); // WHAT: not reached. WHY: retried
+        assert!(matches!(went.told(), Some(Told::Unreachable { .. }))); // WHAT: kept. WHY: likewise
+        let went = Resuming { refused: Some(String::new()), ..Resuming::default() }; // WHAT: waiting for an admin. WHY: the waiting screen is open
+        assert!(went.told().is_none()); // WHAT: nothing more said. WHY: unchanged
+    }
+
+    #[test]
+    fn the_wait_between_tries_grows_and_stops_at_five_minutes() {
+        let waits: Vec<u64> = (1..=9).map(|n| resume_wait(n).as_secs()).collect(); // WHAT: the first nine waits. WHY: checked as a whole
+        assert_eq!(waits, [5, 10, 20, 40, 80, 160, 300, 300, 300]); // WHAT: doubling, capped. WHY: quick at first, gentle after
+        assert_eq!(resume_wait(u32::MAX).as_secs(), 300); // WHAT: never overflows. WHY: a seat offline for days
+        let mut standing = Standing { base: "https://office.example.com".into(), name: "Example Steel".into(), ..Standing::default() }; // WHAT: a seat with its kept server. WHY: as at start-up
+        let now = std::time::Instant::now(); // WHAT: now. WHY: the try is booked from it
+        assert_eq!(standing.cannot_reach(now).as_secs(), 5); // WHAT: the first wait. WHY: quick while a tunnel reconnects
+        assert_eq!(standing.cannot_reach(now).as_secs(), 10); // WHAT: the second. WHY: doubled
+        assert_eq!(standing.resume_at, Some(now + std::time::Duration::from_secs(10))); // WHAT: booked. WHY: the window tries then
+        assert_eq!(standing.base, "https://office.example.com", "the server is kept"); // WHAT: untouched. WHY: never forgotten for not answering
+        assert_eq!(standing.name, "Example Steel"); // WHAT: untouched. WHY: likewise
+    }
+
+    /// A stand-in server that answers every request with `reply`, `times` times.
+    fn answering(reply: &'static str, times: usize) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); // WHAT: any free port on this machine. WHY: nothing leaves it
+        let port = listener.local_addr().unwrap().port(); // WHAT: its port. WHY: the address handed back
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(times).flatten() {
+                let mut stream = stream; // WHAT: one connection. WHY: answered once
+                let mut buf = [0u8; 4096]; // WHAT: room for the request. WHY: read before answering, as a server does
+                let _ = stream.read(&mut buf); // WHAT: the request, unread beyond this. WHY: the answer is the same whatever it was
+                let _ = stream.write_all(reply.as_bytes()); // WHAT: the fixed answer. WHY: what the test is about
+            }
+        });
+        format!("http://127.0.0.1:{port}") // WHAT: its address. WHY: for the client
+    }
+
+    #[test]
+    fn a_real_401_from_the_server_is_what_forgets_and_nothing_else_is() {
+        let ours = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: 51\r\nConnection: close\r\n\r\n{\"error\":\"unauthorised\",\"message\":\"Sign in first.\"}"; // WHAT: the server's own 401. WHY: what a signed-out token gets
+        let bare = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; // WHAT: a 401 with no words. WHY: read as the same
+        let gate = "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Length: 7\r\nConnection: close\r\n\r\nBlocked"; // WHAT: a VPN's own block page. WHY: not about the token
+        let busy = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; // WHAT: a server starting up. WHY: not about the token
+        for (reply, forgets) in [(ours, true), (bare, true), (gate, false), (busy, false)] {
+            let address = answering(reply, 1); // WHAT: the stand-in. WHY: one answer
+            let e = Client::new(&address).with_token("kept-token").me().expect_err("refused"); // WHAT: /me with the kept token. WHY: exactly what Resume asks
+            assert_eq!(token_rejected(&e), forgets, "{reply:?} gave {e}"); // WHAT: forgotten only on a 401. WHY: a field iPad reopening before its VPN is back
+        }
+    }
+
+    #[test]
+    fn reopening_with_the_server_unreachable_keeps_the_sign_in() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port(); // WHAT: a port that was free a moment ago and is closed now. WHY: nothing answers there
+        let link = start(egui::Context::default()); // WHAT: the real worker. WHY: the whole Resume path, not a copy of it
+        let _ = link.to.send(Ask::Resume { base: format!("http://127.0.0.1:{port}"), token: "kept-token".into(), reachable_at: Some(format!("https://127.0.0.1:{port}")) }); // WHAT: a kept sign-in, both addresses down. WHY: an iPad before its VPN is back
+        let said = link.from.recv_timeout(std::time::Duration::from_secs(60)).expect("an answer"); // WHAT: what the window is told. WHY: SignedOut there wiped the kept server
+        assert!(matches!(said, Told::Unreachable { .. }), "an unreachable server must never sign the person out"); // WHAT: kept, retried. WHY: the bug
+        let _ = link.to.send(Ask::Quit); // WHAT: the worker stops. WHY: tidy
     }
 }

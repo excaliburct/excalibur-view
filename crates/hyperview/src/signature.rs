@@ -29,11 +29,19 @@ pub struct Saved {
 }
 
 /// Where this person's signatures are kept. Always their own profile.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn folder() -> Option<PathBuf> {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("Excalibur Hyperview").join("signatures"))
+    let here = crate::prefs::folder()?.join("signatures"); // WHAT: beside this user's settings. WHY: on iOS that is Library/Application Support, where an app may write
+    if let Some(old) = crate::prefs::earlier_folder().map(|f| f.join("signatures")) {
+        if !here.exists() {
+            for entry in std::fs::read_dir(&old).into_iter().flatten().flatten() {
+                if let Err(e) = crate::prefs::copied_once(&entry.path(), &here.join(entry.file_name())) {
+                    log::warn!("couldn't copy the signature {}: {e}", entry.path().display()); // WHAT: said. WHY: the rest are still copied
+                } // WHAT: each signature an earlier iOS build kept, copied once. WHY: an upgrade keeps them
+            }
+        }
+    }
+    Some(here)
 }
 
 /// The signatures kept in a folder, by name.

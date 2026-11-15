@@ -44,7 +44,7 @@ pub fn regions(doc: &Document, page: &Dict) -> Vec<Region> {
         .filter_map(|item| {
             let object = doc.follow(item);
             let dict = object.as_dict()?;
-            let measure = Measure::read(doc.at(dict, "Measure").as_dict()?)?;
+            let measure = Measure::read(&inline(doc, doc.at(dict, "Measure").as_dict()?))?; // WHAT: the measure, its number formats read through any references. WHY: some exporters keep each format as its own object, and a detail's scale was lost
             Some(Region {
                 area: doc.at(dict, "BBox").as_rect().unwrap_or(fallback),
                 name: doc.at(dict, "Name").as_text().unwrap_or_default(),
@@ -52,6 +52,45 @@ pub fn regions(doc: &Document, page: &Dict) -> Vec<Region> {
             })
         })
         .collect()
+}
+
+/// A `/Measure` with every number-format list, and every format in it, read
+/// through its reference, so [`Measure::read`] sees them as if written inline.
+fn inline(doc: &Document, measure: &Dict) -> Dict {
+    let mut out = measure.clone(); // WHAT: a copy. WHY: the file's own object is never changed
+    for key in ["X", "D", "A", "T", "S", "V"] { // WHAT: every number-format list a ruler measure can carry. WHY: /O, the origin, is two numbers and needs nothing
+        let Some(list) = doc.at(measure, key).as_array().map(<[Object]>::to_vec) else {
+            continue; // WHAT: no such list. WHY: most measures have only some
+        };
+        let formats: Vec<Object> = list.iter().map(|item| (*doc.follow(item)).clone()).collect(); // WHAT: each format, followed. WHY: `/X [6 0 R]` reads the same as `/X [<<...>>]`
+        out.set(Name::new(key), Object::Array(formats)); // WHAT: put back inline. WHY: read as one
+    }
+    out
+}
+
+/// Whether `area` covers the whole of `sheet`, give or take a point.
+fn covers(area: [f64; 4], sheet: [f64; 4]) -> bool {
+    area[0] <= sheet[0] + 1.0 && area[1] <= sheet[1] + 1.0 && area[2] >= sheet[2] - 1.0 && area[3] >= sheet[3] - 1.0 // WHAT: every edge at or past the sheet's. WHY: the region a scale set here writes
+}
+
+/// Whether a region stands for the sheet itself rather than a detail: it
+/// covers the sheet, or more than half of it. `AutoCAD`'s main plan viewport
+/// sits inside the title block's margins, so it never quite covers the sheet,
+/// but it is the plan and not a detail.
+fn sheet_like(area: [f64; 4], sheet: [f64; 4]) -> bool {
+    let size = |r: [f64; 4]| (r[2] - r[0]).max(0.0) * (r[3] - r[1]).max(0.0); // WHAT: a rectangle's area. WHY: compared with the sheet's
+    covers(area, sheet) || size(area) * 2.0 > size(sheet) // WHAT: the whole sheet, or most of it. WHY: a detail is a small part of a sheet; a scale set for the sheet replaces the plan's
+}
+
+/// The region that stands for the whole sheet: one covering the sheet (the
+/// one [`write_scale`] writes), else the largest. The first of equals wins.
+fn sheet_wide(regions: &[Region], sheet: [f64; 4]) -> Option<&Region> {
+    regions.iter().find(|r| covers(r.area, sheet)).or_else(|| {
+        regions.iter().fold(None, |best: Option<&Region>, r| match best {
+            Some(b) if b.size() >= r.size() => Some(b), // WHAT: the bigger kept, the earlier on a tie. WHY: file order breaks ties as before
+            _ => Some(r),
+        })
+    }) // WHAT: the sheet-wide region, or the plan before any detail. WHY: a detail listed first was read as the sheet's scale, so a scale just set seemed to revert after the save
 }
 
 /// The scale that applies at a point. The smallest region containing the point
@@ -66,13 +105,17 @@ pub fn scale_at(doc: &Document, page: &Dict, at: [f64; 2]) -> Option<Measure> {
                 .partial_cmp(&b.size())
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
-        .or_else(|| regions.first())
+        .or_else(|| sheet_wide(&regions, doc.page_box(page))) // WHAT: outside every region, the sheet's own scale. WHY: never a detail's just because it is listed first
         .map(|r| r.measure.clone())
 }
 
-/// The scale for the sheet as a whole, when there is only one.
+/// The scale for the sheet as a whole: the region covering the sheet, which
+/// is the one a scale set here writes, rather than whichever the file lists
+/// first. `AutoCAD` lists its viewports first and [`write_scale`] appends the
+/// sheet's own after them.
 pub fn scale_of(doc: &Document, page: &Dict) -> Option<Measure> {
-    regions(doc, page).into_iter().next().map(|r| r.measure)
+    let regions = regions(doc, page); // WHAT: every readable region. WHY: chosen from below
+    sheet_wide(&regions, doc.page_box(page)).map(|r| r.measure.clone()) // WHAT: the sheet-wide one. WHY: the scale shown and totalled for the sheet
 }
 
 /// Whether a page has any scale at all. A page without one has its
@@ -94,12 +137,10 @@ pub fn write_scale(doc: &Document, page: &mut Dict, measure: Option<&Measure>) {
                 .as_dict()
                 .map(|d| doc.at(d, "BBox").as_rect().unwrap_or(area))
                 .unwrap_or(area);
-            let covers_sheet = its_area[0] <= area[0] + 1.0
-                && its_area[1] <= area[1] + 1.0
-                && its_area[2] >= area[2] - 1.0
-                && its_area[3] >= area[3] - 1.0;
-            // A region smaller than the sheet is a detail with its own scale.
-            if !covers_sheet {
+            // A region that is a small part of the sheet is a detail with its
+            // own scale; anything bigger is the sheet's, and is replaced.
+            if !sheet_like(its_area, area) {
+                // WHAT: a detail, kept. WHY: details keep their own scales; the plan takes the one just set
                 list.push(item.clone());
             }
         }
@@ -280,4 +321,17 @@ mod tests {
         let again = Document::from_bytes(update.apply(&doc));
         assert!(!has_scale(&again, &again.page(0).unwrap()));
     }
+
+    #[test]
+    fn the_sheet_scale_is_the_sheet_wide_region_even_when_a_detail_is_listed_first() {
+        let doc = Document::from_bytes(sample()); // WHAT: a 3024 x 2160 sheet. WHY: as above
+        let mut page = doc.page(0).unwrap(); // WHAT: its page. WHY: given a /VP by hand
+        page.set(Name::new("VP"), Object::Array(vec![
+            Object::Dict(dict! { "BBox" => Object::Array(vec![Object::Int(0), Object::Int(0), Object::Int(600), Object::Int(600)]), "Measure" => Object::Dict(imperial(12.0, "1\" = 1'-0\"", 16).write()) }), // WHAT: a detail, first. WHY: how AutoCAD lists them
+            Object::Dict(dict! { "BBox" => Object::Array(vec![Object::Int(0), Object::Int(0), Object::Int(3024), Object::Int(2160)]), "Measure" => Object::Dict(imperial(48.0, "1/4\" = 1'-0\"", 16).write()) }), // WHAT: the sheet's own, last. WHY: where write_scale puts it
+        ]));
+        assert_eq!(scale_of(&doc, &page).unwrap().ratio, "1/4\" = 1'-0\"", "the sheet's, not the first listed"); // WHAT: the sheet-wide one. WHY: the customer's scale seemed to revert
+        assert_eq!(scale_at(&doc, &page, [100.0, 100.0]).unwrap().length(72.0), "1'-0\"", "the detail keeps its own"); // WHAT: inside the detail. WHY: unchanged
+    }
 }
+
