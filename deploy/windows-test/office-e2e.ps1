@@ -335,6 +335,7 @@ try {
 
     Step '(c) the cell''s first start: 1.0''s data moved into the cell, its key imported, 1.0 taken away'
     WaitForCell 600 0                                                           # WHAT: the move, then the cell. WHY: the move copies every file first.
+    (OfficeLogText) -split "`n" | Where-Object { $_ -match 'self-test' } | ForEach-Object { Write-Host $_ }   # WHAT: the cell's own key and TLS checks, from the log. WHY: what it said about its key
     $log = OfficeLogText                                                        # WHAT: the service's log. WHY: checked below.
     Check ($log.Contains('was stopped and disabled for the move')) '1.0 was stopped and disabled before the move'   # WHAT: stopped first. WHY: two servers never run over the same data.
     Check ((Running $CitadelExe).Count -eq 0 -and (Running (Join-Path $CitadelFolder 'service\Citadel Server.exe')).Count -eq 0) '1.0 is not running'   # WHAT: stopped. WHY: the cell holds 47110.
