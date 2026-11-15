@@ -1,7 +1,8 @@
 //! What every Excalibur app on one computer shares about the office's server
 //! (docs/OFFICE-ENROLLMENT.md §2): its address and certificate pin, kept in
 //! one per-user file, `%LocalAppData%\Excalibur\office.json` on Windows or
-//! `~/.config/Excalibur/office.json` elsewhere, so the second app on a PC
+//! `~/.config/Excalibur/office.json` elsewhere (on iOS, the app's own
+//! `Library/Application Support/Excalibur/office.json`), so the second app on a PC
 //! never asks again; whether its office certificate was ever seen verified;
 //! and which addresses a first contact may take a pin from.
 //!
@@ -36,14 +37,150 @@ pub struct Shared {
     pub other: serde_json::Map<String, serde_json::Value>, // WHAT: every other field in the file, as it was. WHY: another app (View, CAD, Archetype, LatCon Estimating) may keep more there, and no app loses it
 }
 
-/// Where the shared file is for this user.
+/// Where the shared file is for this user. On an iPad or iPhone, a file an
+/// earlier build kept under `$HOME/.config` is moved across once.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn shared_file() -> Option<PathBuf> {
-    #[cfg(windows)]
-    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from); // WHAT: %LocalAppData%. WHY: §2.3
-    #[cfg(not(windows))]
-    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))); // WHAT: ~/.config. WHY: §2.3
+    let var = |name: &str| std::env::var_os(name).map(PathBuf::from); // WHAT: one environment variable, as a path. WHY: read the same way each time
+    let here = shared_file_for(&Homes { local_app_data: var("LOCALAPPDATA"), xdg_config: var("XDG_CONFIG_HOME"), home: var("HOME") }, Platform::this())?; // WHAT: this system's place for it. WHY: §2.3, and Library/Application Support on iOS
+    if Platform::this() == Platform::Ios {
+        if let Some(old) = shared_file_for(&Homes { local_app_data: None, xdg_config: None, home: var("HOME") }, Platform::Unix) {
+            match move_once(&old, &here) {
+                Ok(true) => eprintln!("the office server's shared record was moved from {} to {}", old.display(), here.display()), // WHAT: noted in the log. WHY: the move can be seen
+                Ok(false) => {} // WHAT: nothing to copy. WHY: a new install, or copied before
+                Err(e) => eprintln!("the office server's shared record couldn't be moved from {}: {e}", old.display()), // WHAT: said. WHY: the app still connects by its own pin book
+            }
+        }
+    }
+    Some(here)
+}
+
+/// The variables a home folder is found from.
+#[derive(Debug, Default)]
+struct Homes {
+    local_app_data: Option<PathBuf>, // WHAT: %LocalAppData%. WHY: Windows
+    xdg_config: Option<PathBuf>, // WHAT: $XDG_CONFIG_HOME. WHY: Linux, and Android, whose app sets it
+    home: Option<PathBuf>, // WHAT: $HOME. WHY: everything else
+}
+
+/// Which rule finds the shared file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Platform {
+    Windows, // WHAT: %LocalAppData%. WHY: §2.3
+    Ios, // WHAT: the app's Library/Application Support. WHY: an iOS app may only make folders in Documents, Library and tmp
+    Unix, // WHAT: ~/.config, or $XDG_CONFIG_HOME. WHY: §2.3; Linux, the Mac and Android
+}
+
+impl Platform {
+    /// The one this program was built for.
+    fn this() -> Platform {
+        if cfg!(windows) {
+            Platform::Windows // WHAT: Windows. WHY: as built
+        } else if cfg!(target_os = "ios") {
+            Platform::Ios // WHAT: iOS. WHY: as built
+        } else {
+            Platform::Unix // WHAT: the rest. WHY: as built
+        }
+    }
+}
+
+/// Where the shared file is, given the home variables and the platform.
+///
+/// On iOS `$HOME` is the app's sandbox container. Apple's File System
+/// Programming Guide lets an app make folders only inside its `Documents`,
+/// `Library` and `tmp` folders, and puts configuration files in
+/// `Library/Application Support`; a `.config` folder at the container's top
+/// is outside all three, so the record was never kept there.
+fn shared_file_for(homes: &Homes, platform: Platform) -> Option<PathBuf> {
+    let base = match platform {
+        Platform::Windows => homes.local_app_data.clone(), // WHAT: %LocalAppData%. WHY: §2.3
+        Platform::Ios => homes.home.as_ref().map(|h| h.join("Library").join("Application Support")), // WHAT: Library/Application Support. WHY: where an iOS app may keep its own files
+        Platform::Unix => homes.xdg_config.clone().or_else(|| homes.home.as_ref().map(|h| h.join(".config"))), // WHAT: ~/.config. WHY: §2.3, unchanged
+    };
     base.map(|b| b.join("Excalibur").join("office.json")) // WHAT: `Excalibur\office.json`. WHY: §2.3
+}
+
+/// Moves `old` to `new` once, for a file an earlier build kept somewhere it
+/// no longer lives: only when `old` is a plain file (a link there is never
+/// followed) and nothing at all is at `new` (not a file, not a link, not even
+/// a link to nothing). True when it moved.
+///
+/// Race-free against a newer record appearing at `new` at any moment: the old
+/// file is read through a handle opened without following links, written to
+/// a temporary file beside `new`, and put in place with a hard link, which
+/// fails if anything is at `new` by then. Nothing is ever written through an
+/// existing file or a link. Only once the new one is in place is the old one
+/// removed, so a second copy of a sign-in or a pin isn't left behind.
+///
+/// # Errors
+///
+/// When the new folder can't be made, or the copy or the link fails for any
+/// reason but something already being at `new`.
+pub fn move_once(old: &Path, new: &Path) -> std::io::Result<bool> {
+    use std::io::ErrorKind;
+    let Some(mut source) = open_plain(old)? else {
+        return Ok(false); // WHAT: nothing to move, or not a plain file. WHY: a link is never followed, so its target is never read
+    };
+    if let Some(dir) = new.parent() {
+        std::fs::create_dir_all(dir)?; // WHAT: the new folder. WHY: a fresh install has none yet
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()); // WHAT: a unique part for the temporary name. WHY: two starts at once never share one
+    let name = new.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(); // WHAT: the file's own name. WHY: the temporary sits beside it, named after it
+    let temporary = new.with_file_name(format!(".{name}.moving-{}-{stamp}", std::process::id())); // WHAT: a temporary file beside the target. WHY: same folder, so the link can't cross volumes
+    let mut fresh = std::fs::OpenOptions::new();
+    fresh.write(true).create_new(true); // WHAT: a brand-new file. WHY: create_new never opens an existing file or a link
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fresh.mode(0o600); // WHAT: readable and writable by this user only. WHY: security review: it may hold a sign-in or a pin
+    }
+    let mut out = fresh.open(&temporary)?; // WHAT: the temporary, made. WHY: copied into below
+    let placed = std::io::copy(&mut source, &mut out).and_then(|_| out.sync_all()).and_then(|()| std::fs::hard_link(&temporary, new)); // WHAT: copied, flushed, and linked into place. WHY: the link fails if anything is at the target, so a newer record is never replaced
+    let _ = std::fs::remove_file(&temporary); // WHAT: the temporary name gone. WHY: the record lives on under its own name, or wasn't placed
+    match placed {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(false), // WHAT: something got there first. WHY: never over a newer record (a pin or verified flag never goes back)
+        Err(e) => return Err(e), // WHAT: the copy or link failed. WHY: said; the old file stays, so nothing is lost
+    }
+    std::fs::remove_file(old)?; // WHAT: the old copy removed. WHY: security review L3: no stale sign-in or pin left in the old place
+    Ok(true)
+}
+
+/// `path` opened for reading if it is a plain file, without following a
+/// link at its last step; `None` when there is nothing there, it is a link,
+/// or it isn't a plain file.
+fn open_plain(path: &Path) -> std::io::Result<Option<std::fs::File>> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true); // WHAT: read only. WHY: the old file is never written
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK); // WHAT: refuse a link at the last step, and never wait on the open. WHY: security review: the check and the read are one step; a FIFO in the old place can't hang start-up (it is then refused as not a plain file)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Ok(None); // WHAT: a link, refused. WHY: no O_NOFOLLOW here; the move itself only runs on iOS
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None), // WHAT: nothing there. WHY: a fresh install
+        Err(e) if is_a_link(&e) => return Ok(None), // WHAT: a link. WHY: never followed
+        Err(e) => return Err(e), // WHAT: something else. WHY: said
+    };
+    Ok(file.metadata()?.is_file().then_some(file)) // WHAT: kept only if it is a plain file. WHY: a folder or a device is never read as a record
+}
+
+/// Whether an open failed because the last step was a link (`O_NOFOLLOW`).
+fn is_a_link(e: &std::io::Error) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+    {
+        e.raw_os_error() == Some(libc::ELOOP) // WHAT: ELOOP. WHY: what O_NOFOLLOW gives for a link
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
+    {
+        let _ = e; // WHAT: unused. WHY: no O_NOFOLLOW here; links are refused before opening
+        false
+    }
 }
 
 /// The shared file, read: `Ok(None)` when there is none, `Err` when it is
@@ -193,6 +330,88 @@ mod tests {
         }
         assert!(host_is_local("[fe80::1]", 8714));
         assert!(!host_is_local("no-such-host.invalid", 8714), "a name that resolves to nothing is not local");
+    }
+
+    #[test]
+    fn an_ipad_keeps_the_shared_record_in_application_support_and_the_rest_are_unchanged() {
+        let home = PathBuf::from("/var/mobile/Containers/Data/Application/APP"); // WHAT: an iOS app's container, as $HOME. WHY: the iPad case
+        let homes = Homes { local_app_data: Some(PathBuf::from(r"C:\Users\sam\AppData\Local")), xdg_config: None, home: Some(home.clone()) }; // WHAT: every variable set. WHY: each platform takes its own
+        assert_eq!(shared_file_for(&homes, Platform::Ios), Some(home.join("Library/Application Support/Excalibur/office.json"))); // WHAT: Library/Application Support. WHY: an iOS app can't make .config at its container's top
+        assert_eq!(shared_file_for(&homes, Platform::Unix), Some(home.join(".config/Excalibur/office.json"))); // WHAT: ~/.config. WHY: unchanged
+        assert_eq!(shared_file_for(&Homes { xdg_config: Some(PathBuf::from("/x")), ..Homes::default() }, Platform::Unix), Some(PathBuf::from("/x/Excalibur/office.json"))); // WHAT: $XDG_CONFIG_HOME first. WHY: unchanged, and how Android finds it
+        assert_eq!(shared_file_for(&homes, Platform::Windows), Some(PathBuf::from(r"C:\Users\sam\AppData\Local").join("Excalibur").join("office.json"))); // WHAT: %LocalAppData%. WHY: unchanged
+        assert_eq!(shared_file_for(&Homes::default(), Platform::Ios), None); // WHAT: no home. WHY: nowhere, rather than a guess
+    }
+
+    #[test]
+    fn a_record_kept_by_an_earlier_ipad_build_is_moved_once_and_never_over_a_newer_one() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(); // WHAT: a fresh name. WHY: tests run side by side
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("office-move-{n}-{}", std::process::id())); // WHAT: under the build's own folder. WHY: never a shared temporary folder
+        let homes = Homes { home: Some(base.clone()), ..Homes::default() }; // WHAT: this folder as $HOME. WHY: both places under it
+        let old = shared_file_for(&homes, Platform::Unix).unwrap(); // WHAT: where 0.7.0 kept it on iOS. WHY: the old place
+        let new = shared_file_for(&homes, Platform::Ios).unwrap(); // WHAT: where it goes now. WHY: the new place
+        assert!(!move_once(&old, &new).unwrap(), "nothing to move"); // WHAT: no old record. WHY: a fresh install
+        let kept = Shared { address: "https://192.168.1.10:8714".into(), pin: "a".repeat(64), verified: true, other: serde_json::Map::new() }; // WHAT: an old record, verified. WHY: what must survive
+        write(&old, &kept).unwrap(); // WHAT: written in the old place. WHY: as 0.7.0 tried to
+        let newer = Shared { pin: "b".repeat(64), verified: false, ..kept.clone() }; // WHAT: a newer record already in the new place. WHY: must never be overwritten, even with no check before the link
+        write(&new, &newer).unwrap(); // WHAT: written. WHY: as an app linking later would
+        assert!(!move_once(&old, &new).unwrap(), "a newer record wins"); // WHAT: not moved. WHY: the hard link refuses an existing target
+        assert_eq!(read(&new), Ok(Some(newer)), "the newer record is untouched"); // WHAT: unchanged. WHY: an older pin never replaces a newer one
+        assert!(old.exists(), "the old record stays when it wasn't moved"); // WHAT: kept. WHY: nothing lost
+        std::fs::remove_file(&new).unwrap(); // WHAT: the new place empty again. WHY: the move itself, next
+        assert!(move_once(&old, &new).unwrap(), "moved"); // WHAT: moved. WHY: nothing in the new place
+        assert_eq!(read(&new), Ok(Some(kept)), "the same pin and verified flag"); // WHAT: read back. WHY: the iPad stays linked to the same server
+        assert!(!old.exists(), "the old record is removed once moved"); // WHAT: gone. WHY: security review L3: no stale pin left behind
+        let left: Vec<_> = std::fs::read_dir(new.parent().unwrap()).unwrap().flatten().map(|e| e.file_name()).collect(); // WHAT: what is in the new folder. WHY: no temporary left over
+        assert_eq!(left, vec![std::ffi::OsString::from("office.json")], "only the record, no temporary file"); // WHAT: just the record. WHY: tidy
+        let _ = std::fs::remove_dir_all(&base); // WHAT: tidied. WHY: a test leaves nothing
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_are_never_followed_at_either_end_of_a_move() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(); // WHAT: a fresh name. WHY: tests run side by side
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("office-links-{n}-{}", std::process::id())); // WHAT: under the build's own folder. WHY: never a shared temporary folder
+        std::fs::create_dir_all(&base).unwrap(); // WHAT: made. WHY: the files go in it
+        let (old, new, elsewhere) = (base.join("old.json"), base.join("new").join("office.json"), base.join("elsewhere.json")); // WHAT: the two places and a file a link could point at. WHY: the cases below
+        std::fs::write(&elsewhere, b"someone else's file").unwrap(); // WHAT: a file that isn't the record. WHY: must never be read or written through a link
+        std::os::unix::fs::symlink(&elsewhere, &old).unwrap(); // WHAT: the old place is a link. WHY: never followed
+        assert!(!move_once(&old, &new).unwrap(), "a link as the source is not read"); // WHAT: refused. WHY: O_NOFOLLOW
+        assert!(!new.exists() && old.symlink_metadata().is_ok(), "nothing written, the link left as it was"); // WHAT: nothing done. WHY: likewise
+        std::fs::remove_file(&old).unwrap(); // WHAT: the link gone. WHY: a real old record next
+        std::fs::write(&old, b"{}").unwrap(); // WHAT: a real old record. WHY: to be moved
+        std::fs::create_dir_all(new.parent().unwrap()).unwrap(); // WHAT: the new folder. WHY: a link goes in it
+        std::os::unix::fs::symlink(base.join("nowhere.json"), &new).unwrap(); // WHAT: a link to nothing at the new place. WHY: a write through it would land elsewhere
+        assert!(!move_once(&old, &new).unwrap(), "a link to nothing still counts as something there"); // WHAT: refused. WHY: the hard link never goes through a link
+        assert!(!base.join("nowhere.json").exists(), "nothing written through the link"); // WHAT: nothing created. WHY: create_new and the hard link never follow it
+        assert_eq!(std::fs::read(&elsewhere).unwrap(), b"someone else's file"); // WHAT: untouched. WHY: never read or written
+        let _ = std::fs::remove_dir_all(&base); // WHAT: tidied. WHY: a test leaves nothing
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_fifo_in_the_old_place_never_hangs_and_a_moved_file_is_this_users_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(); // WHAT: a fresh name. WHY: tests run side by side
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("office-fifo-{n}-{}", std::process::id())); // WHAT: under the build's own folder. WHY: never a shared temporary folder
+        std::fs::create_dir_all(&base).unwrap(); // WHAT: made. WHY: the files go in it
+        let (fifo, new) = (base.join("old.json"), base.join("new").join("office.json")); // WHAT: the two places. WHY: the FIFO case first
+        let name = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap(); // WHAT: its path for the system call. WHY: mkfifo takes a C string
+        // SAFETY: `name` is a valid NUL-terminated path that outlives the call; mkfifo only reads it.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "a FIFO made"); // WHAT: a named pipe nobody writes to. WHY: an open without O_NONBLOCK would wait for ever
+        let (told, heard) = std::sync::mpsc::channel(); // WHAT: a way back. WHY: a deadline
+        let (from, to) = (fifo.clone(), new.clone()); // WHAT: copies for the thread. WHY: moved into it
+        std::thread::spawn(move || {
+            let _ = told.send(move_once(&from, &to).map_err(|e| e.to_string())); // WHAT: the move tried. WHY: on its own thread, so a hang is a failure, not a stuck test run
+        });
+        let got = heard.recv_timeout(std::time::Duration::from_secs(5)).expect("returned within 5 s: a FIFO never hangs start-up"); // WHAT: the answer. WHY: O_NONBLOCK
+        assert_eq!(got, Ok(false), "a FIFO is not a record"); // WHAT: refused. WHY: not a plain file
+        std::fs::remove_file(&fifo).unwrap(); // WHAT: the FIFO gone. WHY: a real file next
+        std::fs::write(&fifo, b"{}").unwrap(); // WHAT: an ordinary old file. WHY: made with the usual 0644
+        std::fs::set_permissions(&fifo, std::fs::Permissions::from_mode(0o644)).unwrap(); // WHAT: readable by everybody. WHY: the move must not carry that across
+        assert!(move_once(&fifo, &new).unwrap(), "moved"); // WHAT: moved. WHY: nothing in the new place
+        assert_eq!(std::fs::metadata(&new).unwrap().permissions().mode() & 0o777, 0o600, "this user's alone"); // WHAT: 0600. WHY: it may hold a sign-in or a pin
+        let _ = std::fs::remove_dir_all(&base); // WHAT: tidied. WHY: a test leaves nothing
     }
 
     #[test]
