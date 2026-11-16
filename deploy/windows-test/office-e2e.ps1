@@ -565,8 +565,8 @@ try {
     $squatSaid = (Get-Content -Raw "$evidence\squat.txt").Trim()                # WHAT: whether it could. WHY: below
     if ($squatSaid -eq 'ready') {
         $from = (OfficeLogText).Length                                          # WHAT: where the log is now. WHY: only the new alarm counts
-        for ($i = 0; $i -lt 40 -and -not (OfficeLogText).Substring($from).Contains('relay pipe is served by process'); $i++) {
-            try { Invoke-WebRequest -Uri "https://127.0.0.1:$Port/v1/hello" -SkipCertificateCheck -TimeoutSec 10 -UseBasicParsing | Out-Null } catch {}   # WHAT: connections until one reaches the squatter's instance. WHY: Windows hands them to any waiting instance
+        for ($i = 0; $i -lt 120 -and -not (OfficeLogText).Substring($from).Contains('relay pipe is served by process'); $i++) {
+            try { Invoke-WebRequest -Uri "https://127.0.0.1:$Port/v1/hello" -SkipCertificateCheck -DisableKeepAlive -TimeoutSec 10 -UseBasicParsing | Out-Null } catch {}   # WHAT: a new connection each time until one reaches the squatter's instance. WHY: Windows hands each new connection to a waiting instance; a kept-alive connection would never reach another
         }
         & "$env:SystemRoot\System32\schtasks.exe" /End /TN e2e-squat | Out-Null   # WHAT: the squatter stopped. WHY: done with it
         $alarm = ((OfficeLogText).Substring($from) -split "`n" | Where-Object { $_ -match 'relay pipe is served by process' } | Select-Object -First 1)   # WHAT: the alarm. WHY: shown
