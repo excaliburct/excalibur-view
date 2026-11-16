@@ -150,7 +150,17 @@ staging="$out/dmg"
 rm -rf "$staging"; mkdir -p "$staging"
 cp -R "$app" "$staging/"
 ln -s /Applications "$staging/Applications"
-hdiutil create -volname "$name" -srcfolder "$staging" -ov -format UDZO "$dmg" >/dev/null
+# hdiutil sizes the image from its own guess, and on GitHub's macOS runners that guess is sometimes too small: it then
+# fails with "No space left on device" while the disk has tens of gigabytes free (0.7.1, three runs). So the size is
+# given outright, twice what the bundle takes plus room, and a failure is tried twice more before giving up.
+mb=$(( $(du -sm "$staging" | cut -f1) * 2 + 100 ))  # WHAT: the image's size in MB. WHY: never left to hdiutil's guess
+made=""  # WHAT: whether the image was made. WHY: the loop below stops at the first success
+for attempt in 1 2 3; do  # WHAT: up to three tries. WHY: hdiutil on CI fails now and then for reasons outside the build
+  if hdiutil create -volname "$name" -srcfolder "$staging" -size "${mb}m" -ov -format UDZO "$dmg" >/dev/null; then made=1; break; fi  # WHAT: the disk image, sized. WHY: as above
+  echo "   hdiutil failed (try $attempt of 3); trying again" >&2  # WHAT: said. WHY: a retry shows in the log
+  rm -f "$dmg"; sleep 5  # WHAT: a clean start. WHY: a half-made image is never kept
+done
+[ -n "$made" ] || { echo "   the disk image couldn't be made after three tries" >&2; exit 1; }  # WHAT: stop. WHY: nothing unsigned or partial goes on
 rm -rf "$staging"
 codesign --force ${stamp[@]+"${stamp[@]}"} --sign "$SIGN_IDENTITY" "$dmg"  # WHAT: the disk image. WHY: as before; no timestamp when ad hoc.
 
