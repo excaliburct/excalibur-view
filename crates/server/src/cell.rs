@@ -221,9 +221,8 @@ impl Watch {
             State::Starting => None, // WHAT: no word yet. WHY: the look at its port, or "looking"
             State::Running { .. } if crate::cellrelay::sign_trouble(now) => Some(crate::citadel::Seen::NotAnswering), // WHAT: running, but its key wouldn't sign lately. WHY: security review, 2026-11-16: no computer can connect, so it isn't serving
             State::Running { version } => Some(crate::citadel::Seen::Running { version }), // WHAT: running, its version. WHY: Fleet compares it with the shelf
-            State::NotAnswering => Some(crate::citadel::Seen::NotAnswering), // WHAT: not answering. WHY: §6a
+            State::NotAnswering | State::Refused => Some(crate::citadel::Seen::NotAnswering), // WHAT: not answering: given up after restarts, or not started for an alarm an admin must act on. WHY: §6a; security review, 2026-11-16
             State::PipeTaken => Some(crate::citadel::Seen::PipeTaken), // WHAT: the pipe's name taken. WHY: shown as an alarm
-            State::Refused => Some(crate::citadel::Seen::NotAnswering), // WHAT: not started, an alarm in the log. WHY: shown as not answering until an admin acts
         }
     }
 }

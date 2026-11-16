@@ -344,7 +344,7 @@ async fn one(tcp: tokio::net::TcpStream, peer: SocketAddr, ours: SocketAddr, cur
 /// within `idle` of a stalled write.
 ///
 /// When one side ends its sending, the other side's write half is shut. Over
-/// TLS that sends close_notify; on a Windows named pipe it is only a flush
+/// TLS that sends `close_notify`; on a Windows named pipe it is only a flush
 /// (tokio's named pipes have no half-close), so the cell sees the caller's
 /// end only when the relay ends and the pipe is closed: when the cell has
 /// finished too, or after `idle`.
@@ -380,16 +380,14 @@ where
     let since = |at: tokio::time::Instant| u64::try_from(at.saturating_duration_since(start).as_millis()).unwrap_or(u64::MAX); // WHAT: milliseconds since the start. WHY: kept in one number
     let mut buffer = vec![0u8; CHUNK]; // WHAT: this direction's buffer. WHY: bounded memory per connection
     loop {
-        let n = match tokio::time::timeout(idle, from.read(&mut buffer)).await {
-            Ok(read) => read?, // WHAT: read, or the side failed. WHY: below
-            Err(_) => {
-                let quiet = since(tokio::time::Instant::now()).saturating_sub(activity.load(Ordering::Relaxed)); // WHAT: how long nothing has moved either way. WHY: the other direction may be busy
-                if quiet >= u64::try_from(idle.as_millis()).unwrap_or(u64::MAX) {
-                    return Err(std::io::ErrorKind::TimedOut.into()); // WHAT: both quiet for the idle time. WHY: a held-open connection gives its slot back
-                }
-                continue; // WHAT: the other way is busy. WHY: a long answer or upload isn't cut
+        let Ok(read) = tokio::time::timeout(idle, from.read(&mut buffer)).await else {
+            let quiet = since(tokio::time::Instant::now()).saturating_sub(activity.load(Ordering::Relaxed)); // WHAT: how long nothing has moved either way. WHY: the other direction may be busy
+            if quiet >= u64::try_from(idle.as_millis()).unwrap_or(u64::MAX) {
+                return Err(std::io::ErrorKind::TimedOut.into()); // WHAT: both quiet for the idle time. WHY: a held-open connection gives its slot back
             }
+            continue; // WHAT: the other way is busy. WHY: a long answer or upload isn't cut
         };
+        let n = read?; // WHAT: read, or the side failed. WHY: below
         if n == 0 {
             let _ = to.shutdown().await; // WHAT: the other side told this one has finished (close_notify over TLS; only a flush on a named pipe). WHY: see [`relay`]
             return Ok(()); // WHAT: this direction done. WHY: the other carries on until it ends
@@ -462,7 +460,7 @@ mod tests {
         let (mut caller_read, mut caller_write) = tokio::io::split(caller); // WHAT: the caller's halves. WHY: it sends and reads at once
         let (_cell_read, mut cell_write) = tokio::io::split(cell); // WHAT: a cell that never reads. WHY: the caller's direction stalls
         tokio::spawn(async move {
-            let _ = caller_write.write_all(&[1u8; 100_000]).await; // WHAT: far more than the buffers hold. WHY: that direction waits to write
+            let _ = caller_write.write_all(&vec![1u8; 100_000]).await; // WHAT: far more than the buffers hold. WHY: that direction waits to write
         });
         tokio::time::sleep(Duration::from_millis(100)).await; // WHAT: the stall in place. WHY: below
         cell_write.write_all(b"answer").await.unwrap(); // WHAT: the cell answers meanwhile. WHY: the other direction
