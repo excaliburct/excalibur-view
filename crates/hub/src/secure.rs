@@ -127,6 +127,20 @@ pub struct Also<'a> {
     pub shared: Option<&'a std::path::Path>, // WHAT: the shared office.json, when the app uses it. WHY: §2.3: the second app on a PC never asks again
     pub office_keys: &'a [(&'a str, &'a str)], // WHAT: the office certificate keys built in. WHY: §2.4; empty until certificates are signed
     pub confirmed: Option<&'a str>, // WHAT: the pin of a new server the person confirmed, both short pins in front of them. WHY: only that pin may take the shared record's place
+    pub no_first_contact: bool, // WHAT: refuse to take a pin on trust here. WHY: security review L1: a kept sign-in is only ever sent to a server this computer already holds a pin for, never one first trusted on the way
+}
+
+/// The refusal [`open_with`] gives when [`Also::no_first_contact`] stops a
+/// first contact: the person signs in again, which links the server.
+pub const FIRST_CONTACT: &str = "first_contact_needed"; // WHAT: its short name. WHY: told apart by the app, which opens the sign-in window
+
+/// Whether a first contact may go ahead: refused, before anything is sent,
+/// when [`Also::no_first_contact`] is set.
+fn first_contact_allowed(also: Also<'_>) -> Result<(), Trouble> {
+    if also.no_first_contact {
+        return Err(Trouble::Refused(crate::model::Problem::new(FIRST_CONTACT, "This computer hasn't linked to that server yet, so it won't send a kept sign-in there. Sign in to link it."))); // WHAT: refused before anything is sent. WHY: a kept sign-in only goes to a server already pinned
+    }
+    Ok(()) // WHAT: allowed. WHY: signing in, joining or setting up links a server
 }
 
 /// The client a seat should use for `base`: the server's HTTPS by its kept pin
@@ -189,6 +203,7 @@ pub fn open_with(base: &str, book: &PinBook, also: Also<'_>) -> Result<Client, T
         Some(pin) => Client::pinned(&secure, &pin).and_then(|c| c.health().map(|_| c)).map_err(|e| changed_or(e, &secure, &pin))?, // WHAT: the kept pin, checked by answering. WHY: guard 5: a changed certificate is refused with words, never accepted
         None if held => return Err(Trouble::Unreadable("this computer's record of the server's certificate is damaged. Ask whoever looks after the server for its fingerprint before connecting again.".into())), // WHAT: a damaged entry. WHY: never treated as a first connection
         None => {
+            first_contact_allowed(also)?; // WHAT: refused here when a kept sign-in is on its way. WHY: security review L1: no kept token over a connection trusted on first sight
             let Some(addresses) = crate::office::local_addresses(&host, port) else {
                 return Err(Trouble::Unreadable(format!("{host} isn't on the office network, so this computer won't take its certificate on trust. Link this computer to the office server once from inside the office."))); // WHAT: refused. WHY: §2.2: a first contact pins only on a local address
             };
@@ -335,7 +350,7 @@ mod tests {
         let shared = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("shared-{n}.json"));
         std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
         std::fs::write(&shared, b"{trunc").unwrap();
-        assert!(open_with("http://127.0.0.1:1", &book, Also { shared: Some(&shared), office_keys: &[], confirmed: None }).is_err()); // WHAT: refused. WHY: a damaged shared record never means no pin
+        assert!(open_with("http://127.0.0.1:1", &book, Also { shared: Some(&shared), office_keys: &[], confirmed: None, no_first_contact: false }).is_err()); // WHAT: refused. WHY: a damaged shared record never means no pin
         let _ = std::fs::remove_file(&shared);
     }
 
@@ -374,6 +389,22 @@ mod tests {
     fn health(version: &str, product: &str, secure_port: Option<u16>) -> String {
         let port = secure_port.map_or("null".to_string(), |p| p.to_string()); // WHAT: the HTTPS port, or none. WHY: the attack leaves it out
         format!("{{\"ok\":true,\"api_version\":{},\"version\":\"{version}\",\"name\":\"x\",\"claimed\":true,\"joining\":\"code\",\"product\":\"{product}\",\"secure_port\":{port}}}", crate::API_VERSION)
+    }
+
+    #[test]
+    fn a_kept_sign_in_never_makes_a_first_contact() {
+        let (port, _) = plain_server("200 OK", String::new(), health("0.7.0", "excalibur-office", Some(1))); // WHAT: a server this computer holds no pin for. WHY: the first-contact case
+        let base = format!("http://127.0.0.1:{port}"); // WHAT: its address. WHY: asked twice below
+        match open_with(&base, &a_book(), Also { no_first_contact: true, ..Also::default() }) {
+            Err(e) => assert_eq!(e.code(), Some(FIRST_CONTACT), "refused as a first contact, before any pin is taken: {e}"), // WHAT: the refusal, by its code. WHY: the app opens the sign-in window for it
+            Ok(_) => panic!("a kept sign-in must never go to a server first trusted on the way"),
+        }
+        let ordinary = open_with(&base, &a_book(), Also::default()); // WHAT: the same, as a sign-in would. WHY: only the flag refuses it
+        assert!(ordinary.as_ref().err().and_then(hub_code).is_none_or(|c| c != FIRST_CONTACT), "without the flag a first contact is tried as before"); // WHAT: tried (and fails here, nothing answers its HTTPS). WHY: signing in by hand still links a server
+    }
+
+    fn hub_code(e: &Trouble) -> Option<&str> {
+        e.code() // WHAT: the trouble's code. WHY: compared above
     }
 
     #[test]

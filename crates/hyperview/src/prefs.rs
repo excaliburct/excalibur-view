@@ -237,6 +237,7 @@ impl Prefs {
     /// Where the settings live: beside the program if that is writable, which
     /// is how a shared install keeps the whole office consistent, otherwise in
     /// this user's own application data.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn path() -> Option<PathBuf> {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
@@ -246,16 +247,20 @@ impl Prefs {
                 }
             }
         }
-        let base = std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("Excalibur Hyperview").join("hyperview.json"))
+        Some(folder()?.join(FILE)) // WHAT: this user's settings file. WHY: none beside the program
     }
 
     pub fn load() -> Prefs {
         let Some(path) = Prefs::path() else {
             return Prefs::default();
         };
+        if let Some(old) = earlier_folder() {
+            match hub::office::move_once(&old.join(FILE), &path) {
+                Ok(true) => log::info!("settings moved from {} to {}", old.display(), path.display()), // WHAT: noted. WHY: the move is visible in the log
+                Ok(false) => {} // WHAT: nothing to move. WHY: a new install, moved before, or newer settings already there
+                Err(e) => log::warn!("couldn't move the settings from {}: {e}", old.display()), // WHAT: said. WHY: the program still starts, with its usual settings
+            }
+        }
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Prefs::default();
         };
@@ -274,6 +279,41 @@ impl Prefs {
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
     }
+}
+
+/// The settings file's name.
+const FILE: &str = "hyperview.json"; // WHAT: one spelling. WHY: the same name in every place it has lived
+
+/// The folder this user's settings (and signatures) live in, or `None` when
+/// the system names no home at all.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn folder() -> Option<PathBuf> {
+    folder_for(std::env::var_os("APPDATA").map(PathBuf::from), std::env::var_os("HOME").map(PathBuf::from), cfg!(target_os = "ios")) // WHAT: from this system's own variables. WHY: worked out by the rule below
+}
+
+/// Where settings live, given `%APPDATA%`, `$HOME`, and whether this is an
+/// iPad or iPhone.
+///
+/// On iOS `$HOME` is the app's sandbox container, and Apple's File System
+/// Programming Guide lets an app make folders only inside its `Documents`,
+/// `Library` and `tmp` folders, with "configuration files" put in
+/// `Library/Application Support`. A `.config` folder at the container's top
+/// is outside all three. Android is already right: the app sets `$HOME` to
+/// its own writable files folder before anything runs (`mobile/src/android.rs`).
+fn folder_for(appdata: Option<PathBuf>, home: Option<PathBuf>, ios: bool) -> Option<PathBuf> {
+    if ios {
+        return home.map(|h| h.join("Library").join("Application Support").join("Excalibur Hyperview")); // WHAT: Library/Application Support. WHY: where Apple says an app's own settings go
+    }
+    appdata.or_else(|| home.map(|h| h.join(".config"))).map(|base| base.join("Excalibur Hyperview")) // WHAT: %APPDATA% on Windows, ~/.config elsewhere. WHY: unchanged for every desktop and for Android
+}
+
+/// Where an earlier build kept the settings, when that was somewhere else:
+/// `$HOME/.config` on iOS, before 0.7.1.
+pub fn earlier_folder() -> Option<PathBuf> {
+    if !cfg!(target_os = "ios") {
+        return None; // WHAT: nothing moved. WHY: only iOS changed place
+    }
+    folder_for(None, std::env::var_os("HOME").map(PathBuf::from), false) // WHAT: ~/.config/Excalibur Hyperview. WHY: the old rule, for the one-time move
 }
 
 #[cfg(test)]
@@ -349,6 +389,35 @@ mod tests {
         assert_eq!(p.quick_tools, None); // WHAT: no quick tools chosen. WHY: the usual six.
         assert!(p.quick_tools_shown); // WHAT: shown. WHY: the default, the same as a fresh install.
         assert!(p.printer.is_empty()); // WHAT: no printer kept. WHY: the default printer until one is chosen.
+    }
+
+    #[test]
+    fn an_ipad_keeps_its_settings_in_application_support_and_desktops_are_unchanged() {
+        let home = PathBuf::from("/var/mobile/Containers/Data/Application/APP"); // WHAT: an iOS app's container, as $HOME. WHY: the iPad case
+        assert_eq!(folder_for(None, Some(home.clone()), true), Some(home.join("Library/Application Support/Excalibur Hyperview"))); // WHAT: Library/Application Support. WHY: an app may only make folders in Documents, Library and tmp
+        assert_eq!(folder_for(None, Some(PathBuf::from("/home/sam")), false), Some(PathBuf::from("/home/sam/.config/Excalibur Hyperview"))); // WHAT: Linux, and Android (whose $HOME is its files folder). WHY: unchanged
+        assert_eq!(folder_for(Some(PathBuf::from(r"C:\Users\sam\AppData\Roaming")), Some(PathBuf::from("/x")), false), Some(PathBuf::from(r"C:\Users\sam\AppData\Roaming").join("Excalibur Hyperview"))); // WHAT: Windows. WHY: unchanged
+        assert_eq!(folder_for(None, None, true), None); // WHAT: no home at all. WHY: nowhere, rather than a guess
+    }
+
+    #[test]
+    fn settings_kept_by_an_earlier_ipad_build_are_moved_once_and_never_over_newer_ones() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()); // WHAT: a fresh name. WHY: tests run side by side
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("prefs-move-{n}-{}", std::process::id())); // WHAT: a folder under the build's own. WHY: never a shared temporary folder
+        let old = folder_for(None, Some(base.clone()), false).unwrap().join(FILE); // WHAT: where 0.7.0 kept it on iOS. WHY: the old place, by the old rule
+        let new = folder_for(None, Some(base.clone()), true).unwrap().join(FILE); // WHAT: where it goes now. WHY: the new place, by the iOS rule
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap(); // WHAT: the old folder. WHY: an earlier build made it
+        std::fs::write(&old, r#"{"server":{"base":"https://office.example.com","token":"kept","name":"Example Steel","user":"Sam"}}"#).unwrap(); // WHAT: an old file with a sign-in. WHY: what must survive
+        std::fs::create_dir_all(new.parent().unwrap()).unwrap(); // WHAT: the new folder. WHY: newer settings go in it first
+        std::fs::write(&new, "{}").unwrap(); // WHAT: newer settings in the new place. WHY: must never be overwritten
+        assert!(!hub::office::move_once(&old, &new).unwrap(), "newer settings win"); // WHAT: not moved. WHY: never over newer
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "{}"); // WHAT: unchanged. WHY: likewise
+        std::fs::remove_file(&new).unwrap(); // WHAT: the new place empty. WHY: the move itself, next
+        assert!(hub::office::move_once(&old, &new).unwrap(), "moved"); // WHAT: moved. WHY: nothing in the new place
+        let p: Prefs = serde_json::from_str(&std::fs::read_to_string(&new).unwrap()).unwrap(); // WHAT: read back. WHY: the sign-in came across
+        assert_eq!((p.server.base.as_str(), p.server.token.as_str()), ("https://office.example.com", "kept")); // WHAT: the same server and token. WHY: an upgrade keeps them
+        assert!(!old.exists(), "no second copy of the sign-in left behind"); // WHAT: removed. WHY: security review L3
+        let _ = std::fs::remove_dir_all(&base); // WHAT: tidied. WHY: a test leaves nothing
     }
 
     #[test]

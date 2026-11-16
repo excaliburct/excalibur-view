@@ -30,7 +30,7 @@ The baseline needs nothing from anyone:
 
 1. **Found on the office network.** A computer finds the server through discovery (UDP 8715, which answers local networks only), or through a typed address.
 2. **First contact, pinned for good.** A computer that has never linked takes the server's certificate pin, the SPKI SHA-256 of its 8714 HTTPS certificate, on its first connection. It accepts this only when the address is on a local network: a private IPv4 range, fc00::/7, fe80::/10 or loopback. From then on it accepts only that pin, never plain HTTP. This is how View's seats already pin.
-3. **Every app on the same computer shares the pin.** They keep it in one per-user file, `%LocalAppData%\Excalibur\office.json`, holding the server address and pin, or the same path under `~/.config` elsewhere. So the second app on a PC never asks again.
+3. **Every app on the same computer shares the pin.** They keep it in one per-user file, `%LocalAppData%\Excalibur\office.json`, holding the server address and pin, or the same path under `~/.config` elsewhere (on an iPad or iPhone, under the app's own `Library/Application Support`, the only place iOS lets it keep such a file; a record an earlier build kept under `~/.config` is copied across once, never over a newer one). So the second app on a PC never asks again.
 
 Stronger, when Fleet can reach the server:
 
