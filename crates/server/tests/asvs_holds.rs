@@ -366,11 +366,13 @@ fn a_flood_of_made_up_names_does_not_reset_the_wait_on_the_account_being_guessed
 
 #[test]
 fn signing_in_takes_as_long_for_an_address_with_no_account_as_for_a_wrong_password() {
-    let office = an_office(); // WHAT: a running office. WHY: timed.
-    let timed = |email: &str| {
+    // Each office allows five wrong tries from one address before it makes
+    // the caller wait, so the samples are taken across several offices,
+    // three tries each: one to warm up, then one of each kind, in turns.
+    let timed = |office: &Office, email: &str| {
         let started = Instant::now(); // WHAT: now. WHY: the answer is timed.
         let (status, _) = post(
-            &office,
+            office,
             "/api/v1/auth/token",
             None,
             &[],
@@ -379,12 +381,27 @@ fn signing_in_takes_as_long_for_an_address_with_no_account_as_for_a_wrong_passwo
         assert_eq!(status, 401); // WHAT: refused either way. WHY: the same answer.
         started.elapsed()
     };
-    let known = timed("eve@example.com").min(timed("eve@example.com")); // WHAT: a real account, wrong password, the quicker of two. WHY: noise taken out.
-    let unknown = timed("nobody@example.com").min(timed("nobody-else@example.com")); // WHAT: no such account, the quicker of two. WHY: the same.
-                                                                                     // WHAT: within a factor of two. WHY: before, no account answered at once and a real one after the password check, which told anybody which addresses have accounts.
+    let (mut known, mut unknown) = (Vec::new(), Vec::new()); // WHAT: the samples of each kind. WHY: compared by their medians below
+    for round in 0..9 {
+        let office = an_office(); // WHAT: a fresh office. WHY: its own five free tries
+        let _ = timed(&office, "warm-up@example.com"); // WHAT: a first try, not counted. WHY: the first request pays for connecting and warming up, whichever kind it is
+        if round % 2 == 0 {
+            known.push(timed(&office, "eve@example.com")); // WHAT: a real account, wrong password. WHY: one kind
+            unknown.push(timed(&office, &format!("nobody-{round}@example.com"))); // WHAT: no such account. WHY: the other kind
+        } else {
+            unknown.push(timed(&office, &format!("nobody-{round}@example.com"))); // WHAT: the other kind first. WHY: neither kind always goes second
+            known.push(timed(&office, "eve@example.com")); // WHAT: as above. WHY: as above
+        }
+    }
+    let median = |mut samples: Vec<std::time::Duration>| {
+        samples.sort(); // WHAT: in order. WHY: the middle one is the median
+        samples[samples.len() / 2] // WHAT: the middle one. WHY: one slow sample on a busy machine doesn't move it
+    };
+    let (known, unknown) = (median(known), median(unknown)); // WHAT: each kind's median. WHY: compared below
+    // WHAT: within a factor of two. WHY: before, no account answered at once and a real one after the password check, which told anybody which addresses have accounts.
     assert!(
         unknown * 2 >= known,
-        "no account: {unknown:?}, wrong password: {known:?}"
+        "no account: {unknown:?}, wrong password: {known:?} (medians of nine)"
     );
 }
 

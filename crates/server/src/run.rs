@@ -66,7 +66,8 @@ pub async fn serve(
     }
     let store = Store::open(&config.database(), &config.blobs())?;
 
-    let listener = crate::listen::exclusive(config.listen) // WHAT: the port, held exclusively on Windows. WHY: no other program can share or take it (security review, 2026-11-16)
+    let listener = crate::listen::exclusive(config.listen, crate::listen::V6::Dual) // WHAT: the port, held exclusively on Windows; [::] takes IPv4 too. WHY: no other program can share or take it (security review, 2026-11-16); one address serves the office either way
+        .await
         .with_context(|| format!("listening on {}", config.listen))?;
     let address = listener.local_addr().unwrap_or(config.listen);
     let https_only = match &config.https_only {

@@ -38,9 +38,9 @@ pub fn listen() -> std::io::Result<()> {
     }
     let runtime = runtime().ok_or_else(|| std::io::Error::other("the relay's runtime didn't start"))?; // WHAT: the runtime. WHY: below
     let caps = crate::cellrelay::Caps::default(); // WHAT: one set of caps. WHY: 500 in all and 32 per machine hold across IPv4 and IPv6 together (security review, 2026-11-16)
-    let v4 = runtime.block_on(async { crate::listen::exclusive((std::net::Ipv4Addr::UNSPECIFIED, crate::cell::PORT).into()) })?; // WHAT: 47110 on IPv4, held exclusively. WHY: the office network reaches the cell there; no other program can share the port
+    let v4 = runtime.block_on(async { crate::listen::exclusive((std::net::Ipv4Addr::UNSPECIFIED, crate::cell::PORT).into(), crate::listen::V6::Only).await })?; // WHAT: 47110 on IPv4, held exclusively. WHY: the office network reaches the cell there; no other program can share the port
     runtime.spawn(crate::cellrelay::serve(v4, current(), connector(), caps.clone())); // WHAT: served. WHY: TLS answered and relayed
-    match runtime.block_on(async { crate::listen::exclusive((std::net::Ipv6Addr::UNSPECIFIED, crate::cell::PORT).into()) }) {
+    match runtime.block_on(async { crate::listen::exclusive((std::net::Ipv6Addr::UNSPECIFIED, crate::cell::PORT).into(), crate::listen::V6::Only).await }) {
         Ok(v6) => {
             runtime.spawn(crate::cellrelay::serve(v6, current(), connector(), caps)); // WHAT: served on IPv6 too, with the same caps. WHY: Citadel listened on both
         }

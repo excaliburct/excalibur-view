@@ -257,6 +257,11 @@ Office Server, which runs as the system, ends TLS on 47110 itself and relays eac
 - Listened on from the cell's first start (IPv4, and IPv6 where there is one), each socket bound with
   `SO_EXCLUSIVEADDRUSE`, so no other program can share or take the port (the Office Server's own 8714 is bound the same
   way). With no cell running, a connection is closed at once.
+- Just after a restart, Windows may refuse to bind an exclusive port again while the last process's connections are
+  still closing. The Office Server then tries again with a growing wait (from a quarter second up to 5 s) for up to a
+  minute, and logs each wait ("... is still held; trying again in ... ms"). Any other bind failure is reported at once.
+- 47110's IPv6 socket is IPv6 only (IPv4 has its own socket). If 8714 is set to listen on `[::]`, that one socket takes
+  IPv4 as well (dual-stack), so the office is reached either way.
 - If the key ever fails to sign a handshake, the log says ALARM (at most once a minute) and `/api/v1/office` shows the
   cell as not answering for two minutes after the last failure. The firewall rule "Excalibur Office Server (Citadel cell)" is for the Office Server's program, TCP 47110,
   local subnet only, every profile; it is replaced at each start of the cell so an older rule never lingers.
