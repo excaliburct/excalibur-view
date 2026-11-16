@@ -553,12 +553,14 @@ catch { `$e = `$_.Exception.GetBaseException(); "refused `$(`$e.GetType().Name):
     $squat = @"
 `$name = '$relayName'
 try {
-  for (`$i = 0; `$i -lt 60; `$i++) {
-    `$s = [System.IO.Pipes.NamedPipeServerStream]::new(`$name, [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.NamedPipeServerStream]::MaxAllowedServerInstances)
-    'ready' | Set-Content $evidence\squat.txt
-    `$s.WaitForConnection(); Start-Sleep -Milliseconds 200; `$s.Dispose()
+  `$held = @()
+  for (`$i = 0; `$i -lt 50; `$i++) {
+    `$s = [System.IO.Pipes.NamedPipeServerStream]::new(`$name, [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.NamedPipeServerStream]::MaxAllowedServerInstances, [System.IO.Pipes.PipeTransmissionMode]::Byte, [System.IO.Pipes.PipeOptions]::Asynchronous)
+    `$held += `$s; `$null = `$s.WaitForConnectionAsync()
   }
-} catch { "could not: `$(`$_.Exception.Message)" | Set-Content $evidence\squat.txt }
+  'ready' | Set-Content $evidence\squat.txt
+  Start-Sleep -Seconds 240
+} catch { "could not: `$(`$_.Exception.GetBaseException().Message)" | Set-Content $evidence\squat.txt }
 "@                                                                              # WHAT: another SYSTEM process serving extra instances of the relay pipe's name. WHY: shows the Office Server sends it nothing
     AsSystem $squat 'squat'                                                     # WHAT: started. WHY: below
     WaitFor { Test-Path "$evidence\squat.txt" } 60 'the stand-in squatter'    # WHAT: up, or said why not. WHY: below
