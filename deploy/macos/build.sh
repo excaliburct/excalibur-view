@@ -98,6 +98,17 @@ lipo -create -output "$app/Contents/MacOS/$name" \
 chmod +x "$app/Contents/MacOS/$name"
 lipo -info "$app/Contents/MacOS/$name"
 
+# The two release builds leave tens of gigabytes of intermediate files behind
+# (deps, build scripts, incremental), and the runner's disk is small enough that
+# the disk image at the end then fails with "No space left on device". The joined
+# program is already in the bundle, so only the intermediates go; the two
+# finished programs stay. df shows the room before and after.
+df -h "$root" | tail -1  # WHAT: the room before. WHY: a full disk shows in the log, not guessed at
+for arch in aarch64-apple-darwin x86_64-apple-darwin; do  # WHAT: each architecture's build. WHY: both are already joined into the bundle
+  rm -rf "target/$arch/release/deps" "target/$arch/release/build" "target/$arch/release/incremental" "target/$arch/release/.fingerprint"  # WHAT: the intermediates only. WHY: room for the disk image; the finished programs stay
+done
+df -h "$root" | tail -1  # WHAT: the room after. WHY: as above
+
 # ---- 3. the bundle ----------------------------------------------------------
 say "Making the app bundle"
 # Checked before anything is signed, because codesign reads the entitlements
