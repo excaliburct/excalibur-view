@@ -1,0 +1,39 @@
+ONE OFFICE SERVER
+
+The office server is now the Excalibur Office Server: one program and one
+Windows service for everything Excalibur in the office. View's drawings,
+Excalibur CAD's drawings, Archetype's jobs and Citadel's estimating jobs are
+parts of it, each switched on by the office's signed licence. A part the
+licence doesn't include isn't served at all.
+
+ENCRYPTED, PINNED CONNECTIONS
+
+View now talks to the office server over HTTPS on the same port as before
+(8714). Each computer remembers the server's certificate the first time and
+refuses any other after that. Computers on older versions keep working
+through the update.
+
+LINKING A COMPUTER WITH ONE BUTTON
+
+A new computer asks to join and waits; an admin approves it from a list
+that shows the same 12-digit number the computer shows. Nobody reads out a
+code.
+
+CITADEL MOVES INTO THE OFFICE SERVER
+
+An office running Citadel Server 1.0 has it moved in once: its paired
+computers, its jobs and its certificate come across, so every estimating
+computer keeps connecting without being set up again. Citadel runs locked
+away inside the Office Server and still never lets the server read a bid.
+
+IPADS STAY SIGNED IN
+
+Reopening View on an iPad no longer forgets the server and the sign-in when
+the server can't be reached for a moment. It says it can't reach the server
+and keeps trying by itself.
+
+A SCALE STAYS SET
+
+A sheet's scale no longer changes to another viewport's scale after the
+autosave on drawings exported from AutoCAD. Sheets re-scaled in an earlier
+build now total at the scale that was set.
