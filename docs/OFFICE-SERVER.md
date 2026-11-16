@@ -20,7 +20,7 @@ on by the office's signed licence:
 | `view` | drawings, takeoff, markups, sign-offs, the field package | View's server (always on) |
 | `cad` | Excalibur CAD's office drawings: check-out, check-in, versions | built in; an old CAD server's drawings are moved in (`--move-cad`) |
 | `archetype` | Archetype's shared jobs and releases | built in; an old Archetype server's jobs are moved in (`--move-archetype`) |
-| `citadel` | Citadel's estimating jobs, kept **blind** | the Citadel cell: `citadel\Citadel Server.exe`, installed only on offices licensed for citadel (from the IT kit's zip, then pushed by Fleet with each update; never in View's public release) and run by the Office Server as a supervised child process under a restricted token, with its TLS key held by the Office Server (docs/OFFICE-ENROLLMENT.md §6a to §6c). This is the only way Citadel runs |
+| `citadel` | Citadel's estimating jobs, kept **blind** | the Citadel cell: `citadel\Citadel Server.exe`, installed only on offices licensed for citadel (from the IT kit's zip, then pushed by Fleet with each update; never in View's public release) and run by the Office Server as a supervised child process under a restricted token, with TLS on 47110 ended by the Office Server and relayed to the cell over a locked pipe (docs/OFFICE-ENROLLMENT.md §6a to §6c). This is the only way Citadel runs |
 
 A module that isn't licensed isn't served: its routes answer 404, as if it didn't exist.
 
@@ -139,10 +139,10 @@ see the commit "Review fixes".
   the office's private IT kit (made by `python3 tools/citadel_cell.py kit`); it refuses an office whose licence doesn't
   list `citadel`, and any zip but the one pinned in `packaging/citadel-cell.json`, which the server is built with. Fleet
   then pushes each version's cell part over the maintenance channel before the server updates (OFFICE-ENROLLMENT.md
-  §6c). The cell's TLS key is held by the Office Server in Windows' key store, usable only by the cell (§6b).
+  §6c). The Office Server answers TLS on 47110 itself with the cell's certificate, signing with a key it holds in Windows' key store (the system's alone), and relays each connection to the cell over a locked named pipe with the caller's real address (§6b).
 - **Ports.** TCP 8714 and UDP 8715 for the Office Server, and TCP 47110 for the cell: a rule
-  "Excalibur Office Server (Citadel cell)" for the cell's program only, on every profile, from the local subnet
-  only, added at install and again at the cell's first start if it is missing. "Local subnet" is the server's own
+  "Excalibur Office Server (Citadel cell)" for the Office Server's own program (it answers 47110 and relays to the
+  cell), on every profile, from the local subnet only, added at install and put back at each start of the cell. "Local subnet" is the server's own
   network segment: estimating computers on another VLAN or subnet can't reach the cell until the office's IT adds a
   rule (or widens this one's remote addresses) for that network.
 - **Backups.** The nightly off-site backup carries the Citadel cell's newest own backup (from

@@ -1,7 +1,7 @@
 //! TLS on 47110 for the Citadel cell, ended here and relayed to the cell
 //! (docs/OFFICE-ENROLLMENT.md §6b).
 //!
-//! Windows' TLS (SChannel) gives no credentials at all to a process whose
+//! Windows' TLS (`SChannel`) gives no credentials at all to a process whose
 //! token has restricting SIDs, which the cell's has (the Windows end-to-end
 //! test, try 21: `AcquireCredentialsHandle` returned `0x8009030E` even with
 //! no certificate). So the Office Server, as the system, answers 47110 itself
@@ -373,6 +373,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::items_after_statements)] // WHAT: the stand-in key type beside its use. WHY: it reads in order with the test
     async fn tls_on_the_port_is_answered_with_the_pinned_certificate_and_relayed_with_the_callers_address() {
         use ring::signature::{EcdsaKeyPair, KeyPair as _, ECDSA_P256_SHA256_ASN1_SIGNING};
         let rng = ring::rand::SystemRandom::new(); // WHAT: randomness. WHY: a key

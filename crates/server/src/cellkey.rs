@@ -73,7 +73,7 @@ pub struct Entry {
 }
 
 /// A file access mask with its generic bits written as the file rights they
-/// stand for (GENERIC_READ as FILE_GENERIC_READ, and so on), the way Windows
+/// stand for (`GENERIC_READ` as `FILE_GENERIC_READ`, and so on), the way Windows
 /// grants them. The key store keeps both: it reported the system's entry as
 /// `0xD01F01FF` and the cell's as `0x80120089` for the `FA` and `FR` set
 /// (the Windows end-to-end test, 2026-11-13).
