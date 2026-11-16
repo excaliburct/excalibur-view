@@ -511,7 +511,7 @@ try {
 try { `$c = [System.IO.Pipes.NamedPipeClientStream]::new('.', `$name, [System.IO.Pipes.PipeDirection]::InOut); `$c.Connect(3000); `$sddl = `$c.GetAccessControl().GetSecurityDescriptorSddlForm('Access'); `$c.Dispose(); "opened `$sddl" }
 catch { "refused `$(`$_.Exception.GetType().Name): `$(`$_.Exception.Message)" }
 "@                                                                              # WHAT: opens the relay pipe and reads its permissions as Windows reports them. WHY: run as SYSTEM, a standard user and an administrator
-    AsSystem ($probe + " | Set-Content -Encoding utf8 $evidence\system.txt") 'system'   # WHAT: as the system. WHY: the one account the Office Server connects as
+    AsSystem ("& {`n$probe`n} | Set-Content -Encoding utf8 $evidence\system.txt") 'system'   # WHAT: as the system, its answer written (a try statement can't be piped, so it runs inside a block). WHY: the one account the Office Server connects as
     $userPassword = 'E2e-' + [Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(5)).ToLowerInvariant()   # WHAT: a throwaway password, 14 characters. WHY: net user asks before taking a longer one
     & "$env:SystemRoot\System32\net.exe" user e2e-standard $userPassword /add 2>&1 | ForEach-Object { Write-Host "net user: $_" }   # WHAT: a standard user, in Users only. WHY: an ordinary office account
     $global:LASTEXITCODE = 0                                                    # WHAT: its code forgotten. WHY: the sign-on below says whether it worked
