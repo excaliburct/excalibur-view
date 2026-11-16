@@ -190,6 +190,18 @@ function MarkedAs([string] $path, [string] $version) {
 }
 
 # WHAT: the cell, running and answering on 47110, and its process. WHY: the cell's start is waited for and checked.
+# WHAT: folders removed whole, the cell's included: an administrator takes ownership and full control first. WHY: the cell's
+#       data folder is SYSTEM's and the cell's alone (by design), so even an administrator must take it over to remove it.
+function RemoveFolders([string[]] $folders) {
+    foreach ($folder in $folders) {
+        if (-not (Test-Path -LiteralPath $folder)) { continue }                 # WHAT: not there. WHY: nothing to do
+        & "$env:SystemRoot\System32\takeown.exe" /F $folder /R /A /D Y | Out-Null   # WHAT: administrators made the owner of all of it. WHY: an owner may change who may use it
+        & "$env:SystemRoot\System32\icacls.exe" $folder /grant '*S-1-5-32-544:(OI)(CI)F' /T /C /Q | Out-Null   # WHAT: administrators given full control. WHY: so it can be removed
+        $global:LASTEXITCODE = 0                                                # WHAT: their codes forgotten. WHY: checked by removing next
+        Remove-Item -LiteralPath $folder -Recurse -Force                        # WHAT: removed. WHY: a fresh office
+    }
+}
+
 # WHAT: whether a file is in the cell's data folder, asked in backup mode (robocopy /L lists, copies nothing; exit 1 means it
 #       found the file). WHY: that folder is SYSTEM's and the cell's alone, so a plain Test-Path as an administrator can't see in.
 function CellFile([string] $relative) {
@@ -408,7 +420,7 @@ try {
     Check ($LASTEXITCODE -eq 0 -and (ServiceState $OfficeService) -eq 'MISSING') 'the Office Server is uninstalled'   # WHAT: gone. WHY: below.
     WaitFor { (Running $CellExe).Count -eq 0 } 30 'the cell to end with its server'   # WHAT: the job ended. WHY: it dies with the server.
     Copy-Item -LiteralPath $OfficeLog -Destination (Join-Path $Logs 'hyperview-server-before-e.log')   # WHAT: the log so far, kept. WHY: its folder is removed next.
-    Remove-Item -LiteralPath (Join-Path $env:ProgramData 'Excalibur Hyperview'), (Join-Path $env:ProgramData 'Excalibur Office') -Recurse -Force   # WHAT: its folders gone. WHY: a fresh office.
+    RemoveFolders @((Join-Path $env:ProgramData 'Excalibur Hyperview'), (Join-Path $env:ProgramData 'Excalibur Office'))   # WHAT: its folders gone. WHY: a fresh office.
     & $oldExe install                                                           # WHAT: 1.0.1 again, fresh. WHY: an office that hasn't moved yet.
     Check ($LASTEXITCODE -eq 0) '1.0.1 installed again'                         # WHAT: it worked. WHY: exit 0.
     WaitFor { (ServiceState $CitadelService) -eq 'RUNNING' -and (ListenerPath $Port) } 90 '1.0.1 running on 47110'   # WHAT: up. WHY: below.
@@ -443,7 +455,7 @@ try {
     Check ($LASTEXITCODE -eq 0) 'the Office Server is uninstalled'              # WHAT: gone. WHY: below.
     WaitFor { (Running $CellExe).Count -eq 0 } 30 'the cell to end with its server'   # WHAT: the job ended. WHY: it dies with the server.
     Copy-Item -LiteralPath $OfficeLog -Destination (Join-Path $Logs 'hyperview-server-before-g.log')   # WHAT: the log so far, kept. WHY: its folder is removed next.
-    Remove-Item -LiteralPath (Join-Path $env:ProgramData 'Excalibur Hyperview'), (Join-Path $env:ProgramData 'Excalibur Office') -Recurse -Force   # WHAT: its folders gone. WHY: a new office, Mesa Fab's shape.
+    RemoveFolders @((Join-Path $env:ProgramData 'Excalibur Hyperview'), (Join-Path $env:ProgramData 'Excalibur Office'))   # WHAT: its folders gone. WHY: a new office, Mesa Fab's shape.
     InstallOffice $First -Unlicensed                                            # WHAT: installed with no licence. WHY: View only.
     $said = & $OfficeExe --install-citadel-cell $CellZip 2>&1 | Out-String    # WHAT: the cell offered anyway. WHY: refused.
     Write-Host $said.TrimEnd()                                                  # WHAT: shown. WHY: the log has it.
