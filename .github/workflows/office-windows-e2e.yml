@@ -17,12 +17,17 @@ on:
       latcon_ref:                # WHAT: the LatCon Estimating commit whose client code links the computers. WHY: the program the office runs.
         type: string
         required: true
+      only:                      # WHAT: one run alone: "install-day" (from Citadel Server 1.0.1) or "fresh-office" (no 1.0 ever); empty runs both. WHY: a try of one doesn't spend a runner on the other
+        type: string
+        required: false
+        default: ''
 
 permissions: {}   # WHAT: no access by default. WHY: the job asks for only what it needs.
 
 jobs:
   windows:
     name: The Office Server at LatCon, end to end   # WHAT: the job's name. WHY: shown on the run page.
+    if: inputs.only == '' || inputs.only == 'install-day'   # WHAT: unless the other run was asked for alone. WHY: see the input
     runs-on: windows-latest                         # WHAT: a fresh Windows machine. WHY: what LatCon's server runs.
     timeout-minutes: 150                            # WHAT: a limit. WHY: a stuck service never holds a runner for hours.
     permissions:
@@ -162,5 +167,115 @@ jobs:
         with:
           name: office-e2e-logs                 # WHAT: the download's name. WHY: plain.
           path: ${{ runner.temp }}/e2e/logs     # WHAT: the servers' and the feed's logs. WHY: logs only, no keys or programs.
+          if-no-files-found: ignore             # WHAT: no error when an earlier step failed. WHY: the run already says what failed.
+          retention-days: 14                    # WHAT: kept two weeks. WHY: long enough to look.
+
+  fresh:
+    name: A new office with no Citadel Server 1.0, end to end   # WHAT: the job's name. WHY: shown on the run page.
+    if: inputs.only == '' || inputs.only == 'fresh-office'      # WHAT: unless the other run was asked for alone. WHY: see the input
+    runs-on: windows-latest                         # WHAT: a fresh Windows machine. WHY: what LatCon's server runs.
+    timeout-minutes: 90                             # WHAT: a limit. WHY: a stuck service never holds a runner for hours.
+    permissions:
+      contents: read                                # WHAT: read the code and the releases. WHY: the pinned cell.
+    defaults:
+      run:
+        shell: pwsh                                 # WHAT: PowerShell 7 for every step. WHY: the script is PowerShell.
+    env:
+      DOTNET_NOLOGO: "1"                            # WHAT: no .NET banner. WHY: a shorter log.
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"              # WHAT: no telemetry. WHY: nothing about the build leaves the runner.
+      CARGO_TERM_COLOR: always                      # WHAT: colour in cargo's log. WHY: easier to read.
+    steps:
+      - name: Get View
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # WHAT: v4.4.0, 2026-07-20. WHY: pinned by commit, as above.
+        with:
+          repository: excaliburct/excalibur-view   # WHAT: View. WHY: the Office Server's source.
+          ref: ${{ inputs.view_ref }}             # WHAT: the commit asked for. WHY: as the input says.
+          path: view                              # WHAT: its own folder. WHY: LatCon's beside it.
+          persist-credentials: false              # WHAT: the token isn't left in the checkout. WHY: no later step can push with it.
+
+      - name: Get LatCon Estimating
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # WHAT: v4.4.0, 2026-07-20. WHY: as above.
+        with:
+          repository: excaliburct/LatconEstimating  # WHAT: LatCon Estimating. WHY: Mark's PC and the second PC.
+          ref: ${{ inputs.latcon_ref }}             # WHAT: the commit asked for. WHY: as the input says.
+          path: latcon                              # WHAT: its own folder. WHY: beside View.
+          persist-credentials: false                # WHAT: as above. WHY: as above.
+
+      - name: The script parses
+        run: |
+          foreach ($file in @('view/deploy/windows-test/office-e2e-fresh.ps1', 'view/deploy/windows-test/make-test-key.ps1')) {   # WHAT: both scripts. WHY: a typo found now, not after the builds.
+            $errors = $null                                                                                                         # WHAT: filled by the parser. WHY: checked below.
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file).Path, [ref]$null, [ref]$errors)   # WHAT: parsed, not run. WHY: as above.
+            if ($errors) { $errors | ForEach-Object { Write-Host "$file $($_.Extent.StartLineNumber): $($_.Message)" }; throw "$file doesn't parse." }   # WHAT: stop. WHY: said plainly.
+          }
+
+      - name: The .NET SDK from LatCon's global.json
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0 (2026-07-16)
+        with:
+          global-json-file: latcon/global.json   # WHAT: the SDK LatCon names. WHY: the same .NET 10 its builds use.
+
+      - name: publish.py's one library
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: "cryptography==46.0.5"   # WHAT: Ed25519 for publish.py, pinned. WHY: the test licence is signed with it.
+          if ($LASTEXITCODE -ne 0) { throw 'cryptography did not install.' }                              # WHAT: stop. WHY: said plainly.
+
+      - name: Mark's PC and the second PC (LatCon Estimating's app tests)
+        run: |
+          dotnet build latcon/tests/Citadel.App.Tests/Citadel.App.Tests.csproj -c Release -nologo   # WHAT: LatCon's app tests, its Office server page among them. WHY: the PCs' screens.
+          if ($LASTEXITCODE -ne 0) { throw "LatCon's app tests did not build." }                     # WHAT: stop. WHY: said plainly.
+
+      - name: The pinned Citadel cell and LatCon's IT kit
+        env:
+          GH_TOKEN: ${{ github.token }}   # WHAT: the calling repository's read token. WHY: the cell's zip is a release asset there.
+        run: |
+          $url = (Get-Content -Raw view/packaging/citadel-cell.json | ConvertFrom-Json).source.url                                   # WHAT: where the pin says the zip is. WHY: the one source of truth.
+          if ($url -notmatch '^https://github\.com/excaliburct/LatconEstimating/releases/download/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+\.zip)$') { throw "The pin's source.url isn't a LatconEstimating release asset: $url" }   # WHAT: only that repository's releases. WHY: as above.
+          gh release download $Matches[1] --repo excaliburct/LatconEstimating --pattern $Matches[2] --dir "$env:RUNNER_TEMP\cell-zip"   # WHAT: the pinned zip. WHY: checked against the pin by the kit.
+          if ($LASTEXITCODE -ne 0) { throw "The cell's zip couldn't be downloaded." }                                               # WHAT: stop. WHY: said plainly.
+          $zip = (Get-ChildItem "$env:RUNNER_TEMP\cell-zip\*.zip" | Select-Object -First 1).FullName                                  # WHAT: its path. WHY: below.
+          python view/tools/citadel_cell.py kit --out "$env:RUNNER_TEMP\kit" --from-zip $zip                                         # WHAT: the IT kit's copy of the pinned zip. WHY: --install-citadel-cell takes it.
+          if ($LASTEXITCODE -ne 0) { throw 'citadel_cell.py kit failed.' }                                                          # WHAT: stop. WHY: said plainly.
+
+      - name: A test release key, built into this checkout only
+        run: ./view/deploy/windows-test/make-test-key.ps1 -View "$env:GITHUB_WORKSPACE\view" -Keys "$env:RUNNER_TEMP\test-keys"   # WHAT: the only key the test server trusts. WHY: never a real key.
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # WHAT: the stable branch, 2026-10-16. WHY: pinned by commit, as above.
+        with:
+          toolchain: stable  # WHAT: stable Rust. WHY: as View's builds.
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # WHAT: v2.9.3, 2026-10-20. WHY: pinned by commit, as above.
+        with:
+          workspaces: view -> target   # WHAT: View's build folder. WHY: the checkout isn't at the top.
+          cache-on-failure: true       # WHAT: kept even when the test fails. WHY: the next try doesn't build everything again.
+
+      - name: The PDF engine
+        shell: bash
+        working-directory: view
+        run: |
+          set -euo pipefail
+          build="$(grep '^BUILD=' third_party/pdfium/embedded/VERSION | cut -d= -f2)"                                        # WHAT: the pinned PDFium. WHY: as View's Windows build.
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F$build/pdfium-win-x64.tgz" -o pdfium.tgz   # WHAT: fetched. WHY: as above.
+          mkdir -p unpacked && tar -xzf pdfium.tgz -C unpacked                                                              # WHAT: unpacked. WHY: the DLL is inside.
+          cp "$(find unpacked -name 'pdfium.dll' | head -1)" third_party/pdfium/embedded/pdfium.dll                         # WHAT: in place. WHY: the build embeds it.
+
+      - name: The Office Server
+        working-directory: view
+        run: |
+          cargo build --release -p hyperview-server                                        # WHAT: built as it is on main, its version unchanged. WHY: the program IT installs.
+          if ($LASTEXITCODE -ne 0) { throw 'The Office Server did not build.' }           # WHAT: stop. WHY: said plainly.
+
+      - name: A new office, end to end
+        run: >-
+          ./view/deploy/windows-test/office-e2e-fresh.ps1
+          -View "$env:GITHUB_WORKSPACE\view" -Latcon "$env:GITHUB_WORKSPACE\latcon"
+          -Server "$env:GITHUB_WORKSPACE\view\target\release\hyperview-server.exe" -Kit "$env:RUNNER_TEMP\kit"
+          -Key "$env:RUNNER_TEMP\test-keys\test-release.key" -Work "$env:RUNNER_TEMP\e2e-fresh"
+
+      - name: Keep the logs
+        if: always()   # WHAT: pass or fail. WHY: a failed run's logs say why.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # WHAT: v4.6.2, 2025-03-19. WHY: pinned by commit, as above.
+        with:
+          name: office-e2e-fresh-logs           # WHAT: the download's name. WHY: plain.
+          path: ${{ runner.temp }}/e2e-fresh/logs   # WHAT: the servers' logs and messages.txt. WHY: logs only, no keys or programs.
           if-no-files-found: ignore             # WHAT: no error when an earlier step failed. WHY: the run already says what failed.
           retention-days: 14                    # WHAT: kept two weeks. WHY: long enough to look.
