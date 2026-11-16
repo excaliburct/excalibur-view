@@ -567,8 +567,18 @@ try {
     $squatSaid = (Get-Content -Raw "$evidence\squat.txt").Trim()                # WHAT: whether it could. WHY: below
     if ($squatSaid -eq 'ready') {
         $from = (OfficeLogText).Length                                          # WHAT: where the log is now. WHY: only the new alarm counts
-        for ($i = 0; $i -lt 120 -and -not (OfficeLogText).Substring($from).Contains('relay pipe is served by process'); $i++) {
-            try { Invoke-WebRequest -Uri "https://127.0.0.1:$Port/v1/hello" -SkipCertificateCheck -DisableKeepAlive -TimeoutSec 10 -UseBasicParsing | Out-Null } catch {}   # WHAT: a new connection each time until one reaches the squatter's instance. WHY: Windows hands each new connection to a waiting instance; a kept-alive connection would never reach another
+        for ($round = 0; $round -lt 5 -and -not (OfficeLogText).Substring($from).Contains('relay pipe is served by process'); $round++) {
+            $open = @()                                                         # WHAT: connections held at once. WHY: the cell reuses its few waiting instances, so one at a time never reaches past them
+            for ($i = 0; $i -lt 24; $i++) {
+                try {
+                    $tcp = [System.Net.Sockets.TcpClient]::new('127.0.0.1', $Port)   # WHAT: a new connection. WHY: each takes one pipe instance while it stays open
+                    $tls = [System.Net.Security.SslStream]::new($tcp.GetStream(), $false, { $true })   # WHAT: TLS, the test certificate accepted. WHY: the relay opens the pipe only after the handshake
+                    $tls.AuthenticateAsClient('127.0.0.1')                      # WHAT: the handshake. WHY: below
+                    $open += $tcp, $tls                                         # WHAT: kept open. WHY: so the next connection is handed to another instance
+                } catch {}
+            }
+            Start-Sleep -Seconds 2                                              # WHAT: a moment for the log. WHY: the alarm is written as the pipe is checked
+            $open | ForEach-Object { try { $_.Dispose() } catch {} }            # WHAT: all closed. WHY: their slots given back
         }
         & "$env:SystemRoot\System32\schtasks.exe" /End /TN e2e-squat | Out-Null   # WHAT: the squatter stopped. WHY: done with it
         $alarm = ((OfficeLogText).Substring($from) -split "`n" | Where-Object { $_ -match 'relay pipe is served by process' } | Select-Object -First 1)   # WHAT: the alarm. WHY: shown
