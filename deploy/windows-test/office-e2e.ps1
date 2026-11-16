@@ -190,6 +190,16 @@ function MarkedAs([string] $path, [string] $version) {
 }
 
 # WHAT: the cell, running and answering on 47110, and its process. WHY: the cell's start is waited for and checked.
+# WHAT: whether a file is in the cell's data folder, asked in backup mode (robocopy /L lists, copies nothing; exit 1 means it
+#       found the file). WHY: that folder is SYSTEM's and the cell's alone, so a plain Test-Path as an administrator can't see in.
+function CellFile([string] $relative) {
+    $full = Join-Path $CellData $relative                                       # WHAT: the file. WHY: below
+    & "$env:SystemRoot\System32\robocopy.exe" (Split-Path $full) (Join-Path $Work 'robocopy-nowhere') (Split-Path $full -Leaf) /L /B /R:0 /W:0 /NJH /NJS /NP /NDL | Out-Null   # WHAT: listed, not copied. WHY: as above
+    $found = $LASTEXITCODE -eq 1                                                # WHAT: one file would be copied. WHY: robocopy's code for that
+    $global:LASTEXITCODE = 0                                                    # WHAT: robocopy's code forgotten. WHY: it is a count, not a failure
+    return $found
+}
+
 # WHAT: the cell answering through the Office Server: 47110 held by the Office Server's own program (it ends TLS since 0.7.1)
 #       and an HTTPS request relayed to the cell and answered. WHY: the cell itself listens only on its locked relay pipe.
 function CellUp {
@@ -351,10 +361,10 @@ try {
     Check (RuleThere $CellRule) "the cell's 47110 rule is there"                # WHAT: there. WHY: the PCs reach the cell.
     Check (-not (Test-Path -LiteralPath $CitadelData)) "1.0's data folder isn't where it was (kept renamed)"   # WHAT: renamed. WHY: never read again.
     Check ((Sha (Join-Path $OfficeTls 'tls.pfx')) -eq $pfx) "the certificate file was imported and kept byte for byte in the Office Server's folder (SHA-256 $pfx)"   # WHAT: the same file. WHY: the PCs' pins.
-    Check (-not (Test-Path -LiteralPath (Join-Path $CellData 'tls.pfx'))) 'tls.pfx is no longer in the cell''s folder'   # WHAT: out of the cell's reach. WHY: the cell only uses its key.
+    Check (-not (CellFile 'tls.pfx')) 'tls.pfx is no longer in the cell''s folder'   # WHAT: out of the cell's reach. WHY: the cell only uses its key.
     Check ((Get-Content -Raw (Join-Path $OfficeTls 'key-name.txt')).Trim().Length -gt 0) 'the Office Server keeps the key''s name'   # WHAT: kept. WHY: opened at every start.
     Check ((Pin $Port) -eq $pin) "the cell shows 1.0.1's certificate on 47110 ($pin)"   # WHAT: the same pin on the wire. WHY: no PC pairs again.
-    Check (Test-Path -LiteralPath (Join-Path $CellData 'state\moved-from.json')) "the cell's folder is marked as moved"   # WHAT: marked. WHY: never moved twice.
+    Check (CellFile 'state\moved-from.json') "the cell's folder is marked as moved"   # WHAT: marked. WHY: never moved twice.
     $cell = CellProcess                                                         # WHAT: the cell's process. WHY: checked below.
     Check (InJob $cell.ProcessId) 'the cell runs inside the Office Server''s job object'   # WHAT: in its job. WHY: it dies with the server.
     Check ($cell.ParentProcessId -eq (Get-CimInstance Win32_Service -Filter "Name = '$OfficeService'").ProcessId) 'the cell was started by the Office Server''s service'   # WHAT: its parent. WHY: supervised.
