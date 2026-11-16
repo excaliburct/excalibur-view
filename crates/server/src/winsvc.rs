@@ -313,6 +313,33 @@ fn stage_citadel_cell(zip: &Path) -> Result<String, String> {
     Ok(pin.version) // WHAT: its version. WHY: said
 }
 
+/// `hyperview-server --forget-citadel-key-copies`: an administrator removes
+/// the copies of the Citadel cell's key kept as files (`citadel-tls\*.pfx`,
+/// and the `tls.pfx` in Citadel Server 1.0's renamed data folder), once the
+/// cell has answered a computer with the key kept in Windows' store; refused
+/// before then (`crate::cellkey::forget_copies`). What was done, in words.
+///
+/// # Errors
+///
+/// When it is refused, or a copy can't be removed.
+pub fn forget_citadel_key_copies() -> Result<String, String> {
+    use rusqlite::OptionalExtension as _; // WHAT: a row that may not be there. WHY: below
+    let config = crate::Config { data: data_folder(), ..crate::Config::default() }; // WHAT: the installed service's data. WHY: its settings
+    let db = rusqlite::Connection::open_with_flags(config.database(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| format!("the Office Server's data couldn't be read ({e}); run this as an administrator on the server")) ?; // WHAT: read only. WHY: the running service keeps writing; nothing here changes it
+    let read = |key: &str| db.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get::<_, String>(0)).optional().ok().flatten(); // WHAT: one setting. WHY: below
+    let served = read(crate::cellkey::SERVED); // WHAT: when the cell first served, if it has. WHY: refused before then
+    let kept_as = read(crate::cellmove::SETTING).and_then(|t| serde_json::from_str::<crate::cellmove::Moved>(&t).ok()).and_then(|m| match m {
+        crate::cellmove::Moved::Moved { kept_as, .. } => kept_as, // WHAT: 1.0's renamed folder. WHY: its tls.pfx is a copy too
+        _ => None,
+    });
+    let removed = crate::cellkey::forget_copies(&home(), kept_as.as_deref().map(Path::new), served.as_deref())?; // WHAT: removed, or refused. WHY: crate::cellkey decides
+    Ok(if removed.is_empty() {
+        "There were no copies of the Citadel cell's key to remove.".to_string() // WHAT: said. WHY: plain
+    } else {
+        format!("Removed {} copies of the Citadel cell's key: {}. The key itself stays in Windows' key store, usable by the system alone.", removed.len(), removed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")) // WHAT: what went. WHY: a person checks it
+    })
+}
+
 fn stop_and_wait(service: &windows_service::service::Service) {
     let _ = service.stop();
     let deadline = Instant::now() + Duration::from_secs(30);

@@ -361,6 +361,9 @@ try {
 
     Step '(b) the Office Server installed from the USB kit, licensed for citadel; the cell from LatCon''s IT kit'
     InstallOffice $First                                                        # WHAT: installed. WHY: below.
+    $said = & $OfficeExe --forget-citadel-key-copies 2>&1 | Out-String         # WHAT: the key copies' removal asked for too early. WHY: refused before the cell has served
+    Write-Host $said.TrimEnd()                                                  # WHAT: shown. WHY: the log has it.
+    Check ($LASTEXITCODE -ne 0 -and $said.Contains("hasn't answered a computer")) 'removing the key''s copies is refused before the cell has served'   # WHAT: refused. WHY: they are the only way back if the key were lost
     InstallCell                                                                 # WHAT: the cell installed. WHY: (b).
 
     Step '(c) the cell''s first start: 1.0''s data moved into the cell, its key imported, 1.0 taken away'
@@ -383,6 +386,14 @@ try {
     Check (InJob $cell.ProcessId) 'the cell runs inside the Office Server''s job object'   # WHAT: in its job. WHY: it dies with the server.
     Check ($cell.ParentProcessId -eq (Get-CimInstance Win32_Service -Filter "Name = '$OfficeService'").ProcessId) 'the cell was started by the Office Server''s service'   # WHAT: its parent. WHY: supervised.
     LatCon 'after-swap' $pin                                                    # WHAT: the PC paired with 1.0 opens its job on the cell and saves. WHY: carried over through the Office Server's list.
+    $oldKept = Get-ChildItem -LiteralPath $env:ProgramData -Directory -Filter 'Citadel Server (moved*' | Select-Object -First 1   # WHAT: 1.0's renamed data folder. WHY: it holds a copy of the key
+    Check ($oldKept -and (Test-Path -LiteralPath (Join-Path $oldKept.FullName 'tls.pfx'))) "1.0's renamed folder still holds its tls.pfx"   # WHAT: there. WHY: removed below
+    WaitFor { (OfficeLogText).Contains('answered its first computer with the kept key') } 60 'the Office Server noting the cell has served'   # WHAT: noted. WHY: the removal waits for it
+    $said = & $OfficeExe --forget-citadel-key-copies 2>&1 | Out-String         # WHAT: the key's file copies removed. WHY: the cell has served with the key in Windows' store
+    Write-Host $said.TrimEnd()                                                  # WHAT: shown. WHY: the log has it.
+    Check ($LASTEXITCODE -eq 0 -and $said.Contains('Removed 2 copies')) 'the key''s two file copies are removed once the cell has served'   # WHAT: removed. WHY: security review, 2026-11-16
+    Check (-not (Test-Path -LiteralPath (Join-Path $OfficeTls 'tls.pfx')) -and -not (Test-Path -LiteralPath (Join-Path $oldKept.FullName 'tls.pfx'))) 'no tls.pfx is left in citadel-tls or in 1.0''s renamed folder'   # WHAT: gone. WHY: the key now lives only in Windows' key store
+    Check ((Pin $Port) -eq $pin) 'the cell still shows 1.0.1''s certificate after the copies are gone'   # WHAT: unchanged. WHY: the key in Windows' store serves
 
     Step '(d) two computers: the first claims the office, approves the second, which reaches a project and the cell'
     & $Device two-computers (Join-Path $Work 'computers')                       # WHAT: LatCon's own linking code. WHY: (d).
@@ -479,6 +490,84 @@ try {
     Restart-Service -Name $OfficeService -Force                                 # WHAT: restarted. WHY: the key is reused.
     OfficeAt $First 120                                                         # WHAT: back with its cell. WHY: below.
     Check ((Pin $Port) -eq $pin3) 'the new office''s cell keeps its certificate across a restart'   # WHAT: unchanged. WHY: the PCs pin it.
+
+    Step '(h) evidence for IT: the relay pipe''s permissions and who it refuses, the PID check, the firewall rule, the caller''s real address'
+    $evidence = 'C:\e2e-evidence'                                               # WHAT: a folder every account here may write. WHY: what the other accounts' runs say comes back through it
+    New-Item -ItemType Directory -Force -Path $evidence | Out-Null              # WHAT: made. WHY: below
+    & "$env:SystemRoot\System32\icacls.exe" $evidence /grant '*S-1-5-32-545:(OI)(CI)M' /Q | Out-Null   # WHAT: Users may write in it. WHY: the standard user's run writes its answer there
+    $relayName = ([System.IO.Directory]::GetFiles('\\.\pipe\') | ForEach-Object { Split-Path $_ -Leaf } | Where-Object { $_ -like 'excalibur-cell-relay-*' } | Select-Object -First 1)   # WHAT: the relay pipe's name, as Windows lists it. WHY: new at each start
+    Check ([bool]$relayName) "the relay pipe is there ($relayName)"             # WHAT: found. WHY: below
+    $pwsh = (Get-Command pwsh).Source                                           # WHAT: PowerShell 7's path. WHY: the other accounts run it
+    function RunAs([string] $account, [string] $password, [string] $script, [string] $out) {
+        [System.IO.File]::WriteAllText("$evidence\$out.ps1", $script)           # WHAT: the script. WHY: run as the account
+        $args = @('/Create', '/TN', "e2e-$out", '/SC', 'ONCE', '/ST', '23:59', '/F', '/TR', "`"$pwsh`" -NoProfile -ExecutionPolicy Bypass -File $evidence\$out.ps1", '/RU', $account)   # WHAT: a one-off task. WHY: the simplest way to run as another account
+        if ($password) { $args += @('/RP', $password) }                         # WHAT: the user's password. WHY: a standard user's task needs it
+        & "$env:SystemRoot\System32\schtasks.exe" @args | Out-Null              # WHAT: made. WHY: below
+        & "$env:SystemRoot\System32\schtasks.exe" /Run /TN "e2e-$out" | Out-Null   # WHAT: run now. WHY: below
+    }
+    $probe = @"
+`$name = '$relayName'
+try { `$c = [System.IO.Pipes.NamedPipeClientStream]::new('.', `$name, [System.IO.Pipes.PipeDirection]::InOut); `$c.Connect(3000); `$sddl = `$c.GetAccessControl().GetSecurityDescriptorSddlForm('Access'); `$c.Dispose(); "opened `$sddl" }
+catch { "refused `$(`$_.Exception.GetType().Name): `$(`$_.Exception.Message)" }
+"@                                                                              # WHAT: opens the relay pipe and reads its permissions as Windows reports them. WHY: run as SYSTEM, a standard user and an administrator
+    RunAs 'SYSTEM' '' ($probe + " | Set-Content -Encoding utf8 $evidence\system.txt") 'system'   # WHAT: as the system. WHY: the one account the Office Server connects as
+    $userPassword = 'E2e-' + [Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(12))   # WHAT: a throwaway password. WHY: a standard user for the test
+    & "$env:SystemRoot\System32\net.exe" user e2e-standard $userPassword /add | Out-Null   # WHAT: a standard user, in Users only. WHY: an ordinary office account
+    RunAs 'e2e-standard' $userPassword ($probe + " | Set-Content -Encoding utf8 $evidence\user.txt") 'user'   # WHAT: as that user. WHY: must be refused
+    WaitFor { (Test-Path "$evidence\system.txt") -and (Test-Path "$evidence\user.txt") } 60 'the system''s and the standard user''s runs'   # WHAT: both answered. WHY: below
+    $asSystem = (Get-Content -Raw "$evidence\system.txt").Trim(); $asUser = (Get-Content -Raw "$evidence\user.txt").Trim()   # WHAT: what each saw. WHY: checked and shown
+    Write-Host "as SYSTEM: $asSystem"; Write-Host "as a standard user: $asUser"   # WHAT: shown. WHY: IT's evidence
+    Check ($asSystem -match '^opened D:P(\(A;;[^;]+;;;SY\)\(A;;[^;]+;;;S-1-5-80(-\d+){5}\)|\(A;;[^;]+;;;S-1-5-80(-\d+){5}\)\(A;;[^;]+;;;SY\))$') 'the relay pipe''s permissions, as Windows reports them: protected, SYSTEM and the cell''s S-1-5-80 SID, nobody else'   # WHAT: exactly two entries. WHY: §6b
+    Check ($asUser.StartsWith('refused UnauthorizedAccessException')) 'a standard user is refused the relay pipe'   # WHAT: refused. WHY: only the system and the cell
+    $asAdmin = & ([scriptblock]::Create($probe))                                # WHAT: this test's own process, an administrator and not the cell. WHY: below
+    Write-Host "as an administrator: $asAdmin"                                  # WHAT: shown. WHY: IT's evidence
+    Check ("$asAdmin".StartsWith('refused UnauthorizedAccessException')) 'an administrator''s process that isn''t the cell is refused the relay pipe'   # WHAT: refused. WHY: as above
+
+    $fw = Get-NetFirewallRule -DisplayName $CellRule                            # WHAT: the 47110 rule, as Windows holds it. WHY: below
+    $fwAddress = ($fw | Get-NetFirewallAddressFilter).RemoteAddress; $fwProgram = ($fw | Get-NetFirewallApplicationFilter).Program; $fwPort = $fw | Get-NetFirewallPortFilter   # WHAT: its scope, program and port. WHY: checked
+    Write-Host "the 47110 rule: remote $fwAddress, program $fwProgram, $($fwPort.Protocol) $($fwPort.LocalPort), $($fw.Direction) $($fw.Action), profile $($fw.Profile)"   # WHAT: shown. WHY: IT's evidence
+    Check ("$fwAddress" -eq 'LocalSubnet' -and $fwProgram -ieq $OfficeExe -and "$($fwPort.LocalPort)" -eq "$Port" -and "$($fwPort.Protocol)" -eq 'TCP') 'the 47110 rule is the local subnet only, TCP 47110, for the Office Server''s program'   # WHAT: as set. WHY: §6b
+
+    $lan = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1).IPAddress   # WHAT: this machine's office-network address. WHY: a caller that isn't loopback
+    try { Invoke-WebRequest -Uri "https://${lan}:$Port/api/admin/ops" -Headers @{ 'x-av-update-key' = 'not-the-key' } -SkipCertificateCheck -TimeoutSec 10 -UseBasicParsing | Out-Null } catch {}   # WHAT: a wrong maintenance key from that address. WHY: the cell logs whom it refused
+    $limited = $false                                                           # WHAT: whether that address met its open limit. WHY: below
+    for ($i = 0; $i -lt 30 -and -not $limited; $i++) {
+        try { Invoke-WebRequest -Uri "https://${lan}:$Port/v1/hello" -SkipCertificateCheck -TimeoutSec 10 -UseBasicParsing | Out-Null }
+        catch { if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 429) { $limited = $true } }   # WHAT: 429 once its 20 a minute are used. WHY: the cell's limit is per caller
+    }
+    Check $limited "the cell limited $lan by its own address"                   # WHAT: limited. WHY: below
+    Check ((Invoke-WebRequest -Uri "https://127.0.0.1:$Port/v1/hello" -SkipCertificateCheck -TimeoutSec 10 -UseBasicParsing).StatusCode -eq 200) 'another caller (127.0.0.1) is still answered: the cell sees each real caller, not the relay'   # WHAT: answered. WHY: the PROXY header carries the caller
+    & "$env:SystemRoot\System32\robocopy.exe" (Join-Path $CellData 'logs') (Join-Path $Logs 'cell-h') /E /B /R:0 /W:0 /NP /NFL /NDL | Out-Null; $global:LASTEXITCODE = 0   # WHAT: the cell's logs, in backup mode. WHY: its folder is the system's and the cell's alone
+    $cellLog = (Get-ChildItem -LiteralPath (Join-Path $Logs 'cell-h') -File | ForEach-Object { Get-Content -Raw $_.FullName }) -join "`n"   # WHAT: what the cell wrote. WHY: below
+    $line = ($cellLog -split "`n" | Where-Object { $_ -match 'wrong maintenance key' } | Select-Object -Last 1)   # WHAT: the refusal it logged. WHY: shown
+    Write-Host "the cell logged: $line"                                         # WHAT: shown. WHY: IT's evidence
+    Check ("$line".Contains("(from $lan)")) "the cell's log names the real caller ($lan), not the relay"   # WHAT: the address. WHY: §6b
+
+    $squat = @"
+`$name = '$relayName'
+try {
+  for (`$i = 0; `$i -lt 60; `$i++) {
+    `$s = [System.IO.Pipes.NamedPipeServerStream]::new(`$name, [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.NamedPipeServerStream]::MaxAllowedServerInstances)
+    'ready' | Set-Content $evidence\squat.txt
+    `$s.WaitForConnection(); Start-Sleep -Milliseconds 200; `$s.Dispose()
+  }
+} catch { "could not: `$(`$_.Exception.Message)" | Set-Content $evidence\squat.txt }
+"@                                                                              # WHAT: another SYSTEM process serving extra instances of the relay pipe's name. WHY: shows the Office Server sends it nothing
+    RunAs 'SYSTEM' '' $squat 'squat'                                            # WHAT: started. WHY: below
+    WaitFor { Test-Path "$evidence\squat.txt" } 60 'the stand-in squatter'    # WHAT: up, or said why not. WHY: below
+    $squatSaid = (Get-Content -Raw "$evidence\squat.txt").Trim()                # WHAT: whether it could. WHY: below
+    if ($squatSaid -eq 'ready') {
+        $from = (OfficeLogText).Length                                          # WHAT: where the log is now. WHY: only the new alarm counts
+        for ($i = 0; $i -lt 40 -and -not (OfficeLogText).Substring($from).Contains('relay pipe is served by process'); $i++) {
+            try { Invoke-WebRequest -Uri "https://127.0.0.1:$Port/v1/hello" -SkipCertificateCheck -TimeoutSec 10 -UseBasicParsing | Out-Null } catch {}   # WHAT: connections until one reaches the squatter's instance. WHY: Windows hands them to any waiting instance
+        }
+        & "$env:SystemRoot\System32\schtasks.exe" /End /TN e2e-squat | Out-Null   # WHAT: the squatter stopped. WHY: done with it
+        $alarm = ((OfficeLogText).Substring($from) -split "`n" | Where-Object { $_ -match 'relay pipe is served by process' } | Select-Object -First 1)   # WHAT: the alarm. WHY: shown
+        Write-Host "the Office Server said: $alarm"                             # WHAT: shown. WHY: IT's evidence
+        Check ([bool]$alarm) 'a pipe instance served by any process but the cell is refused, with an alarm, and gets nothing'   # WHAT: refused. WHY: the PID check
+    } else {
+        Write-Host "the PID check couldn't be triggered on this runner: $squatSaid"   # WHAT: said plainly. WHY: only if it can be done safely
+    }
 
     Step 'Passed'
     Write-Host 'Office Server end to end on Windows: the cell installed from the IT kit, 1.0.1 moved into it and its key imported, two computers linked, a project and the cell reached, an update with its pushed cell rolled back and a newer one taken, a failed move held and retried, an unlicensed server refusing the cell, and a new office''s key made and kept.'   # WHAT: the summary. WHY: one line for the run page.

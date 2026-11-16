@@ -37,11 +37,12 @@ pub fn listen() -> std::io::Result<()> {
         return Ok(()); // WHAT: already listening. WHY: nothing to do
     }
     let runtime = runtime().ok_or_else(|| std::io::Error::other("the relay's runtime didn't start"))?; // WHAT: the runtime. WHY: below
-    let v4 = runtime.block_on(tokio::net::TcpListener::bind(("0.0.0.0", crate::cell::PORT)))?; // WHAT: 47110 on IPv4. WHY: the office network reaches the cell there
-    runtime.spawn(crate::cellrelay::serve(v4, current(), connector())); // WHAT: served. WHY: TLS answered and relayed
-    match runtime.block_on(tokio::net::TcpListener::bind(("::", crate::cell::PORT))) {
+    let caps = crate::cellrelay::Caps::default(); // WHAT: one set of caps. WHY: 500 in all and 32 per machine hold across IPv4 and IPv6 together (security review, 2026-11-16)
+    let v4 = runtime.block_on(async { crate::listen::exclusive((std::net::Ipv4Addr::UNSPECIFIED, crate::cell::PORT).into()) })?; // WHAT: 47110 on IPv4, held exclusively. WHY: the office network reaches the cell there; no other program can share the port
+    runtime.spawn(crate::cellrelay::serve(v4, current(), connector(), caps.clone())); // WHAT: served. WHY: TLS answered and relayed
+    match runtime.block_on(async { crate::listen::exclusive((std::net::Ipv6Addr::UNSPECIFIED, crate::cell::PORT).into()) }) {
         Ok(v6) => {
-            runtime.spawn(crate::cellrelay::serve(v6, current(), connector())); // WHAT: served on IPv6 too. WHY: Citadel listened on both
+            runtime.spawn(crate::cellrelay::serve(v6, current(), connector(), caps)); // WHAT: served on IPv6 too, with the same caps. WHY: Citadel listened on both
         }
         Err(e) => tracing::info!("the Citadel cell's port isn't served on IPv6 ({e}); IPv4 is"), // WHAT: said. WHY: a machine without IPv6 still serves the office
     }

@@ -33,6 +33,7 @@ pub mod devices; // WHAT: the office's device list and the signed-request gate. 
 pub mod fleet;
 pub mod folders; // WHAT: groups, who sees which folder, and files that aren't drawings. WHY: the field and the shop see only the folders given to them.
 pub mod license;
+pub mod listen; // WHAT: listening sockets nobody else can share. WHY: SO_EXCLUSIVEADDRUSE on 8714 and 47110 (Windows)
 pub mod kept; // WHAT: the version before an update kept a day, and --roll-back. WHY: critical 4: the documented rollback made real
 pub mod lockdown; // WHAT: the service folder made the service's own. WHY: ProgramData lets every account read it and add files.
 pub mod mcp;

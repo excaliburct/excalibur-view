@@ -183,10 +183,20 @@ impl super::Launcher for Cell {
         crate::cellbundle::check_program(&self.program, &self.pin).map_err(std::io::Error::other)?; // WHAT: the pinned program, or not started. WHY: risk 8: checked before every start, a restart too
         super::give_the_cell_the_office_key(&self.data, self.server.config.maintenance_key.as_deref()).inspect_err(|e| tracing::error!("ALARM: the Citadel cell was not started: {e}"))?; // WHAT: only the Office Server's maintenance key opens the cell's admin routes; a link on the way stops the start. WHY: a key set on 1.0 moved in with its settings; review medium: never written through a link
         let tls = super::tlskey::ready(&self.home, &self.data).map_err(|e| {
+            if e.starts_with(crate::cellkey::PFX_STUCK) {
+                return std::io::Error::new(std::io::ErrorKind::PermissionDenied, e); // WHAT: a key copy stuck with the cell: refused for good, as an alarm. WHY: security review, 2026-11-16; the supervisor stops and shows it
+            }
             tracing::error!("ALARM: the Citadel cell was not started: its TLS key isn't ready: {e}"); // WHAT: the alarm. WHY: 47110 is never answered with a key others could use
             std::io::Error::other(e)
         })?; // WHAT: the cell's key made, imported or opened, owned by the system, locked to the system alone, and its certificate. WHY: §6b
         let relay = super::relaywin::current(); // WHAT: the relay's state. WHY: set below
+        if self.server.store.setting(crate::cellkey::SERVED).ok().flatten().is_none() {
+            let server = self.server.clone(); // WHAT: for the notice. WHY: below
+            relay.on_served(Box::new(move || {
+                let _ = server.store.set_setting(crate::cellkey::SERVED, &crate::audit::now()); // WHAT: when the cell first answered a computer. WHY: --forget-citadel-key-copies waits for it
+                tracing::info!("the Citadel cell answered its first computer with the kept key; its key's file copies may now be removed with --forget-citadel-key-copies"); // WHAT: said. WHY: an administrator knows
+            })); // WHAT: noted once. WHY: below
+        }
         relay.set_config(crate::cellrelay::server_config(tls.certificate.clone(), tls.signer.clone()).map_err(std::io::Error::other)?); // WHAT: TLS on 47110 with the pinned certificate, signed through the key. WHY: §6b: the Office Server answers TLS for the cell
         super::relaywin::listen().inspect_err(|e| tracing::error!("ALARM: the Citadel cell was not started: TCP {} couldn't be taken ({e})", super::PORT))?; // WHAT: 47110 listened on, once. WHY: nothing else may hold the cell's port
         crate::winsvc::cell_firewall(); // WHAT: 47110 open for the Office Server's program, office network only. WHY: critical 2; the program that answers it changed in 0.7.1

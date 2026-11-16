@@ -251,10 +251,14 @@ Office Server, which runs as the system, ends TLS on 47110 itself and relays eac
 - rustls, TLS 1.3 and 1.2 only (Citadel's own), ALPN `http/1.1` (what Citadel served), the certificate every computer
   pinned. The handshake signs through the cell's key in Windows' key store (`NCryptSignHash`, ECDSA P-256 SHA-256); the
   key never leaves Windows.
-- At most 500 connections, 32 from one machine (an IPv6 /64 counts as one), Citadel's own numbers. A handshake must finish
-  within 10 s; a connection that carries nothing either way for 90 s is closed (the cell's own keep-alive is 60 s).
-- Listened on from the cell's first start (IPv4, and IPv6 where there is one). With no cell running, a connection is
-  closed at once. The firewall rule "Excalibur Office Server (Citadel cell)" is for the Office Server's program, TCP 47110,
+- At most 500 connections, 32 from one machine (an IPv6 /64 counts as one), Citadel's own numbers, held across the IPv4 and
+  IPv6 listeners together (one set of caps for both). A handshake must finish within 10 s; a connection that carries
+  nothing either way for 90 s is closed (the cell's own keep-alive is 60 s).
+- Listened on from the cell's first start (IPv4, and IPv6 where there is one), each socket bound with
+  `SO_EXCLUSIVEADDRUSE`, so no other program can share or take the port (the Office Server's own 8714 is bound the same
+  way). With no cell running, a connection is closed at once.
+- If the key ever fails to sign a handshake, the log says ALARM (at most once a minute) and `/api/v1/office` shows the
+  cell as not answering for two minutes after the last failure. The firewall rule "Excalibur Office Server (Citadel cell)" is for the Office Server's program, TCP 47110,
   local subnet only, every profile; it is replaced at each start of the cell so an older rule never lingers.
 
 **The relay pipe (`cell::relaywin`, Citadel's `ServerHost.ListenRelay`):**
@@ -271,8 +275,12 @@ Office Server, which runs as the system, ends TLS on 47110 itself and relays eac
   remote and local ends from it, so the per-address cap, the Guard's per-address limits and the logs see the real
   computer. A connection without a good header is closed unanswered; the header is trusted only because this pipe is the
   cell's only listener and only the system may open it.
-- Bytes are relayed both ways with backpressure (16 KiB at a time, each write waiting for the other side); when one side
-  ends, the other is told, and both close together.
+- Bytes are relayed in each direction on its own, so one waiting to write never holds up the other: 16 KiB at a time,
+  each write waiting for the other side (backpressure) for at most 90 s. A direction with nothing to read ends the
+  connection only when the other has been quiet as long, so a long upload or answer is never cut. Any failure or the idle
+  limit ends both directions at once and both are closed together, so a connection's slot is given back within 90 s of
+  its last byte. When the caller ends its sending, the cell's side is only flushed (Windows named pipes have no
+  half-close in tokio): the cell sees the end when the relay ends and the pipe closes.
 
 **The key:**
 
@@ -283,6 +291,11 @@ Office Server, which runs as the system, ends TLS on 47110 itself and relays eac
 - **What the cell gets:** the certificate only, public, for its pin.
 - **What the Office Server keeps** in `<service folder>\citadel-tls\` (the system's and administrators' only):
   `key-name.txt`, `certificate.der`, and 1.0's moved `tls.pfx`.
+- **Copies of the key as files**, until an administrator removes them: `citadel-tls\tls.pfx` (and any
+  `citadel-tls\quarantine*.pfx` or `tls-<n>.pfx`), and the `tls.pfx` left in Citadel Server 1.0's renamed data folder
+  (`C:\ProgramData\Citadel Server (moved to the Excalibur Office Server <date>)\`). Each is DPAPI-sealed for this machine,
+  readable by SYSTEM and administrators. `hyperview-server --forget-citadel-key-copies` removes them, refused until the
+  cell has answered a computer through the relay with the key in Windows' store (noted as `citadel_cell_served`).
 
 At every start of the cell (`crate::cellkey` decides; `cell::tlskey` hands it to Windows):
 
@@ -291,7 +304,8 @@ At every start of the cell (`crate::cellkey` decides; `cell::tlskey` hands it to
 | The first start after the move: 1.0's `tls.pfx` in the cell's folder, nothing kept | It is imported once (DPAPI opened as the system with Citadel's purpose; PFX import as a non-exportable CNG machine key). Its certificate is kept, so every computer's pin still matches. `tls.pfx` is moved out of the cell's reach into `citadel-tls\`. |
 | A new office: nothing moved, nothing kept, and the cell never served | A new P-256 key is made with its permissions set **before** it is finished, and a certificate made for it in Citadel's own shape (`CN=Citadel Server`, this computer's name and `localhost`, ten years). |
 | A restart, a new cell version, an update, a rollback: the key kept | The kept key is opened by name. |
-| A `tls.pfx` appears in the cell's folder after a key is kept | Not used; an alarm in the log. The cell can write its own folder, so nothing there replaces the office's key. |
+| A `tls.pfx` appears in the cell's folder after a key is kept | Not used: moved into quarantine (`citadel-tls\quarantine.pfx`), its read-only flag cleared first, with an alarm in the log. The cell can write its own folder, so nothing there replaces the office's key. |
+| A `tls.pfx` in the cell's folder can't be moved out (at import or quarantine) | The cell isn't started until the Office Server restarts; an alarm in the log, and `/api/v1/office` shows it not answering. A copy of the key never stays with the cell. |
 | The key's permissions were changed (an older build's read entry for the cell included) | Set back to the system only, with an alarm in the log, and read back; if they still aren't exactly ours, the cell isn't started. |
 | The key is owned by anyone but the system or administrators | Refused: whoever owns it could always give itself access. |
 | Half the kept pair, or nothing kept although the cell has served before (`state\moved-from.json`) | Refused, with an alarm: a new key would change the pin every computer holds. Put `citadel-tls` back from a backup, or delete the mark to start again with a new certificate (every computer pairs afresh). |

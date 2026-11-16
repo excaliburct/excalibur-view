@@ -35,6 +35,11 @@ pub const KEY_NAME_FILE: &str = "key-name.txt"; // WHAT: one line, the key's nam
 pub const CERTIFICATE_FILE: &str = "certificate.der"; // WHAT: the certificate the computers pinned. WHY: handed to the cell at every start
 /// 1.0's certificate file, as the move leaves it in the cell's folder.
 pub const PFX: &str = "tls.pfx"; // WHAT: Citadel's own name (ServerPaths.Certificate). WHY: imported once, then moved out of the cell's reach
+/// The start of the refusal when a `tls.pfx` couldn't be moved out of the
+/// cell's folder: the cell is then not started until the Office Server
+/// restarts, and `/api/v1/office` shows it as not answering.
+pub const PFX_STUCK: &str = "ALARM: a copy of the cell's key is stuck in its folder"; // WHAT: the words. WHY: the supervisor tells this refusal apart (security review, 2026-11-16)
+
 /// The largest `tls.pfx` read.
 pub const PFX_MOST: u64 = 64 * 1024; // WHAT: 64 KiB. WHY: Citadel's own limit (DpapiCertificateFile.MaxBytes); a planted giant is refused
 /// The largest certificate passed to the cell.
@@ -222,6 +227,55 @@ pub fn certificate_params(machine: &str, now: time::OffsetDateTime) -> Result<rc
     Ok(params)
 }
 
+/// The setting that says when the cell first answered a computer through
+/// the relay, with the kept key.
+pub const SERVED: &str = "citadel_cell_served"; // WHAT: the setting's name. WHY: the key copies may be forgotten only after
+
+/// The copies of the cell's key kept as files: every `.pfx` in the kept
+/// folder (1.0's moved `tls.pfx`, any `tls-<n>.pfx`, any `quarantine*.pfx`),
+/// and the `tls.pfx` in Citadel Server 1.0's renamed data folder, if one was
+/// kept. Only those that exist.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn key_copies(home: &Path, kept_as: Option<&Path>) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(folder(home)).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pfx")) && std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file())).collect(); // WHAT: the .pfx files kept. WHY: each holds the key
+    found.sort(); // WHAT: in one order. WHY: said the same way each time
+    if let Some(old) = kept_as.map(|k| k.join(PFX)).filter(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file())) {
+        found.push(old); // WHAT: 1.0's own copy, in its renamed folder. WHY: it holds the key too
+    }
+    found
+}
+
+/// Removes the copies of the cell's key kept as files ([`key_copies`]),
+/// only once the cell has answered a computer with the kept key (`served`)
+/// and that key's name and certificate are still kept. Which were removed.
+///
+/// # Errors
+///
+/// Before the cell has served, when the kept key isn't whole, or when a copy can't be removed.
+pub fn forget_copies(home: &Path, kept_as: Option<&Path>, served: Option<&str>) -> Result<Vec<PathBuf>, String> {
+    let Some(when) = served else {
+        return Err("the Citadel cell hasn't answered a computer with its kept key yet, so the copies of its key were kept: they are the only way back if the key were lost. Run this again once the office's computers use the cell".to_string()); // WHAT: refused. WHY: Creede, 2026-11-16: only once the cell has served
+    };
+    let kept = folder(home); // WHAT: the kept folder. WHY: below
+    if !kept.join(KEY_NAME_FILE).is_file() || !kept.join(CERTIFICATE_FILE).is_file() {
+        return Err(format!("the cell's kept key isn't whole ({KEY_NAME_FILE} and {CERTIFICATE_FILE} in {}), so its copies were kept", kept.display())); // WHAT: refused. WHY: never the last copy of a key in doubt
+    }
+    let copies = key_copies(home, kept_as); // WHAT: the copies. WHY: removed below
+    for copy in &copies {
+        if let Ok(meta) = std::fs::symlink_metadata(copy) {
+            let mut permissions = meta.permissions(); // WHAT: its attributes. WHY: a read-only file can't be removed on Windows
+            if permissions.readonly() {
+                #[allow(clippy::permissions_set_readonly_false)] // WHAT: read-only cleared on purpose. WHY: Windows' read-only flag only, so the file can be removed
+                permissions.set_readonly(false); // WHAT: cleared. WHY: as above
+                let _ = std::fs::set_permissions(copy, permissions); // WHAT: set. WHY: removed next
+            }
+        }
+        std::fs::remove_file(copy).map_err(|e| format!("{} couldn't be removed ({e})", copy.display()))?; // WHAT: removed. WHY: the key lives only in Windows' key store from now on
+    }
+    tracing::warn!("the copies of the Citadel cell's key were removed (the cell first served {when}): {copies:?}"); // WHAT: said. WHY: the log shows what went
+    Ok(copies)
+}
+
 /// The cell's argument for its certificate: `--certificate BASE64`. Public
 /// only: the cell needs its pin (the certificate's public key) for its own
 /// records, never the key.
@@ -351,5 +405,24 @@ mod tests {
         assert!(der.windows(14).any(|w| w == b"LATCON-SERVER1"), "the machine's name, cleaned"); // WHAT: the SAN. WHY: SafeName drops odd characters
         let parsed = rustls::pki_types::CertificateDer::from(der.clone()); // WHAT: as a TLS client sees it. WHY: it must parse
         assert!(!parsed.is_empty()); // WHAT: there. WHY: plain check
+    }
+
+    #[test]
+    fn the_key_copies_are_forgotten_only_once_the_cell_has_served() {
+        let n: u64 = rand::random(); // WHAT: a fresh name. WHY: tests run side by side
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-scratch").join(format!("forget-{n:016x}")); // WHAT: a scratch folder. WHY: never a shared one
+        let (home, old) = (root.join("home"), root.join("Citadel Server (moved)")); // WHAT: the service's folder and 1.0's renamed one. WHY: both hold a copy
+        std::fs::create_dir_all(folder(&home)).unwrap(); // WHAT: the kept folder. WHY: below
+        std::fs::create_dir_all(&old).unwrap(); // WHAT: 1.0's renamed folder. WHY: below
+        for (path, body) in [(folder(&home).join(PFX), "a"), (folder(&home).join("quarantine.pfx"), "b"), (old.join(PFX), "c"), (folder(&home).join(KEY_NAME_FILE), "k"), (folder(&home).join(CERTIFICATE_FILE), "c")] {
+            std::fs::write(path, body).unwrap(); // WHAT: each file. WHY: below
+        }
+        assert_eq!(key_copies(&home, Some(&old)).len(), 3, "three copies of the key, the name and certificate aside"); // WHAT: found. WHY: listed for the admin
+        assert!(forget_copies(&home, Some(&old), None).unwrap_err().contains("hasn't answered"), "refused before the cell has served"); // WHAT: refused. WHY: the only way back if the key were lost
+        assert_eq!(key_copies(&home, Some(&old)).len(), 3, "and nothing was removed"); // WHAT: kept. WHY: as above
+        let removed = forget_copies(&home, Some(&old), Some("2026-11-16T00:00:00Z")).unwrap(); // WHAT: after it served. WHY: allowed
+        assert_eq!(removed.len(), 3, "every copy"); // WHAT: removed. WHY: the key lives only in Windows' store now
+        assert!(key_copies(&home, Some(&old)).is_empty() && folder(&home).join(KEY_NAME_FILE).is_file() && folder(&home).join(CERTIFICATE_FILE).is_file(), "the name and certificate stay"); // WHAT: only the copies went. WHY: the cell still needs those
+        let _ = std::fs::remove_dir_all(&root); // WHAT: tidied. WHY: a test leaves nothing
     }
 }

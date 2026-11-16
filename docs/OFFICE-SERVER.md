@@ -140,6 +140,11 @@ see the commit "Review fixes".
   list `citadel`, and any zip but the one pinned in `packaging/citadel-cell.json`, which the server is built with. Fleet
   then pushes each version's cell part over the maintenance channel before the server updates (OFFICE-ENROLLMENT.md
   §6c). The Office Server answers TLS on 47110 itself with the cell's certificate, signing with a key it holds in Windows' key store (the system's alone), and relays each connection to the cell over a locked named pipe with the caller's real address (§6b).
+- **Copies of the Citadel key.** After the move, the cell's key lives in Windows' key store, usable by SYSTEM alone.
+  Two file copies are kept until an administrator removes them: `C:\ProgramData\Excalibur Hyperview\Server\citadel-tls\tls.pfx`
+  (with any `quarantine*.pfx` there) and the `tls.pfx` in Citadel Server 1.0's renamed data folder
+  (`C:\ProgramData\Citadel Server (moved to the Excalibur Office Server <date>)`). Once estimating computers use the cell,
+  run `hyperview-server --forget-citadel-key-copies` as an administrator; it is refused before the cell has served.
 - **Ports.** TCP 8714 and UDP 8715 for the Office Server, and TCP 47110 for the cell: a rule
   "Excalibur Office Server (Citadel cell)" for the Office Server's own program (it answers 47110 and relays to the
   cell), on every profile, from the local subnet only, added at install and put back at each start of the cell. "Local subnet" is the server's own

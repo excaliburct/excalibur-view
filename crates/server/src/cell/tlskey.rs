@@ -89,7 +89,7 @@ pub fn ready(home: &Path, data: &Path) -> Result<Tls, String> {
             let (name, certificate) = import(&pfx)?; // WHAT: the key into the machine's store, its certificate out. WHY: the first start after the move
             keep(&name_file, name.as_bytes())?; // WHAT: the name kept first. WHY: a start cut short after this reuses the key rather than importing again
             keep(&cert_file, &certificate)?; // WHAT: the certificate kept. WHY: handed to the cell at every start
-            move_out(&pfx, &kept); // WHAT: tls.pfx moved out of the cell's reach. WHY: the cell never uses or holds the key
+            move_out(&pfx, &kept, "tls").map_err(|e| format!("{}: {} was imported, but couldn't be moved out of the cell's folder ({e}); the cell was not started", cellkey::PFX_STUCK, pfx.display()))?; // WHAT: tls.pfx moved out of the cell's reach, or the cell not started. WHY: security review, 2026-11-16: the cell never holds a copy of the key
             (name, certificate, true)
         }
         Plan::Make => {
@@ -101,7 +101,8 @@ pub fn ready(home: &Path, data: &Path) -> Result<Tls, String> {
         }
         Plan::Reuse | Plan::ReuseAndIgnorePfx => {
             if plan == Plan::ReuseAndIgnorePfx {
-                tracing::error!("ALARM: {} is in the Citadel cell's folder, but this office already holds the cell's key; the file was not used", pfx.display()); // WHAT: said. WHY: something put it there after the key was made
+                let to = move_out(&pfx, &kept, "quarantine").map_err(|e| format!("{}: {} is in the Citadel cell's folder and couldn't be moved out ({e}); the cell was not started", cellkey::PFX_STUCK, pfx.display()))?; // WHAT: moved into quarantine, or the cell not started. WHY: security review, 2026-11-16: never left with the cell
+                tracing::error!("ALARM: {} was in the Citadel cell's folder although this office already holds the cell's key; it was not used, and was moved to {}", pfx.display(), to.display()); // WHAT: said. WHY: something put it there after the key was made
             }
             (kept_name.unwrap_or_default(), kept_cert.unwrap_or_default(), false)
         }
@@ -122,24 +123,48 @@ fn keep(path: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::rename(&part, path).map_err(|e| format!("could not keep {} ({e})", path.display())) // WHAT: in place. WHY: never half written
 }
 
-/// Moves `tls.pfx` out of the cell's folder into the kept folder (as
-/// `tls.pfx`, or `tls-<seconds>.pfx` beside an older one). Said in the log
-/// when it can't be.
-fn move_out(pfx: &Path, kept: &Path) {
-    let moved = (|| -> std::io::Result<std::path::PathBuf> {
-        let bytes = read_plain(pfx)?; // WHAT: read again, never through a link. WHY: copied whole
-        let mut to = kept.join(cellkey::PFX); // WHAT: where it is kept. WHY: the Office Server's own folder
-        if to.exists() {
-            to = kept.join(format!("tls-{}.pfx", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))); // WHAT: a new name. WHY: an older one is never written over
-        }
-        std::fs::OpenOptions::new().write(true).create_new(true).open(&to).and_then(|mut f| std::io::Write::write_all(&mut f, &bytes).and_then(|()| f.sync_all()))?; // WHAT: a new file, inheriting the locked folder's permissions. WHY: never readable by the cell
-        std::fs::remove_file(pfx)?; // WHAT: the cell's copy gone. WHY: the cell never needs the key
-        Ok(to)
-    })();
-    match moved {
-        Ok(to) => tracing::warn!("Citadel Server 1.0's tls.pfx was imported into the machine's key store for the cell, and kept as {}", to.display()), // WHAT: said. WHY: an administrator knows where it went
-        Err(e) => tracing::error!("ALARM: {} was imported, but could not be moved out of the cell's folder ({e})", pfx.display()), // WHAT: said. WHY: the cell could read its key's file
+/// Moves a `tls.pfx` out of the cell's folder into the kept folder, as
+/// `<stem>.pfx` or `<stem>-<seconds>.pfx` beside an older one: its read-only
+/// flag cleared on the file itself (never through a link), its bytes copied
+/// into a new file there (which inherits the locked folder's permissions),
+/// and the cell's copy removed. Where it went.
+///
+/// # Errors
+///
+/// When any step fails; the caller then doesn't start the cell.
+fn move_out(pfx: &Path, kept: &Path, stem: &str) -> std::io::Result<std::path::PathBuf> {
+    clear_read_only(pfx)?; // WHAT: the read-only flag cleared. WHY: a read-only file can't be removed, and would stay with the cell (security review, 2026-11-16)
+    let bytes = read_plain(pfx)?; // WHAT: read again, never through a link. WHY: copied whole
+    let mut to = kept.join(format!("{stem}.pfx")); // WHAT: where it is kept. WHY: the Office Server's own folder
+    if to.exists() {
+        to = kept.join(format!("{stem}-{}.pfx", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))); // WHAT: a new name. WHY: an older one is never written over
     }
+    std::fs::OpenOptions::new().write(true).create_new(true).open(&to).and_then(|mut f| std::io::Write::write_all(&mut f, &bytes).and_then(|()| f.sync_all()))?; // WHAT: a new file, inheriting the locked folder's permissions. WHY: never readable by the cell
+    std::fs::remove_file(pfx)?; // WHAT: the cell's copy gone. WHY: the cell never needs the key
+    if std::fs::symlink_metadata(pfx).is_ok() {
+        return Err(std::io::Error::other("it is still there after being removed")); // WHAT: refused. WHY: checked, never assumed
+    }
+    tracing::warn!("{} was moved out of the Citadel cell's folder and kept as {}", pfx.display(), to.display()); // WHAT: said. WHY: an administrator knows where it went
+    Ok(to)
+}
+
+/// Clears a file's read-only flag on the file itself: opened without
+/// following a reparse point, checked on that handle, the flag cleared
+/// through it.
+fn clear_read_only(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _}; // WHAT: Windows' attributes and open flags. WHY: below
+    let file = std::fs::OpenOptions::new().access_mode(0x0080 | 0x0100).custom_flags(0x0020_0000).open(path)?; // WHAT: FILE_READ_ATTRIBUTES and FILE_WRITE_ATTRIBUTES, FILE_FLAG_OPEN_REPARSE_POINT. WHY: a link is opened as itself, never followed
+    let meta = file.metadata()?; // WHAT: what was opened. WHY: checked on the handle changed
+    if !meta.is_file() || meta.file_attributes() & 0x400 != 0 {
+        return Err(std::io::Error::other(format!("{} is not a plain file", path.display()))); // WHAT: refused. WHY: the system never changes a file through a link the cell made
+    }
+    let mut permissions = meta.permissions(); // WHAT: its attributes. WHY: changed below
+    if permissions.readonly() {
+        #[allow(clippy::permissions_set_readonly_false)] // WHAT: read-only cleared on purpose. WHY: Windows' read-only flag only, so the file can be removed
+        permissions.set_readonly(false); // WHAT: cleared. WHY: as above
+        file.set_permissions(permissions)?; // WHAT: set through the handle. WHY: never through a path that could be swapped
+    }
+    Ok(())
 }
 
 /// Reads a small file the cell can change, never through a link: opened

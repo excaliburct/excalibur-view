@@ -124,6 +124,14 @@ fn main() {
             }
         }
         #[cfg(windows)]
+        "--forget-citadel-key-copies" => match hyperview_server::winsvc::forget_citadel_key_copies() { // WHAT: the key's file copies removed once the cell has served. WHY: security review, 2026-11-16: the key then lives only in Windows' store
+            Ok(said) => println!("  {said}"), // WHAT: what was done. WHY: a person reads it
+            Err(why) => {
+                eprintln!("  {why}"); // WHAT: why not. WHY: said plainly
+                std::process::exit(1);
+            }
+        },
+        #[cfg(windows)]
         "--roll-back" => match hyperview_server::winsvc::roll_back() { // WHAT: the version before the last update put back, server and cell together. WHY: critical 4: the documented rollback, for real
             Ok(said) => println!("  {said}"), // WHAT: what was done. WHY: a person reads it
             Err(why) => {

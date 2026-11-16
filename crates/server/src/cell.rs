@@ -181,6 +181,7 @@ pub enum State {
     Running { version: String }, // WHAT: said hello with its version. WHY: shown as running
     NotAnswering, // WHAT: given up after too many restarts, or couldn't be started. WHY: §6a
     PipeTaken, // WHAT: another program holds the cell's pipe name. WHY: security review L4: an alarm, never a quiet restart
+    Refused, // WHAT: not started until the Office Server restarts: a copy of its key stuck in its folder. WHY: security review, 2026-11-16: an alarm an admin must act on, never retried
 }
 
 /// The supervisor's last word on the cell. Empty when there is no cell to
@@ -211,11 +212,18 @@ impl Watch {
     /// The cell as `/api/v1/office` reports Citadel: `None` while it starts,
     /// or when it isn't supervised, so the last look at its port is used.
     pub fn seen(&self) -> Option<crate::citadel::Seen> {
+        self.seen_at(hub::device::unix_now()) // WHAT: as of now. WHY: a key that failed to sign lately counts
+    }
+
+    /// [`Watch::seen`] as of `now` (Unix seconds).
+    fn seen_at(&self, now: i64) -> Option<crate::citadel::Seen> {
         match self.get()? {
             State::Starting => None, // WHAT: no word yet. WHY: the look at its port, or "looking"
+            State::Running { .. } if crate::cellrelay::sign_trouble(now) => Some(crate::citadel::Seen::NotAnswering), // WHAT: running, but its key wouldn't sign lately. WHY: security review, 2026-11-16: no computer can connect, so it isn't serving
             State::Running { version } => Some(crate::citadel::Seen::Running { version }), // WHAT: running, its version. WHY: Fleet compares it with the shelf
             State::NotAnswering => Some(crate::citadel::Seen::NotAnswering), // WHAT: not answering. WHY: §6a
             State::PipeTaken => Some(crate::citadel::Seen::PipeTaken), // WHAT: the pipe's name taken. WHY: shown as an alarm
+            State::Refused => Some(crate::citadel::Seen::NotAnswering), // WHAT: not started, an alarm in the log. WHY: shown as not answering until an admin acts
         }
     }
 }
@@ -251,6 +259,11 @@ pub fn supervise(launcher: &mut dyn Launcher, watch: &Watch, sleep: &dyn Fn(Dura
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 tracing::error!("ALARM: another program holds the Citadel cell's pipe ({e}); the cell is not started until the Office Server restarts"); // WHAT: written in the log as an alarm. WHY: something on this machine is pretending to be the Office Server to the cell
                 watch.set(State::PipeTaken); // WHAT: shown on /api/v1/office. WHY: an admin and Fleet see it
+                return;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                tracing::error!("{e}; the cell is not started until the Office Server restarts"); // WHAT: the alarm (its words start with ALARM). WHY: retrying can't fix it; an admin must
+                watch.set(State::Refused); // WHAT: shown on /api/v1/office as not answering. WHY: an admin and Fleet see it
                 return;
             }
             Err(e) => tracing::warn!("the Citadel cell could not be started: {e}"), // WHAT: said. WHY: counted as a stop
@@ -990,6 +1003,39 @@ mod tests {
         assert_eq!(cell.starts, 1, "never tried again on a name someone else holds");
         assert_eq!(watch.get(), Some(State::PipeTaken));
         assert_eq!(watch.seen().map(|s| s.state()), Some("pipe-taken"));
+    }
+
+    /// A start refused because a copy of the key is stuck with the cell.
+    struct KeyStuck {
+        starts: usize,
+    }
+
+    impl Launcher for KeyStuck {
+        fn start(&mut self) -> std::io::Result<()> {
+            self.starts += 1; // WHAT: counted. WHY: once only
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, crate::cellkey::PFX_STUCK)) // WHAT: as tlskey refuses it. WHY: below
+        }
+        fn wait(&mut self) {}
+    }
+
+    #[test]
+    fn a_key_copy_stuck_with_the_cell_stops_it_for_good_and_shows_it_not_answering() {
+        let watch = Watch::default(); // WHAT: the supervisor's word. WHY: below
+        let mut cell = KeyStuck { starts: 0 }; // WHAT: a start refused so. WHY: below
+        let start = Instant::now(); // WHAT: the clock. WHY: below
+        supervise(&mut cell, &watch, &|_| {}, &|| start, 3); // WHAT: supervised. WHY: under test
+        assert_eq!(cell.starts, 1, "never retried: an admin must act"); // WHAT: once. WHY: security review, 2026-11-16
+        assert_eq!(watch.get(), Some(State::Refused)); // WHAT: refused. WHY: kept
+        assert_eq!(watch.seen().map(|s| s.state()), Some("not-answering"), "shown on /api/v1/office"); // WHAT: not answering. WHY: as above
+    }
+
+    #[test]
+    fn a_running_cell_whose_key_would_not_sign_shows_as_not_serving() {
+        let watch = Watch::default(); // WHAT: the supervisor's word. WHY: below
+        watch.set(State::Running { version: "1.1.7".into() }); // WHAT: running. WHY: below
+        crate::cellrelay::note_sign_failure(1_000_000); // WHAT: a handshake's signing failed at a fixed past moment (the same one cellrelay's test uses). WHY: tests side by side never see a failure "now"
+        assert_eq!(watch.seen_at(1_000_010).map(|s| s.state()), Some("not-answering"), "not serving while its key won't sign"); // WHAT: shown. WHY: security review, 2026-11-16
+        assert_eq!(watch.seen_at(1_000_000 + crate::cellrelay::SIGN_TROUBLE_FOR).map(|s| s.state()), Some("running"), "serving again once it signs"); // WHAT: cleared. WHY: a failure that stops
     }
 
     #[test]

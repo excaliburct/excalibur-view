@@ -77,8 +77,39 @@ pub fn proxy_v2(remote: SocketAddr, local: SocketAddr) -> Vec<u8> {
 }
 
 /// Connections counted per machine, given back when each closes.
-#[derive(Default, Clone)]
-pub struct Counts(Arc<Mutex<HashMap<IpAddr, usize>>>); // WHAT: open connections by machine. WHY: the per-machine cap
+#[derive(Clone)]
+pub struct Counts {
+    open: Arc<Mutex<HashMap<IpAddr, usize>>>, // WHAT: open connections by machine. WHY: the per-machine cap
+    most: usize, // WHAT: the cap per machine. WHY: [`MOST_FROM_ONE`] in the product, smaller in a test
+}
+
+impl Default for Counts {
+    fn default() -> Self {
+        Counts { open: Arc::default(), most: MOST_FROM_ONE } // WHAT: no connections, Citadel's cap. WHY: the product's
+    }
+}
+
+/// The caps every listener on 47110 shares: one set of slots and one count
+/// per machine, so IPv4 and IPv6 together hold to 500 and 32.
+#[derive(Clone)]
+pub struct Caps {
+    slots: Arc<tokio::sync::Semaphore>, // WHAT: the open-connection slots. WHY: the total cap
+    counts: Counts, // WHAT: connections per machine. WHY: the per-machine cap
+}
+
+impl Default for Caps {
+    fn default() -> Self {
+        Caps::new(MOST_CONNECTIONS, MOST_FROM_ONE) // WHAT: Citadel's numbers. WHY: the product's
+    }
+}
+
+impl Caps {
+    /// Caps of `total` connections, `per_machine` from one machine.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+    pub fn new(total: usize, per_machine: usize) -> Caps {
+        Caps { slots: Arc::new(tokio::sync::Semaphore::new(total)), counts: Counts { open: Arc::default(), most: per_machine } } // WHAT: made. WHY: shared by every listener
+    }
+}
 
 /// One connection counted against its machine.
 pub struct Counted {
@@ -91,9 +122,9 @@ impl Counts {
     #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it gives the slot back at once
     pub fn take(&self, ip: IpAddr) -> Option<Counted> {
         let machine = crate::tls::machine(ip); // WHAT: the machine (an IPv6 /64, an IPv4 address). WHY: the same rule as 8714
-        let mut map = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner); // WHAT: the counts. WHY: a poisoned lock still counts
+        let mut map = self.open.lock().unwrap_or_else(std::sync::PoisonError::into_inner); // WHAT: the counts. WHY: a poisoned lock still counts
         let n = map.entry(machine).or_insert(0); // WHAT: its count. WHY: below
-        if *n >= MOST_FROM_ONE {
+        if *n >= self.most {
             return None; // WHAT: its share taken. WHY: one machine can't take every slot
         }
         *n += 1; // WHAT: counted. WHY: given back on drop
@@ -103,7 +134,7 @@ impl Counts {
 
 impl Drop for Counted {
     fn drop(&mut self) {
-        let mut map = self.counts.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner); // WHAT: the counts. WHY: below
+        let mut map = self.counts.open.lock().unwrap_or_else(std::sync::PoisonError::into_inner); // WHAT: the counts. WHY: below
         if let Some(n) = map.get_mut(&self.machine) {
             *n -= 1; // WHAT: given back. WHY: the connection closed
             if *n == 0 {
@@ -138,9 +169,36 @@ impl rustls::sign::SigningKey for Key {
     }
 }
 
+/// When signing through the cell's key last failed, and when that was last
+/// said as an alarm, in Unix seconds (0: never).
+static SIGN_FAILED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0); // WHAT: the last failure. WHY: /api/v1/office shows the cell not serving
+static SIGN_ALARMED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0); // WHAT: the last alarm. WHY: at most one a minute, however many handshakes fail
+/// How long a signing failure counts as the cell not serving.
+pub const SIGN_TROUBLE_FOR: i64 = 120; // WHAT: two minutes. WHY: a failure that stops shows as serving again soon after
+
+/// Notes a signing failure, and says it as an alarm at most once a minute.
+pub fn note_sign_failure(now: i64) {
+    use std::sync::atomic::Ordering;
+    SIGN_FAILED.store(now, Ordering::Relaxed); // WHAT: noted. WHY: below
+    let last = SIGN_ALARMED.load(Ordering::Relaxed); // WHAT: the last alarm. WHY: rate-limited
+    if now - last >= 60 && SIGN_ALARMED.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+        tracing::error!("ALARM: the Citadel cell's key would not sign a TLS handshake on 47110; estimating computers can't connect until it does"); // WHAT: the alarm. WHY: never silent
+    }
+}
+
+/// Whether signing failed within [`SIGN_TROUBLE_FOR`] of `now`.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn sign_trouble(now: i64) -> bool {
+    let at = SIGN_FAILED.load(std::sync::atomic::Ordering::Relaxed); // WHAT: the last failure. WHY: below
+    at != 0 && now - at < SIGN_TROUBLE_FOR // WHAT: recent. WHY: shown as not serving
+}
+
 impl rustls::sign::Signer for Signing {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
-        self.0.sign(message).ok_or_else(|| rustls::Error::General("the Citadel cell's key would not sign".into())) // WHAT: signed through the key, or the handshake fails. WHY: never a handshake without the pinned key
+        self.0.sign(message).ok_or_else(|| {
+            note_sign_failure(hub::device::unix_now()); // WHAT: noted and, at most once a minute, an alarm. WHY: a key that stops signing is never silent
+            rustls::Error::General("the Citadel cell's key would not sign".into()) // WHAT: the handshake fails. WHY: never a handshake without the pinned key
+        })
     }
 
     fn scheme(&self) -> rustls::SignatureScheme {
@@ -182,6 +240,7 @@ pub fn server_config(certificate: Vec<u8>, key: Arc<dyn Sign>) -> Result<Arc<rus
 pub struct Current {
     config: Mutex<Option<Arc<rustls::ServerConfig>>>, // WHAT: the TLS settings with the key. WHY: none until the key is ready
     target: Mutex<Option<Target>>, // WHAT: the running cell's pipe and process. WHY: none while it isn't running
+    served: Mutex<Option<Box<dyn FnOnce() + Send>>>, // WHAT: what to do the first time the cell answers a computer through the relay. WHY: the server notes the cell has served, once (the key copies may then be forgotten)
 }
 
 /// The running cell, as the relay reaches it.
@@ -202,6 +261,18 @@ impl Current {
         *self.target.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = target; // WHAT: kept. WHY: each new connection reads it
     }
 
+    /// What to do the first time the cell answers through the relay; done once.
+    pub fn on_served(&self, then: Box<dyn FnOnce() + Send>) {
+        *self.served.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(then); // WHAT: kept. WHY: run below
+    }
+
+    fn served(&self) {
+        let then = self.served.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take(); // WHAT: taken, so it runs once. WHY: below
+        if let Some(then) = then {
+            then(); // WHAT: run. WHY: the cell has answered a computer
+        }
+    }
+
     fn now(&self) -> (Option<Arc<rustls::ServerConfig>>, Option<Target>) {
         (self.config.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone(), self.target.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()) // WHAT: both, as they are. WHY: one connection's view
     }
@@ -218,10 +289,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 pub type Connect = Arc<dyn Fn(Target) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<CellStream>> + Send>> + Send + Sync>;
 
 /// Answers TLS on `listener` and relays each connection to the cell, for as
-/// long as the listener lives.
-pub async fn serve(listener: tokio::net::TcpListener, current: Arc<Current>, connect: Connect) {
-    let slots = Arc::new(tokio::sync::Semaphore::new(MOST_CONNECTIONS)); // WHAT: the open-connection slots. WHY: the cap
-    let counts = Counts::default(); // WHAT: connections per machine. WHY: the per-machine cap
+/// long as the listener lives, within `caps` (shared by every listener).
+pub async fn serve(listener: tokio::net::TcpListener, current: Arc<Current>, connect: Connect, caps: Caps) {
+    let Caps { slots, counts } = caps; // WHAT: the caps shared with every other listener. WHY: 500 and 32 hold across IPv4 and IPv6 together
     let local = listener.local_addr().ok(); // WHAT: our own address. WHY: the PROXY header's destination
     loop {
         let Ok((tcp, peer)) = listener.accept().await else {
@@ -256,55 +326,85 @@ async fn one(tcp: tokio::net::TcpStream, peer: SocketAddr, ours: SocketAddr, cur
     let tls = tokio::time::timeout(HANDSHAKE, tokio_rustls::TlsAcceptor::from(config).accept(tcp)).await.map_err(|_| "the handshake took too long".to_string())?.map_err(|e| format!("the handshake failed: {e}"))?; // WHAT: TLS, within ten seconds. WHY: a stalled handshake gives its slot back
     let mut cell = tokio::time::timeout(PIPE_WAIT, connect(target)).await.map_err(|_| "the cell's pipe stayed busy".to_string())?.map_err(|e| format!("the cell couldn't be reached: {e}"))?; // WHAT: the cell, checked by the connector. WHY: only the cell this server started gets a byte
     cell.write_all(&proxy_v2(peer, ours)).await.map_err(|e| e.to_string())?; // WHAT: the caller's real address first. WHY: the cell's limits and logs keep working
-    relay(tls, cell, IDLE).await.map_err(|e| e.to_string()) // WHAT: the bytes, both ways. WHY: the cell answers as before
+    let answered = std::sync::atomic::AtomicU64::new(0); // WHAT: bytes the cell sent back. WHY: the first answer is noted
+    let ended = relay(tls, cell, IDLE, &answered).await; // WHAT: the bytes, both ways. WHY: the cell answers as before
+    if answered.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+        current.served(); // WHAT: the cell has answered a computer over TLS with the kept key. WHY: noted once
+    }
+    ended.map_err(|e| e.to_string())
 }
 
-/// Copies bytes both ways between `a` and `b` until both have ended, or
-/// nothing moves either way for `idle`; each write waits for the other side
-/// (backpressure). When one side ends, the other is told (its write half is
-/// shut) and the rest is still carried; both are closed together at the end.
+/// Copies bytes both ways between `a` and `b`, each direction on its own, so
+/// one waiting to write never holds up the other reading. Each read and each
+/// write may wait at most `idle`; a direction that has nothing to read for
+/// `idle` ends the relay only when the other has been quiet that long too, so
+/// a long upload or a long answer isn't cut. Any failure or the idle limit
+/// ends both directions at once, and both streams are dropped together, so a
+/// connection's slot is given back within `idle` of the last byte, and
+/// within `idle` of a stalled write.
+///
+/// When one side ends its sending, the other side's write half is shut. Over
+/// TLS that sends close_notify; on a Windows named pipe it is only a flush
+/// (tokio's named pipes have no half-close), so the cell sees the caller's
+/// end only when the relay ends and the pipe is closed: when the cell has
+/// finished too, or after `idle`.
+///
+/// `answered` counts the bytes carried from `b` to `a` (the cell's answers).
 ///
 /// # Errors
 ///
-/// When either side fails.
-pub async fn relay<A, B>(a: A, b: B, idle: Duration) -> std::io::Result<()>
+/// When either side fails, or the idle limit passes.
+pub async fn relay<A, B>(a: A, b: B, idle: Duration, answered: &std::sync::atomic::AtomicU64) -> std::io::Result<()>
 where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
-    let (mut a_read, mut a_write) = tokio::io::split(a); // WHAT: the caller's halves. WHY: read and written at once
-    let (mut b_read, mut b_write) = tokio::io::split(b); // WHAT: the cell's halves. WHY: likewise
-    let (mut from_a, mut from_b) = (vec![0u8; CHUNK], vec![0u8; CHUNK]); // WHAT: one buffer each way. WHY: bounded memory per connection
-    let (mut a_open, mut b_open) = (true, true); // WHAT: whether each side still sends. WHY: carried until both have ended
-    while a_open || b_open {
-        tokio::select! {
-            read = a_read.read(&mut from_a), if a_open => match read {
-                Ok(0) => {
-                    a_open = false; // WHAT: the caller has finished sending. WHY: below
-                    let _ = b_write.shutdown().await; // WHAT: the cell told. WHY: it sees the end of the request
-                }
-                Ok(n) => tokio::time::timeout(idle, b_write.write_all(&from_a[..n])).await.map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??, // WHAT: passed to the cell, waiting for it to take it. WHY: backpressure; a cell that takes nothing for the idle time ends the connection
-                Err(e) => return Err(e), // WHAT: the caller's side failed. WHY: both closed
-            },
-            read = b_read.read(&mut from_b), if b_open => match read {
-                Ok(0) => {
-                    b_open = false; // WHAT: the cell has finished sending. WHY: below
-                    let _ = a_write.shutdown().await; // WHAT: the caller told (TLS close). WHY: it sees the end of the answer
-                }
-                Ok(n) => tokio::time::timeout(idle, a_write.write_all(&from_b[..n])).await.map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??, // WHAT: passed to the caller, waiting for it to take it. WHY: backpressure
-                Err(e) => return Err(e), // WHAT: the cell's side failed. WHY: both closed
-            },
-            () = tokio::time::sleep(idle) => return Err(std::io::ErrorKind::TimedOut.into()), // WHAT: nothing either way for the idle time. WHY: a held-open connection gives its slot back
-        }
-    }
-    let _ = a_write.shutdown().await; // WHAT: the caller's side closed. WHY: both together
-    let _ = b_write.shutdown().await; // WHAT: the cell's side closed. WHY: likewise
+    let (a_read, a_write) = tokio::io::split(a); // WHAT: the caller's halves. WHY: each direction on its own
+    let (b_read, b_write) = tokio::io::split(b); // WHAT: the cell's halves. WHY: likewise
+    let start = tokio::time::Instant::now(); // WHAT: a clock start. WHY: activity is kept as milliseconds since it
+    let activity = std::sync::atomic::AtomicU64::new(0); // WHAT: when a byte last moved either way. WHY: a direction only times out when both are quiet
+    let ignored = std::sync::atomic::AtomicU64::new(0); // WHAT: the caller's bytes, not needed. WHY: one shape for both directions
+    let toward_cell = one_way(a_read, b_write, idle, start, &activity, &ignored); // WHAT: caller to cell. WHY: below
+    let toward_caller = one_way(b_read, a_write, idle, start, &activity, answered); // WHAT: cell to caller, counted. WHY: below
+    tokio::try_join!(toward_cell, toward_caller)?; // WHAT: both, side by side; the first failure ends the other at once. WHY: neither blocks the other, and a slot is never held by a half that failed
     Ok(())
+}
+
+/// One direction of [`relay`]: read, then write all of it, until the reader ends.
+async fn one_way<R, W>(mut from: R, mut to: W, idle: Duration, start: tokio::time::Instant, activity: &std::sync::atomic::AtomicU64, carried: &std::sync::atomic::AtomicU64) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    use std::sync::atomic::Ordering;
+    let since = |at: tokio::time::Instant| u64::try_from(at.saturating_duration_since(start).as_millis()).unwrap_or(u64::MAX); // WHAT: milliseconds since the start. WHY: kept in one number
+    let mut buffer = vec![0u8; CHUNK]; // WHAT: this direction's buffer. WHY: bounded memory per connection
+    loop {
+        let n = match tokio::time::timeout(idle, from.read(&mut buffer)).await {
+            Ok(read) => read?, // WHAT: read, or the side failed. WHY: below
+            Err(_) => {
+                let quiet = since(tokio::time::Instant::now()).saturating_sub(activity.load(Ordering::Relaxed)); // WHAT: how long nothing has moved either way. WHY: the other direction may be busy
+                if quiet >= u64::try_from(idle.as_millis()).unwrap_or(u64::MAX) {
+                    return Err(std::io::ErrorKind::TimedOut.into()); // WHAT: both quiet for the idle time. WHY: a held-open connection gives its slot back
+                }
+                continue; // WHAT: the other way is busy. WHY: a long answer or upload isn't cut
+            }
+        };
+        if n == 0 {
+            let _ = to.shutdown().await; // WHAT: the other side told this one has finished (close_notify over TLS; only a flush on a named pipe). WHY: see [`relay`]
+            return Ok(()); // WHAT: this direction done. WHY: the other carries on until it ends
+        }
+        tokio::time::timeout(idle, to.write_all(&buffer[..n])).await.map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??; // WHAT: passed on, waiting for the other side to take it, at most the idle time. WHY: backpressure; a side that takes nothing ends the connection
+        activity.store(since(tokio::time::Instant::now()), Ordering::Relaxed); // WHAT: a byte moved. WHY: neither direction times out while the other is busy
+        carried.fetch_add(n as u64, Ordering::Relaxed); // WHAT: counted. WHY: the caller may want to know
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static CARRIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // WHAT: bytes counted by relays the tests spawn. WHY: a spawned relay needs a counter that lives for ever
 
     #[test]
     fn the_proxy_header_carries_the_caller_s_real_address() {
@@ -335,7 +435,7 @@ mod tests {
     async fn the_relay_carries_both_ways_and_closes_both_together() {
         let (caller, near) = tokio::io::duplex(64); // WHAT: the caller's side. WHY: a small buffer shows backpressure works
         let (far, cell) = tokio::io::duplex(64); // WHAT: the cell's side. WHY: likewise
-        let pump = tokio::spawn(relay(near, far, Duration::from_secs(5))); // WHAT: the relay. WHY: under test
+        let pump = tokio::spawn(relay(near, far, Duration::from_secs(5), &CARRIED)); // WHAT: the relay. WHY: under test
         let (mut caller, mut cell) = (caller, cell); // WHAT: the two ends a test holds. WHY: below
         let request = vec![7u8; 100_000]; // WHAT: a request far bigger than the buffers. WHY: every byte must pass, in order
         let writer = tokio::spawn(async move {
@@ -355,10 +455,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_direction_waiting_to_write_never_holds_up_the_other() {
+        let (caller, near) = tokio::io::duplex(64); // WHAT: the caller's side, a small buffer. WHY: its writes fill it at once
+        let (far, cell) = tokio::io::duplex(64); // WHAT: the cell's side. WHY: likewise
+        tokio::spawn(relay(near, far, Duration::from_secs(5), &CARRIED)); // WHAT: the relay. WHY: under test
+        let (mut caller_read, mut caller_write) = tokio::io::split(caller); // WHAT: the caller's halves. WHY: it sends and reads at once
+        let (_cell_read, mut cell_write) = tokio::io::split(cell); // WHAT: a cell that never reads. WHY: the caller's direction stalls
+        tokio::spawn(async move {
+            let _ = caller_write.write_all(&[1u8; 100_000]).await; // WHAT: far more than the buffers hold. WHY: that direction waits to write
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await; // WHAT: the stall in place. WHY: below
+        cell_write.write_all(b"answer").await.unwrap(); // WHAT: the cell answers meanwhile. WHY: the other direction
+        let mut back = [0u8; 6]; // WHAT: room for it. WHY: below
+        tokio::time::timeout(Duration::from_secs(2), caller_read.read_exact(&mut back)).await.expect("the answer arrives while the other way is stalled").unwrap(); // WHAT: read in time. WHY: neither direction blocks the other
+        assert_eq!(&back, b"answer"); // WHAT: as sent. WHY: carried
+    }
+
+    #[tokio::test]
     async fn a_connection_that_carries_nothing_is_closed() {
         let (_caller, near) = tokio::io::duplex(64); // WHAT: a caller that sends nothing. WHY: a held-open socket
         let (far, _cell) = tokio::io::duplex(64); // WHAT: a cell that sends nothing. WHY: likewise
-        let ended = relay(near, far, Duration::from_millis(100)).await; // WHAT: the relay with a short idle limit. WHY: under test
+        let ended = relay(near, far, Duration::from_millis(100), &std::sync::atomic::AtomicU64::new(0)).await; // WHAT: the relay with a short idle limit. WHY: under test
         assert_eq!(ended.unwrap_err().kind(), std::io::ErrorKind::TimedOut, "closed after the idle time"); // WHAT: ended. WHY: its slot given back
     }
 
@@ -398,6 +515,10 @@ mod tests {
         let current = Arc::new(Current::default()); // WHAT: no cell yet. WHY: set below
         current.set_config(server_config(cert.clone(), Arc::new(Ring(key))).unwrap()); // WHAT: the TLS settings. WHY: as at the cell's start
         current.set_target(Some(Target { pipe: "test".into(), pid: 1 })); // WHAT: a running cell. WHY: below
+        let (served_tx, served_rx) = tokio::sync::oneshot::channel::<()>(); // WHAT: told when the cell first answers. WHY: checked below
+        current.on_served(Box::new(move || {
+            let _ = served_tx.send(()); // WHAT: said. WHY: below
+        })); // WHAT: what the server does then. WHY: the key copies may be forgotten only after
         let (to_cell, from_relay) = tokio::sync::mpsc::channel::<tokio::io::DuplexStream>(1); // WHAT: the cell's ends of connections. WHY: the test plays the cell
         let connect: Connect = Arc::new(move |target: Target| {
             let to_cell = to_cell.clone(); // WHAT: for the future. WHY: below
@@ -410,7 +531,7 @@ mod tests {
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // WHAT: a free port. WHY: stands in for 47110
         let address = listener.local_addr().unwrap(); // WHAT: its address. WHY: the client connects to it
-        tokio::spawn(serve(listener, current.clone(), connect)); // WHAT: the relay. WHY: under test
+        tokio::spawn(serve(listener, current.clone(), connect, Caps::default())); // WHAT: the relay. WHY: under test
         let mut roots = rustls::RootCertStore::empty(); // WHAT: trust only the pinned certificate. WHY: as a pinning client
         roots.add(rustls::pki_types::CertificateDer::from(cert.clone())).unwrap(); // WHAT: added. WHY: below
         let mut client = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider())).with_safe_default_protocol_versions().unwrap().with_root_certificates(roots).with_no_client_auth(); // WHAT: a TLS client. WHY: below
@@ -432,10 +553,53 @@ mod tests {
         let mut back = [0u8; 2]; // WHAT: what the caller gets. WHY: checked
         tls.read_exact(&mut back).await.unwrap(); // WHAT: read. WHY: below
         assert_eq!(&back, b"ok", "the cell's answer, back over TLS"); // WHAT: carried. WHY: both ways
+        drop(tls); // WHAT: the caller hangs up. WHY: the connection ends, and its first answer is noted
+        drop(cell); // WHAT: the cell's side closes. WHY: likewise
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(5), served_rx).await, Ok(Ok(()))), "the server is told the cell has served"); // WHAT: told once. WHY: the forget command waits for it
         current.set_target(None); // WHAT: the cell stopped. WHY: a new connection is closed
         let tcp = tokio::net::TcpStream::connect(address).await.unwrap(); // WHAT: another caller. WHY: below
         let mut closed = tcp; // WHAT: its socket. WHY: read below
         let mut nothing = [0u8; 1]; // WHAT: room for a byte. WHY: none comes
         assert_eq!(closed.read(&mut nothing).await.unwrap_or(0), 0, "with no cell running, a connection is closed at once"); // WHAT: closed. WHY: nothing to relay to
+    }
+
+    #[tokio::test]
+    async fn one_set_of_caps_holds_across_both_listeners() {
+        let current = Arc::new(Current::default()); // WHAT: no TLS settings, no cell. WHY: a connection is counted before anything else
+        let connect: Connect = Arc::new(|_| Box::pin(async { Err(std::io::Error::other("no cell")) })); // WHAT: never reached. WHY: as above
+        let caps = Caps::new(3, 2); // WHAT: 3 in all, 2 from one machine. WHY: small numbers show the rule
+        let (one, two) = (tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(), tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()); // WHAT: two listeners. WHY: stand in for IPv4 and IPv6
+        let (a, b) = (one.local_addr().unwrap(), two.local_addr().unwrap()); // WHAT: their addresses. WHY: below
+        current.set_config(server_config(vec![0x30, 0], Arc::new(NoKey)).unwrap()); // WHAT: TLS settings, so a connection waits in its handshake. WHY: it holds its slot meanwhile
+        current.set_target(Some(Target { pipe: "x".into(), pid: 1 })); // WHAT: a cell. WHY: as above
+        tokio::spawn(serve(one, current.clone(), connect.clone(), caps.clone())); // WHAT: one listener. WHY: below
+        tokio::spawn(serve(two, current.clone(), connect, caps)); // WHAT: the other, sharing the caps. WHY: under test
+        let held = |address| async move { tokio::net::TcpStream::connect(address).await.unwrap() }; // WHAT: a connection that sends nothing. WHY: it holds its slot
+        let closed = |mut s: tokio::net::TcpStream| async move {
+            let mut byte = [0u8; 1]; // WHAT: room for a byte. WHY: none comes
+            matches!(tokio::time::timeout(Duration::from_millis(500), s.read(&mut byte)).await, Ok(Ok(0) | Err(_))) // WHAT: closed at once. WHY: a still-open one times out instead
+        };
+        let first = held(a).await; // WHAT: one on the first listener. WHY: below
+        let second = held(b).await; // WHAT: one on the second, the same machine. WHY: below
+        tokio::time::sleep(Duration::from_millis(100)).await; // WHAT: both accepted. WHY: counted
+        assert!(closed(held(a).await).await, "a third from the same machine is closed on either listener: 2 per machine across both"); // WHAT: refused. WHY: the per-machine cap is shared
+        assert!(!closed(first).await && !closed(second).await, "the first two still wait in their handshakes"); // WHAT: held. WHY: within the caps
+    }
+
+    /// A key that never signs, for connections that never get that far.
+    #[derive(Debug)]
+    struct NoKey;
+
+    impl Sign for NoKey {
+        fn sign(&self, _message: &[u8]) -> Option<Vec<u8>> {
+            None // WHAT: no signature. WHY: never reached
+        }
+    }
+
+    #[test]
+    fn a_signing_failure_is_noted_and_counts_for_two_minutes() {
+        note_sign_failure(1_000_000); // WHAT: a failure at a moment. WHY: below
+        assert!(sign_trouble(1_000_000 + 60), "a minute later the cell shows as not serving"); // WHAT: noted. WHY: /api/v1/office
+        assert!(!sign_trouble(1_000_000 + SIGN_TROUBLE_FOR), "after two minutes without another, it doesn't"); // WHAT: cleared. WHY: a failure that stops
     }
 }

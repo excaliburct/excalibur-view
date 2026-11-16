@@ -66,8 +66,7 @@ pub async fn serve(
     }
     let store = Store::open(&config.database(), &config.blobs())?;
 
-    let listener = tokio::net::TcpListener::bind(config.listen)
-        .await
+    let listener = crate::listen::exclusive(config.listen) // WHAT: the port, held exclusively on Windows. WHY: no other program can share or take it (security review, 2026-11-16)
         .with_context(|| format!("listening on {}", config.listen))?;
     let address = listener.local_addr().unwrap_or(config.listen);
     let https_only = match &config.https_only {
