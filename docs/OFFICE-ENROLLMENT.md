@@ -205,7 +205,7 @@ Citadel's existing `citadel-request/1` signing stays exactly as it is, for LatCo
 "<office program folder>\citadel\Citadel Server.exe" --cell --pipe excalibur-office-<install id> --data "C:\ProgramData\Excalibur Office\citadel" --certificate <certificate, base64 DER> --relay excalibur-cell-relay-<32 hex> --relay-sid <cell SID>
 ```
 
-From Citadel Server 1.1.6: `--certificate` is public (the cell works out its own pin from it); `--relay` is the relay pipe's
+From Citadel Server 1.1.7: `--certificate` is public (the cell works out its own pin from it); `--relay` is the relay pipe's
 name, new and random at each start, never the control pipe; `--relay-sid` is the cell's own SID, written into the relay
 pipe's permissions. There is no `--port`, `--tls-key` or `--tls-cert`; the cell refuses them (§6b).
 
@@ -239,7 +239,7 @@ The messages:
 
 **Failing closed:** if the pipe doesn't answer within 2 s, the cell refuses the request with 503 `office_unreachable`. It never falls back to an old list.
 
-## 6b. TLS on 47110: ended by the Office Server, relayed to the cell (Citadel Server 1.1.6, View 0.7.1)
+## 6b. TLS on 47110: ended by the Office Server, relayed to the cell (Citadel Server 1.1.7, View 0.7.1)
 
 Windows' TLS (SChannel) gives no credentials at all to a process whose token has restricting SIDs, which the cell's has:
 `AcquireCredentialsHandle` returned `0x8009030E` "No credentials are available" even with no certificate (the Windows
