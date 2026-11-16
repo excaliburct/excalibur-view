@@ -65,7 +65,9 @@ pub fn data_folder(program_data: &Path) -> PathBuf {
     program_data.join("Excalibur Office").join(FOLDER) // WHAT: the folder. WHY: §6
 }
 
-/// The program to start and its arguments, exactly as §6a writes them.
+/// The program to start and its fixed arguments, exactly as §6a writes
+/// them; each start adds [`relay_args`] and the certificate
+/// (`crate::cellkey::cell_args`).
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn command(program_folder: &Path, install_id: &str, data: &Path) -> (PathBuf, Vec<String>) {
     let program = program_folder.join(FOLDER).join(PROGRAM); // WHAT: `<office program folder>\citadel\Citadel Server.exe`. WHY: §6a
@@ -75,10 +77,23 @@ pub fn command(program_folder: &Path, install_id: &str, data: &Path) -> (PathBuf
         pipe_name(install_id), // WHAT: which pipe to ask. WHY: §6a
         "--data".to_string(),
         data.display().to_string(), // WHAT: its own data folder. WHY: §6a
-        "--port".to_string(),
-        PORT.to_string(), // WHAT: 47110. WHY: §6a
-    ];
+    ]; // WHAT: no port: the Office Server answers 47110 and relays to the cell (§6b). WHY: Windows' TLS refuses the cell's restricted token
     (program, args)
+}
+
+/// A new relay pipe's name for one start of the cell: `excalibur-cell-relay-`
+/// and 32 hex digits from 16 random bytes. Never the control pipe's name
+/// (`excalibur-office-...`), and unguessable.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn relay_pipe(random: [u8; 16]) -> String {
+    format!("excalibur-cell-relay-{}", hub::update::hex(&random)) // WHAT: the name. WHY: as above
+}
+
+/// The cell's arguments for its relay pipe: `--relay NAME --relay-sid SID`.
+/// The cell serves the pipe, letting only the system and its own SID in.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn relay_args(pipe: &str, cell_sid: &str) -> Vec<String> {
+    vec!["--relay".into(), pipe.into(), "--relay-sid".into(), cell_sid.into()] // WHAT: the four words. WHY: Citadel's CellOptions reads them
 }
 
 /// One argument quoted the way Windows programs read their command line
@@ -465,8 +480,9 @@ pub const OLD_FIREWALL_RULE: &str = "Citadel Server"; // WHAT: the name 1.0's in
 pub const OLD_UPDATE_TASK: &str = "Citadel Server updates"; // WHAT: the task 1.0 made, 03:30 as the system (ServerUpdateCheck.TaskName). WHY: it would try to update a program that no longer runs
 
 /// The `netsh` arguments that let the office network reach the cell on
-/// 47110: TCP, for the cell's own program only, on every profile and from
-/// the local subnet only, as the Office Server's own 8714 rule.
+/// 47110: TCP, for `program` only (the Office Server's own program, which
+/// answers 47110 and relays to the cell), on every profile and from the
+/// local subnet only, as the Office Server's own 8714 rule.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn firewall_rule(program: &Path) -> Vec<String> {
     vec![
@@ -479,7 +495,7 @@ pub fn firewall_rule(program: &Path) -> Vec<String> {
         "action=allow".into(), // WHAT: let in. WHY: nothing else opens 47110
         "protocol=TCP".into(), // WHAT: TCP. WHY: the cell's HTTPS
         format!("localport={PORT}"), // WHAT: 47110. WHY: §6
-        format!("program={}", program.display()), // WHAT: the cell's own program only. WHY: no other program may answer on the port through this rule
+        format!("program={}", program.display()), // WHAT: the Office Server's program only. WHY: it answers 47110 since 1.1.6's relay; no other program may answer on the port through this rule
         "profile=any".into(), // WHAT: every network profile. WHY: as 8714: a new network is "Public" until someone says otherwise
         "remoteip=localsubnet".into(), // WHAT: the office network only. WHY: as 8714
     ]
@@ -745,6 +761,8 @@ pub fn end_for_update() -> bool {
 pub mod windows;
 #[cfg(windows)]
 mod tlskey; // WHAT: the cell's TLS key in Windows' key store. WHY: §6b; crate::cellkey decides, this hands it to Windows
+#[cfg(windows)]
+mod relaywin; // WHAT: the 47110 listener and the cell's relay pipe. WHY: crate::cellrelay decides, this hands it to Windows
 
 /// Starts supervising the cell, when the licence lists it and its program is
 /// there. Windows only; elsewhere there is no cell.
@@ -900,7 +918,11 @@ mod tests {
         let (program, args) = command(Path::new(r"C:\Program Files\Excalibur Office"), "inst_1", Path::new(r"C:\ProgramData\Excalibur Office\citadel"));
         let line = command_line(&program, &args);
         assert!(line.starts_with('"') && line.contains("Citadel Server.exe\""), "{line}");
-        assert!(line.ends_with(r#" --cell --pipe excalibur-office-inst-1 --data "C:\ProgramData\Excalibur Office\citadel" --port 47110"#), "{line}");
+        assert!(line.ends_with(r#" --cell --pipe excalibur-office-inst-1 --data "C:\ProgramData\Excalibur Office\citadel""#), "{line}"); // WHAT: no port. WHY: the Office Server answers 47110
+        let relay = relay_pipe([0xab; 16]); // WHAT: a relay pipe's name. WHY: its form
+        assert_eq!(relay, format!("excalibur-cell-relay-{}", "ab".repeat(16)), "unguessable, and never the control pipe"); // WHAT: as made. WHY: below
+        assert!(!relay.starts_with("excalibur-office-"), "not the control pipe's prefix"); // WHAT: apart. WHY: the cell refuses a relay name that is its control pipe
+        assert_eq!(relay_args("r", "S-1-5-80-1"), vec!["--relay", "r", "--relay-sid", "S-1-5-80-1"], "the relay's arguments"); // WHAT: as CellOptions reads them. WHY: below
         let real = pipe_name(&crate::api::fresh_id("inst")); // WHAT: the pipe for a real installation id. WHY: inst_<hex> has an underscore
         let id = real.strip_prefix("excalibur-office-").unwrap_or_default(); // WHAT: the id part. WHY: checked as the cell checks it
         assert!(real.len() > 17 && real.len() <= 81 && !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "the cell's own rule (CellOptions.IsPipeName) takes {real}"); // WHAT: what the cell accepts. WHY: it refused every start with the underscore

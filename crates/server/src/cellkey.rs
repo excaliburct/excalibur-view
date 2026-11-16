@@ -1,13 +1,12 @@
 //! The Citadel cell's TLS key, held by the Office Server (docs/OFFICE-ENROLLMENT.md §6b).
 //!
-//! The cell serves HTTPS on 47110 under a restricted token that can't make or
-//! import a private key anywhere Windows' TLS can use it. So the Office
-//! Server, running as the system, keeps the cell's key itself: a persisted,
+//! Windows' TLS refuses a process whose token has restricting SIDs, as the
+//! cell's has, so the Office Server, running as the system, answers TLS on
+//! 47110 itself (`crate::cellrelay`) and keeps the cell's key: a persisted,
 //! non-exportable machine key in Windows' own key store (the Microsoft
 //! Software Key Storage Provider), whose permissions give the system full
-//! control and the cell's own SID read (use) only, and nobody else anything.
-//! The cell is handed the key's name and the certificate (public) on its
-//! command line, and opens the key by name.
+//! control and nobody else anything, the cell included. The cell is handed
+//! only the certificate (public), to know its own pin.
 //!
 //! Where the key comes from, decided by [`plan`]:
 //!
@@ -52,7 +51,7 @@ pub const ADMINISTRATORS: &str = "S-1-5-32-544"; // WHAT: BUILTIN\Administrators
 /// Full control of a file.
 pub const FULL: u32 = 0x001F_01FF; // WHAT: FILE_ALL_ACCESS. WHY: the system's entry
 /// Read of a file.
-pub const READ: u32 = 0x0012_0089; // WHAT: FILE_GENERIC_READ. WHY: the cell's entry: enough to use the key, never to change or delete it
+pub const READ: u32 = 0x0012_0089; // WHAT: FILE_GENERIC_READ. WHY: what GENERIC_READ stands for, in [`file_rights`]
 
 /// The kept folder.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
@@ -61,11 +60,8 @@ pub fn folder(home: &Path) -> PathBuf {
 }
 
 /// The key's permissions, as SDDL: protected (nothing inherited from the key
-/// store's folder), the system in full, the cell's SID read, nobody else.
-#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
-pub fn key_sddl(cell_sid: &str) -> String {
-    format!("D:P(A;;FA;;;SY)(A;;FR;;;{cell_sid})") // WHAT: SYSTEM full (FA), the cell read (FR). WHY: Creede, 2026-11-13: only the cell's SID may use it; no other account gains anything
-}
+/// store's folder), the system in full, nobody else.
+pub const KEY_SDDL: &str = "D:P(A;;FA;;;SY)"; // WHAT: SYSTEM full (FA) only. WHY: Creede, 2026-11-15: the Office Server ends TLS itself, so the cell never needs its key; no other account gains anything
 
 /// One entry of a key's permissions, as Windows reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,13 +96,13 @@ pub fn file_rights(mask: u32) -> u32 {
 }
 
 /// Whether a key's permissions are exactly ours: protected, the system in
-/// full and the cell's SID read, and nothing else at all.
+/// full, and nothing else at all.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
-pub fn locked_as_ours(protected: bool, entries: &[Entry], cell_sid: &str) -> bool {
-    let want = [(SYSTEM, FULL), (cell_sid, READ)]; // WHAT: the two entries. WHY: [`key_sddl`]
+pub fn locked_as_ours(protected: bool, entries: &[Entry]) -> bool {
+    let want = [(SYSTEM, FULL)]; // WHAT: the one entry. WHY: [`KEY_SDDL`]
     protected // WHAT: nothing from above. WHY: the key store's folder grants others
-        && entries.len() == want.len() // WHAT: exactly two. WHY: a third entry is somebody else's way in
-        && want.iter().all(|(sid, mask)| entries.iter().any(|e| e.allow && !e.inherited && e.sid == *sid && file_rights(e.mask) == *mask)) // WHAT: each, exactly, generic bits read as the rights they grant. WHY: more rights for the cell, or less for the system, is a change
+        && entries.len() == want.len() // WHAT: exactly one. WHY: a second entry is somebody else's way in
+        && want.iter().all(|(sid, mask)| entries.iter().any(|e| e.allow && !e.inherited && e.sid == *sid && file_rights(e.mask) == *mask)) // WHAT: the system's, exactly, generic bits read as the rights they grant. WHY: less for the system is a change; anyone else is refused by the count
 }
 
 /// Whether a key's owner is one this server accepts: the system, or the
@@ -226,20 +222,19 @@ pub fn certificate_params(machine: &str, now: time::OffsetDateTime) -> Result<rc
     Ok(params)
 }
 
-/// The cell's two arguments for its key: `--tls-key NAME --tls-cert BASE64`.
+/// The cell's argument for its certificate: `--certificate BASE64`. Public
+/// only: the cell needs its pin (the certificate's public key) for its own
+/// records, never the key.
 ///
 /// # Errors
 ///
-/// When the name isn't plain or the certificate is empty or too big.
-pub fn cell_args(name: &str, certificate: &[u8]) -> Result<Vec<String>, String> {
+/// When the certificate is empty or too big.
+pub fn cell_args(certificate: &[u8]) -> Result<Vec<String>, String> {
     use base64::Engine as _; // WHAT: base64. WHY: the certificate on the command line
-    if !is_key_name(name) {
-        return Err(format!("the kept key's name {name:?} isn't a plain name, so the cell was not started")); // WHAT: refused. WHY: never an odd string on the command line
-    }
     if certificate.is_empty() || certificate.len() > CERTIFICATE_MOST {
-        return Err("the kept certificate is empty or too big, so the cell was not started".to_string()); // WHAT: refused. WHY: likewise
+        return Err("the kept certificate is empty or too big, so the cell was not started".to_string()); // WHAT: refused. WHY: never an odd string on the command line
     }
-    Ok(vec!["--tls-key".into(), name.into(), "--tls-cert".into(), base64::engine::general_purpose::STANDARD.encode(certificate)]) // WHAT: the four words. WHY: Citadel's CellOptions reads them
+    Ok(vec!["--certificate".into(), base64::engine::general_purpose::STANDARD.encode(certificate)]) // WHAT: the two words. WHY: Citadel's CellOptions reads them
 }
 
 #[cfg(test)]
@@ -251,27 +246,24 @@ mod tests {
     }
 
     #[test]
-    fn only_the_system_in_full_and_the_cell_reading_count_as_locked() {
+    fn only_the_system_in_full_counts_as_locked_and_the_cell_gets_nothing() {
         let cell = "S-1-5-80-1-2-3-4-5"; // WHAT: a cell's SID. WHY: as cell_sid makes them
-        let ours = vec![entry(SYSTEM, FULL), entry(cell, READ)]; // WHAT: exactly ours. WHY: passes
-        assert!(locked_as_ours(true, &ours, cell), "ours"); // WHAT: passes. WHY: as set
-        assert!(!locked_as_ours(false, &ours, cell), "not protected: the store's folder grants others"); // WHAT: refused. WHY: inheritance would add entries
-        let mut more = ours.clone();
-        more.push(entry("S-1-5-32-545", READ)); // WHAT: Users added. WHY: the tampering asked about
-        assert!(!locked_as_ours(true, &more, cell), "a third entry"); // WHAT: refused. WHY: anybody else gains nothing
-        assert!(!locked_as_ours(true, &[entry(SYSTEM, FULL), entry(cell, FULL)], cell), "the cell given full control"); // WHAT: refused. WHY: read only
-        assert!(!locked_as_ours(true, &[entry(SYSTEM, FULL), entry("S-1-5-80-9", READ)], cell), "another cell's SID"); // WHAT: refused. WHY: this cell's own
+        let ours = vec![entry(SYSTEM, FULL)]; // WHAT: exactly ours. WHY: passes
+        assert!(locked_as_ours(true, &ours), "ours"); // WHAT: passes. WHY: as set
+        assert!(!locked_as_ours(false, &ours), "not protected: the store's folder grants others"); // WHAT: refused. WHY: inheritance would add entries
+        assert!(!locked_as_ours(true, &[entry(SYSTEM, FULL), entry(cell, READ)]), "the cell given read, as before 1.1.6"); // WHAT: refused, set back. WHY: the cell never uses the key now
+        assert!(!locked_as_ours(true, &[entry(SYSTEM, FULL), entry("S-1-5-32-545", READ)]), "Users added"); // WHAT: refused. WHY: anybody else gains nothing
+        assert!(!locked_as_ours(true, &[entry(SYSTEM, READ)]), "the system given less"); // WHAT: refused. WHY: the Office Server signs with it
         let mut inherited = ours.clone();
-        inherited[1].inherited = true; // WHAT: the cell's entry from above. WHY: never inherited
-        assert!(!locked_as_ours(true, &inherited, cell), "an inherited entry"); // WHAT: refused. WHY: as above
+        inherited[0].inherited = true; // WHAT: the system's entry from above. WHY: never inherited
+        assert!(!locked_as_ours(true, &inherited), "an inherited entry"); // WHAT: refused. WHY: as above
         let mut denied = ours;
         denied[0].allow = false; // WHAT: a deny where the system's allow was. WHY: not ours
-        assert!(!locked_as_ours(true, &denied, cell), "a deny entry"); // WHAT: refused. WHY: likewise
-        assert_eq!(key_sddl(cell), format!("D:P(A;;FA;;;SY)(A;;FR;;;{cell})"), "what is set"); // WHAT: the SDDL. WHY: matches what is checked
-        let as_kept = vec![entry(SYSTEM, 0xD01F_01FF), entry(cell, 0x8012_0089)]; // WHAT: what Windows' key store kept for that SDDL. WHY: the end-to-end test's run 15 read these back
-        assert!(locked_as_ours(true, &as_kept, cell), "the key store's own way of writing ours"); // WHAT: passes. WHY: the same rights
-        assert!(!locked_as_ours(true, &[entry(SYSTEM, 0xD01F_01FF), entry(cell, 0xC012_0089)], cell), "the cell given GENERIC_WRITE as well"); // WHAT: refused. WHY: read only
-        assert!(!locked_as_ours(true, &[entry(SYSTEM, 0xD01F_01FF), entry(cell, 0x1000_0000)], cell), "the cell given GENERIC_ALL"); // WHAT: refused. WHY: likewise
+        assert!(!locked_as_ours(true, &denied), "a deny entry"); // WHAT: refused. WHY: likewise
+        assert_eq!(KEY_SDDL, "D:P(A;;FA;;;SY)", "what is set"); // WHAT: the SDDL. WHY: matches what is checked
+        assert!(locked_as_ours(true, &[entry(SYSTEM, 0xD01F_01FF)]), "the key store's own way of writing ours (run 15)"); // WHAT: passes. WHY: the same rights
+        assert_eq!(file_rights(0x8012_0089), READ, "GENERIC_READ read as FILE_GENERIC_READ"); // WHAT: mapped. WHY: below
+        assert_ne!(file_rights(0xC012_0089), READ, "GENERIC_WRITE adds rights"); // WHAT: more. WHY: never mistaken for read
     }
 
     #[test]
@@ -299,8 +291,8 @@ mod tests {
         for bad in ["", "a b", "a\"b", "..\\x", &"a".repeat(101)] {
             assert!(!is_key_name(bad), "{bad:?}"); // WHAT: refused. WHY: never on the command line
         }
-        assert!(cell_args("a b", b"x").is_err() && cell_args("k", b"").is_err() && cell_args("k", &[0; CERTIFICATE_MOST + 1]).is_err(), "bad arguments refused"); // WHAT: refused. WHY: likewise
-        assert_eq!(cell_args("k", b"\x30\x00").unwrap(), vec!["--tls-key", "k", "--tls-cert", "MAA="], "the four words"); // WHAT: the arguments. WHY: as CellOptions reads them
+        assert!(cell_args(b"").is_err() && cell_args(&[0; CERTIFICATE_MOST + 1]).is_err(), "bad certificates refused"); // WHAT: refused. WHY: likewise
+        assert_eq!(cell_args(b"\x30\x00").unwrap(), vec!["--certificate", "MAA="], "the two words, no key"); // WHAT: the arguments. WHY: as CellOptions reads them
     }
 
     #[test]

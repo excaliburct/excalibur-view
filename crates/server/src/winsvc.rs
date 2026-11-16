@@ -357,27 +357,23 @@ fn open_firewall() -> Result<(), String> {
             return Err(format!("the firewall would not let {protocol} {number} in"));
         }
     }
-    let cell = crate::cellbundle::program_in(&home()); // WHAT: the cell's program, where it is installed. WHY: its rule is for it alone
     let _ = netsh(&["advfirewall", "firewall", "delete", "rule", &format!("name={}", crate::cell::FIREWALL_RULE)]); // WHAT: an older copy of the rule gone. WHY: added fresh, as the two above
-    let rule = crate::cell::firewall_rule(&cell); // WHAT: TCP 47110 for the cell's program, office network only. WHY: critical 2: nothing opened 47110 for the cell
+    let rule = crate::cell::firewall_rule(&installed_program()); // WHAT: TCP 47110 for the Office Server's program, office network only. WHY: critical 2; it answers 47110 and relays to the cell
     if !netsh(&rule.iter().map(String::as_str).collect::<Vec<_>>())? {
         return Err(format!("the firewall would not let TCP {} in for the Citadel cell", crate::cell::PORT)); // WHAT: said. WHY: estimating couldn't reach the cell
     }
     Ok(())
 }
 
-/// Adds the cell's firewall rule when it is missing, at the cell's first
-/// start: an office installed before the rule existed gets it from its
-/// update.
-pub fn cell_firewall(program: &Path) {
-    let shown = crate::cell::firewall_rule_shown(); // WHAT: asked for by name. WHY: added only when missing
-    if matches!(netsh(&shown.iter().map(String::as_str).collect::<Vec<_>>()), Ok(true)) {
-        return; // WHAT: already there. WHY: nothing to do
-    }
-    let rule = crate::cell::firewall_rule(program); // WHAT: the rule. WHY: critical 2
+/// Puts the cell's 47110 rule in place for the Office Server's program at
+/// each start of the cell: removed, then added, so a rule made for an older
+/// program (the cell's own, before 0.7.1's relay) never lingers.
+pub fn cell_firewall() {
+    let _ = netsh(&["advfirewall", "firewall", "delete", "rule", &format!("name={}", crate::cell::FIREWALL_RULE)]); // WHAT: the rule as it was, gone. WHY: it may name the cell's program, which no longer listens
+    let rule = crate::cell::firewall_rule(&installed_program()); // WHAT: the rule. WHY: critical 2
     match netsh(&rule.iter().map(String::as_str).collect::<Vec<_>>()) {
-        Ok(true) => tracing::warn!("the firewall now lets the office network reach the Citadel cell on TCP {}", crate::cell::PORT), // WHAT: said. WHY: whoever looks after the server can see it
-        _ => tracing::error!("the firewall would not let TCP {} in for the Citadel cell; estimating computers can't reach it", crate::cell::PORT), // WHAT: the alarm. WHY: someone must act
+        Ok(true) => tracing::info!("the firewall lets the office network reach the Citadel cell on TCP {}", crate::cell::PORT), // WHAT: said. WHY: the log shows it
+        _ => tracing::error!("ALARM: the firewall would not let TCP {} in for the Citadel cell; estimating computers can't reach it", crate::cell::PORT), // WHAT: the alarm. WHY: someone must act
     }
 }
 

@@ -93,7 +93,6 @@ pub fn start(server: Shared) {
         if let Some(own) = program.parent() {
             allow(own, &super::program_sddl(&sid), false); // WHAT: the cell may read and run its program. WHY: the service's folder is locked to the system and administrators
         }
-        crate::winsvc::cell_firewall(&program); // WHAT: TCP 47110 open for the cell's program, when it isn't yet. WHY: critical 2: an office installed before the rule existed gets it here
         crate::cellmove::tidy_old_task(&server.store, &OldTask); // WHAT: 1.0's update task removed, or the alarm kept and tried again. WHY: review low 2
         let unpack = super::extract_folder(&folder, true); // WHAT: the cell's own unpacking folder. WHY: review low 3: never C:\Windows\Temp
         let _ = std::fs::create_dir_all(&unpack); // WHAT: made; it inherits the locked service folder's ACL. WHY: the system and administrators only
@@ -183,13 +182,19 @@ impl super::Launcher for Cell {
     fn start(&mut self) -> std::io::Result<()> {
         crate::cellbundle::check_program(&self.program, &self.pin).map_err(std::io::Error::other)?; // WHAT: the pinned program, or not started. WHY: risk 8: checked before every start, a restart too
         super::give_the_cell_the_office_key(&self.data, self.server.config.maintenance_key.as_deref()).inspect_err(|e| tracing::error!("ALARM: the Citadel cell was not started: {e}"))?; // WHAT: only the Office Server's maintenance key opens the cell's admin routes; a link on the way stops the start. WHY: a key set on 1.0 moved in with its settings; review medium: never written through a link
-        let tls = super::tlskey::ready(&self.home, &self.data, &self.sid).map_err(|e| {
-            tracing::error!("ALARM: the Citadel cell was not started: its TLS key isn't ready: {e}"); // WHAT: the alarm. WHY: a cell without its key can't serve, and a key others could use is never handed over
+        let tls = super::tlskey::ready(&self.home, &self.data).map_err(|e| {
+            tracing::error!("ALARM: the Citadel cell was not started: its TLS key isn't ready: {e}"); // WHAT: the alarm. WHY: 47110 is never answered with a key others could use
             std::io::Error::other(e)
-        })?; // WHAT: the cell's key made, imported or opened, owned by the system, locked to the cell's SID, and its certificate. WHY: §6b: the cell's restricted token can't keep a key Windows' TLS can use
-        let mut args = self.args.clone(); // WHAT: the fixed arguments. WHY: the key's two are added
-        args.extend(crate::cellkey::cell_args(&tls.name, &tls.certificate).map_err(std::io::Error::other)?); // WHAT: --tls-key and --tls-cert. WHY: the cell opens its key by name and serves that certificate
-        let line = super::command_line(&self.program, &args); // WHAT: the whole command line. WHY: made at each start, so a key set back after tampering is the one used
+        })?; // WHAT: the cell's key made, imported or opened, owned by the system, locked to the system alone, and its certificate. WHY: §6b
+        let relay = super::relaywin::current(); // WHAT: the relay's state. WHY: set below
+        relay.set_config(crate::cellrelay::server_config(tls.certificate.clone(), tls.signer.clone()).map_err(std::io::Error::other)?); // WHAT: TLS on 47110 with the pinned certificate, signed through the key. WHY: §6b: the Office Server answers TLS for the cell
+        super::relaywin::listen().inspect_err(|e| tracing::error!("ALARM: the Citadel cell was not started: TCP {} couldn't be taken ({e})", super::PORT))?; // WHAT: 47110 listened on, once. WHY: nothing else may hold the cell's port
+        crate::winsvc::cell_firewall(); // WHAT: 47110 open for the Office Server's program, office network only. WHY: critical 2; the program that answers it changed in 0.7.1
+        let relay_pipe = super::relay_pipe(rand::random()); // WHAT: this start's relay pipe, a new name. WHY: unguessable, never the control pipe
+        let mut args = self.args.clone(); // WHAT: the fixed arguments. WHY: this start's are added
+        args.extend(crate::cellkey::cell_args(&tls.certificate).map_err(std::io::Error::other)?); // WHAT: --certificate, public only. WHY: the cell knows its own pin; it never sees the key
+        args.extend(super::relay_args(&relay_pipe, &self.sid)); // WHAT: --relay and --relay-sid. WHY: the cell serves that pipe to the system and itself only
+        let line = super::command_line(&self.program, &args); // WHAT: the whole command line. WHY: made at each start
         let pipe = match self.next.take() {
             Some(pipe) => pipe, // WHAT: the instance made while the last one was still held. WHY: the name was never free
             None => make_pipe(&self.pipe, &self.sid, true)?, // WHAT: the first instance, made only if nobody made it first. WHY: a name somebody else holds is an alarm (AddrInUse), not a restart
@@ -198,6 +203,9 @@ impl super::Launcher for Cell {
         self.serving = Some(std::thread::Builder::new().name("citadel-pipe".into()).spawn(move || serve(pipe, &server, &name, &sid))?); // WHAT: the pipe answered on its own thread. WHY: the supervisor waits on the process meanwhile
         match restricted_process(&self.program, &line, &self.sid, &self.environment) {
             Ok(process) => {
+                // SAFETY: the process handle CreateProcessAsUserW just gave us, alive until `wait` closes it.
+                let pid = unsafe { windows_sys::Win32::System::Threading::GetProcessId(process.handle()) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: the cell's process id
+                relay.set_target(Some(crate::cellrelay::Target { pipe: relay_pipe, pid })); // WHAT: connections go to this cell's pipe, served by this process only. WHY: the relay checks the pipe's server is it
                 self.process = Some(process); // WHAT: kept. WHY: waited for
                 Ok(())
             }
@@ -210,6 +218,7 @@ impl super::Launcher for Cell {
 
     fn wait(&mut self) {
         if let Some(process) = self.process.take() {
+            let relay = super::relaywin::current(); // WHAT: the relay's state. WHY: below
             // SAFETY: `process` is the process handle CreateProcessAsUserW gave us, owned here and closed once.
             unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: waiting on and closing our own process handle
                 WaitForSingleObject(process.handle(), INFINITE); // WHAT: until the cell stops. WHY: then it is restarted
@@ -217,6 +226,7 @@ impl super::Launcher for Cell {
                 if GetExitCodeProcess(process.handle(), &mut code) != 0 {
                     tracing::warn!("the Citadel cell ended with exit code {code} (0x{code:08X})"); // WHAT: said. WHY: 4 is a refused start, others a crash; the log says which
                 }
+                relay.set_target(None); // WHAT: no cell to relay to. WHY: a new connection is closed until the next start
                 CloseHandle(process.handle()); // WHAT: let go. WHY: no handle kept for a stopped process
             }
         }

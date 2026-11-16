@@ -214,7 +214,7 @@ where
 /// The machine an address belongs to, for the per-machine cap: an IPv4
 /// address itself, an IPv6 address's /64 network (one machine can hold many
 /// addresses in it).
-fn machine(ip: std::net::IpAddr) -> std::net::IpAddr {
+pub(crate) fn machine(ip: std::net::IpAddr) -> std::net::IpAddr {
     match ip {
         std::net::IpAddr::V6(v6) if v6.to_ipv4_mapped().is_none() => {
             let s = v6.segments();

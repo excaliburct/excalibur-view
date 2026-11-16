@@ -190,7 +190,13 @@ function MarkedAs([string] $path, [string] $version) {
 }
 
 # WHAT: the cell, running and answering on 47110, and its process. WHY: the cell's start is waited for and checked.
-function CellUp { (ListenerPath $Port) -ieq $CellExe }
+# WHAT: the cell answering through the Office Server: 47110 held by the Office Server's own program (it ends TLS since 0.7.1)
+#       and an HTTPS request relayed to the cell and answered. WHY: the cell itself listens only on its locked relay pipe.
+function CellUp {
+    if ((ListenerPath $Port) -ine $OfficeExe) { return $false }                 # WHAT: the port is the Office Server's. WHY: no other program answers 47110
+    try { return (Invoke-WebRequest -Uri "https://127.0.0.1:$Port/v1/hello" -SkipCertificateCheck -TimeoutSec 5 -UseBasicParsing).StatusCode -eq 200 }   # WHAT: relayed and answered. WHY: TLS here, Citadel behind it
+    catch { return $false }                                                     # WHAT: not yet. WHY: waited for by the caller
+}
 function CellProcess { $found = Running $CellExe; Check ($found.Count -eq 1) "exactly one cell process runs ($($found.Count))"; return $found[0] }
 
 # WHAT: runs one step of the LatCon PC (LatCon's LiveServerTests) and checks it wrote its done file. WHY: as LatCon's own Windows test.

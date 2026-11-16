@@ -25,7 +25,7 @@ takeoff = { path = "../takeoff" }
 chest = { path = "../chest" }
 
 axum = { version = "0.7", features = ["multipart", "macros"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs", "sync"] } # WHAT: sync added. WHY: a semaphore holds password hashing to a few at a time (audit, 2026-11-11)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs", "sync", "net", "io-util", "time"] } # WHAT: sync added; net, io-util and time named (already built through hyper-util). WHY: a semaphore holds password hashing to a few at a time (audit, 2026-11-11); the Citadel cell's TLS relay listens, copies and times out (crate::cellrelay)
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors", "limit", "timeout"] }
 rusqlite = { version = "0.41", features = ["bundled"] }

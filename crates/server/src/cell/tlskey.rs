@@ -19,10 +19,28 @@ use windows_sys::Win32::Security::{GetAce, GetSecurityDescriptorControl, GetSecu
 
 use crate::cellkey::{self, Plan};
 
-/// What the cell is handed: its key's name and the certificate.
+/// The cell's TLS identity, ready: its key's name, the certificate, and
+/// what signs with the key.
 pub struct Tls {
-    pub name: String, // WHAT: the key's name in the machine's key store. WHY: the cell opens it by name
-    pub certificate: Vec<u8>, // WHAT: the certificate, DER. WHY: the cell serves it with the key
+    pub name: String, // WHAT: the key's name in the machine's key store. WHY: said in the log
+    pub certificate: Vec<u8>, // WHAT: the certificate, DER. WHY: served on 47110, and handed to the cell for its pin
+    pub signer: std::sync::Arc<dyn crate::cellrelay::Sign>, // WHAT: signs through the key, as the system. WHY: TLS on 47110 (crate::cellrelay)
+}
+
+/// Signs through the cell's key, held open for the life of this start.
+struct CngSigner(Ncrypt); // WHAT: the open key. WHY: each handshake signs with it
+
+impl std::fmt::Debug for CngSigner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the Citadel cell's CNG key") // WHAT: a name, never the handle. WHY: logs say what it is
+    }
+}
+
+impl crate::cellrelay::Sign for CngSigner {
+    fn sign(&self, message: &[u8]) -> Option<Vec<u8>> {
+        use rcgen::RemoteKeyPair as _; // WHAT: the signing call below. WHY: one implementation of SHA-256, NCryptSignHash and DER
+        Held { key: (self.0).0, point: Vec::new() }.sign(message).ok() // WHAT: signed through the key. WHY: the same path the certificate was made with
+    }
 }
 
 /// A string as Windows wants it: UTF-16, ended by a zero.
@@ -48,13 +66,13 @@ fn status(what: &str, code: i32) -> Result<(), String> {
 }
 
 /// The cell's key, ready: made, imported or opened as the plan says, owned
-/// by the system or administrators, locked to the system and the cell's SID,
+/// by the system or administrators, locked to the system alone,
 /// and matching the certificate.
 ///
 /// # Errors
 ///
 /// When any step fails; the cell is then not started (said as an alarm by the caller).
-pub fn ready(home: &Path, data: &Path, cell_sid: &str) -> Result<Tls, String> {
+pub fn ready(home: &Path, data: &Path) -> Result<Tls, String> {
     let kept = cellkey::folder(home); // WHAT: `<service folder>\citadel-tls`. WHY: the system's and administrators' only (it inherits the locked service folder)
     std::fs::create_dir_all(&kept).map_err(|e| format!("could not make {} ({e})", kept.display()))?; // WHAT: made once. WHY: the key's name and certificate are kept there
     let (name_file, cert_file) = (kept.join(cellkey::KEY_NAME_FILE), kept.join(cellkey::CERTIFICATE_FILE)); // WHAT: the two kept files. WHY: read below
@@ -65,13 +83,13 @@ pub fn ready(home: &Path, data: &Path, cell_sid: &str) -> Result<Tls, String> {
     let started_before = std::fs::symlink_metadata(data.join(cellkey::STARTED_MARK)).is_ok(); // WHAT: whether the cell has served before. WHY: then a lost key is never quietly replaced
     let plan = cellkey::plan(pfx_there, kept_name.is_some(), kept_cert.is_some(), started_before)?; // WHAT: what to do. WHY: crate::cellkey decides
     let provider = provider()?; // WHAT: the Software KSP. WHY: every step below uses it
-    let sddl = cellkey::key_sddl(cell_sid); // WHAT: the key's permissions. WHY: set and checked
+    let sddl = cellkey::KEY_SDDL.to_string(); // WHAT: the key's permissions. WHY: set and checked
     let (name, certificate, fresh) = match plan {
         Plan::Import => {
             let (name, certificate) = import(&pfx)?; // WHAT: the key into the machine's store, its certificate out. WHY: the first start after the move
             keep(&name_file, name.as_bytes())?; // WHAT: the name kept first. WHY: a start cut short after this reuses the key rather than importing again
             keep(&cert_file, &certificate)?; // WHAT: the certificate kept. WHY: handed to the cell at every start
-            move_out(&pfx, &kept); // WHAT: tls.pfx moved out of the cell's reach. WHY: the cell only ever uses the key, never holds it
+            move_out(&pfx, &kept); // WHAT: tls.pfx moved out of the cell's reach. WHY: the cell never uses or holds the key
             (name, certificate, true)
         }
         Plan::Make => {
@@ -92,9 +110,9 @@ pub fn ready(home: &Path, data: &Path, cell_sid: &str) -> Result<Tls, String> {
         return Err(format!("the kept key's name in {} isn't a plain name", name_file.display())); // WHAT: refused. WHY: never passed to Windows or the cell
     }
     let key = open(&provider, &name)?; // WHAT: the key, by name. WHY: checked below
-    lock(&key, cell_sid, &sddl, fresh)?; // WHAT: owner checked, permissions ours (set back if changed). WHY: only the cell's SID may use it
+    lock(&key, &sddl, fresh)?; // WHAT: owner checked, permissions ours (set back if changed). WHY: only the system may use it
     matches(&key, &certificate)?; // WHAT: the key is the certificate's. WHY: the cell would fail to serve otherwise, and the pin is the key's
-    Ok(Tls { name, certificate })
+    Ok(Tls { name, certificate, signer: std::sync::Arc::new(CngSigner(key)) }) // WHAT: the key kept open in its signer. WHY: every handshake on 47110 signs with it
 }
 
 /// Writes a kept file whole: a new file beside it, then renamed over it.
@@ -115,7 +133,7 @@ fn move_out(pfx: &Path, kept: &Path) {
             to = kept.join(format!("tls-{}.pfx", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))); // WHAT: a new name. WHY: an older one is never written over
         }
         std::fs::OpenOptions::new().write(true).create_new(true).open(&to).and_then(|mut f| std::io::Write::write_all(&mut f, &bytes).and_then(|()| f.sync_all()))?; // WHAT: a new file, inheriting the locked folder's permissions. WHY: never readable by the cell
-        std::fs::remove_file(pfx)?; // WHAT: the cell's copy gone. WHY: the cell only uses the key
+        std::fs::remove_file(pfx)?; // WHAT: the cell's copy gone. WHY: the cell never needs the key
         Ok(to)
     })();
     match moved {
@@ -415,23 +433,23 @@ unsafe fn sid_text(sid: PSID) -> String {
 /// they aren't ours (an alarm unless the key was only just imported), and
 /// checks again. A key owned by anyone but the system or administrators is
 /// refused, never fixed: whoever owns it could always grant itself access.
-fn lock(key: &Ncrypt, cell_sid: &str, sddl: &str, fresh: bool) -> Result<(), String> {
+fn lock(key: &Ncrypt, sddl: &str, fresh: bool) -> Result<(), String> {
     let (owner, protected, entries) = permissions(key)?; // WHAT: as it is. WHY: checked
     if !cellkey::owner_ok(&owner) {
         return Err(format!("the Citadel cell's key is owned by {owner}, not the system or administrators, so it isn't used")); // WHAT: refused. WHY: someone else made or took it
     }
-    if cellkey::locked_as_ours(protected, &entries, cell_sid) {
+    if cellkey::locked_as_ours(protected, &entries) {
         return Ok(()); // WHAT: as set. WHY: nothing to do
     }
     if !fresh {
-        tracing::error!("ALARM: the Citadel cell's key's permissions had been changed ({entries:?}, protected {protected}); they were set back to the system and the cell only"); // WHAT: said. WHY: somebody changed them
+        tracing::error!("ALARM: the Citadel cell's key's permissions had been changed ({entries:?}, protected {protected}); they were set back to the system only"); // WHAT: said. WHY: somebody changed them
     }
-    set_permissions(key, sddl)?; // WHAT: set back. WHY: only the cell's SID may use it
+    set_permissions(key, sddl)?; // WHAT: set back. WHY: only the system may use it
     let (owner, protected, entries) = permissions(key)?; // WHAT: read again. WHY: what Windows kept is what counts
-    if cellkey::owner_ok(&owner) && cellkey::locked_as_ours(protected, &entries, cell_sid) {
+    if cellkey::owner_ok(&owner) && cellkey::locked_as_ours(protected, &entries) {
         Ok(())
     } else {
-        Err(format!("the Citadel cell's key's permissions couldn't be set to the system and the cell only (Windows kept {entries:?}, protected {protected})")) // WHAT: refused. WHY: the cell is never started on a key others can use
+        Err(format!("the Citadel cell's key's permissions couldn't be set to the system only (Windows kept {entries:?}, protected {protected})")) // WHAT: refused. WHY: the cell is never started on a key others can use
     }
 }
 
