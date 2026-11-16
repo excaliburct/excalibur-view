@@ -9,7 +9,11 @@ WHAT: LatCon's install day as it really is, on a throwaway GitHub Windows runner
           renamed; Mark signs in with his same account and sees every job;
        3. a second PC asks, Mark approves it, and it signs in with an account from Mark's moved keyring and opens a job;
        4. --forget-citadel-key-copies on a fresh office, before the cell, before any computer, and after: its exact words,
-          harmless every time.
+          harmless every time;
+       5. starting fresh (Mark may have no jobs worth moving): the office removed whole, a new Office Server and an empty
+          cell; Mark's PC makes his account on its first run, with ZERO jobs, links, is the admin, moves the account and
+          keyring up, signs in against the server, adds Jo and makes a job; a second PC, approved by Mark, signs in as Jo
+          and opens that job.
       Every message the PCs' screens show is printed from messages.txt, for the install instructions.
 WHY:  the other end-to-end run (office-e2e.ps1) starts from Citadel Server 1.0.1 on the server; LatCon never had it, so
       the path IT and Mark will really walk had never run on Windows.
@@ -129,6 +133,34 @@ function Forget([string] $when) {
 # WHAT: what the kept key folder holds, by name and SHA-256. WHY: --forget-citadel-key-copies must never touch it.
 function TlsFolder { return ((Get-ChildItem -LiteralPath $OfficeTls -File | Sort-Object Name | ForEach-Object { "$($_.Name)=$(Sha $_.FullName)" }) -join ';') }
 
+# WHAT: folders removed whole, the cell's included: administrators take ownership and full control first. WHY: the cell's
+#       folder is SYSTEM's and the cell's alone (by design), so even an administrator must take it over to remove it.
+function RemoveFolders([string[]] $folders) {
+    foreach ($folder in $folders) {
+        if (-not (Test-Path -LiteralPath $folder)) { continue }                 # WHAT: not there. WHY: nothing to do.
+        & "$env:SystemRoot\System32\takeown.exe" /F $folder /R /A /D Y | Out-Null   # WHAT: administrators own all of it. WHY: an owner may change who may use it.
+        & "$env:SystemRoot\System32\icacls.exe" $folder /grant '*S-1-5-32-544:(OI)(CI)F' /T /C /Q | Out-Null   # WHAT: full control. WHY: so it can be removed.
+        $global:LASTEXITCODE = 0                                                # WHAT: their codes forgotten. WHY: checked by removing next.
+        Remove-Item -LiteralPath $folder -Recurse -Force                        # WHAT: removed. WHY: a fresh office.
+    }
+}
+
+# WHAT: LatCon's live test for one phase, with the screens' words printed. WHY: steps 2-3 ("move") and 5 ("new").
+function LatConLive([string] $phase, [string] $messages, [string] $done) {
+    $env:LATCON_LIVE_FRESH = $Pcs                                               # WHAT: the PCs' folder. WHY: the test does nothing without it.
+    $env:LATCON_LIVE_FRESH_PHASE = $phase                                       # WHAT: which test. WHY: each runs on its own fresh office.
+    try {
+        & dotnet test (Join-Path $Latcon 'tests/Citadel.App.Tests/Citadel.App.Tests.csproj') -c Release --no-build -nologo `
+            --filter 'FullyQualifiedName~Citadel.App.Tests.LiveFreshOfficeTests' --logger 'console;verbosity=normal'   # WHAT: the live tests only. WHY: built before.
+        $passed = $LASTEXITCODE -eq 0                                           # WHAT: whether it passed. WHY: checked after the words are shown.
+    } finally { Remove-Item Env:LATCON_LIVE_FRESH, Env:LATCON_LIVE_FRESH_PHASE -ErrorAction SilentlyContinue }   # WHAT: cleared. WHY: no later run picks them up.
+    $file = Join-Path $Pcs $messages                                            # WHAT: what the screens said. WHY: shown whole.
+    Write-Host "--- what the PCs' screens said, in order ($phase) ---"          # WHAT: a heading. WHY: the instructions quote these.
+    if (Test-Path -LiteralPath $file) { Get-Content -LiteralPath $file | ForEach-Object { Write-Host $_ }; Copy-Item -LiteralPath $file -Destination $Logs }   # WHAT: shown and kept. WHY: as above.
+    Check $passed "LatCon's $phase test passed"                                 # WHAT: passed. WHY: the PCs' side worked.
+    Check (Test-Path -LiteralPath (Join-Path $Pcs $done)) "LatCon's $phase test really ran"   # WHAT: its done file. WHY: a skipped test can't pass.
+}
+
 try {
     Step '1. A fresh Windows server: the Office Server from its USB kit, the licence, the cell from LatCon''s IT kit; no Citadel Server 1.0 anywhere'
     Check ((ServiceState 'CitadelServer') -eq 'MISSING') 'there is no Citadel Server 1.0 service on this server'   # WHAT: none. WHY: LatCon never had it.
@@ -165,17 +197,7 @@ try {
     $served = Forget 'once the cell is installed, before any computer'          # WHAT: asked before any computer used the cell. WHY: step 4.
 
     Step '2 and 3. Mark''s PC links, is the admin, moves its jobs up; a second PC asks, Mark approves it, it signs in (LatCon Estimating''s own screens)'
-    $env:LATCON_LIVE_FRESH = $Pcs                                               # WHAT: the PCs' folder. WHY: the test does nothing without it.
-    try {
-        & dotnet test (Join-Path $Latcon 'tests/Citadel.App.Tests/Citadel.App.Tests.csproj') -c Release --no-build -nologo `
-            --filter 'FullyQualifiedName~Citadel.App.Tests.LiveFreshOfficeTests' --logger 'console;verbosity=normal'   # WHAT: the live test only. WHY: built before.
-        $passed = $LASTEXITCODE -eq 0                                           # WHAT: whether it passed. WHY: checked after the messages are shown.
-    } finally { Remove-Item Env:LATCON_LIVE_FRESH -ErrorAction SilentlyContinue }   # WHAT: cleared. WHY: no later run picks it up.
-    $messages = Join-Path $Pcs 'messages.txt'                                   # WHAT: what the screens said. WHY: shown whole.
-    Write-Host '--- what the PCs'' screens said, in order ---'                  # WHAT: a heading. WHY: the instructions quote these.
-    if (Test-Path -LiteralPath $messages) { Get-Content -LiteralPath $messages | ForEach-Object { Write-Host $_ }; Copy-Item -LiteralPath $messages -Destination $Logs }   # WHAT: shown and kept. WHY: as above.
-    Check $passed 'LatCon''s fresh-office test passed'                          # WHAT: passed. WHY: steps 2 and 3.
-    Check (Test-Path -LiteralPath (Join-Path $Pcs 'fresh.done')) 'LatCon''s fresh-office test really ran'   # WHAT: its done file. WHY: a skipped test can't pass.
+    LatConLive 'move' 'messages.txt' 'fresh.done'                               # WHAT: Mark's PC moves its jobs up; a second PC joins. WHY: steps 2 and 3.
     Check ((OfficeLogText).Contains('answered its first computer with the kept key')) 'the cell answered the PCs with the new office''s key'   # WHAT: served. WHY: the relay and the kept key.
     NoAlarmSince 0                                                              # WHAT: no alarm in the whole run. WHY: a quiet install day.
 
@@ -188,6 +210,25 @@ try {
     Restart-Service -Name $OfficeService -Force                                 # WHAT: restarted. WHY: the cell starts again with its kept key.
     WaitFor { CellUp } 180 'the cell answering again after a restart'           # WHAT: up. WHY: below.
     Check ((Pin $Port) -eq $pin) 'the cell shows the same certificate after the command and a restart: harmless'   # WHAT: unchanged. WHY: the PCs pinned it.
+
+    Step '5. Starting fresh: a new Office Server, Mark''s account with ZERO jobs moved up, then Jo added and a job made on the server, and a second PC opens it'
+    & $OfficeExe --uninstall                                                    # WHAT: the first office taken off. WHY: a brand-new one next.
+    Check ($LASTEXITCODE -eq 0) 'the first office''s Office Server is uninstalled'   # WHAT: gone. WHY: below.
+    WaitFor { -not (Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ieq $CellExe }) } 30 'the cell to end with its server'   # WHAT: the job ended. WHY: it dies with the server.
+    Copy-Item -LiteralPath $OfficeLog -Destination (Join-Path $Logs 'hyperview-server-move.log') -ErrorAction SilentlyContinue   # WHAT: the first office's log, kept. WHY: its folder is removed next.
+    RemoveFolders @((Join-Path $env:ProgramData 'Excalibur Hyperview'), (Join-Path $env:ProgramData 'Excalibur Office'))   # WHAT: everything of the first office gone. WHY: a brand-new office.
+    New-Item -ItemType Directory -Force -Path $OfficeData | Out-Null            # WHAT: the data folder. WHY: the licence first.
+    Copy-Item -LiteralPath $licence -Destination $OfficeData -Force             # WHAT: the .evlicense dropped in. WHY: as IT does.
+    & (Join-Path $stick 'ExcaliburView-Server.exe') --install                   # WHAT: installed again from the kit. WHY: a new office.
+    Check ($LASTEXITCODE -eq 0) 'a new Office Server installed from the USB kit'   # WHAT: installed. WHY: below.
+    WaitFor { (ServiceState $OfficeService) -eq 'RUNNING' -and (OfficeVersion) } 120 'the new Office Server answering'   # WHAT: up. WHY: below.
+    $from = (OfficeLogText).Length                                              # WHAT: where the log is now. WHY: only new alarms count.
+    $said = & $OfficeExe --install-citadel-cell $CellZip 2>&1 | Out-String    # WHAT: the cell from the IT kit. WHY: as on install day.
+    Check ($LASTEXITCODE -eq 0) 'the pinned cell installed on the new office'   # WHAT: done. WHY: below.
+    WaitFor { NoAlarmSince $from; CellUp } 300 'the new office''s cell answering on 47110'   # WHAT: up with an empty store. WHY: nobody has used it.
+    Check ((Pin $Port) -ne $pin) 'the new office''s cell has a key of its own'   # WHAT: new. WHY: a new office.
+    LatConLive 'zero' 'messages-zero.txt' 'zero.done'                           # WHAT: Mark's account with no jobs, moved up; he adds Jo and a job; a second PC opens it. WHY: Mark is starting fresh.
+    NoAlarmSince $from                                                          # WHAT: no alarm. WHY: a quiet start.
 
     Step 'Passed'
     Write-Host 'A new office end to end on Windows: the Office Server and the cell installed with no Citadel Server 1.0, a new key made, Mark''s PC linked as the admin and its jobs moved up through the relay (keyring last, Data folder renamed), Mark signing in on both PCs, a second PC approved and signing in with an account from the moved keyring.'
