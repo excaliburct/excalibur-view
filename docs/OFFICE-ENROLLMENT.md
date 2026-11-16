@@ -253,7 +253,8 @@ Office Server, which runs as the system, ends TLS on 47110 itself and relays eac
   key never leaves Windows.
 - At most 500 connections, 32 from one machine (an IPv6 /64 counts as one), Citadel's own numbers, held across the IPv4 and
   IPv6 listeners together (one set of caps for both). A handshake must finish within 10 s; a connection that carries
-  nothing either way for 90 s is closed (the cell's own keep-alive is 60 s).
+  nothing either way for 90 s is closed (the cell's own keep-alive is 60 s). Every chunk is flushed on as soon as it is
+  written, so TLS never holds the end of an answer back.
 - Listened on from the cell's first start (IPv4, and IPv6 where there is one), each socket bound with
   `SO_EXCLUSIVEADDRUSE`, so no other program can share or take the port (the Office Server's own 8714 is bound the same
   way). With no cell running, a connection is closed at once.

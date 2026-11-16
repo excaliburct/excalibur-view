@@ -393,6 +393,7 @@ where
             return Ok(()); // WHAT: this direction done. WHY: the other carries on until it ends
         }
         tokio::time::timeout(idle, to.write_all(&buffer[..n])).await.map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??; // WHAT: passed on, waiting for the other side to take it, at most the idle time. WHY: backpressure; a side that takes nothing ends the connection
+        tokio::time::timeout(idle, to.flush()).await.map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??; // WHAT: sent on now, at most the idle time. WHY: TLS can take bytes and keep them in its records until a flush; unflushed, the end of a long answer waited for the idle limit and was cut off (e2e try 36)
         activity.store(since(tokio::time::Instant::now()), Ordering::Relaxed); // WHAT: a byte moved. WHY: neither direction times out while the other is busy
         carried.fetch_add(n as u64, Ordering::Relaxed); // WHAT: counted. WHY: the caller may want to know
     }
@@ -467,6 +468,49 @@ mod tests {
         let mut back = [0u8; 6]; // WHAT: room for it. WHY: below
         tokio::time::timeout(Duration::from_secs(2), caller_read.read_exact(&mut back)).await.expect("the answer arrives while the other way is stalled").unwrap(); // WHAT: read in time. WHY: neither direction blocks the other
         assert_eq!(&back, b"answer"); // WHAT: as sent. WHY: carried
+    }
+
+    /// A stream that keeps what is written until it is flushed, as TLS can.
+    struct KeptUntilFlushed {
+        inner: tokio::io::DuplexStream,
+        kept: Vec<u8>,
+    }
+
+    impl tokio::io::AsyncRead for KeptUntilFlushed {
+        fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_read(cx, buf) // WHAT: read as it is. WHY: only writing is held back
+        }
+    }
+
+    impl tokio::io::AsyncWrite for KeptUntilFlushed {
+        fn poll_write(mut self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>, data: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+            self.kept.extend_from_slice(data); // WHAT: taken, not sent. WHY: as TLS records waiting for a flush
+            std::task::Poll::Ready(Ok(data.len())) // WHAT: all accepted. WHY: below
+        }
+        fn poll_flush(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+            while !self.kept.is_empty() {
+                let this = &mut *self; // WHAT: both fields at once. WHY: below
+                let n = std::task::ready!(std::pin::Pin::new(&mut this.inner).poll_write(cx, &this.kept))?; // WHAT: sent on. WHY: flushed
+                this.kept.drain(..n); // WHAT: gone from what is kept. WHY: sent
+            }
+            std::pin::Pin::new(&mut self.inner).poll_flush(cx) // WHAT: flushed beneath. WHY: done
+        }
+        fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+            std::task::ready!(self.as_mut().poll_flush(cx))?; // WHAT: everything sent. WHY: before the end
+            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx) // WHAT: ended. WHY: below
+        }
+    }
+
+    #[tokio::test]
+    async fn bytes_a_side_keeps_until_flushed_are_sent_at_once() {
+        let (mut caller, near) = tokio::io::duplex(1 << 16); // WHAT: the caller's side. WHY: below
+        let (far, mut cell) = tokio::io::duplex(1 << 16); // WHAT: the cell's side. WHY: below
+        let near = KeptUntilFlushed { inner: near, kept: Vec::new() }; // WHAT: the caller's side keeps writes until a flush. WHY: as tokio-rustls can
+        tokio::spawn(relay(near, far, Duration::from_secs(30), &CARRIED)); // WHAT: the relay, a long idle limit. WHY: the answer must not wait for it
+        cell.write_all(b"the end of a long answer").await.unwrap(); // WHAT: the cell answers and keeps the connection open. WHY: a kept-alive HTTP connection
+        let mut back = [0u8; 24]; // WHAT: room for it. WHY: below
+        tokio::time::timeout(Duration::from_secs(2), caller.read_exact(&mut back)).await.expect("the answer arrives without waiting for the idle limit").unwrap(); // WHAT: read in time. WHY: the relay flushes
+        assert_eq!(&back, b"the end of a long answer"); // WHAT: as sent. WHY: carried
     }
 
     #[tokio::test]
