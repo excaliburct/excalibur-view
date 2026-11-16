@@ -1,8 +1,10 @@
-"""The Citadel cell the Office Server carries: taken from a pinned LatCon
-Estimating release, checked, and packed for the signed release and the USB kit.
+"""The Citadel cell the Office Server runs: taken from a pinned LatCon
+Estimating release (private), checked, and packed for Fleet and the IT kit.
+It is never part of Excalibur View's public release, which carries only the
+pin (Creede, 2026-11-13).
 
     python3 tools/citadel_cell.py bundle --out ExcaliburOffice-Citadel.tar.gz [--from-zip FILE]
-    python3 tools/citadel_cell.py kit --out USB/                      [--from-zip FILE]
+    python3 tools/citadel_cell.py kit --out KIT/                      [--from-zip FILE]
     python3 tools/citadel_cell.py check ExcaliburOffice-Citadel.tar.gz
 
 Everything comes from packaging/citadel-cell.json (the pin): the LatCon release
@@ -11,14 +13,17 @@ read from --from-zip, the same file fetched by hand), checked against the pin,
 and every pinned file is taken out of it by its exact name and checked again.
 Nothing else in the zip is ever used.
 
-`bundle` writes the release's cell part: a gzipped tar of names.json (SHA-256
-to file name) and each file named by its own SHA-256, the shape the server's
-crate::cellbundle::stage_bundle reads. publish.py signs it as the
-windows-x64-citadel part, beside the server, with the same key.
+`bundle` writes the cell part Fleet delivers: a gzipped tar of names.json
+(SHA-256 to file name) and each file named by its own SHA-256, the shape the
+server's crate::cellbundle::stage_bundle reads. hyperview-release signs it as
+the windows-x64-citadel platform of the same version as the server, with the
+same key, and bundles it for Fleet's shelf; Fleet pushes it only to installs
+licensed for citadel.
 
-`kit` writes OUT/citadel/ with the pinned files, which goes on the USB stick
-beside ExcaliburView-Server.exe; the server's install checks each file against
-the pin it was built with and refuses anything else.
+`kit` copies the pinned zip itself, checked, into OUT/ for the office's
+private IT kit; an administrator installs it with
+hyperview-server --install-citadel-cell "<zip>", which checks it against the
+pin the server was built with and refuses anything else.
 
 `check` says whether a cell part holds exactly the pinned files.
 """
@@ -145,18 +150,19 @@ def main(argv=None):
         check_part(a.part, pin)
         print(f"{a.part} holds exactly the pinned Citadel cell {pin.get('version', '')}")  # WHAT: said. WHY: plain
         return 0
-    files = pinned_files(pin, source_zip(pin, a.from_zip))  # WHAT: the checked files. WHY: both commands use them
+    data = source_zip(pin, a.from_zip)  # WHAT: the pinned zip, checked. WHY: both commands start from it
+    files = pinned_files(pin, data)  # WHAT: the checked files. WHY: a zip missing one is never handed on
     if a.command == "bundle":
         with open(a.out, "wb") as f:
             f.write(pack(files))  # WHAT: the cell part. WHY: signed by publish.py
         print(f"wrote {a.out}: the Citadel cell {pin.get('version', '')}, {len(files)} file(s)")  # WHAT: said. WHY: plain
     else:
-        folder = os.path.join(a.out, "citadel")  # WHAT: the kit's citadel\. WHY: beside the server program on the stick
-        os.makedirs(folder, exist_ok=False)  # WHAT: made fresh. WHY: never mixed with an older cell
-        for name, body in files.items():
-            with open(os.path.join(folder, name), "wb") as f:
-                f.write(body)  # WHAT: each pinned file. WHY: nothing else
-        print(f"wrote {folder}: the Citadel cell {pin.get('version', '')}")  # WHAT: said. WHY: plain
+        name = os.path.basename((pin.get("source") or {}).get("url", "")) or f"CitadelServer-{pin.get('version', '')}-win-x64-cell.zip"  # WHAT: the zip's own name. WHY: as LatCon's release names it
+        os.makedirs(a.out, exist_ok=True)  # WHAT: the kit's folder. WHY: the zip goes in it
+        to = os.path.join(a.out, name)  # WHAT: where it goes. WHY: beside the kit's other files
+        with open(to, "xb") as f:
+            f.write(data)  # WHAT: the pinned zip, as checked. WHY: the install command checks it again against the server's pin
+        print(f"wrote {to}: the Citadel cell {pin.get('version', '')}")  # WHAT: said. WHY: plain
     return 0
 
 

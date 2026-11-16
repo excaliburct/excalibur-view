@@ -12,14 +12,14 @@ use std::os::windows::io::FromRawHandle;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, SetHandleInformation, ERROR_PIPE_CONNECTED, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::IO::CancelSynchronousIo;
 use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, SDDL_REVISION_1};
 use windows_sys::Win32::Security::{CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, PSID, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY};
 use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
-use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT};
+use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, CreatePipe, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT};
 use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
-use windows_sys::Win32::System::Threading::{CreateProcessAsUserW, GetCurrentProcess, OpenProcessToken, ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION, STARTUPINFOW};
+use windows_sys::Win32::System::Threading::{CreateProcessAsUserW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess, InitializeProcThreadAttributeList, OpenProcessToken, ResumeThread, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW};
 
 use crate::api::Shared;
 
@@ -88,18 +88,17 @@ pub fn start(server: Shared) {
         if !crate::cellmove::before_first_start(&server.store, &OldCitadel, &crate::cellmove::Run, &program, &old, &data) {
             return; // WHAT: the move failed: the cell is not started. WHY: a cell started empty would make a new certificate; /api/v1/office shows the alarm
         }
-        icacls(&super::data_steps(&data, &sid)); // WHAT: the system and the cell only, the moved files included. WHY: §6
+        allow(&data, &super::data_sddl(&sid), true); // WHAT: the system and the cell only. WHY: §6
+        icacls(&super::data_steps(&data)); // WHAT: the moved files inherit it, the system owns them. WHY: §6
         if let Some(own) = program.parent() {
-            icacls(&super::program_steps(own, &sid)); // WHAT: the cell may read and run its program. WHY: the service's folder is locked to the system and administrators
+            allow(own, &super::program_sddl(&sid), false); // WHAT: the cell may read and run its program. WHY: the service's folder is locked to the system and administrators
         }
-        crate::winsvc::cell_firewall(&program); // WHAT: TCP 47110 open for the cell's program, when it isn't yet. WHY: critical 2: an office installed before the rule existed gets it here
         crate::cellmove::tidy_old_task(&server.store, &OldTask); // WHAT: 1.0's update task removed, or the alarm kept and tried again. WHY: review low 2
         let unpack = super::extract_folder(&folder, true); // WHAT: the cell's own unpacking folder. WHY: review low 3: never C:\Windows\Temp
         let _ = std::fs::create_dir_all(&unpack); // WHAT: made; it inherits the locked service folder's ACL. WHY: the system and administrators only
-        icacls(&super::extract_steps(&unpack, &sid)); // WHAT: the cell may use it too. WHY: a restricted token unpacks there
+        allow(&unpack, &super::extract_sddl(&sid), false); // WHAT: the cell may use it too. WHY: a restricted token unpacks there
         let environment = super::environment_block(std::env::vars_os(), super::EXTRACT_VARIABLE, unpack.as_os_str()); // WHAT: this server's environment, with .NET's unpacking folder set. WHY: review low 3
-        let mut launcher = Cell { server: server.clone(), program, line: String::new(), args, pipe: format!(r"\\.\pipe\{}", super::pipe_name(&install)), sid, process: None, serving: None, next: None, pin, data, environment };
-        launcher.line = super::command_line(&launcher.program, &launcher.args); // WHAT: the command line. WHY: written once
+        let mut launcher = Cell { server: server.clone(), program, home: folder.clone(), args, pipe: format!(r"\\.\pipe\{}", super::pipe_name(&install)), sid, process: None, serving: None, next: None, pin, data, environment }; // WHAT: the cell, ready to start. WHY: its command line is made at each start, with its key
         super::supervise(&mut launcher, &server.cell, &std::thread::sleep, &Instant::now, usize::MAX); // WHAT: run and restarted. WHY: §6a
     });
     if let Err(e) = spawned {
@@ -107,16 +106,59 @@ pub fn start(server: Shared) {
     }
 }
 
-/// Runs each icacls step, saying in the log when one fails.
+/// Runs each icacls step, saying in the log, with icacls' own words, when
+/// one fails.
 fn icacls(steps: &[Vec<std::ffi::OsString>]) {
     use std::os::windows::process::CommandExt; // WHAT: Windows-only process options. WHY: no console window
     let system = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from); // WHAT: Windows' folder. WHY: icacls by its full path
     let program = system.join("System32").join("icacls.exe"); // WHAT: the program. WHY: never one found on the PATH
     for args in steps {
-        let done = std::process::Command::new(&program).args(args).creation_flags(CREATE_NO_WINDOW).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status(); // WHAT: run and waited for. WHY: done before the cell starts
-        if !matches!(done, Ok(status) if status.success()) {
-            tracing::warn!("could not set who may use {:?}", args.first()); // WHAT: said. WHY: whoever looks after the server can see it
+        match std::process::Command::new(&program).args(args).creation_flags(CREATE_NO_WINDOW).stdin(std::process::Stdio::null()).output() {
+            Ok(done) if done.status.success() => {} // WHAT: done. WHY: nothing to say
+            Ok(done) => tracing::warn!("could not set who may use {:?}: icacls said {}", args.first(), String::from_utf8_lossy(&done.stdout).trim().chars().take(300).collect::<String>()), // WHAT: said, with icacls' reason. WHY: whoever looks after the server can see why
+            Err(e) => tracing::warn!("could not set who may use {:?}: icacls didn't run ({e})", args.first()), // WHAT: said. WHY: likewise
         }
+    }
+}
+
+/// Sets a folder's own entries from SDDL with Windows' own call, saying in
+/// the log when it can't. `protected`: nothing inherited from above; else
+/// the entries are added to what the folder inherits.
+fn allow(folder: &Path, sddl: &str, protected: bool) {
+    if let Err(e) = set_acl(folder, sddl, protected) {
+        tracing::warn!("could not set who may use {}: {e}", folder.display()); // WHAT: said. WHY: whoever looks after the server can see it
+    }
+}
+
+/// The work of [`allow`]: the SDDL made into a security descriptor (a SID is
+/// read as written, so the cell's SID needs no account behind it), its DACL
+/// set on the folder; Windows passes the inheritable entries on to what is
+/// inside.
+fn set_acl(folder: &Path, sddl: &str, protected: bool) -> std::io::Result<()> {
+    use windows_sys::Win32::Security::Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, UNPROTECTED_DACL_SECURITY_INFORMATION};
+    let text = wide(OsStr::new(sddl)); // WHAT: the SDDL. WHY: as Windows takes it
+    let path = wide(folder.as_os_str()); // WHAT: the folder. WHY: likewise
+    // SAFETY: every pointer passed is to a live local for the length of the call; the descriptor Windows allocates is
+    // freed once, after SetNamedSecurityInfoW has copied the DACL it points into.
+    unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: a folder's DACL set from SDDL
+        let mut descriptor: *mut core::ffi::c_void = std::ptr::null_mut(); // WHAT: filled by Windows. WHY: the parsed SDDL
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(text.as_ptr(), SDDL_REVISION_1, &mut descriptor, std::ptr::null_mut()) == 0 {
+            return Err(std::io::Error::last_os_error()); // WHAT: refused. WHY: SDDL that doesn't read
+        }
+        let (mut present, mut defaulted, mut dacl) = (0, 0, std::ptr::null_mut::<ACL>()); // WHAT: filled by Windows. WHY: the DACL inside
+        let found = GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted); // WHAT: the DACL. WHY: set next
+        let done = if found == 0 || present == 0 {
+            Err(std::io::Error::other("the SDDL has no DACL")) // WHAT: refused. WHY: never an empty grant
+        } else {
+            let how = DACL_SECURITY_INFORMATION | if protected { PROTECTED_DACL_SECURITY_INFORMATION } else { UNPROTECTED_DACL_SECURITY_INFORMATION }; // WHAT: the DACL, inheriting or not. WHY: as asked
+            match SetNamedSecurityInfoW(path.as_ptr(), SE_FILE_OBJECT, how, std::ptr::null_mut(), std::ptr::null_mut(), dacl, std::ptr::null()) {
+                0 => Ok(()), // WHAT: set. WHY: done
+                code => Err(std::io::Error::from_raw_os_error(i32::try_from(code).unwrap_or(i32::MAX))), // WHAT: Windows' reason. WHY: said
+            }
+        };
+        LocalFree(descriptor); // WHAT: let go. WHY: the folder holds its own copy
+        done
     }
 }
 
@@ -124,12 +166,12 @@ fn icacls(steps: &[Vec<std::ffi::OsString>]) {
 struct Cell {
     server: Shared, // WHAT: the Office Server. WHY: the pipe's answers
     program: PathBuf, // WHAT: `citadel\Citadel Server.exe`. WHY: started
-    line: String, // WHAT: its command line. WHY: started with it
+    home: PathBuf, // WHAT: the Office Server's own folder. WHY: the cell's key's name and certificate are kept there (crate::cellkey)
     args: Vec<String>, // WHAT: its arguments. WHY: the line is made from them
     pipe: String, // WHAT: `\\.\pipe\excalibur-office-<install id>`. WHY: §6a
     sid: String, // WHAT: the cell's SID. WHY: the pipe and the token
     process: Option<Raw>, // WHAT: the running cell. WHY: waited for
-    serving: Option<std::thread::JoinHandle<std::fs::File>>, // WHAT: the thread answering its pipe, which hands the pipe back when done. WHY: the old instance is held until the next exists
+    serving: Option<std::thread::JoinHandle<(std::fs::File, Option<std::fs::File>)>>, // WHAT: the thread answering its pipe, which hands the pipe back when done, with the next instance it made once the cell connected. WHY: the old instance is held until the next exists
     next: Option<std::fs::File>, // WHAT: the next pipe instance, made before the old one closed. WHY: security review L4: the name is never free during the restart wait
     pin: crate::cellbundle::Pin, // WHAT: the cell this build was made with. WHY: checked before every start
     data: PathBuf, // WHAT: the cell's data folder. WHY: its settings get the Office Server's maintenance key before every start
@@ -140,14 +182,40 @@ impl super::Launcher for Cell {
     fn start(&mut self) -> std::io::Result<()> {
         crate::cellbundle::check_program(&self.program, &self.pin).map_err(std::io::Error::other)?; // WHAT: the pinned program, or not started. WHY: risk 8: checked before every start, a restart too
         super::give_the_cell_the_office_key(&self.data, self.server.config.maintenance_key.as_deref()).inspect_err(|e| tracing::error!("ALARM: the Citadel cell was not started: {e}"))?; // WHAT: only the Office Server's maintenance key opens the cell's admin routes; a link on the way stops the start. WHY: a key set on 1.0 moved in with its settings; review medium: never written through a link
+        let tls = super::tlskey::ready(&self.home, &self.data).map_err(|e| {
+            if e.starts_with(crate::cellkey::PFX_STUCK) {
+                return std::io::Error::new(std::io::ErrorKind::PermissionDenied, e); // WHAT: a key copy stuck with the cell: refused for good, as an alarm. WHY: security review, 2026-11-16; the supervisor stops and shows it
+            }
+            tracing::error!("ALARM: the Citadel cell was not started: its TLS key isn't ready: {e}"); // WHAT: the alarm. WHY: 47110 is never answered with a key others could use
+            std::io::Error::other(e)
+        })?; // WHAT: the cell's key made, imported or opened, owned by the system, locked to the system alone, and its certificate. WHY: §6b
+        let relay = super::relaywin::current(); // WHAT: the relay's state. WHY: set below
+        if self.server.store.setting(crate::cellkey::SERVED).ok().flatten().is_none() {
+            let server = self.server.clone(); // WHAT: for the notice. WHY: below
+            relay.on_served(Box::new(move || {
+                let _ = server.store.set_setting(crate::cellkey::SERVED, &crate::audit::now()); // WHAT: when the cell first answered a computer. WHY: --forget-citadel-key-copies waits for it
+                tracing::info!("the Citadel cell answered its first computer with the kept key; its key's file copies may now be removed with --forget-citadel-key-copies"); // WHAT: said. WHY: an administrator knows
+            })); // WHAT: noted once. WHY: below
+        }
+        relay.set_config(crate::cellrelay::server_config(tls.certificate.clone(), tls.signer.clone()).map_err(std::io::Error::other)?); // WHAT: TLS on 47110 with the pinned certificate, signed through the key. WHY: §6b: the Office Server answers TLS for the cell
+        super::relaywin::listen().inspect_err(|e| tracing::error!("ALARM: the Citadel cell was not started: TCP {} couldn't be taken ({e})", super::PORT))?; // WHAT: 47110 listened on, once. WHY: nothing else may hold the cell's port
+        crate::winsvc::cell_firewall(); // WHAT: 47110 open for the Office Server's program, office network only. WHY: critical 2; the program that answers it changed in 0.7.1
+        let relay_pipe = super::relay_pipe(rand::random()); // WHAT: this start's relay pipe, a new name. WHY: unguessable, never the control pipe
+        let mut args = self.args.clone(); // WHAT: the fixed arguments. WHY: this start's are added
+        args.extend(crate::cellkey::cell_args(&tls.certificate).map_err(std::io::Error::other)?); // WHAT: --certificate, public only. WHY: the cell knows its own pin; it never sees the key
+        args.extend(super::relay_args(&relay_pipe, &self.sid)); // WHAT: --relay and --relay-sid. WHY: the cell serves that pipe to the system and itself only
+        let line = super::command_line(&self.program, &args); // WHAT: the whole command line. WHY: made at each start
         let pipe = match self.next.take() {
             Some(pipe) => pipe, // WHAT: the instance made while the last one was still held. WHY: the name was never free
             None => make_pipe(&self.pipe, &self.sid, true)?, // WHAT: the first instance, made only if nobody made it first. WHY: a name somebody else holds is an alarm (AddrInUse), not a restart
         };
-        let server = self.server.clone(); // WHAT: the server, for the thread. WHY: its answers
-        self.serving = Some(std::thread::Builder::new().name("citadel-pipe".into()).spawn(move || serve(pipe, &server))?); // WHAT: the pipe answered on its own thread. WHY: the supervisor waits on the process meanwhile
-        match restricted_process(&self.program, &self.line, &self.sid, &self.environment) {
+        let (server, name, sid) = (self.server.clone(), self.pipe.clone(), self.sid.clone()); // WHAT: the server, the pipe's name and the cell's SID, for the thread. WHY: its answers, and the next instance
+        self.serving = Some(std::thread::Builder::new().name("citadel-pipe".into()).spawn(move || serve(pipe, &server, &name, &sid))?); // WHAT: the pipe answered on its own thread. WHY: the supervisor waits on the process meanwhile
+        match restricted_process(&self.program, &line, &self.sid, &self.environment) {
             Ok(process) => {
+                // SAFETY: the process handle CreateProcessAsUserW just gave us, alive until `wait` closes it.
+                let pid = unsafe { windows_sys::Win32::System::Threading::GetProcessId(process.handle()) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: the cell's process id
+                relay.set_target(Some(crate::cellrelay::Target { pipe: relay_pipe, pid })); // WHAT: connections go to this cell's pipe, served by this process only. WHY: the relay checks the pipe's server is it
                 self.process = Some(process); // WHAT: kept. WHY: waited for
                 Ok(())
             }
@@ -160,9 +228,15 @@ impl super::Launcher for Cell {
 
     fn wait(&mut self) {
         if let Some(process) = self.process.take() {
+            let relay = super::relaywin::current(); // WHAT: the relay's state. WHY: below
             // SAFETY: `process` is the process handle CreateProcessAsUserW gave us, owned here and closed once.
             unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: waiting on and closing our own process handle
                 WaitForSingleObject(process.handle(), INFINITE); // WHAT: until the cell stops. WHY: then it is restarted
+                let mut code = 0u32; // WHAT: filled by Windows. WHY: how it ended
+                if GetExitCodeProcess(process.handle(), &mut code) != 0 {
+                    tracing::warn!("the Citadel cell ended with exit code {code} (0x{code:08X})"); // WHAT: said. WHY: 4 is a refused start, others a crash; the log says which
+                }
+                relay.set_target(None); // WHAT: no cell to relay to. WHY: a new connection is closed until the next start
                 CloseHandle(process.handle()); // WHAT: let go. WHY: no handle kept for a stopped process
             }
         }
@@ -171,15 +245,18 @@ impl super::Launcher for Cell {
 }
 
 impl Cell {
-    /// Makes the next pipe instance while the old one is still held, then
-    /// ends the old one's thread (cancelling its wait if the cell never
-    /// connected) and lets the old instance go.
+    /// Ends the old instance's thread (cancelling its wait if the cell never
+    /// connected), keeps the next instance it made once the cell connected
+    /// (or makes it now, while the old one is still held), and lets the old
+    /// instance go.
     fn end_pipe(&mut self) {
-        match make_pipe(&self.pipe, &self.sid, false) {
-            Ok(next) => self.next = Some(next), // WHAT: held for the next start. WHY: the name is ours throughout
-            Err(e) => tracing::error!("the Citadel cell's next pipe could not be made: {e}"), // WHAT: said. WHY: the next start makes it fresh, and refuses a name someone else took
-        }
-        if let Some(thread) = self.serving.take() {
+        let Some(thread) = self.serving.take() else {
+            if self.next.is_none() {
+                self.next = self.make_next(); // WHAT: the next instance. WHY: the name is ours throughout
+            }
+            return;
+        };
+        {
             use std::os::windows::io::AsRawHandle;
             for _ in 0..50 {
                 if thread.is_finished() {
@@ -189,8 +266,19 @@ impl Cell {
                 unsafe { CancelSynchronousIo(thread.as_raw_handle() as HANDLE) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: cancelling our own thread's wait for the cell
                 std::thread::sleep(std::time::Duration::from_millis(20)); // WHAT: a moment. WHY: for the cancel to land
             }
-            let _ = thread.join(); // WHAT: waited for; the old instance it hands back is dropped here. WHY: only once the next one exists
+            match thread.join() {
+                Ok((old, made)) => {
+                    self.next = made.or_else(|| self.make_next()); // WHAT: the next instance, made while the cell ran or now. WHY: the name is ours throughout
+                    drop(old); // WHAT: the old instance let go. WHY: only once the next one exists
+                }
+                Err(_) => self.next = self.make_next(), // WHAT: the thread failed; a next instance made. WHY: as above
+            }
         }
+    }
+
+    /// The next instance of the cell's pipe, or none, said in the log.
+    fn make_next(&self) -> Option<std::fs::File> {
+        make_pipe(&self.pipe, &self.sid, false).inspect_err(|e| tracing::error!("the Citadel cell's next pipe could not be made: {e}")).ok() // WHAT: made, or said. WHY: the next start makes it fresh, and refuses a name someone else took
     }
 }
 
@@ -232,11 +320,13 @@ fn make_pipe(name: &str, sid: &str, first: bool) -> std::io::Result<std::fs::Fil
 
 /// Waits for the cell to connect, then answers it until it closes; hands the
 /// pipe back, still open.
-fn serve(pipe: std::fs::File, server: &crate::api::Server) -> std::fs::File {
+fn serve(pipe: std::fs::File, server: &crate::api::Server, name: &str, sid: &str) -> (std::fs::File, Option<std::fs::File>) {
     use std::os::windows::io::AsRawHandle;
     // SAFETY: the handle is the pipe this File owns, alive for the whole call; no overlapped structure is used.
     let connected = unsafe { ConnectNamedPipe(pipe.as_raw_handle() as HANDLE, std::ptr::null_mut()) != 0 || GetLastError() == ERROR_PIPE_CONNECTED }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: waiting for the cell on our own pipe
+    let mut next = None; // WHAT: the second instance, once the cell is connected. WHY: below
     if connected {
+        next = make_pipe(name, sid, false).inspect_err(|e| tracing::error!("the Citadel cell's next pipe could not be made: {e}")).ok(); // WHAT: the second of the two instances, made as soon as the cell is connected to the first. WHY: both are the Office Server's while the cell runs, so the cell can never make one of its own (its access to the pipe includes FILE_CREATE_PIPE_INSTANCE, which .NET's read-write open asks for)
         let office = super::Answering::new(server); // WHAT: the answers for this connection. WHY: the pure part
         let mut reader = BufReader::new(&pipe); // WHAT: lines in. WHY: one JSON object each
         let mut writer = &pipe; // WHAT: lines out. WHY: one answer each
@@ -244,7 +334,7 @@ fn serve(pipe: std::fs::File, server: &crate::api::Server) -> std::fs::File {
             tracing::debug!("the Citadel cell's pipe closed: {e}"); // WHAT: noted. WHY: a stopping cell closes it
         }
     }
-    pipe // WHAT: handed back open. WHY: closed only once the next instance exists
+    (pipe, next) // WHAT: handed back open, with the next instance. WHY: closed only once the next instance exists
 }
 
 /// Starts `program` under a restricted copy of this service's token: every
@@ -294,8 +384,46 @@ fn restricted_process(program: &Path, line: &str, sid: &str, environment: &[std:
         }
         CloseHandle(own);
         made?;
-        let mut startup: STARTUPINFOW = std::mem::zeroed(); // WHAT: no window, nothing special. WHY: the defaults
-        startup.cb = u32::try_from(std::mem::size_of::<STARTUPINFOW>()).unwrap_or(0);
+        if let Err(e) = give_default_dacl(token, sid) {
+            CloseHandle(token); // WHAT: let go. WHY: not started
+            return Err(e); // WHAT: said. WHY: a cell that can't open its own process never starts
+        }
+        let (said, write) = match output_pipe() {
+            Ok(pair) => pair, // WHAT: the pipe the cell's output comes back on. WHY: it says why it stopped, on its error output
+            Err(e) => {
+                CloseHandle(token); // WHAT: let go. WHY: not started
+                return Err(e);
+            }
+        };
+        let mut size = 0usize; // WHAT: the attribute list's size. WHY: asked of Windows first
+        InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size); // WHAT: the size for one attribute. WHY: the list is made in our own memory
+        let mut list = vec![0u8; size.max(64)]; // WHAT: room for it. WHY: Windows fills it
+        let attributes = list.as_mut_ptr().cast::<core::ffi::c_void>(); // WHAT: the list. WHY: passed on
+        let inherited = [write]; // WHAT: the only handle the cell inherits: its output's write end. WHY: it reaches us otherwise only through the pipe
+        let listed = InitializeProcThreadAttributeList(attributes, 1, 0, &mut size) != 0
+            && UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize, inherited.as_ptr().cast(), std::mem::size_of_val(&inherited), std::ptr::null_mut(), std::ptr::null()) != 0; // WHAT: that one handle named. WHY: no other handle of ours is ever inherited
+        if !listed {
+            let why = std::io::Error::last_os_error(); // WHAT: why. WHY: read first
+            CloseHandle(write); // WHAT: let go. WHY: not started
+            CloseHandle(token);
+            return Err(why);
+        }
+        let mut desktop = match desktop(sid) {
+            Ok(name) => name, // WHAT: the cell's own desktop. WHY: below
+            Err(e) => {
+                DeleteProcThreadAttributeList(attributes); // WHAT: let go. WHY: not started
+                CloseHandle(write);
+                CloseHandle(token);
+                return Err(e);
+            }
+        };
+        let mut startup: STARTUPINFOEXW = std::mem::zeroed(); // WHAT: no window; its output to our pipe. WHY: the defaults otherwise
+        startup.StartupInfo.lpDesktop = desktop.as_mut_ptr(); // WHAT: the cell's own window station and desktop. WHY: its restricted token can't open the service's; Windows would end it at once (0xC0000142)
+        startup.StartupInfo.cb = u32::try_from(std::mem::size_of::<STARTUPINFOEXW>()).unwrap_or(0); // WHAT: the extended form's size. WHY: the attribute list follows
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES; // WHAT: its standard handles given. WHY: below
+        startup.StartupInfo.hStdOutput = write; // WHAT: its output. WHY: to our log
+        startup.StartupInfo.hStdError = write; // WHAT: its errors. WHY: likewise
+        startup.lpAttributeList = attributes; // WHAT: the one inherited handle. WHY: as above
         let mut info: PROCESS_INFORMATION = std::mem::zeroed(); // WHAT: filled by Windows. WHY: the process's handle
         let started = CreateProcessAsUserW(
             token,
@@ -303,18 +431,21 @@ fn restricted_process(program: &Path, line: &str, sid: &str, environment: &[std:
             command.as_mut_ptr(),
             std::ptr::null(),
             std::ptr::null(),
-            0, // WHAT: no handles inherited. WHY: the cell reaches us only through the pipe
-            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED, // WHAT: no window, and held until it is in the job. WHY: §6a; nothing it starts escapes the job
+            1, // WHAT: inherit, but only the handle in the list. WHY: the cell's output comes back; nothing else of ours reaches it
+            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, // WHAT: no window, held until it is in the job, the list read. WHY: §6a; nothing it starts escapes the job
             block.as_ptr().cast(), // WHAT: its environment, with .NET's unpacking folder. WHY: review low 3
             folder.as_ref().map_or(std::ptr::null(), |f| f.as_ptr()),
-            &startup,
+            (&raw const startup).cast::<STARTUPINFOW>(),
             &mut info,
         );
         let start_error = std::io::Error::last_os_error(); // WHAT: why, if it failed. WHY: read before CloseHandle can change it
+        DeleteProcThreadAttributeList(attributes); // WHAT: the list let go. WHY: used only by the call
+        CloseHandle(write); // WHAT: our copy of the write end closed. WHY: the read end ends when the cell does
         CloseHandle(token);
         if started == 0 {
             return Err(start_error);
         }
+        let _ = std::thread::Builder::new().name("citadel-output".into()).spawn(move || log_output(said)); // WHAT: the cell's output read and logged. WHY: "The cell didn't start: ..." reaches the Office Server's log
         if AssignProcessToJobObject(job.handle(), info.hProcess) == 0 {
             let why = std::io::Error::last_os_error(); // WHAT: why. WHY: read before anything else changes it
             TerminateProcess(info.hProcess, 1); // WHAT: never run outside the job. WHY: it wouldn't die with the server
@@ -325,6 +456,120 @@ fn restricted_process(program: &Path, line: &str, sid: &str, environment: &[std:
         ResumeThread(info.hThread); // WHAT: let it run, now inside the job. WHY: started suspended for that
         CloseHandle(info.hThread); // WHAT: the thread's handle let go. WHY: only the process is waited for
         Ok(Raw(info.hProcess as usize))
+    }
+}
+
+/// Gives the restricted token a default DACL that its own SID passes
+/// (`super::token_default_sddl`): what the cell makes without saying who may
+/// use it (its own process and threads above all) is the system's and the
+/// cell's. With the system's default alone, the token's second check refuses
+/// the cell its own process, and Windows ends it as it starts (0xC0000142).
+fn give_default_dacl(token: HANDLE, sid: &str) -> std::io::Result<()> {
+    use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, SetTokenInformation, TokenDefaultDacl, ACL, TOKEN_DEFAULT_DACL};
+    let sddl = wide(OsStr::new(&super::token_default_sddl(sid))); // WHAT: the default DACL, as SDDL. WHY: read by Windows
+    // SAFETY: every pointer passed is to a live local for the length of the call; the descriptor Windows allocates is
+    // freed once, after SetTokenInformation has copied the DACL it points into.
+    unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: the cell's token's default DACL
+        let mut descriptor: *mut core::ffi::c_void = std::ptr::null_mut(); // WHAT: filled by Windows. WHY: the parsed SDDL
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut descriptor, std::ptr::null_mut()) == 0 {
+            return Err(std::io::Error::last_os_error()); // WHAT: refused. WHY: said
+        }
+        let (mut present, mut defaulted, mut dacl) = (0, 0, std::ptr::null_mut::<ACL>()); // WHAT: filled by Windows. WHY: the DACL inside
+        let done = if GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) == 0 || present == 0 {
+            Err(std::io::Error::other("the default DACL's SDDL has no DACL")) // WHAT: refused. WHY: never an empty one
+        } else {
+            let value = TOKEN_DEFAULT_DACL { DefaultDacl: dacl }; // WHAT: the DACL, as the call takes it. WHY: below
+            if SetTokenInformation(token, TokenDefaultDacl, (&raw const value).cast(), u32::try_from(std::mem::size_of::<TOKEN_DEFAULT_DACL>()).unwrap_or(0)) == 0 {
+                Err(std::io::Error::last_os_error()) // WHAT: Windows' reason. WHY: said
+            } else {
+                Ok(()) // WHAT: set. WHY: the cell may open its own process
+            }
+        };
+        LocalFree(descriptor); // WHAT: let go. WHY: the token holds its own copy
+        done
+    }
+}
+
+/// The cell's own window station and desktop, made once for this process,
+/// the system's and the cell's alone (`super::desktop_sddl`); its name as
+/// `lpDesktop` takes it. The handles are kept for the life of the process,
+/// which keeps them there.
+fn desktop(sid: &str) -> std::io::Result<Vec<u16>> {
+    static MADE: std::sync::OnceLock<Result<String, i32>> = std::sync::OnceLock::new(); // WHAT: made once. WHY: every start of the cell uses the same one
+    let name = MADE.get_or_init(|| make_desktop(sid)).clone().map_err(std::io::Error::from_raw_os_error)?; // WHAT: its name, or why not. WHY: said by the caller
+    Ok(wide(OsStr::new(&name))) // WHAT: as Windows takes it. WHY: STARTUPINFO.lpDesktop
+}
+
+/// The work of [`desktop`].
+fn make_desktop(sid: &str) -> Result<String, i32> {
+    use windows_sys::Win32::Foundation::GENERIC_ALL;
+    use windows_sys::Win32::System::StationsAndDesktops::{CloseWindowStation, CreateDesktopW, CreateWindowStationW, GetProcessWindowStation, SetProcessWindowStation};
+    let (station, full) = super::desktop_name(std::process::id()); // WHAT: the names. WHY: one per Office Server process
+    let sddl = wide(OsStr::new(&super::desktop_sddl(sid))); // WHAT: who may use them. WHY: the system and the cell only
+    let (station_wide, desk_wide) = (wide(OsStr::new(&station)), wide(OsStr::new("Default"))); // WHAT: the names as Windows takes them. WHY: below
+    let failed = || std::io::Error::last_os_error().raw_os_error().unwrap_or(0); // WHAT: Windows' reason. WHY: said
+    // SAFETY: every pointer passed is to a live local for the length of the call; the descriptor Windows allocates is freed
+    // once, after both objects hold their own copies; the window station is the process's own again before returning; the
+    // two new handles are kept open on purpose for the life of the process.
+    unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: the cell's private window station and desktop
+        let mut descriptor: *mut core::ffi::c_void = std::ptr::null_mut(); // WHAT: filled by Windows. WHY: the permissions
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut descriptor, std::ptr::null_mut()) == 0 {
+            return Err(failed()); // WHAT: refused. WHY: never without its permissions
+        }
+        let attributes = SECURITY_ATTRIBUTES { nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(0), lpSecurityDescriptor: descriptor, bInheritHandle: 0 }; // WHAT: the permissions, not inherited. WHY: the cell gets no handle of ours
+        let made_station = CreateWindowStationW(station_wide.as_ptr(), 0, GENERIC_ALL, &attributes); // WHAT: the window station. WHY: the desktop lives in it
+        if made_station.is_null() {
+            let why = failed(); // WHAT: why. WHY: read first
+            LocalFree(descriptor);
+            return Err(why);
+        }
+        let ours = GetProcessWindowStation(); // WHAT: this process's own. WHY: put back after
+        if SetProcessWindowStation(made_station) == 0 {
+            let why = failed(); // WHAT: why. WHY: read first
+            CloseWindowStation(made_station);
+            LocalFree(descriptor);
+            return Err(why);
+        }
+        let made_desktop = CreateDesktopW(desk_wide.as_ptr(), std::ptr::null(), std::ptr::null(), 0, GENERIC_ALL, &attributes); // WHAT: the desktop, made in the station just set. WHY: CreateDesktopW makes it in the process's current station
+        let why = failed(); // WHAT: why, if it failed. WHY: read before anything else changes it
+        SetProcessWindowStation(ours); // WHAT: this process's own station back. WHY: it was changed only for the call above
+        LocalFree(descriptor); // WHAT: let go. WHY: both hold their own copies
+        if made_desktop.is_null() {
+            CloseWindowStation(made_station); // WHAT: let go. WHY: no desktop, no use
+            return Err(why);
+        }
+        Ok(full) // WHAT: station\desktop. WHY: both handles stay open with the process
+    }
+}
+
+/// A pipe for the cell's output: the read end, ours, never inherited; the
+/// write end, inheritable, for the cell.
+fn output_pipe() -> std::io::Result<(std::fs::File, HANDLE)> {
+    let attributes = SECURITY_ATTRIBUTES { nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(0), lpSecurityDescriptor: std::ptr::null_mut(), bInheritHandle: 1 }; // WHAT: inheritable handles. WHY: the write end goes to the cell
+    let (mut read, mut write): (HANDLE, HANDLE) = (std::ptr::null_mut(), std::ptr::null_mut()); // WHAT: filled by Windows. WHY: the two ends
+    // SAFETY: the pointers are to live locals; the read end is owned by the File returned, the write end by the caller.
+    unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- reviewed Windows FFI: an anonymous pipe for the cell's output
+        if CreatePipe(&mut read, &mut write, &attributes, 0) == 0 {
+            return Err(std::io::Error::last_os_error()); // WHAT: refused. WHY: said
+        }
+        SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0); // WHAT: the read end never inherited. WHY: only the write end goes to the cell
+        Ok((std::fs::File::from_raw_handle(read), write))
+    }
+}
+
+/// Writes what the cell prints into the Office Server's log, a line at a
+/// time, the first 50 lines of each start at most; the rest is read and let
+/// go, so the cell never waits on a full pipe.
+fn log_output(said: std::fs::File) {
+    use std::io::BufRead as _; // WHAT: reading lines. WHY: one log line each
+    let mut shown = 0; // WHAT: lines written so far. WHY: a cell printing without end can't flood the log
+    for line in BufReader::new(said).split(b'\n') {
+        let Ok(line) = line else { break }; // WHAT: the next line, or the end. WHY: read until the cell's output closes, so the cell never blocks writing
+        let line = String::from_utf8_lossy(&line[..line.len().min(4096)]).into_owned(); // WHAT: as text, bounded. WHY: whatever the cell's console writes
+        if shown < 50 && !line.trim().is_empty() {
+            shown += 1; // WHAT: counted. WHY: as above
+            tracing::warn!("the Citadel cell said: {}", line.chars().filter(|c| !c.is_control()).take(500).collect::<String>()); // WHAT: its words, plain and bounded. WHY: why it stopped, in the log
+        }
     }
 }
 

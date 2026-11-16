@@ -264,7 +264,8 @@ pub fn check_with(server: &Server, feed: &Feed, trusted: &hub::update::Trusted) 
                 // The server is what Office buys. The desktop app below is free
                 // and is offered whatever the license says.
                 if crate::license::covers(server, &release.published) {
-                    return match replace_self(release, &found, feed, trusted) {
+                    let licensed = crate::office::licensed(server).contains(&hub::license::Module::Citadel); // WHAT: whether this office may hold the cell. WHY: only a licensed office waits for, or takes, a pushed cell
+                    return match replace_self(release, &found, feed, trusted, licensed) {
                         Ok(()) => Outcome::ServerReplaced(release.version.clone()),
                         Err(why) => Outcome::Trouble(why),
                     };
@@ -371,35 +372,42 @@ fn replace_self(
     found: &Found,
     feed: &Feed,
     trusted: &hub::update::Trusted,
+    licensed: bool,
 ) -> Result<(), String> {
     let bytes = download(release, found, feed, trusted)?;
     let program = std::env::current_exe().map_err(|e| e.to_string())?;
     if let Some(home) = program.parent() {
-        stage_cell(release, found, feed, trusted, home)?; // WHAT: the release's cell, checked and waiting, before the server is swapped. WHY: critical 3: the cell updates with the server, under the same signature
+        stage_cell(release, trusted, home, licensed)?; // WHAT: the cell Fleet delivered for this version, checked and waiting, before the server is swapped. WHY: critical 3: the cell updates with the server, under the same signature
     }
     hub::update::swap_in(&program, &bytes)
         .map_err(|e| format!("could not put version {} in place: {e}", release.version))
 }
 
-/// The cell part of the release the server is updating to, downloaded,
-/// checked against the release signature and unpacked into `citadel.new`
+/// The cell part for the version the server is updating to: never from the
+/// public feed (which carries none), only the one Fleet pushed to this
+/// licensed office over the maintenance channel (`crate::cellbundle::keep_pushed`).
+/// Its signature is checked again, and it is unpacked into `citadel.new`
 /// beside the server; the new server checks it against its own pin and puts
-/// it in place before the cell starts. A release without a cell part is
-/// refused when a cell is installed here, so an update never leaves an
-/// office's estimating without its cell.
+/// it in place before the cell starts. While the office's licence lists
+/// `citadel` and a cell is installed here, the server isn't updated until
+/// Fleet has delivered that version's cell, so an office's estimating is
+/// never left without its cell.
 ///
 /// # Errors
 ///
-/// When the cell part is missing but needed, or doesn't check out.
-pub fn stage_cell(release: &Release, found: &Found, feed: &Feed, trusted: &hub::update::Trusted, home: &std::path::Path) -> Result<(), String> {
-    let part = found.published.services().into_iter().find(|r| r.platform == hub::feed::CITADEL_PLATFORM && r.version == release.version); // WHAT: the cell part of the same release. WHY: the cell and the server are one version
-    let Some(part) = part else {
-        if home.join(crate::cellbundle::FOLDER).exists() {
-            return Err(format!("version {} has no Citadel cell part, and this server runs the cell; the server was not updated", release.version)); // WHAT: refused. WHY: never update the server and strand its cell
+/// When the cell part is needed but hasn't been delivered, or doesn't check out.
+pub fn stage_cell(release: &Release, trusted: &hub::update::Trusted, home: &std::path::Path, licensed: bool) -> Result<(), String> {
+    let cell_here = home.join(crate::cellbundle::FOLDER).exists(); // WHAT: whether a cell is installed. WHY: an office without one updates freely
+    let Some((part, bytes)) = crate::cellbundle::pushed(home, &release.version).filter(|_| licensed) else {
+        if cell_here && licensed {
+            return Err(format!("version {}'s Citadel cell hasn't been delivered by Fleet yet, and this server runs the cell; the server was not updated", release.version)); // WHAT: refused, until Fleet pushes it. WHY: never update the server and strand its cell
         }
-        return Ok(()); // WHAT: no cell here, none in the release. WHY: an office without Citadel
+        return Ok(()); // WHAT: no cell here, or no licence for one. WHY: an office without Citadel never holds the cell
     };
-    let bytes = download(part, found, feed, trusted)?; // WHAT: downloaded and checked against the signature. WHY: the same key as the server
+    if part.platform != hub::feed::CITADEL_PLATFORM || part.version != release.version {
+        return Err(format!("the Citadel cell part kept for {} isn't that version's", release.version)); // WHAT: refused. WHY: the cell and the server are one version
+    }
+    trusted.check(&part, &bytes).map_err(|e| format!("version {}'s Citadel cell: the signature was not accepted: {e}", release.version))?; // WHAT: checked again. WHY: the same key as the server, at the moment it is used
     crate::cellbundle::stage_bundle(&bytes, home).map_err(|e| format!("version {}'s Citadel cell: {e}", release.version)) // WHAT: unpacked into citadel.new. WHY: put in place at the next start, before the cell runs
 }
 

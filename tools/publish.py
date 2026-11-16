@@ -111,11 +111,15 @@ MAC_DISK_IMAGE = "ExcaliburView-mac.dmg"
 # for that person, and an update replaces that one file.
 LINUX_FILE = "ExcaliburView-linux"
 # The Office Server's Citadel cell, made by tools/citadel_cell.py from the
-# LatCon release pinned in packaging/citadel-cell.json, and signed beside the
-# server with the same key. Its own platform, so its signature can never pass
-# for the server's; a server older than the cell never looks at it.
+# LatCon release pinned in packaging/citadel-cell.json. It is NEVER part of a
+# release made here: View's releases are public, and the cell is only for
+# offices licensed for citadel (Creede, 2026-11-13). Fleet's recipe signs it
+# with hyperview-release as this platform and pushes it to those offices only.
 CITADEL_PLATFORM = "windows-x64-citadel"  # WHAT: the cell's part. WHY: hub::feed::CITADEL_PLATFORM
 CITADEL_FILE = "ExcaliburOffice-Citadel.tar.gz"  # WHAT: its name on the release. WHY: the server downloads it by this name
+NOT_PUBLIC = ("The Citadel cell never goes in View's public release: only its pin does (packaging/citadel-cell.json). "
+              "Fleet's recipe signs it for licensed offices with: hyperview-release prepare --platform windows-x64-citadel "
+              "(docs/OFFICE-ENROLLMENT.md §6c).")  # WHAT: the refusal. WHY: Creede, 2026-11-13: offices without citadel never download it
 FILES = {APP_PLATFORM: APP_FILE, SERVER_PLATFORM: SERVER_FILE, MAC_PLATFORM: MAC_FILE, LINUX_PLATFORM: LINUX_FILE, CITADEL_PLATFORM: CITADEL_FILE}
 MANIFEST = "release.json"
 
@@ -249,13 +253,7 @@ def unsigned_manifest(version, channel, notes, published, min_api, programs):
     if programs.get(SERVER_PLATFORM):
         manifest["server"] = described(SERVER_PLATFORM)
     if programs.get(CITADEL_PLATFORM):
-        if "server" not in manifest:
-            raise SystemExit("--citadel goes with --server: the cell updates with the Office Server")  # WHAT: refused. WHY: the cell is part of the server's release
-        cell = citadel_cell()  # WHAT: the cell's checks. WHY: only the pinned cell is signed
-        cell.check_part(programs[CITADEL_PLATFORM], cell.read_pin())  # WHAT: exactly the pinned files. WHY: the server built with that pin runs nothing else
-        # `server` stays where every older server reads it; `servers` holds it
-        # again with the cell beside it, for a server that knows the cell.
-        manifest["servers"] = [manifest["server"], described(CITADEL_PLATFORM)]  # WHAT: both, under one signature key. WHY: critical 3
+        raise SystemExit(NOT_PUBLIC)  # WHAT: refused. WHY: the public release never carries the cell
     if len(apps) > 1:
         manifest["apps"] = apps
     return manifest
@@ -1271,11 +1269,8 @@ def cmd_release(a):
     # Building here still works for anybody who has the toolchain, which is
     # how a developer cuts a test release without waiting on CI.
     handed_in = bool(a.app or a.server)
-    pin_file = os.path.join(root, "packaging", "citadel-cell.json")  # WHAT: the cell's pin in the tree being released. WHY: the server is built with it
-    cell_pinned = os.path.exists(pin_file) and bool(json.load(open(pin_file, encoding="utf-8")).get("files"))  # WHAT: whether this build carries a cell. WHY: then its release must carry the cell part
-    if cell_pinned and not getattr(a, "citadel", None):
-        raise SystemExit("packaging/citadel-cell.json pins a Citadel cell, so the release needs it: make it with "
-                         "python3 tools/citadel_cell.py bundle --out ExcaliburOffice-Citadel.tar.gz and pass --citadel")  # WHAT: refused. WHY: a server that pins a cell must never ship without it
+    if getattr(a, "citadel", None):
+        raise SystemExit(NOT_PUBLIC)  # WHAT: refused. WHY: the public release never carries the cell; it needs no --citadel
     if handed_in:
         for what, path in (("--app", a.app), ("--server", a.server)):
             if not path:
@@ -1473,7 +1468,7 @@ def main():
     s.add_argument("--mac", help="the Mac program, zipped by deploy/macos/build.sh")
     s.add_argument("--linux", help="the Linux program, built by the Linux build workflow")
     s.add_argument("--server")
-    s.add_argument("--citadel", help=f"{CITADEL_FILE}, made by tools/citadel_cell.py bundle; signed beside the server")
+    s.add_argument("--citadel", help="refused: the Citadel cell is never in View's public release (Fleet delivers it)")
     s.add_argument("--out", help=f"default {MANIFEST}, or with --finish, {MANIFEST} in the kept folder")
     s.add_argument("--published")
     s.add_argument("--min-api", type=int, default=1)
@@ -1499,7 +1494,7 @@ def main():
     rel.add_argument("--notes-file")
     rel.add_argument("--app", help="ExcaliburView.exe, already built (GitHub builds it)")
     rel.add_argument("--server", help="ExcaliburView-Server.exe, already built")
-    rel.add_argument("--citadel", help=f"{CITADEL_FILE}, made by tools/citadel_cell.py bundle (needed once packaging/citadel-cell.json pins a cell)")
+    rel.add_argument("--citadel", help="refused: the Citadel cell is never in View's public release (Fleet delivers it)")
     rel.add_argument("--mac-zip", help="ExcaliburView-mac.zip from deploy/macos/build.sh")
     rel.add_argument("--mac-dmg", help="the .dmg from the same build")
     rel.add_argument("--linux", help="ExcaliburView-linux, built by the Linux build workflow")

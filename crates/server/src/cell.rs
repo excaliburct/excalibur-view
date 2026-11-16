@@ -48,10 +48,15 @@ pub const PROGRAM: &str = "Citadel Server.exe"; // WHAT: the cell's file name. W
 /// The folder it is in, inside the Office Server's program folder.
 pub const FOLDER: &str = "citadel"; // WHAT: `citadel\`. WHY: §6a
 
-/// The named pipe for an installation: `excalibur-office-<install id>`.
+/// The named pipe for an installation: `excalibur-office-<install id>`, the
+/// id written in letters, digits and dashes only (its `_` as `-`), at most
+/// 64 of them: the form the cell accepts (Citadel's `CellOptions.IsPipeName`).
+/// The id itself (`inst_<hex>`) has an underscore, and the cell refused
+/// every start over it (found by the Windows end-to-end test, 2026-11-12).
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn pipe_name(install_id: &str) -> String {
-    format!("excalibur-office-{install_id}") // WHAT: the pipe's name, without `\\.\pipe\`. WHY: §6a; the argument the cell is given
+    let id: String = install_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).take(64).collect(); // WHAT: letters, digits and dashes, 64 at most. WHY: the cell reads nothing else
+    format!("excalibur-office-{id}") // WHAT: the pipe's name, without `\\.\pipe\`. WHY: §6a; the argument the cell is given
 }
 
 /// The cell's data folder: `ProgramData\Excalibur Office\citadel`.
@@ -60,7 +65,9 @@ pub fn data_folder(program_data: &Path) -> PathBuf {
     program_data.join("Excalibur Office").join(FOLDER) // WHAT: the folder. WHY: §6
 }
 
-/// The program to start and its arguments, exactly as §6a writes them.
+/// The program to start and its fixed arguments, exactly as §6a writes
+/// them; each start adds [`relay_args`] and the certificate
+/// (`crate::cellkey::cell_args`).
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn command(program_folder: &Path, install_id: &str, data: &Path) -> (PathBuf, Vec<String>) {
     let program = program_folder.join(FOLDER).join(PROGRAM); // WHAT: `<office program folder>\citadel\Citadel Server.exe`. WHY: §6a
@@ -70,10 +77,23 @@ pub fn command(program_folder: &Path, install_id: &str, data: &Path) -> (PathBuf
         pipe_name(install_id), // WHAT: which pipe to ask. WHY: §6a
         "--data".to_string(),
         data.display().to_string(), // WHAT: its own data folder. WHY: §6a
-        "--port".to_string(),
-        PORT.to_string(), // WHAT: 47110. WHY: §6a
-    ];
+    ]; // WHAT: no port: the Office Server answers 47110 and relays to the cell (§6b). WHY: Windows' TLS refuses the cell's restricted token
     (program, args)
+}
+
+/// A new relay pipe's name for one start of the cell: `excalibur-cell-relay-`
+/// and 32 hex digits from 16 random bytes. Never the control pipe's name
+/// (`excalibur-office-...`), and unguessable.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn relay_pipe(random: [u8; 16]) -> String {
+    format!("excalibur-cell-relay-{}", hub::update::hex(&random)) // WHAT: the name. WHY: as above
+}
+
+/// The cell's arguments for its relay pipe: `--relay NAME --relay-sid SID`.
+/// The cell serves the pipe, letting only the system and its own SID in.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn relay_args(pipe: &str, cell_sid: &str) -> Vec<String> {
+    vec!["--relay".into(), pipe.into(), "--relay-sid".into(), cell_sid.into()] // WHAT: the four words. WHY: Citadel's CellOptions reads them
 }
 
 /// One argument quoted the way Windows programs read their command line
@@ -161,6 +181,7 @@ pub enum State {
     Running { version: String }, // WHAT: said hello with its version. WHY: shown as running
     NotAnswering, // WHAT: given up after too many restarts, or couldn't be started. WHY: §6a
     PipeTaken, // WHAT: another program holds the cell's pipe name. WHY: security review L4: an alarm, never a quiet restart
+    Refused, // WHAT: not started until the Office Server restarts: a copy of its key stuck in its folder. WHY: security review, 2026-11-16: an alarm an admin must act on, never retried
 }
 
 /// The supervisor's last word on the cell. Empty when there is no cell to
@@ -191,10 +212,16 @@ impl Watch {
     /// The cell as `/api/v1/office` reports Citadel: `None` while it starts,
     /// or when it isn't supervised, so the last look at its port is used.
     pub fn seen(&self) -> Option<crate::citadel::Seen> {
+        self.seen_at(hub::device::unix_now()) // WHAT: as of now. WHY: a key that failed to sign lately counts
+    }
+
+    /// [`Watch::seen`] as of `now` (Unix seconds).
+    fn seen_at(&self, now: i64) -> Option<crate::citadel::Seen> {
         match self.get()? {
             State::Starting => None, // WHAT: no word yet. WHY: the look at its port, or "looking"
+            State::Running { .. } if crate::cellrelay::sign_trouble(now) => Some(crate::citadel::Seen::NotAnswering), // WHAT: running, but its key wouldn't sign lately. WHY: security review, 2026-11-16: no computer can connect, so it isn't serving
             State::Running { version } => Some(crate::citadel::Seen::Running { version }), // WHAT: running, its version. WHY: Fleet compares it with the shelf
-            State::NotAnswering => Some(crate::citadel::Seen::NotAnswering), // WHAT: not answering. WHY: §6a
+            State::NotAnswering | State::Refused => Some(crate::citadel::Seen::NotAnswering), // WHAT: not answering: given up after restarts, or not started for an alarm an admin must act on. WHY: §6a; security review, 2026-11-16
             State::PipeTaken => Some(crate::citadel::Seen::PipeTaken), // WHAT: the pipe's name taken. WHY: shown as an alarm
         }
     }
@@ -231,6 +258,11 @@ pub fn supervise(launcher: &mut dyn Launcher, watch: &Watch, sleep: &dyn Fn(Dura
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 tracing::error!("ALARM: another program holds the Citadel cell's pipe ({e}); the cell is not started until the Office Server restarts"); // WHAT: written in the log as an alarm. WHY: something on this machine is pretending to be the Office Server to the cell
                 watch.set(State::PipeTaken); // WHAT: shown on /api/v1/office. WHY: an admin and Fleet see it
+                return;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                tracing::error!("{e}; the cell is not started until the Office Server restarts"); // WHAT: the alarm (its words start with ALARM). WHY: retrying can't fix it; an admin must
+                watch.set(State::Refused); // WHAT: shown on /api/v1/office as not answering. WHY: an admin and Fleet see it
                 return;
             }
             Err(e) => tracing::warn!("the Citadel cell could not be started: {e}"), // WHAT: said. WHY: counted as a stop
@@ -402,35 +434,40 @@ pub fn cell_sid(install_id: &str) -> String {
 /// else, and nothing inherited.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn pipe_sddl(cell_sid: &str) -> String {
-    format!("D:P(A;;GA;;;SY)(A;;0x12008b;;;{cell_sid})") // WHAT: SYSTEM full; the cell reads and writes data only (FILE_GENERIC_READ and FILE_WRITE_DATA), never FILE_CREATE_PIPE_INSTANCE. WHY: §6a: "SYSTEM, plus the cell's own SID. Nobody else may connect"; and the cell can never make an instance of the pipe itself
+    format!("D:P(A;;GA;;;SY)(A;;0x12019f;;;{cell_sid})") // WHAT: SYSTEM full; the cell what .NET's read-write open asks for (FILE_GENERIC_READ and FILE_GENERIC_WRITE, which holds FILE_CREATE_PIPE_INSTANCE). WHY: §6a: "SYSTEM, plus the cell's own SID. Nobody else may connect"; with 0x12008b the cell was refused (the Windows end-to-end test, 2026-11-12); it still never makes an instance, because both of the pipe's two are the Office Server's while the cell runs
 }
 
-/// The `icacls` runs that make the cell's data folder its own: nothing
-/// inherited, the system (which the cell's restricted token is made from,
-/// and needs for the token's first check) and the cell's SID.
+/// The cell's data folder's permissions, as SDDL: nothing inherited, the
+/// system in full (the cell's restricted token is made from it, and needs it
+/// for the token's first check) and the cell's SID to read, write and
+/// delete, both passed on to everything inside. Set through Windows' own
+/// call, never icacls: the cell's SID names no account, and icacls refused
+/// every grant to it on a real Windows server (the end-to-end test, 2026-11-12).
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
-pub fn data_steps(folder: &Path, cell_sid: &str) -> Vec<Vec<std::ffi::OsString>> {
-    let whole = folder.as_os_str().to_os_string(); // WHAT: the folder. WHY: every step is on it
+pub fn data_sddl(cell_sid: &str) -> String {
+    format!("D:P(A;OICI;FA;;;SY)(A;OICI;0x1301bf;;;{cell_sid})") // WHAT: protected; SYSTEM full; the cell's SID "modify" (0x1301bf). WHY: §6: ACL'd to the cell
+}
+
+/// The `icacls` runs after [`data_sddl`] is set: everything inside made to
+/// inherit it, and the system made the owner. Neither names the cell's SID.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn data_steps(folder: &Path) -> Vec<Vec<std::ffi::OsString>> {
+    let whole = folder.as_os_str().to_os_string(); // WHAT: the folder. WHY: the owner is set on it
     let below = folder.join("*").into_os_string(); // WHAT: what is inside. WHY: reset to inherit
-    let cell = format!("*{cell_sid}:(OI)(CI)M"); // WHAT: the cell may read, write and delete its own data. WHY: a blind store keeps its files here
     let os = |a: &str| std::ffi::OsString::from(a); // WHAT: one argument. WHY: icacls takes them as they are
     vec![
-        vec![whole.clone(), os("/reset"), os("/C"), os("/Q")], // WHAT: its own entries cleared. WHY: as the service's folder
-        vec![whole.clone(), os("/inheritance:r"), os("/grant:r"), os("*S-1-5-18:(OI)(CI)F"), os(&cell), os("/C"), os("/Q")], // WHAT: the system and the cell only. WHY: §6: ACL'd to the cell
-        vec![below, os("/reset"), os("/T"), os("/C"), os("/Q")], // WHAT: everything inside inherits. WHY: an entry written on a file goes
+        vec![below, os("/reset"), os("/T"), os("/C"), os("/Q")], // WHAT: everything inside inherits. WHY: an entry written on a moved file goes
         vec![whole, os("/setowner"), os("*S-1-5-18"), os("/T"), os("/C"), os("/Q")], // WHAT: the system owns it. WHY: nobody keeps an owner's right to change it back
     ]
 }
 
-/// The `icacls` runs that let the cell read and run its own program folder:
-/// the system and administrators as for the service, and the cell's SID to
-/// read and run. Run after the service's folder is locked, which resets it.
+/// The cell's program folder's own entry, as SDDL: the cell's SID may read
+/// and run (0x1200a9), added to what the folder inherits from the locked
+/// service folder (the system and administrators). Set through Windows' own
+/// call, as [`data_sddl`].
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
-pub fn program_steps(folder: &Path, cell_sid: &str) -> Vec<Vec<std::ffi::OsString>> {
-    let whole = folder.as_os_str().to_os_string(); // WHAT: `citadel\`. WHY: the cell's program
-    let os = |a: &str| std::ffi::OsString::from(a); // WHAT: one argument. WHY: as above
-    let cell = format!("*{cell_sid}:(OI)(CI)RX"); // WHAT: read and run. WHY: never change its own program
-    vec![vec![whole, os("/grant:r"), os(&cell), os("/C"), os("/Q")]] // WHAT: added to what it inherits from the locked service folder. WHY: the system and administrators keep theirs
+pub fn program_sddl(cell_sid: &str) -> String {
+    format!("D:(A;OICI;0x1200a9;;;{cell_sid})") // WHAT: not protected, so the inherited entries stay; the cell reads and runs. WHY: never change its own program
 }
 
 /// The SIDs the cell's restricted token is checked against a second time:
@@ -455,8 +492,9 @@ pub const OLD_FIREWALL_RULE: &str = "Citadel Server"; // WHAT: the name 1.0's in
 pub const OLD_UPDATE_TASK: &str = "Citadel Server updates"; // WHAT: the task 1.0 made, 03:30 as the system (ServerUpdateCheck.TaskName). WHY: it would try to update a program that no longer runs
 
 /// The `netsh` arguments that let the office network reach the cell on
-/// 47110: TCP, for the cell's own program only, on every profile and from
-/// the local subnet only, as the Office Server's own 8714 rule.
+/// 47110: TCP, for `program` only (the Office Server's own program, which
+/// answers 47110 and relays to the cell), on every profile and from the
+/// local subnet only, as the Office Server's own 8714 rule.
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
 pub fn firewall_rule(program: &Path) -> Vec<String> {
     vec![
@@ -469,7 +507,7 @@ pub fn firewall_rule(program: &Path) -> Vec<String> {
         "action=allow".into(), // WHAT: let in. WHY: nothing else opens 47110
         "protocol=TCP".into(), // WHAT: TCP. WHY: the cell's HTTPS
         format!("localport={PORT}"), // WHAT: 47110. WHY: §6
-        format!("program={}", program.display()), // WHAT: the cell's own program only. WHY: no other program may answer on the port through this rule
+        format!("program={}", program.display()), // WHAT: the Office Server's program only. WHY: it answers 47110 since 1.1.6's relay; no other program may answer on the port through this rule
         "profile=any".into(), // WHAT: every network profile. WHY: as 8714: a new network is "Public" until someone says otherwise
         "remoteip=localsubnet".into(), // WHAT: the office network only. WHY: as 8714
     ]
@@ -663,12 +701,41 @@ pub fn extract_folder(home: &Path, for_the_cell: bool) -> PathBuf {
 /// The variable that points .NET's single-file bundle at that folder.
 pub const EXTRACT_VARIABLE: &str = "DOTNET_BUNDLE_EXTRACT_BASE_DIR"; // WHAT: .NET's own setting. WHY: harmless when the bundle doesn't extract
 
-/// The `icacls` run that lets the cell use its own unpacking folder: added to
-/// what it inherits from the locked service folder.
+/// The cell's token's default DACL, as SDDL: the system and the cell's SID.
+/// What the cell makes without naming who may use it (its own process and
+/// threads above all) gets this; the system's default alone fails the
+/// token's second check, and Windows ends the cell as it starts (0xC0000142,
+/// found by the Windows end-to-end test).
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
-pub fn extract_steps(folder: &Path, cell_sid: &str) -> Vec<Vec<std::ffi::OsString>> {
-    let os = |a: &str| std::ffi::OsString::from(a); // WHAT: one argument. WHY: icacls takes them as they are
-    vec![vec![folder.as_os_str().to_os_string(), os("/grant:r"), os(&format!("*{cell_sid}:(OI)(CI)M")), os("/C"), os("/Q")]] // WHAT: the cell may unpack there. WHY: nobody else but the system and administrators can
+pub fn token_default_sddl(cell_sid: &str) -> String {
+    format!("D:(A;;GA;;;SY)(A;;GA;;;{cell_sid})") // WHAT: the system and the cell, in full. WHY: the cell may open what it made
+}
+
+/// The cell's own window station and desktop, as SDDL: the system and the
+/// cell's SID, nobody else. A process under the cell's restricted token can't
+/// open the service's own desktop (it grants the system only, which the
+/// token's second check leaves out), and Windows then ends it as it starts
+/// with 0xC0000142 (found by the Windows end-to-end test, 2026-11-12).
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn desktop_sddl(cell_sid: &str) -> String {
+    format!("D:P(A;;GA;;;SY)(A;;GA;;;{cell_sid})") // WHAT: protected; the system and the cell, in full. WHY: the cell's private desktop, no other program's
+}
+
+/// The window station made for the cell by the Office Server with this
+/// process id, and the desktop in it, as `STARTUPINFO.lpDesktop` names them.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn desktop_name(process_id: u32) -> (String, String) {
+    let station = format!("ExcaliburOfficeCell-{process_id}"); // WHAT: one per Office Server process. WHY: a restarted server makes its own; the old one goes with the old process
+    let full = format!("{station}\\Default"); // WHAT: station\desktop. WHY: the form CreateProcess reads
+    (station, full)
+}
+
+/// The cell's unpacking folder's own entry, as SDDL: the cell's SID may
+/// change it (0x1301bf), added to what it inherits from the locked service
+/// folder. Set through Windows' own call, as [`data_sddl`].
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn extract_sddl(cell_sid: &str) -> String {
+    format!("D:(A;OICI;0x1301bf;;;{cell_sid})") // WHAT: not protected; the cell unpacks there. WHY: nobody else but the system and administrators can
 }
 
 /// A Windows environment block (`name=value` pairs, each ended by a zero,
@@ -704,6 +771,10 @@ pub fn end_for_update() -> bool {
 
 #[cfg(windows)]
 pub mod windows;
+#[cfg(windows)]
+mod tlskey; // WHAT: the cell's TLS key in Windows' key store. WHY: §6b; crate::cellkey decides, this hands it to Windows
+#[cfg(windows)]
+mod relaywin; // WHAT: the 47110 listener and the cell's relay pipe. WHY: crate::cellrelay decides, this hands it to Windows
 
 /// Starts supervising the cell, when the licence lists it and its program is
 /// there. Windows only; elsewhere there is no cell.
@@ -728,7 +799,10 @@ mod tests {
         assert!(texts.contains(&format!(r"{}=C:\x\cell", super::EXTRACT_VARIABLE)), "{texts:?}"); // WHAT: set. WHY: the folder
         assert!(!texts.iter().any(|t| t.to_ascii_lowercase().contains("windows\\temp")), "the old value is gone: {texts:?}"); // WHAT: replaced. WHY: never Windows' temp
         assert!(texts.iter().any(|t| t.starts_with("Path=")), "everything else kept"); // WHAT: kept. WHY: the cell needs its environment
-        assert!(super::extract_steps(Path::new("x"), "S-1-5-80-1").last().unwrap().iter().any(|a| a.to_string_lossy() == "*S-1-5-80-1:(OI)(CI)M"), "the cell may use its own"); // WHAT: granted. WHY: it unpacks there
+        assert_eq!(super::token_default_sddl("S-1-5-80-1"), "D:(A;;GA;;;SY)(A;;GA;;;S-1-5-80-1)", "what the cell makes is the system's and its own"); // WHAT: its token's default DACL. WHY: it must open its own process
+        assert_eq!(super::desktop_sddl("S-1-5-80-1"), "D:P(A;;GA;;;SY)(A;;GA;;;S-1-5-80-1)", "the cell's desktop is the system's and the cell's alone"); // WHAT: its desktop. WHY: a restricted token can't use the service's own
+        assert_eq!(super::desktop_name(42), ("ExcaliburOfficeCell-42".to_string(), "ExcaliburOfficeCell-42\\Default".to_string()), "station\\desktop, one per server process"); // WHAT: the names. WHY: lpDesktop's form
+        assert_eq!(super::extract_sddl("S-1-5-80-1"), "D:(A;OICI;0x1301bf;;;S-1-5-80-1)", "the cell may use its own, beside what it inherits"); // WHAT: granted. WHY: it unpacks there
     }
 
     #[test]
@@ -856,7 +930,14 @@ mod tests {
         let (program, args) = command(Path::new(r"C:\Program Files\Excalibur Office"), "inst_1", Path::new(r"C:\ProgramData\Excalibur Office\citadel"));
         let line = command_line(&program, &args);
         assert!(line.starts_with('"') && line.contains("Citadel Server.exe\""), "{line}");
-        assert!(line.ends_with(r#" --cell --pipe excalibur-office-inst_1 --data "C:\ProgramData\Excalibur Office\citadel" --port 47110"#), "{line}");
+        assert!(line.ends_with(r#" --cell --pipe excalibur-office-inst-1 --data "C:\ProgramData\Excalibur Office\citadel""#), "{line}"); // WHAT: no port. WHY: the Office Server answers 47110
+        let relay = relay_pipe([0xab; 16]); // WHAT: a relay pipe's name. WHY: its form
+        assert_eq!(relay, format!("excalibur-cell-relay-{}", "ab".repeat(16)), "unguessable, and never the control pipe"); // WHAT: as made. WHY: below
+        assert!(!relay.starts_with("excalibur-office-"), "not the control pipe's prefix"); // WHAT: apart. WHY: the cell refuses a relay name that is its control pipe
+        assert_eq!(relay_args("r", "S-1-5-80-1"), vec!["--relay", "r", "--relay-sid", "S-1-5-80-1"], "the relay's arguments"); // WHAT: as CellOptions reads them. WHY: below
+        let real = pipe_name(&crate::api::fresh_id("inst")); // WHAT: the pipe for a real installation id. WHY: inst_<hex> has an underscore
+        let id = real.strip_prefix("excalibur-office-").unwrap_or_default(); // WHAT: the id part. WHY: checked as the cell checks it
+        assert!(real.len() > 17 && real.len() <= 81 && !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "the cell's own rule (CellOptions.IsPipeName) takes {real}"); // WHAT: what the cell accepts. WHY: it refused every start with the underscore
         assert_eq!(quoted(r"a\b"), r"a\b");
         assert_eq!(quoted(r#"a "b""#), r#""a \"b\"""#);
         assert_eq!(quoted(r"C:\a b\"), r#""C:\a b\\""#);
@@ -923,6 +1004,39 @@ mod tests {
         assert_eq!(watch.seen().map(|s| s.state()), Some("pipe-taken"));
     }
 
+    /// A start refused because a copy of the key is stuck with the cell.
+    struct KeyStuck {
+        starts: usize,
+    }
+
+    impl Launcher for KeyStuck {
+        fn start(&mut self) -> std::io::Result<()> {
+            self.starts += 1; // WHAT: counted. WHY: once only
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, crate::cellkey::PFX_STUCK)) // WHAT: as tlskey refuses it. WHY: below
+        }
+        fn wait(&mut self) {}
+    }
+
+    #[test]
+    fn a_key_copy_stuck_with_the_cell_stops_it_for_good_and_shows_it_not_answering() {
+        let watch = Watch::default(); // WHAT: the supervisor's word. WHY: below
+        let mut cell = KeyStuck { starts: 0 }; // WHAT: a start refused so. WHY: below
+        let start = Instant::now(); // WHAT: the clock. WHY: below
+        supervise(&mut cell, &watch, &|_| {}, &|| start, 3); // WHAT: supervised. WHY: under test
+        assert_eq!(cell.starts, 1, "never retried: an admin must act"); // WHAT: once. WHY: security review, 2026-11-16
+        assert_eq!(watch.get(), Some(State::Refused)); // WHAT: refused. WHY: kept
+        assert_eq!(watch.seen().map(|s| s.state()), Some("not-answering"), "shown on /api/v1/office"); // WHAT: not answering. WHY: as above
+    }
+
+    #[test]
+    fn a_running_cell_whose_key_would_not_sign_shows_as_not_serving() {
+        let watch = Watch::default(); // WHAT: the supervisor's word. WHY: below
+        watch.set(State::Running { version: "1.1.7".into() }); // WHAT: running. WHY: below
+        crate::cellrelay::note_sign_failure(1_000_000); // WHAT: a handshake's signing failed at a fixed past moment (the same one cellrelay's test uses). WHY: tests side by side never see a failure "now"
+        assert_eq!(watch.seen_at(1_000_010).map(|s| s.state()), Some("not-answering"), "not serving while its key won't sign"); // WHAT: shown. WHY: security review, 2026-11-16
+        assert_eq!(watch.seen_at(1_000_000 + crate::cellrelay::SIGN_TROUBLE_FOR).map(|s| s.state()), Some("running"), "serving again once it signs"); // WHAT: cleared. WHY: a failure that stops
+    }
+
     #[test]
     fn a_cell_that_keeps_stopping_is_given_up_on_and_shown_not_answering() {
         let watch = Watch::default();
@@ -943,11 +1057,11 @@ mod tests {
         assert!(sid.starts_with("S-1-5-80-") && sid.split('-').count() == 9, "S, 1, 5, 80 and five sub-authorities: {sid}");
         assert_eq!(sid, cell_sid("inst_1"), "the same every start");
         assert_ne!(sid, cell_sid("inst_2"), "another installation, another SID");
-        assert_eq!(pipe_sddl(&sid), format!("D:P(A;;GA;;;SY)(A;;0x12008b;;;{sid})"), "the cell may read and write, never make an instance");
-        let steps = data_steps(Path::new(r"C:\ProgramData\Excalibur Office\citadel"), &sid);
-        let grant: Vec<String> = steps[1].iter().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert!(grant.contains(&"/inheritance:r".to_string()));
-        assert_eq!(grant.iter().filter(|a| a.starts_with('*')).count(), 2, "the system and the cell, nobody else: {grant:?}");
+        assert_eq!(pipe_sddl(&sid), format!("D:P(A;;GA;;;SY)(A;;0x12019f;;;{sid})"), "the cell may open it read-write as .NET does; both instances are the server's while it runs"); // WHAT: the pipe's entries. WHY: .NET's NamedPipeClientStream asks GENERIC_READ and GENERIC_WRITE
+        assert_eq!(data_sddl(&sid), format!("D:P(A;OICI;FA;;;SY)(A;OICI;0x1301bf;;;{sid})"), "protected: the system and the cell, nobody else"); // WHAT: the data folder's entries. WHY: §6
+        assert_eq!(program_sddl(&sid), format!("D:(A;OICI;0x1200a9;;;{sid})"), "the cell reads and runs its program, beside what the folder inherits"); // WHAT: the program folder's entry. WHY: never change its own program
+        let steps = data_steps(Path::new(r"C:\ProgramData\Excalibur Office\citadel")); // WHAT: icacls after the entries are set. WHY: checked below
+        assert!(steps.iter().flatten().all(|a| !a.to_string_lossy().contains(&sid)), "icacls never names the cell's SID, which it refuses: {steps:?}"); // WHAT: no grant to the cell through icacls. WHY: the end-to-end test found icacls refusing it
         assert!(!restricting_sids(&sid).iter().any(|s| s == "S-1-5-18" || s == "S-1-5-32-544"), "never the system or administrators");
     }
 }

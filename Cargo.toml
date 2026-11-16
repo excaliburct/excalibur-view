@@ -13,7 +13,7 @@ exclude = ["plugins", "private"]
 # CAD and Archetype as licensed parts and watching Citadel, HTTPS on the same
 # port 8714 with seats pinning its certificate; two builds never share a
 # version, because an install refuses to put a version over itself.
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 # WHAT: the oldest Rust that builds it. WHY: 1.89 gives File::try_lock, the system-held lock the off-site
 # backup takes so a crashed run never blocks the next one; every build uses the newest stable.

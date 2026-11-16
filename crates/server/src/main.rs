@@ -28,6 +28,7 @@ use hyperview_server::{run, Config, Store, VERSION};
 /// double-clicked on the server can tell it is newer than the one installed.
 static BUILD_MARK: &str = hub::build_mark!();
 
+#[allow(clippy::too_many_lines)] // WHAT: one arm per command. WHY: the command table reads in one place; each arm is short
 fn main() {
     std::hint::black_box(BUILD_MARK);
     let given: Vec<String> = std::env::args().take(6).collect(); // WHAT: the program's name and its first five words, read once. WHY: the command, and the device code --make-admin takes, which may be typed as three groups
@@ -49,7 +50,9 @@ fn main() {
                 Err(why) => format!("error\n{why}\n"),
             };
             let _ = std::fs::create_dir_all(hyperview_server::winsvc::home());
-            let _ = std::fs::write(hyperview_server::winsvc::report_file(), report);
+            if let Err(e) = std::fs::write(hyperview_server::winsvc::report_file(), &report) {
+                eprintln!("  The install's report couldn't be written ({e}); it said: {report}"); // WHAT: said where a person or a script sees it. WHY: an install that leaves no report must still say why
+            }
             std::process::exit(if result.is_ok() { 0 } else { 1 });
         }
         #[cfg(windows)]
@@ -106,6 +109,28 @@ fn main() {
             }
         }
         "--reopen-claim" | "--make-admin" | "--reset-admins" | "--retry-citadel-move" => device_console(&first, Some(given.get(2..).map(|rest| rest.join(" ")).unwrap_or_default().as_str()).filter(|code| !code.is_empty())), // WHAT: the device list's console commands. WHY: §3 and the security review's M3; on the server itself
+        #[cfg(windows)]
+        "--install-citadel-cell" => { // WHAT: the Citadel cell installed from the office's private IT kit. WHY: View's public release never carries it (Creede, 2026-11-13)
+            let Some(zip) = std::env::args_os().nth(2) else {
+                eprintln!("  Say which zip: hyperview-server --install-citadel-cell \"D:\\CitadelServer-1.1.7-win-x64-cell.zip\""); // WHAT: how to use it. WHY: a person types it
+                std::process::exit(2);
+            };
+            match hyperview_server::winsvc::install_citadel_cell(std::path::Path::new(&zip)) {
+                Ok(said) => println!("  {said}"), // WHAT: what was done. WHY: a person reads it
+                Err(why) => {
+                    eprintln!("  {why}"); // WHAT: why not. WHY: said plainly
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(windows)]
+        "--forget-citadel-key-copies" => match hyperview_server::winsvc::forget_citadel_key_copies() { // WHAT: the key's file copies removed once the cell has served. WHY: security review, 2026-11-16: the key then lives only in Windows' store
+            Ok(said) => println!("  {said}"), // WHAT: what was done. WHY: a person reads it
+            Err(why) => {
+                eprintln!("  {why}"); // WHAT: why not. WHY: said plainly
+                std::process::exit(1);
+            }
+        },
         #[cfg(windows)]
         "--roll-back" => match hyperview_server::winsvc::roll_back() { // WHAT: the version before the last update put back, server and cell together. WHY: critical 4: the documented rollback, for real
             Ok(said) => println!("  {said}"), // WHAT: what was done. WHY: a person reads it

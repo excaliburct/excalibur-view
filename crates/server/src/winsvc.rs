@@ -95,6 +95,9 @@ pub fn install() -> Result<(), String> {
     let home = home();
     let parent = home.parent().ok_or("the service's folder has no folder above it")?.to_path_buf(); // WHAT: ProgramData\Excalibur Hyperview. WHY: locked first
     std::fs::create_dir_all(&parent).map_err(|e| format!("could not make {}: {e}", parent.display()))?;
+    if std::fs::symlink_metadata(&home).is_ok_and(|m| m.is_dir()) {
+        crate::lockdown::lock_down(&home); // WHAT: the service's folder, if there already, made its own (protected) first. WHY: locking the folder above takes away what it passed on, which would leave this folder with no entries until it was locked itself
+    }
     crate::lockdown::lock_parent(&parent); // WHAT: the folder above made the system's and administrators' alone. WHY: whoever made it first could otherwise swap the service's folder (audit, 2026-11-11)
     if std::fs::symlink_metadata(&home).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(format!("{} is a link to somewhere else, not a folder; it was left as it is and nothing was installed. Remove it, then install again.", home.display())); // WHAT: refused. WHY: a link put there would point the system's program somewhere an account controls
@@ -130,14 +133,10 @@ pub fn install() -> Result<(), String> {
         .map_err(|e| format!("could not put the server in {}: {e}", home.display()))?;
     }
 
-    // The Citadel cell, from the `citadel\` folder the USB kit carries beside
-    // this program: checked file by file against the pin this program was
-    // built with, and put in place. Without that folder an installed cell is
-    // left as it is (an update brings the cell with the server).
-    if let Some(kit) = me.parent().map(|d| d.join(crate::cellbundle::FOLDER)).filter(|kit| kit.is_dir() && !same_file(kit, &home.join(crate::cellbundle::FOLDER))) {
-        let pin = crate::cellbundle::pinned().map_err(|why| format!("a citadel folder is beside this program, but {why}; nothing was installed"))?; // WHAT: this build's pin. WHY: critical 3: only the pinned cell is installed
-        crate::cellbundle::place_from(&kit, &home, &pin).map_err(|why| format!("the Citadel cell couldn't be installed: {why}"))?; // WHAT: checked and put in place. WHY: critical 3: install puts the cell in place
-    }
+    // The Citadel cell is never installed from here: it isn't in View's public
+    // release. An office licensed for it installs it afterwards with
+    // `--install-citadel-cell` and the zip from its private IT kit; an
+    // installed cell is left as it is (Fleet delivers it with each update).
 
     // Somebody may have run the plain program first and already set up an
     // office on it. Those drawings come along rather than being left behind
@@ -265,6 +264,82 @@ pub fn roll_back() -> Result<String, String> {
     }
 }
 
+/// `hyperview-server --install-citadel-cell "<zip>"`: an administrator
+/// installs the Citadel cell from the office's private IT kit. Refused unless
+/// the Office Server is installed, its licence lists `citadel`, and the zip is
+/// the one this build pins; then the pinned files are checked, left waiting
+/// as `citadel.new`, and the service is restarted, which checks the cell once
+/// more, puts it in place and starts it. What was done, in words.
+///
+/// # Errors
+///
+/// When any of those isn't so; nothing is installed then.
+pub fn install_citadel_cell(zip: &Path) -> Result<String, String> {
+    if !installed_program().is_file() {
+        return Err("the Office Server isn't installed here yet; install it first, then the Citadel cell".to_string()); // WHAT: refused. WHY: the cell runs inside the installed service
+    }
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).map_err(|e| format!("Windows would not let this reach the service manager ({e}); run it as an administrator"))?; // WHAT: the service manager. WHY: the service is stopped while its data is read
+    let service = manager.open_service(NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::START).map_err(|e| format!("the Office Server's service couldn't be opened ({e}); run this as an administrator"))?; // WHAT: the service. WHY: stopped and started again
+    stop_and_wait(&service); // WHAT: stopped first. WHY: its database is opened here; a running service holding it made the open fail (the Windows end-to-end test, try 19)
+    let done = stage_citadel_cell(zip); // WHAT: checked and waiting, or refused. WHY: below
+    let started = service.start::<&str>(&[]); // WHAT: started again, whatever happened. WHY: the office is never left without its server; it puts a waiting cell in place and starts it
+    match (done, started) {
+        (Ok(version), Ok(())) => Ok(format!("The Citadel cell {version} was checked against this Office Server's pin and installed. The service restarted, and starts the cell now.")), // WHAT: said. WHY: a person reads it
+        (Ok(_), Err(e)) => Err(format!("the cell waits, but the service didn't start again ({e}); start \"{DISPLAY}\" in Services")), // WHAT: said. WHY: someone must act
+        (Err(why), _) => Err(why), // WHAT: refused; the service runs as before. WHY: said
+    }
+}
+
+/// The work of [`install_citadel_cell`], with the service stopped: the
+/// licence checked, the zip checked against the pin and its files left
+/// waiting. The cell's version.
+fn stage_citadel_cell(zip: &Path) -> Result<String, String> {
+    let mut config = crate::Config::from_environment(); // WHAT: the server's settings. WHY: its licence keys and data
+    config.data = data_folder(); // WHAT: the installed service's data. WHY: its licence is there
+    config.program_folder = Some(home()); // WHAT: the service's folder. WHY: the cell goes beside it
+    let store = crate::Store::open(&config.database(), &config.blobs()).map_err(|e| format!("the Office Server's data couldn't be opened ({e})"))?; // WHAT: its store. WHY: the licence it holds
+    let server = crate::api::Server::new(store, config); // WHAT: the server's view of its licence, the data folder's licence file taken as at a start. WHY: the same rule the service applies
+    if !crate::office::licensed(&server).contains(&hub::license::Module::Citadel) {
+        return Err(format!("{}; nothing was installed. Put the office's licence (listing citadel) in {} and run this again.", crate::cellbundle::NOT_LICENSED, data_folder().display())); // WHAT: refused. WHY: Creede, 2026-11-13: only licensed offices hold the cell
+    }
+    drop(server); // WHAT: the database let go. WHY: before the service starts again
+    let size = std::fs::metadata(zip).map_err(|e| format!("{} couldn't be read ({e})", zip.display()))?.len(); // WHAT: its size. WHY: checked before it is read
+    if size > crate::cellbundle::ZIP_MOST {
+        return Err(format!("{} is too big to be the Citadel cell's zip", zip.display())); // WHAT: refused. WHY: never read whole
+    }
+    let bytes = std::fs::read(zip).map_err(|e| format!("{} couldn't be read ({e})", zip.display()))?; // WHAT: the zip. WHY: checked against the pin
+    let pin = crate::cellbundle::pinned()?; // WHAT: the cell this build pins. WHY: only that one
+    crate::cellbundle::stage_zip(&bytes, &home(), &pin)?; // WHAT: checked and waiting. WHY: put in place by the service's next start
+    Ok(pin.version) // WHAT: its version. WHY: said
+}
+
+/// `hyperview-server --forget-citadel-key-copies`: an administrator removes
+/// the copies of the Citadel cell's key kept as files (`citadel-tls\*.pfx`,
+/// and the `tls.pfx` in Citadel Server 1.0's renamed data folder), once the
+/// cell has answered a computer with the key kept in Windows' store; refused
+/// before then (`crate::cellkey::forget_copies`). What was done, in words.
+///
+/// # Errors
+///
+/// When it is refused, or a copy can't be removed.
+pub fn forget_citadel_key_copies() -> Result<String, String> {
+    use rusqlite::OptionalExtension as _; // WHAT: a row that may not be there. WHY: below
+    let config = crate::Config { data: data_folder(), ..crate::Config::default() }; // WHAT: the installed service's data. WHY: its settings
+    let db = rusqlite::Connection::open_with_flags(config.database(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| format!("the Office Server's data couldn't be read ({e}); run this as an administrator on the server")) ?; // WHAT: read only. WHY: the running service keeps writing; nothing here changes it
+    let read = |key: &str| db.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get::<_, String>(0)).optional().ok().flatten(); // WHAT: one setting. WHY: below
+    let served = read(crate::cellkey::SERVED); // WHAT: when the cell first served, if it has. WHY: refused before then
+    let kept_as = read(crate::cellmove::SETTING).and_then(|t| serde_json::from_str::<crate::cellmove::Moved>(&t).ok()).and_then(|m| match m {
+        crate::cellmove::Moved::Moved { kept_as, .. } => kept_as, // WHAT: 1.0's renamed folder. WHY: its tls.pfx is a copy too
+        _ => None,
+    });
+    let removed = crate::cellkey::forget_copies(&home(), kept_as.as_deref().map(Path::new), served.as_deref())?; // WHAT: removed, or refused. WHY: crate::cellkey decides
+    Ok(if removed.is_empty() {
+        "There were no copies of the Citadel cell's key to remove.".to_string() // WHAT: said. WHY: plain
+    } else {
+        format!("Removed {} copies of the Citadel cell's key: {}. The key itself stays in Windows' key store, usable by the system alone.", removed.len(), removed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")) // WHAT: what went. WHY: a person checks it
+    })
+}
+
 fn stop_and_wait(service: &windows_service::service::Service) {
     let _ = service.stop();
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -309,27 +384,23 @@ fn open_firewall() -> Result<(), String> {
             return Err(format!("the firewall would not let {protocol} {number} in"));
         }
     }
-    let cell = crate::cellbundle::program_in(&home()); // WHAT: the cell's program, where it is installed. WHY: its rule is for it alone
     let _ = netsh(&["advfirewall", "firewall", "delete", "rule", &format!("name={}", crate::cell::FIREWALL_RULE)]); // WHAT: an older copy of the rule gone. WHY: added fresh, as the two above
-    let rule = crate::cell::firewall_rule(&cell); // WHAT: TCP 47110 for the cell's program, office network only. WHY: critical 2: nothing opened 47110 for the cell
+    let rule = crate::cell::firewall_rule(&installed_program()); // WHAT: TCP 47110 for the Office Server's program, office network only. WHY: critical 2; it answers 47110 and relays to the cell
     if !netsh(&rule.iter().map(String::as_str).collect::<Vec<_>>())? {
         return Err(format!("the firewall would not let TCP {} in for the Citadel cell", crate::cell::PORT)); // WHAT: said. WHY: estimating couldn't reach the cell
     }
     Ok(())
 }
 
-/// Adds the cell's firewall rule when it is missing, at the cell's first
-/// start: an office installed before the rule existed gets it from its
-/// update.
-pub fn cell_firewall(program: &Path) {
-    let shown = crate::cell::firewall_rule_shown(); // WHAT: asked for by name. WHY: added only when missing
-    if matches!(netsh(&shown.iter().map(String::as_str).collect::<Vec<_>>()), Ok(true)) {
-        return; // WHAT: already there. WHY: nothing to do
-    }
-    let rule = crate::cell::firewall_rule(program); // WHAT: the rule. WHY: critical 2
+/// Puts the cell's 47110 rule in place for the Office Server's program at
+/// each start of the cell: removed, then added, so a rule made for an older
+/// program (the cell's own, before 0.7.1's relay) never lingers.
+pub fn cell_firewall() {
+    let _ = netsh(&["advfirewall", "firewall", "delete", "rule", &format!("name={}", crate::cell::FIREWALL_RULE)]); // WHAT: the rule as it was, gone. WHY: it may name the cell's program, which no longer listens
+    let rule = crate::cell::firewall_rule(&installed_program()); // WHAT: the rule. WHY: critical 2
     match netsh(&rule.iter().map(String::as_str).collect::<Vec<_>>()) {
-        Ok(true) => tracing::warn!("the firewall now lets the office network reach the Citadel cell on TCP {}", crate::cell::PORT), // WHAT: said. WHY: whoever looks after the server can see it
-        _ => tracing::error!("the firewall would not let TCP {} in for the Citadel cell; estimating computers can't reach it", crate::cell::PORT), // WHAT: the alarm. WHY: someone must act
+        Ok(true) => tracing::info!("the firewall lets the office network reach the Citadel cell on TCP {}", crate::cell::PORT), // WHAT: said. WHY: the log shows it
+        _ => tracing::error!("ALARM: the firewall would not let TCP {} in for the Citadel cell; estimating computers can't reach it", crate::cell::PORT), // WHAT: the alarm. WHY: someone must act
     }
 }
 

@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    WHAT: two estimating computers for the Office Server's Windows end-to-end test (deploy/windows-test/office-e2e.ps1),
+          built on LatCon Estimating's own client library, taken from a LatCon Estimating checkout named by LatconRepo.
+    WHY:  the test links computers the way LatCon Estimating really does, through its real code, so the Office Server and
+          its Citadel cell are tested against the program the office runs, not a stand-in written for the test.
+
+      dotnet build deploy/windows-test/office-device -c Release -p:LatconRepo=C:\path\to\LatconEstimating
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>                                <!-- WHAT: a console program. WHY: the script runs it and reads its exit code -->
+    <TargetFramework>net10.0</TargetFramework>                  <!-- WHAT: .NET 10. WHY: the same as LatCon Estimating's library -->
+    <Nullable>enable</Nullable>                                 <!-- WHAT: null checks. WHY: as LatCon's own code -->
+    <ImplicitUsings>enable</ImplicitUsings>                     <!-- WHAT: the usual namespaces. WHY: a shorter file -->
+    <InvariantGlobalization>true</InvariantGlobalization>       <!-- WHAT: no culture data. WHY: as LatCon's own builds -->
+    <IsPackable>false</IsPackable>                              <!-- WHAT: never a package. WHY: a test tool only -->
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(LatconRepo)/src/Citadel.Client/Citadel.Client.csproj" />   <!-- WHAT: LatCon's client library. WHY: linking, signing and the cell's store API, as the program uses them -->
+  </ItemGroup>
+  <!-- WHAT: stops the build when no LatCon checkout is named. WHY: a missing reference would otherwise fail with a less plain message -->
+  <Target Name="NeedsLatcon" BeforeTargets="ResolveProjectReferences" Condition="'$(LatconRepo)' == ''">
+    <Error Text="Name the LatCon Estimating checkout: -p:LatconRepo=&lt;folder&gt;" />   <!-- WHAT: said plainly. WHY: as above -->
+  </Target>
+</Project>

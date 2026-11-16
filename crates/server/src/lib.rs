@@ -23,6 +23,8 @@ pub mod audit;
 pub mod auth;
 pub mod cad; // WHAT: Excalibur CAD's office drawings, moved in. WHY: the Office Server's cad part
 pub mod cellbundle; // WHAT: the Citadel cell's files as this build pins them, installed, updated and checked before every run. WHY: only the signed bundle's cell runs as the system or the cell
+pub mod cellkey; // WHAT: the Citadel cell's TLS key, held by the Office Server for the cell. WHY: the cell's restricted token can't keep a key Windows' TLS can use (§6b)
+pub mod cellrelay; // WHAT: TLS on 47110 ended here and relayed to the Citadel cell over its locked pipe. WHY: Windows' TLS refuses a restricted-token process (§6b)
 pub mod cellmove; // WHAT: Citadel Server 1.0's data moved into the cell once, before its first start. WHY: the restricted cell can't read the old folder itself
 pub mod cell; // WHAT: the Citadel cell, started, watched and answered over its pipe. WHY: Citadel runs inside the Office Server (docs/OFFICE-ENROLLMENT.md §6a)
 pub mod citadel; // WHAT: the Citadel cell's port, looked at by its pin. WHY: the Office Server's citadel part, kept blind; the cell is the only way Citadel runs (crate::cell)
@@ -31,6 +33,7 @@ pub mod devices; // WHAT: the office's device list and the signed-request gate. 
 pub mod fleet;
 pub mod folders; // WHAT: groups, who sees which folder, and files that aren't drawings. WHY: the field and the shop see only the folders given to them.
 pub mod license;
+pub mod listen; // WHAT: listening sockets nobody else can share. WHY: SO_EXCLUSIVEADDRUSE on 8714 and 47110 (Windows)
 pub mod kept; // WHAT: the version before an update kept a day, and --roll-back. WHY: critical 4: the documented rollback made real
 pub mod lockdown; // WHAT: the service folder made the service's own. WHY: ProgramData lets every account read it and add files.
 pub mod mcp;
