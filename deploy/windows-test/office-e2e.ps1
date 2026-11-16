@@ -124,7 +124,9 @@ function StartType([string] $name) {
 function ListenerPath([int] $port) {
     $listen = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1   # WHAT: the listener. WHY: who holds the port.
     if (-not $listen) { return $null }                                          # WHAT: nobody. WHY: said as null.
-    return (Get-CimInstance Win32_Process -Filter "ProcessId = $($listen.OwningProcess)").ExecutablePath   # WHAT: its program. WHY: compared with a path.
+    $owner = Get-CimInstance Win32_Process -Filter "ProcessId = $($listen.OwningProcess)" | Select-Object -First 1   # WHAT: its process. WHY: its program is compared
+    if (-not $owner) { return $null }                                          # WHAT: gone in the moment between (a service restarting). WHY: asked again by the caller's wait (try 23)
+    return $owner.ExecutablePath                                                # WHAT: its program. WHY: compared with a path.
 }
 
 # WHAT: the processes running a program, by its full path, always as a list (the comma keeps an empty one a list).
