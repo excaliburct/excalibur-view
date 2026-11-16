@@ -182,7 +182,8 @@ try {
     Step '4. --forget-citadel-key-copies on a fresh office'
     $after = Forget 'after the computers used the cell'                         # WHAT: asked once the cell has served. WHY: what IT would see.
     $again = Forget 'a second time'                                             # WHAT: asked again. WHY: harmless however often.
-    Check ($before.Code -ne 0 -and $served.Code -ne 0 -and $after.Code -eq 0 -and $again.Code -eq 0) 'refused before the cell has served, done after (exit codes)'   # WHAT: the codes. WHY: a script can tell.
+    Check ($before.Code -ne 0 -and $before.Said.Contains("hasn't answered a computer")) 'before the cell, it refuses in plain words (exit 1)'   # WHAT: refused. WHY: nothing has used the key yet
+    Check ($after.Code -eq 0 -and $again.Code -eq 0 -and $after.Said.Contains('no copies') -and $again.Said.Contains('no copies')) 'after the computers used the cell, it says there are no copies (exit 0), however often it is run'   # WHAT: harmless. WHY: a new office's key was never in a file
     Check ((TlsFolder) -eq $tls) 'the kept key''s name and certificate are untouched'   # WHAT: the same files, byte for byte. WHY: the command only ever removes copies.
     Restart-Service -Name $OfficeService -Force                                 # WHAT: restarted. WHY: the cell starts again with its kept key.
     WaitFor { CellUp } 180 'the cell answering again after a restart'           # WHAT: up. WHY: below.
