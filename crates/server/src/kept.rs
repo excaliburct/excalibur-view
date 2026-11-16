@@ -15,6 +15,7 @@
 //! seat unable to connect (docs/OFFICE-SERVER.md).
 
 use std::path::{Path, PathBuf}; // WHAT: file paths. WHY: Windows and Linux both
+use std::time::Duration; // WHAT: how long to wait. WHY: a held file lets go within moments
 
 /// Which version has been running since when: `version|RFC 3339`.
 pub const SINCE: &str = "server_running_since"; // WHAT: the setting. WHY: the day the previous version is kept for starts at the new version's first start
@@ -103,12 +104,26 @@ pub fn roll_back(store: &crate::Store, program: &Path) -> Result<String, String>
     Ok(said)
 }
 
+/// Renames `from` to `to`, trying again for up to `patience` while Windows
+/// refuses it. Just after the service stops, the cell's process can still be
+/// ending and hold its files for a moment (or a virus scanner may be reading
+/// them), and the rename is refused with "access denied" until it lets go.
+fn rename_patiently(from: &Path, to: &Path, patience: Duration) -> std::io::Result<()> {
+    let until = std::time::Instant::now() + patience; // WHAT: when to give up. WHY: a held file lets go within moments; a real refusal is still reported
+    loop {
+        match std::fs::rename(from, to) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && std::time::Instant::now() < until => std::thread::sleep(Duration::from_millis(250)), // WHAT: wait a moment, then again. WHY: the ending process lets go of its files
+            done => return done, // WHAT: renamed, or a failure that waiting won't change. WHY: said by the caller
+        }
+    }
+}
+
 /// Swaps two paths' places by renaming, putting both back if a step fails.
 fn exchange(a: &Path, b: &Path) -> Result<(), String> {
     let aside = a.with_extension("rolling"); // WHAT: a name for the moment. WHY: two renames can't swap without one
     let _ = std::fs::remove_file(&aside); // WHAT: a leftover gone. WHY: a rename onto it would fail
     let _ = std::fs::remove_dir_all(&aside); // WHAT: likewise, for a folder. WHY: the cell is a folder
-    std::fs::rename(a, &aside).map_err(|e| format!("could not move {} aside ({e})", a.display()))?; // WHAT: the current one aside. WHY: its name is wanted
+    rename_patiently(a, &aside, Duration::from_secs(15)).map_err(|e| format!("could not move {} aside ({e})", a.display()))?; // WHAT: the current one aside. WHY: its name is wanted
     if let Err(e) = std::fs::rename(b, a) {
         let _ = std::fs::rename(&aside, a); // WHAT: put back. WHY: never left without it
         return Err(format!("could not put {} back ({e})", b.display())); // WHAT: said. WHY: nothing changed
@@ -124,6 +139,36 @@ fn exchange(a: &Path, b: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_rename_is_tried_again_until_it_is_let_go() {
+        use std::os::unix::fs::PermissionsExt; // WHAT: folder modes. WHY: a refusal made on purpose
+        struct Reopen(PathBuf); // WHAT: gives the folder its write right back. WHY: below
+        impl Drop for Reopen {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755)); // WHAT: writable again. WHY: a failed run must not leave a folder nobody can clear
+            }
+        }
+        let (_store, home) = a_home(); // WHAT: a scratch folder. WHY: below
+        let shut = home.join("shut"); // WHAT: a folder whose entries can't be renamed for now. WHY: stands in for a cell still ending
+        std::fs::create_dir_all(shut.join("citadel")).unwrap(); // WHAT: the thing to move. WHY: below
+        let _reopen = Reopen(shut.clone()); // WHAT: held to the end. WHY: runs even if an assertion fails
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o555)).unwrap(); // WHAT: renames refused. WHY: "access denied", as on Windows
+        if std::fs::rename(shut.join("citadel"), shut.join("probe")).is_ok() {
+            return; // WHAT: this account isn't refused (root). WHY: nothing to show then
+        }
+        let started = std::time::Instant::now(); // WHAT: the start. WHY: it must have waited
+        let refused = rename_patiently(&shut.join("citadel"), &shut.join("citadel.rolling"), Duration::from_millis(600)); // WHAT: refused throughout. WHY: gives up after its patience
+        assert_eq!(refused.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied); // WHAT: the refusal is reported. WHY: a real refusal isn't hidden
+        assert!(started.elapsed() >= Duration::from_millis(600)); // WHAT: it waited first. WHY: the retry
+        let opener = shut.clone(); // WHAT: for the thread. WHY: below
+        let later = std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(400)); std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap() }); // WHAT: let go after a moment. WHY: as the ending process does
+        rename_patiently(&shut.join("citadel"), &shut.join("citadel.rolling"), Duration::from_secs(10)).unwrap(); // WHAT: renamed once let go. WHY: the rollback goes through
+        later.join().unwrap(); // WHAT: the thread done. WHY: tidy
+        assert!(shut.join("citadel.rolling").is_dir()); // WHAT: moved. WHY: below
+        assert!(rename_patiently(&home.join("missing"), &home.join("x"), Duration::from_secs(10)).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)); // WHAT: a missing source fails at once. WHY: only "access denied" is waited out
+    }
 
     fn a_home() -> (crate::Store, PathBuf) {
         let n: u64 = rand::random(); // WHAT: a fresh name. WHY: tests run side by side
