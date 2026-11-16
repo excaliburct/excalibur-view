@@ -512,16 +512,19 @@ try { `$c = [System.IO.Pipes.NamedPipeClientStream]::new('.', `$name, [System.IO
 catch { "refused `$(`$_.Exception.GetType().Name): `$(`$_.Exception.Message)" }
 "@                                                                              # WHAT: opens the relay pipe and reads its permissions as Windows reports them. WHY: run as SYSTEM, a standard user and an administrator
     AsSystem ($probe + " | Set-Content -Encoding utf8 $evidence\system.txt") 'system'   # WHAT: as the system. WHY: the one account the Office Server connects as
-    $userPassword = 'E2e-' + [Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(12))   # WHAT: a throwaway password. WHY: a standard user for the test
-    & "$env:SystemRoot\System32\net.exe" user e2e-standard $userPassword /add | Out-Null   # WHAT: a standard user, in Users only. WHY: an ordinary office account
+    $userPassword = 'E2e-' + [Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(5)).ToLowerInvariant()   # WHAT: a throwaway password, 14 characters. WHY: net user asks before taking a longer one
+    & "$env:SystemRoot\System32\net.exe" user e2e-standard $userPassword /add 2>&1 | ForEach-Object { Write-Host "net user: $_" }   # WHAT: a standard user, in Users only. WHY: an ordinary office account
+    $global:LASTEXITCODE = 0                                                    # WHAT: its code forgotten. WHY: the sign-on below says whether it worked
     $token = $null                                                              # WHAT: filled by Windows. WHY: the standard user's token
-    Check ([E2E.Logon]::LogonUser('e2e-standard', '.', $userPassword, 3, 0, [ref] $token)) 'a standard user signed on (network logon)'   # WHAT: LOGON32_LOGON_NETWORK. WHY: Users have that right by default; no desktop needed
+    $signedOn = [E2E.Logon]::LogonUser('e2e-standard', '.', $userPassword, 3, 0, [ref] $token)   # WHAT: LOGON32_LOGON_NETWORK. WHY: Users have that right by default; no desktop needed
+    if (-not $signedOn) { Write-Host "LogonUser said $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" }   # WHAT: why not. WHY: said plainly
+    Check $signedOn 'a standard user signed on (network logon)'                # WHAT: signed on. WHY: below
     $asUser = [System.Security.Principal.WindowsIdentity]::RunImpersonated($token, [Func[object]] { & ([scriptblock]::Create($probe)) })   # WHAT: the pipe opened as that user. WHY: must be refused
     $token.Dispose()                                                            # WHAT: let go. WHY: tidy
     WaitFor { Test-Path "$evidence\system.txt" } 60 'the system''s run'       # WHAT: answered. WHY: below
     $asSystem = (Get-Content -Raw "$evidence\system.txt").Trim(); $asUser = "$asUser".Trim()   # WHAT: what each saw. WHY: checked and shown
     Write-Host "as SYSTEM: $asSystem"; Write-Host "as a standard user: $asUser"   # WHAT: shown. WHY: IT's evidence
-    Check ($asSystem -match '^opened D:P(\(A;;[^;]+;;;SY\)\(A;;[^;]+;;;S-1-5-80(-\d+){5}\)|\(A;;[^;]+;;;S-1-5-80(-\d+){5}\)\(A;;[^;]+;;;SY\))$') 'the relay pipe''s permissions, as Windows reports them: protected, SYSTEM and the cell''s S-1-5-80 SID, nobody else'   # WHAT: exactly two entries. WHY: §6b
+    Check ($asSystem -match '^opened D:P[A-Z]*(\(A;;[^;]+;;;SY\)\(A;;[^;]+;;;S-1-5-80(-\d+){5}\)|\(A;;[^;]+;;;S-1-5-80(-\d+){5}\)\(A;;[^;]+;;;SY\))$') 'the relay pipe''s permissions, as Windows reports them: protected, SYSTEM and the cell''s S-1-5-80 SID, nobody else'   # WHAT: exactly two entries. WHY: §6b
     Check ($asUser.StartsWith('refused UnauthorizedAccessException')) 'a standard user is refused the relay pipe'   # WHAT: refused. WHY: only the system and the cell
     $asAdmin = & ([scriptblock]::Create($probe))                                # WHAT: this test's own process, an administrator and not the cell. WHY: below
     Write-Host "as an administrator: $asAdmin"                                  # WHAT: shown. WHY: IT's evidence
@@ -540,7 +543,7 @@ catch { "refused `$(`$_.Exception.GetType().Name): `$(`$_.Exception.Message)" }
         catch { if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 429) { $limited = $true } }   # WHAT: 429 once its 20 a minute are used. WHY: the cell's limit is per caller
     }
     Check $limited "the cell limited $lan by its own address"                   # WHAT: limited. WHY: below
-    Check ((Invoke-WebRequest -Uri "https://127.0.0.1:$Port/v1/hello" -SkipCertificateCheck -TimeoutSec 10 -UseBasicParsing).StatusCode -eq 200) 'another caller (127.0.0.1) is still answered: the cell sees each real caller, not the relay'   # WHAT: answered. WHY: the PROXY header carries the caller
+    Check ((Invoke-WebRequest -Uri "https://[::1]:$Port/v1/hello" -SkipCertificateCheck -TimeoutSec 10 -UseBasicParsing).StatusCode -eq 200) 'another caller (::1) is still answered: the cell sees each real caller, not the relay'   # WHAT: answered. WHY: the PROXY header carries the caller; ::1 has made no request before (127.0.0.1 may have used its share waiting for the cell)
     & "$env:SystemRoot\System32\robocopy.exe" (Join-Path $CellData 'logs') (Join-Path $Logs 'cell-h') /E /B /R:0 /W:0 /NP /NFL /NDL | Out-Null; $global:LASTEXITCODE = 0   # WHAT: the cell's logs, in backup mode. WHY: its folder is the system's and the cell's alone
     $cellLog = (Get-ChildItem -LiteralPath (Join-Path $Logs 'cell-h') -File | ForEach-Object { Get-Content -Raw $_.FullName }) -join "`n"   # WHAT: what the cell wrote. WHY: below
     $line = ($cellLog -split "`n" | Where-Object { $_ -match 'wrong maintenance key' } | Select-Object -Last 1)   # WHAT: the refusal it logged. WHY: shown
