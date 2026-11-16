@@ -498,24 +498,28 @@ try {
     $relayName = ([System.IO.Directory]::GetFiles('\\.\pipe\') | ForEach-Object { Split-Path $_ -Leaf } | Where-Object { $_ -like 'excalibur-cell-relay-*' } | Select-Object -First 1)   # WHAT: the relay pipe's name, as Windows lists it. WHY: new at each start
     Check ([bool]$relayName) "the relay pipe is there ($relayName)"             # WHAT: found. WHY: below
     $pwsh = (Get-Command pwsh).Source                                           # WHAT: PowerShell 7's path. WHY: the other accounts run it
-    function RunAs([string] $account, [string] $password, [string] $script, [string] $out) {
-        [System.IO.File]::WriteAllText("$evidence\$out.ps1", $script)           # WHAT: the script. WHY: run as the account
-        $args = @('/Create', '/TN', "e2e-$out", '/SC', 'ONCE', '/ST', '23:59', '/F', '/TR', "`"$pwsh`" -NoProfile -ExecutionPolicy Bypass -File $evidence\$out.ps1", '/RU', $account)   # WHAT: a one-off task. WHY: the simplest way to run as another account
-        if ($password) { $args += @('/RP', $password) }                         # WHAT: the user's password. WHY: a standard user's task needs it
-        & "$env:SystemRoot\System32\schtasks.exe" @args | Out-Null              # WHAT: made. WHY: below
-        & "$env:SystemRoot\System32\schtasks.exe" /Run /TN "e2e-$out" | Out-Null   # WHAT: run now. WHY: below
+    function AsSystem([string] $script, [string] $out) {
+        [System.IO.File]::WriteAllText("$evidence\$out.ps1", $script)           # WHAT: the script. WHY: run as the system
+        $taskArgs = @('/Create', '/TN', "e2e-$out", '/SC', 'ONCE', '/ST', '23:59', '/F', '/RU', 'SYSTEM', '/TR', "`"$pwsh`" -NoProfile -ExecutionPolicy Bypass -File $evidence\$out.ps1")   # WHAT: a one-off task as SYSTEM. WHY: the simplest way to run as the system
+        & "$env:SystemRoot\System32\schtasks.exe" @taskArgs 2>&1 | ForEach-Object { Write-Host "schtasks: $_" }   # WHAT: made, its words shown. WHY: a task that doesn't run says why
+        & "$env:SystemRoot\System32\schtasks.exe" /Run /TN "e2e-$out" 2>&1 | ForEach-Object { Write-Host "schtasks: $_" }   # WHAT: run now. WHY: below
+        $global:LASTEXITCODE = 0                                                # WHAT: its codes forgotten. WHY: the file it writes is checked instead
     }
+    Add-Type -Namespace E2E -Name Logon -MemberDefinition '[DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern bool LogonUser(string user, string domain, string password, int type, int provider, out Microsoft.Win32.SafeHandles.SafeAccessTokenHandle token);'   # WHAT: Windows' LogonUser. WHY: the test acts as a standard user without a task or a desktop
     $probe = @"
 `$name = '$relayName'
 try { `$c = [System.IO.Pipes.NamedPipeClientStream]::new('.', `$name, [System.IO.Pipes.PipeDirection]::InOut); `$c.Connect(3000); `$sddl = `$c.GetAccessControl().GetSecurityDescriptorSddlForm('Access'); `$c.Dispose(); "opened `$sddl" }
 catch { "refused `$(`$_.Exception.GetType().Name): `$(`$_.Exception.Message)" }
 "@                                                                              # WHAT: opens the relay pipe and reads its permissions as Windows reports them. WHY: run as SYSTEM, a standard user and an administrator
-    RunAs 'SYSTEM' '' ($probe + " | Set-Content -Encoding utf8 $evidence\system.txt") 'system'   # WHAT: as the system. WHY: the one account the Office Server connects as
+    AsSystem ($probe + " | Set-Content -Encoding utf8 $evidence\system.txt") 'system'   # WHAT: as the system. WHY: the one account the Office Server connects as
     $userPassword = 'E2e-' + [Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(12))   # WHAT: a throwaway password. WHY: a standard user for the test
     & "$env:SystemRoot\System32\net.exe" user e2e-standard $userPassword /add | Out-Null   # WHAT: a standard user, in Users only. WHY: an ordinary office account
-    RunAs 'e2e-standard' $userPassword ($probe + " | Set-Content -Encoding utf8 $evidence\user.txt") 'user'   # WHAT: as that user. WHY: must be refused
-    WaitFor { (Test-Path "$evidence\system.txt") -and (Test-Path "$evidence\user.txt") } 60 'the system''s and the standard user''s runs'   # WHAT: both answered. WHY: below
-    $asSystem = (Get-Content -Raw "$evidence\system.txt").Trim(); $asUser = (Get-Content -Raw "$evidence\user.txt").Trim()   # WHAT: what each saw. WHY: checked and shown
+    $token = $null                                                              # WHAT: filled by Windows. WHY: the standard user's token
+    Check ([E2E.Logon]::LogonUser('e2e-standard', '.', $userPassword, 3, 0, [ref] $token)) 'a standard user signed on (network logon)'   # WHAT: LOGON32_LOGON_NETWORK. WHY: Users have that right by default; no desktop needed
+    $asUser = [System.Security.Principal.WindowsIdentity]::RunImpersonated($token, [Func[object]] { & ([scriptblock]::Create($probe)) })   # WHAT: the pipe opened as that user. WHY: must be refused
+    $token.Dispose()                                                            # WHAT: let go. WHY: tidy
+    WaitFor { Test-Path "$evidence\system.txt" } 60 'the system''s run'       # WHAT: answered. WHY: below
+    $asSystem = (Get-Content -Raw "$evidence\system.txt").Trim(); $asUser = "$asUser".Trim()   # WHAT: what each saw. WHY: checked and shown
     Write-Host "as SYSTEM: $asSystem"; Write-Host "as a standard user: $asUser"   # WHAT: shown. WHY: IT's evidence
     Check ($asSystem -match '^opened D:P(\(A;;[^;]+;;;SY\)\(A;;[^;]+;;;S-1-5-80(-\d+){5}\)|\(A;;[^;]+;;;S-1-5-80(-\d+){5}\)\(A;;[^;]+;;;SY\))$') 'the relay pipe''s permissions, as Windows reports them: protected, SYSTEM and the cell''s S-1-5-80 SID, nobody else'   # WHAT: exactly two entries. WHY: §6b
     Check ($asUser.StartsWith('refused UnauthorizedAccessException')) 'a standard user is refused the relay pipe'   # WHAT: refused. WHY: only the system and the cell
@@ -553,7 +557,7 @@ try {
   }
 } catch { "could not: `$(`$_.Exception.Message)" | Set-Content $evidence\squat.txt }
 "@                                                                              # WHAT: another SYSTEM process serving extra instances of the relay pipe's name. WHY: shows the Office Server sends it nothing
-    RunAs 'SYSTEM' '' $squat 'squat'                                            # WHAT: started. WHY: below
+    AsSystem $squat 'squat'                                                     # WHAT: started. WHY: below
     WaitFor { Test-Path "$evidence\squat.txt" } 60 'the stand-in squatter'    # WHAT: up, or said why not. WHY: below
     $squatSaid = (Get-Content -Raw "$evidence\squat.txt").Trim()                # WHAT: whether it could. WHY: below
     if ($squatSaid -eq 'ready') {
