@@ -508,8 +508,8 @@ try {
     Add-Type -Namespace E2E -Name Logon -MemberDefinition '[DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern bool LogonUser(string user, string domain, string password, int type, int provider, out Microsoft.Win32.SafeHandles.SafeAccessTokenHandle token);'   # WHAT: Windows' LogonUser. WHY: the test acts as a standard user without a task or a desktop
     $probe = @"
 `$name = '$relayName'
-try { `$c = [System.IO.Pipes.NamedPipeClientStream]::new('.', `$name, [System.IO.Pipes.PipeDirection]::InOut); `$c.Connect(3000); `$sddl = `$c.GetAccessControl().GetSecurityDescriptorSddlForm('Access'); `$c.Dispose(); "opened `$sddl" }
-catch { "refused `$(`$_.Exception.GetType().Name): `$(`$_.Exception.Message)" }
+try { `$c = [System.IO.Pipes.NamedPipeClientStream]::new('.', `$name, [System.IO.Pipes.PipeDirection]::InOut); `$c.Connect(3000); `$sddl = [System.IO.Pipes.PipesAclExtensions]::GetAccessControl(`$c).GetSecurityDescriptorSddlForm('Access'); `$c.Dispose(); "opened `$sddl" }
+catch { `$e = `$_.Exception.GetBaseException(); "refused `$(`$e.GetType().Name): `$(`$e.Message)" }
 "@                                                                              # WHAT: opens the relay pipe and reads its permissions as Windows reports them. WHY: run as SYSTEM, a standard user and an administrator
     AsSystem ("& {`n$probe`n} | Set-Content -Encoding utf8 $evidence\system.txt") 'system'   # WHAT: as the system, its answer written (a try statement can't be piped, so it runs inside a block). WHY: the one account the Office Server connects as
     $userPassword = 'E2e-' + [Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(5)).ToLowerInvariant()   # WHAT: a throwaway password, 14 characters. WHY: net user asks before taking a longer one
