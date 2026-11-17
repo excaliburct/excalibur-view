@@ -108,6 +108,21 @@ impl Office {
     }
 }
 
+/// The device gate's refusal of a body it never read: 401 with the gate's word, or 401 with no word.
+/// WHAT: 401 and "device_unknown", or 401 and nothing, when the server closed the connection before the client had read the
+/// answer's body (seen on macOS, 2026-11-16). WHY: the server stops at the gate and closes without reading the body; how
+/// much of the answer the client gets before the close is the operating system's socket timing, not what the gate decided.
+/// A 401 with any other word, or any other status, is still a failure.
+fn gate_refused(answer: &(u16, String)) -> bool {
+    answer.0 == 401 && (answer.1 == "device_unknown" || answer.1.is_empty()) // WHAT: refused at the gate, its word read or cut off. WHY: as above
+}
+
+/// As gate_refused, or no answer at all: the server closed before the client read even the status line.
+/// WHAT: also (0, ""), the client's "no answer". WHY: a big unproven body is cut off mid-send; the refusal can be lost entirely.
+fn refused_unread(answer: &(u16, String)) -> bool {
+    gate_refused(answer) || answer.0 == 0 // WHAT: the gate's refusal, or the connection closed before any answer. WHY: as above
+}
+
 fn key(seed: u8) -> DeviceKey {
     DeviceKey::from_secret(&[seed; 32])
 }
@@ -546,9 +561,9 @@ fn review_m2_an_unproven_body_is_never_read_past_a_small_one() {
     let big = vec![b'x'; 3 * 1024 * 1024];
     let bogus = device::Signed { device: admin.key().id(), time: device::unix_now().to_string(), signature: "A".repeat(86) + "==", body: device::body_hash(&big) };
     let declared = office.raw_body("POST", "/api/v1/sets", &big, &bogus, true);
-    assert!(declared == (401, "device_unknown".into()) || declared.0 == 0, "a declared hash with a bad signature is refused before the body is read: {declared:?}");
+    assert!(refused_unread(&declared), "a declared hash with a bad signature is refused before the body is read: {declared:?}"); // WHAT: refused at the gate, its word possibly cut off by the close. WHY: the macOS timing
     let undeclared = office.raw_body("POST", "/api/v1/sets", &big, &bogus, false);
-    assert!(undeclared == (401, "device_unknown".into()) || undeclared.0 == 0, "a body without its declared hash is refused, never read: {undeclared:?}");
+    assert!(refused_unread(&undeclared), "a body without its declared hash is refused, never read: {undeclared:?}"); // WHAT: the same. WHY: the same
     let good = admin.sign(&office.pin, "PUT", "/api/v1/cad/drawings/1/file", &big, device::unix_now()).unwrap();
     let proven = office.raw_body("PUT", "/api/v1/cad/drawings/1/file", &big, &good, true);
     assert!(proven.0 != 0 && proven.0 != 413 && proven.1 != "device_unknown", "a proven big body is read whole and passes the gate to the route's own checks: {proven:?}");
@@ -658,14 +673,14 @@ fn rereview_m2_no_body_is_read_unproven_and_none_on_a_get() {
     let body = vec![b'x'; 512 * 1024];
     let on_get = waiting.sign(&office.pin, "GET", "/api/v1/devices/me", &body, device::unix_now()).unwrap();
     let answer = office.raw_body("GET", "/api/v1/devices/me", &body, &on_get, true);
-    assert!(answer == (401, "device_unknown".into()) || answer.0 == 0, "a waiting computer's GET with a body is refused unread: {answer:?}");
+    assert!(refused_unread(&answer), "a waiting computer's GET with a body is refused unread: {answer:?}"); // WHAT: refused unread; on macOS the word can be cut off (401, ""). WHY: that failed the Mac release build on 2026-11-16
     let admin_get = admin.sign(&office.pin, "GET", "/api/v1/devices", &body, device::unix_now()).unwrap();
     let answer = office.raw_body("GET", "/api/v1/devices", &body, &admin_get, true);
-    assert!(answer == (401, "device_unknown".into()) || answer.0 == 0, "no body on a GET, even an admin's: {answer:?}");
+    assert!(refused_unread(&answer), "no body on a GET, even an admin's: {answer:?}"); // WHAT: the same. WHY: the same
     let small = br#"{"admin":false}"#;
     let post = admin.sign(&office.pin, "POST", &format!("/api/v1/devices/{}/approve", waiting.key().id()), small, device::unix_now()).unwrap();
     let undeclared = office.raw_body("POST", &format!("/api/v1/devices/{}/approve", waiting.key().id()), small, &post, false);
-    assert_eq!(undeclared, (401, "device_unknown".into()), "a body without its hash is refused, however small");
+    assert!(gate_refused(&undeclared), "a body without its hash is refused, however small: {undeclared:?}"); // WHAT: 401 at the gate, its word read or cut off by the close. WHY: the same socket timing; never a status 0 here
     let declared = office.raw_body("POST", &format!("/api/v1/devices/{}/approve", waiting.key().id()), small, &admin.sign(&office.pin, "POST", &format!("/api/v1/devices/{}/approve", waiting.key().id()), small, device::unix_now() + 1).unwrap(), true);
     assert_eq!(declared.0, 200, "the same body, declared, is taken: {declared:?}");
 }
