@@ -109,7 +109,7 @@ impl Office {
 }
 
 /// The device gate's refusal of a body it never read: 401 with the gate's word, or 401 with no word.
-/// WHAT: 401 and "device_unknown", or 401 and nothing, when the server closed the connection before the client had read the
+/// WHAT: 401 and `"device_unknown"`, or 401 and nothing, when the server closed the connection before the client had read the
 /// answer's body (seen on macOS, 2026-11-16). WHY: the server stops at the gate and closes without reading the body; how
 /// much of the answer the client gets before the close is the operating system's socket timing, not what the gate decided.
 /// A 401 with any other word, or any other status, is still a failure.
@@ -117,7 +117,7 @@ fn gate_refused(answer: &(u16, String)) -> bool {
     answer.0 == 401 && (answer.1 == "device_unknown" || answer.1.is_empty()) // WHAT: refused at the gate, its word read or cut off. WHY: as above
 }
 
-/// As gate_refused, or no answer at all: the server closed before the client read even the status line.
+/// As `gate_refused`, or no answer at all: the server closed before the client read even the status line.
 /// WHAT: also (0, ""), the client's "no answer". WHY: a big unproven body is cut off mid-send; the refusal can be lost entirely.
 fn refused_unread(answer: &(u16, String)) -> bool {
     gate_refused(answer) || answer.0 == 0 // WHAT: the gate's refusal, or the connection closed before any answer. WHY: as above
