@@ -219,6 +219,7 @@ async fn serve() -> Result<()> {
     if std::env::var("HYPERVIEW_FIRST_ADMIN").is_ok() {
         let store = Store::open(&config.database(), &config.blobs())?;
         if store.is_empty()? {
+            hyperview_server::devices::note_began(&store, time::OffsetDateTime::now_utc()); // WHAT: the device list's beginning, written before the first account. WHY: review L2: a fresh headless server never counts as upgraded
             let password = run::first_administrator(&store)?;
             println!();
             println!("  A first administrator has been created.");

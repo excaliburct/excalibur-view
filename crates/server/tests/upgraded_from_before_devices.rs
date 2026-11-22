@@ -2,7 +2,7 @@
 //! (docs/OFFICE-ENROLLMENT.md §3a). The database is the one 0.6.31 made
 //! (tests/fixtures/office-0.6.31.sql), with its people, a seat's session and
 //! the next release already on it. Then: the seats from before 0.7.0 keep
-//! working through the upgrade grace, a new computer claims the admin seat,
+//! working through the upgrade grace, no new computer can claim the admin seat,
 //! an existing account's sign-in approves a waiting computer, the old seat
 //! fetches its update without being signed in or approved, and once the
 //! grace is over the device gate holds again. Beside it, the offices the
@@ -58,6 +58,7 @@ fn as_0_6_31_left_it(data: &std::path::Path) -> String {
     let hashed = auth::hash_password(PASSWORD).unwrap(); // WHAT: the password as stored. WHY: the old seats sign in with it
     db.execute("INSERT INTO people (id, name, email, password, role, created) VALUES ('usr_owner', 'Owner', ?1, ?2, 'admin', '2026-03-01T09:00:00Z')", params![OWNER, hashed]).unwrap(); // WHAT: the owner, made in March. WHY: an administrator account older than the device list
     db.execute("INSERT INTO people (id, name, email, password, role, created) VALUES ('usr_dana', 'Dana', ?1, ?2, 'estimator', '2026-03-02T09:00:00Z')", params![DANA, hashed]).unwrap(); // WHAT: an estimator, made in March. WHY: an ordinary account older than the device list
+    db.execute("INSERT INTO settings (key, value) VALUES ('licensing_began', '2026-03-01T08:00:00Z')", []).unwrap(); // WHAT: when 0.6.x first ran here, as it writes at its first start. WHY: how an office whose database already has a device table is told from a fresh one
     let (token, digest) = auth::new_token(); // WHAT: a session a 0.6.30 seat holds. WHY: it keeps working through the grace without signing in again
     db.execute("INSERT INTO sessions (token, person, issued, expires) VALUES (?1, 'usr_dana', ?2, '2099-01-01T00:00:00Z')", params![digest, now_text(-3)]).unwrap(); // WHAT: Dana's seat's session, stored by its digest. WHY: as 0.6.31 keeps it
     token // WHAT: the session's own token. WHY: the old seat sends it
@@ -225,7 +226,7 @@ fn an_office_upgraded_from_0_6_31_keeps_working_claims_its_admin_and_updates_its
     let old_session = as_0_6_31_left_it(&data); // WHAT: the database as 0.6.31 left it, and a seat's session. WHY: the upgrade under test starts there
     let office = start(&data); // WHAT: this version, started over it. WHY: its first start is the upgrade
 
-    // The first start after the upgrade: the grace and the claim are open.
+    // The first start after the upgrade: the grace is open, the claim is not.
     let grace = parsed(
         &office
             .setting(devices::settings::GRACE_UNTIL)
@@ -242,9 +243,14 @@ fn an_office_upgraded_from_0_6_31_keeps_working_claims_its_admin_and_updates_its
             .expect("a claiming window"),
     );
     assert!(
-        claim > time::OffsetDateTime::now_utc() + time::Duration::hours(23),
-        "the claim opens for a day, as on a fresh install: {claim}"
-    );
+        claim < time::OffsetDateTime::now_utc(),
+        "the claim is NOT reopened by the upgrade (review M1): {claim}"
+    ); // WHAT: the window is shut. WHY: only an admin account's sign-in makes the admin computer after an upgrade
+    assert_eq!(
+        office.audit_says(devices::action::REOPENED_CLAIM),
+        0,
+        "and nothing says it was"
+    ); // WHAT: no reopen line. WHY: nothing reopened it
     assert_eq!(
         office.audit_says(devices::action::GRACE_OPENED),
         1,
@@ -362,7 +368,7 @@ fn an_office_upgraded_from_0_6_31_keeps_working_claims_its_admin_and_updates_its
         "for the download too"
     );
 
-    // A new 0.7.2 computer claims the admin seat: the office had none.
+    // A new 0.7.2 computer can't claim the admin seat, though the office has none (review M1).
     let first = signer(1);
     assert_eq!(
         office
@@ -371,12 +377,13 @@ fn an_office_upgraded_from_0_6_31_keeps_working_claims_its_admin_and_updates_its
             .unwrap()
             .unwrap()
             .state,
-        "approved"
+        "waiting",
+        "no computer claims an upgraded office"
     );
     assert_eq!(
         office.state_of(&first),
-        ("approved".to_string(), true),
-        "the first new computer is the admin computer"
+        ("waiting".to_string(), false),
+        "and none is made the admin computer by asking"
     );
     // The next waits, until an account from before the upgrade signs in on it.
     let second = signer(2);
@@ -409,22 +416,11 @@ fn an_office_upgraded_from_0_6_31_keeps_working_claims_its_admin_and_updates_its
     // an account made since approves nothing. (The refused and removed
     // computers are in their own office below: every ask from one address
     // counts against it, and this one stays within the free tries.)
-    let third = signer(3); // WHAT: a new computer after the claim. WHY: it must wait, not claim
-    assert_eq!(
-        office
-            .client(&third)
-            .ask_to_be_let_in("view", "New")
-            .unwrap()
-            .unwrap()
-            .state,
-        "waiting",
-        "a computer nobody signed in on waits for the admin"
-    ); // WHAT: waiting. WHY: the office has its admin now
     assert!(
-        office.client(&third).sign_in(NEWCOMER, PASSWORD).is_err(),
+        office.client(&first).sign_in(NEWCOMER, PASSWORD).is_err(),
         "an account made after the upgrade can't approve a computer"
-    ); // WHAT: refused. WHY: only accounts older than the device list get the grace
-    assert_eq!(office.state_of(&third).0, "waiting"); // WHAT: still waiting. WHY: as above
+    ); // WHAT: refused, on the computer that only asked. WHY: only accounts older than the device list get the grace
+    assert_eq!(office.state_of(&first).0, "waiting"); // WHAT: still waiting. WHY: as above
 
     // A restart doesn't open the grace or the claim again.
     office
@@ -469,13 +465,8 @@ fn an_office_upgraded_from_0_6_31_keeps_working_claims_its_admin_and_updates_its
         &[],
     );
     assert_eq!(status, 401, "no old seat signs in after the grace");
-    let sixth = signer(6);
-    office
-        .client(&sixth)
-        .ask_to_be_let_in("view", "Dana")
-        .unwrap();
     assert!(
-        office.client(&sixth).sign_in(DANA, PASSWORD).is_err(),
+        office.client(&first).sign_in(DANA, PASSWORD).is_err(),
         "a waiting computer waits for an admin after the grace"
     );
     // The update is still there for any seat on the office network.
@@ -577,6 +568,7 @@ fn an_office_already_on_0_7_1_with_its_admin_set_gets_the_grace_and_no_new_claim
     for key in [
         devices::settings::GRACE_UNTIL,
         devices::settings::UPGRADE_SEEN,
+        devices::settings::FROM_BEFORE_DEVICES,
     ] {
         store
             .with(|db| Ok(db.execute("DELETE FROM settings WHERE key = ?1", params![key])?))
@@ -645,6 +637,7 @@ fn an_office_already_on_0_7_1_with_its_admin_set_gets_the_grace_and_no_new_claim
     for key in [
         devices::settings::GRACE_UNTIL,
         devices::settings::UPGRADE_SEEN,
+        devices::settings::FROM_BEFORE_DEVICES,
     ] {
         store
             .with(|db| Ok(db.execute("DELETE FROM settings WHERE key = ?1", params![key])?))
@@ -693,11 +686,13 @@ fn a_computer_an_admin_refused_or_removed_is_never_brought_back_by_a_sign_in() {
     let data = folder("upgraded-removed"); // WHAT: an office of its own. WHY: the main test's wrong tries would slow this one's requests
     let _ = as_0_6_31_left_it(&data); // WHAT: the database as 0.6.31 left it. WHY: the grace opens on the first start
     let office = start(&data); // WHAT: this version over it. WHY: under test
-    let admin = signer(30); // WHAT: the first new computer. WHY: it claims the office, so it can approve and remove
+    let admin = signer(30); // WHAT: the owner's new computer. WHY: the owner's sign-in makes it the admin computer, so it can approve and remove
     office
         .client(&admin)
         .ask_to_be_let_in("view", "Owner")
-        .unwrap(); // WHAT: it claims the admin seat. WHY: the office had none
+        .unwrap(); // WHAT: it asks, and waits. WHY: nothing claims an upgraded office (review M1)
+    office.client(&admin).sign_in(OWNER, PASSWORD).unwrap(); // WHAT: the owner signs in on it. WHY: the one way to the admin seat after an upgrade
+    assert_eq!(office.state_of(&admin), ("approved".to_string(), true)); // WHAT: the admin computer. WHY: it must be, for what follows
     let refused = signer(32); // WHAT: a computer an admin turned down. WHY: the grace must never move it either
     office
         .client(&refused)
@@ -730,4 +725,304 @@ fn a_computer_an_admin_refused_or_removed_is_never_brought_back_by_a_sign_in() {
         "a removed computer is never brought back by a sign-in"
     ); // WHAT: refused, even for the owner's account. WHY: only an admin's Approve brings it back
     assert_eq!(office.state_of(&removed).0, "removed"); // WHAT: unchanged. WHY: as above
+}
+
+// ---- the security review of 0.7.2 -------------------------------------------
+
+impl Office {
+    /// A release put where the server keeps them: `channel`, ready or not,
+    /// with `bytes` as its installer.
+    fn release(&self, version: &str, channel: &str, ready: i64, bytes: &[u8]) {
+        let store = self.store(); // WHAT: the store. WHY: the build goes in it
+        let digest = store.put_blob(bytes).unwrap(); // WHAT: the build, kept by its digest. WHY: the download route reads it so
+        store
+            .with(|db| {
+                Ok(db.execute(
+                    "INSERT INTO releases (version, channel, platform, published, notes, bytes, digest, signature, signing_key, minimum_api, ready)
+                     VALUES (?1, ?2, 'windows-x64', ?3, 'notes', ?4, ?5, 'ab', 'k', 1, ?6)",
+                    params![version, channel, now_text(0), i64::try_from(bytes.len()).unwrap(), digest, ready],
+                )?)
+            })
+            .unwrap(); // WHAT: the row. WHY: as the release feed writes it
+    }
+}
+
+/// A plain GET with no device, no session: its status, its Content-Length
+/// header and its bytes.
+fn plain_get(office: &Office, path: &str) -> (u16, Option<String>, Vec<u8>) {
+    match ureq::get(&format!("http://127.0.0.1:{}{path}", office.port)).call() {
+        Ok(r) => {
+            let length = r.header("content-length").map(str::to_string); // WHAT: the length it promised. WHY: a streamed body still says it
+            let mut bytes = Vec::new(); // WHAT: the download. WHY: compared whole
+            std::io::Read::read_to_end(&mut r.into_reader(), &mut bytes).unwrap(); // WHAT: read to the end. WHY: as above
+            (200, length, bytes)
+        }
+        Err(ureq::Error::Status(code, _)) => (code, None, Vec::new()),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+const DOWNLOAD: &str = "/api/v1/update/{v}/download?platform=windows-x64"; // WHAT: the download's address, its version left to fill. WHY: one place for it
+
+fn download_of(version: &str) -> String {
+    DOWNLOAD.replace("{v}", version) // WHAT: the address for one version. WHY: the tests ask for several
+}
+
+#[test]
+fn a_release_not_ready_is_never_downloaded_by_a_stranger() {
+    let data = folder("m2-not-ready");
+    let _ = as_0_6_31_left_it(&data);
+    let office = start(&data);
+    let bytes = b"unready unsigned build".to_vec();
+    office.release("9.9.9-private", "preview", 0, &bytes); // WHAT: a preview build still being made. WHY: the reviewer's probe
+    office.release("0.7.5", "stable", 0, &bytes); // WHAT: a stable one not ready either. WHY: ready is the gate, not only the channel
+    assert_eq!(office.old_download(&download_of("9.9.9-private"), &[]).0, 404, "not ready, not preview");
+    assert_eq!(office.old_download(&download_of("0.7.5"), &[]).0, 404, "not ready, though stable");
+    office.store().set_setting("update_channel", "preview").unwrap(); // WHAT: the office on preview. WHY: ready is still needed
+    assert_eq!(office.old_download(&download_of("9.9.9-private"), &[]).0, 404, "not ready, though the office is on preview");
+}
+
+#[test]
+fn a_preview_release_is_served_only_to_an_office_on_preview() {
+    let data = folder("m2-channel");
+    let _ = as_0_6_31_left_it(&data);
+    let office = start(&data);
+    let bytes = b"a preview build, ready".to_vec();
+    office.release("9.9.8", "preview", 1, &bytes);
+    assert_eq!(office.old_download(&download_of("9.9.8"), &[]).0, 404, "a stable office doesn't serve it");
+    assert_eq!(
+        office.old_download(&format!("{}&channel=preview", download_of("9.9.8")), &[]).0,
+        404,
+        "and a stranger can't ask for the preview channel"
+    );
+    office.store().set_setting("update_channel", "preview").unwrap(); // WHAT: the office on preview. WHY: then it is the office's channel
+    assert_eq!(office.old_download(&download_of("9.9.8"), &[]), (200, bytes), "an office on preview serves it");
+}
+
+#[test]
+fn the_download_is_streamed_with_its_length() {
+    let data = folder("m2-stream");
+    let _ = as_0_6_31_left_it(&data);
+    let office = start(&data);
+    let bytes: Vec<u8> = (0..3 * 1024 * 1024 + 17).map(|i: u32| u8::try_from(i % 251).unwrap()).collect(); // WHAT: an installer of a few MiB, not a multiple of a piece. WHY: the last piece is a short one
+    office.release("0.7.5", "stable", 1, &bytes);
+    let (status, length, got) = plain_get(&office, &download_of("0.7.5"));
+    assert_eq!(status, 200);
+    assert_eq!(length, Some(bytes.len().to_string()), "it says how long it is");
+    assert!(got == bytes, "and every byte arrives, in order");
+}
+
+#[test]
+fn only_a_few_anonymous_downloads_run_at_once_and_the_rest_are_told_to_retry() {
+    let data = folder("m2-cap");
+    let _ = as_0_6_31_left_it(&data);
+    let office = start(&data);
+    let big = vec![7u8; 48 * 1024 * 1024]; // WHAT: an installer far bigger than the sockets' buffers. WHY: a client that doesn't read leaves the server holding its place
+    office.release("0.7.5", "stable", 1, &big);
+    let mut held = Vec::new(); // WHAT: the connections left open. WHY: each keeps its place
+    for _ in 0..devices_places() {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", office.port)).unwrap(); // WHAT: a plain connection. WHY: sends the request by hand, then never reads the body
+        std::io::Write::write_all(&mut stream, format!("GET {} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", download_of("0.7.5")).as_bytes()).unwrap(); // WHAT: the request. WHY: it starts a download
+        let mut first = [0u8; 16]; // WHAT: the start of the answer. WHY: the download has begun when it arrives
+        std::io::Read::read_exact(&mut stream, &mut first).unwrap(); // WHAT: read. WHY: proof the place is taken
+        held.push(stream);
+    }
+    let (status, said) = office.old_seat("GET", &download_of("0.7.5"), None, None, &[]);
+    assert_eq!(status, 503, "the next is told to retry: {said}");
+    assert_eq!(said["error"], "busy");
+    drop(held); // WHAT: the connections closed. WHY: the places are given back
+}
+
+/// The number of anonymous downloads the server allows at once.
+fn devices_places() -> usize {
+    hyperview_server::download::AT_ONCE // WHAT: the server's own number. WHY: the test follows it
+}
+
+#[test]
+fn one_address_may_start_only_so_many_anonymous_downloads() {
+    let data = folder("m2-rate");
+    let _ = as_0_6_31_left_it(&data);
+    let office = start(&data);
+    office.release("0.7.5", "stable", 1, b"a small build");
+    for n in 0..hyperview_server::download::PER_WINDOW {
+        assert_eq!(office.old_download(&download_of("0.7.5"), &[]).0, 200, "download {n} of the window");
+    }
+    let (status, said) = office.old_seat("GET", &download_of("0.7.5"), None, None, &[]);
+    assert_eq!(status, 429, "past the window's share: {said}");
+    assert_eq!(said["error"], "too_many");
+}
+
+#[test]
+fn a_signed_in_person_is_not_held_to_the_anonymous_limit() {
+    let data = folder("m2-signed");
+    let old_session = as_0_6_31_left_it(&data);
+    let office = start(&data);
+    office.release("0.7.5", "stable", 1, b"a small build");
+    for _ in 0..hyperview_server::download::PER_WINDOW + 2 {
+        let agent = ureq::get(&format!("http://127.0.0.1:{}{}", office.port, download_of("0.7.5"))).set("Authorization", &format!("Bearer {old_session}")); // WHAT: a seat with its session. WHY: it is signed in
+        assert_eq!(agent.call().unwrap().status(), 200);
+    }
+}
+
+#[test]
+fn what_an_unsigned_seat_is_offered_is_only_what_the_office_would_install() {
+    let data = folder("m2-offer");
+    let old_session = as_0_6_31_left_it(&data);
+    let office = start(&data);
+    office.release("0.7.5", "stable", 1, b"stable build");
+    office.release("9.9.9", "preview", 1, b"preview build");
+    office.store().set_setting("pin_version", "0.7.5").unwrap(); // WHAT: the office held on 0.7.5. WHY: its hold is not for strangers
+    let ask = "/api/v1/update/latest?version=0.6.31&platform=windows-x64&channel=preview&fresh=true";
+    let (status, offer) = office.old_seat("GET", ask, None, None, &[]);
+    assert_eq!(status, 200, "{offer}");
+    assert_eq!(offer["release"]["version"], "0.7.5", "stable only, whatever the asker says: {offer}");
+    assert!(offer.get("pinned_to").is_none(), "no hold details for a stranger: {offer}");
+    assert!(!offer["looking"].as_bool().unwrap_or(false), "nor whether the server is looking: {offer}");
+    // Signed in, the person sees the hold; with no pin, their own preview channel.
+    let (_, signed) = office.old_seat("GET", ask, Some(&old_session), None, &[]);
+    assert_eq!(signed["pinned_to"], "0.7.5", "a signed-in person sees the hold: {signed}");
+    office.store().set_setting("pin_version", "").unwrap(); // WHAT: the hold taken off. WHY: so the preview channel can be seen
+    let (_, signed) = office.old_seat("GET", ask, Some(&old_session), None, &[]);
+    assert_eq!(signed["release"]["version"], "9.9.9", "a signed-in seat may try the preview channel: {signed}");
+    let (_, stranger) = office.old_seat("GET", ask, None, None, &[]);
+    assert_eq!(stranger["release"]["version"], "0.7.5", "a stranger still gets stable: {stranger}");
+}
+
+#[test]
+fn a_stale_bearer_on_a_sign_in_neither_blocks_it_nor_skips_the_older_account_rule() {
+    let data = folder("l1-stale");
+    let old_session = as_0_6_31_left_it(&data);
+    let office = start(&data);
+    let good = serde_json::json!({"email": OWNER, "password": PASSWORD});
+    let (status, said) = office.old_seat("POST", "/api/v1/auth/token", Some("stale-token-from-last-week"), Some(good), &[]);
+    assert_eq!(status, 200, "a stale bearer doesn't block a correct sign-in: {said}");
+    newcomer(&office);
+    let body = serde_json::json!({"email": NEWCOMER, "password": PASSWORD});
+    let (status, said) = office.old_seat("POST", "/api/v1/auth/token", Some(&old_session), Some(body.clone()), &[]);
+    assert_eq!((status, said["error"].as_str()), (401, Some("device_unknown")), "a good session on the sign-in doesn't skip the older-account rule: {said}");
+    let (status, said) = office.old_seat("POST", "/api/v1/auth/token", Some("stale-token-from-last-week"), Some(body), &[]);
+    assert_eq!((status, said["error"].as_str()), (401, Some("device_unknown")), "nor does a stale one: {said}");
+}
+
+#[test]
+fn a_computer_with_no_password_never_becomes_the_admin_computer_after_an_upgrade() {
+    let data = folder("m1-claim");
+    let _ = as_0_6_31_left_it(&data);
+    let office = start(&data);
+    let attacker = signer(66);
+    let said = office.client(&attacker).ask_to_be_let_in("view", "guest-wifi").unwrap().unwrap().state;
+    assert_eq!(said, "waiting", "asking with no password gets nothing");
+    assert_eq!(office.state_of(&attacker), ("waiting".to_string(), false));
+    assert!(office.client(&attacker).device_me().unwrap().claimable.not(), "and is not offered the admin seat");
+    let owner = signer(67);
+    office.client(&owner).ask_to_be_let_in("view", "Owner").unwrap();
+    office.client(&owner).sign_in(OWNER, PASSWORD).unwrap();
+    assert_eq!(office.state_of(&owner), ("approved".to_string(), true), "the owner's admin sign-in makes the admin computer");
+    assert_eq!(office.state_of(&attacker), ("waiting".to_string(), false), "and the attacker still waits");
+}
+
+use std::ops::Not as _; // WHAT: `.not()` on a bool. WHY: reads as a plain assertion above
+
+#[test]
+fn the_upgrade_is_read_from_the_old_schema_marker_not_from_account_dates() {
+    // An upgraded office: people and no device list when 0.7.x first opened it.
+    let data = folder("l2-marker");
+    let _ = as_0_6_31_left_it(&data);
+    let office = start(&data);
+    assert!(office.setting(devices::settings::FROM_BEFORE_DEVICES).is_some(), "the 0.6.x database is marked");
+    assert!(office.setting(devices::settings::GRACE_UNTIL).is_some(), "and gets its grace");
+    // Opened again, it keeps its mark, and a restart changes nothing.
+    let first = office.setting(devices::settings::FROM_BEFORE_DEVICES);
+    assert_eq!(office.setting(devices::settings::FROM_BEFORE_DEVICES), first, "the mark is kept once");
+    // An office already on 0.7.1 has the device table and no mark; licensing's start, long before the device list's, tells it.
+    let store = office.store();
+    for key in [devices::settings::GRACE_UNTIL, devices::settings::UPGRADE_SEEN, devices::settings::FROM_BEFORE_DEVICES] {
+        store.with(|db| Ok(db.execute("DELETE FROM settings WHERE key = ?1", params![key])?)).unwrap(); // WHAT: as 0.7.1 left it. WHY: only the licensing marker remains
+    }
+    store.set_setting(devices::settings::BEGAN, &now_text(-1)).unwrap(); // WHAT: the device list began yesterday. WHY: Mesa
+    devices::open_for_the_upgrade(&store, time::OffsetDateTime::now_utc());
+    assert!(office.setting(devices::settings::GRACE_UNTIL).is_some(), "licensing's old start alone marks it");
+    // A fresh install is never marked.
+    let fresh = folder("l2-fresh-marker");
+    let new_office = start(&fresh);
+    assert_eq!(new_office.setting(devices::settings::FROM_BEFORE_DEVICES), None, "a fresh office is not marked");
+}
+
+#[test]
+fn a_fresh_install_whose_clock_ran_ahead_is_not_upgraded() {
+    // LatCon's case: 0.7.1 installed fresh, its clock three days ahead at the first start, then set right.
+    let data = folder("l2-skew");
+    let office = start(&data); // WHAT: a fresh server. WHY: its device list begins now
+    let ahead = now_text(3); // WHAT: what the wrong clock wrote at the first start. WHY: both settings are written in one start, by one clock
+    office.store().set_setting(devices::settings::BEGAN, &ahead).unwrap(); // WHAT: the device list's start, in the future. WHY: the accounts made since look older than it
+    office.store().set_setting("licensing_began", &ahead).unwrap(); // WHAT: licensing's start, the same moment. WHY: as above
+    let hashed = auth::hash_password(PASSWORD).unwrap();
+    office
+        .store()
+        .with(|db| Ok(db.execute("INSERT INTO people (id, name, email, password, role, created) VALUES ('usr_owner', 'Owner', ?1, ?2, 'admin', ?3)", params![OWNER, hashed, now_text(-1)])?))
+        .unwrap(); // WHAT: an administrator dated days before the device list's start. WHY: the date alone would make it an upgrade
+    devices::open_for_the_upgrade(&office.store(), time::OffsetDateTime::now_utc()); // WHAT: the next start. WHY: it must find nothing to carry over
+    assert_eq!(office.setting(devices::settings::GRACE_UNTIL), None, "no grace");
+    assert_eq!(office.setting(devices::settings::UPGRADE_SEEN), None, "no upgrade noted");
+    let (status, said) = office.old_seat("POST", "/api/v1/auth/token", None, Some(serde_json::json!({"email": OWNER, "password": PASSWORD})), &[]);
+    assert_eq!((status, said["error"].as_str()), (401, Some("device_unknown")), "an unsigned sign-in is held: {said}");
+}
+
+#[test]
+fn an_account_dated_near_the_device_list_start_is_not_taken_for_an_old_one() {
+    let data = folder("l2-margin");
+    let _ = as_0_6_31_left_it(&data);
+    let office = start(&data);
+    let hashed = auth::hash_password(PASSWORD).unwrap();
+    let began = parsed(&office.setting(devices::settings::BEGAN).unwrap());
+    let near = (began - time::Duration::minutes(5)).format(&time::format_description::well_known::Rfc3339).unwrap(); // WHAT: five minutes before the list began. WHY: inside the margin
+    office
+        .store()
+        .with(|db| Ok(db.execute("INSERT INTO people (id, name, email, password, role, created) VALUES ('usr_near', 'Near', ?1, ?2, 'admin', ?3)", params![NEWCOMER, hashed, near])?))
+        .unwrap();
+    let (status, said) = office.old_seat("POST", "/api/v1/auth/token", None, Some(serde_json::json!({"email": NEWCOMER, "password": PASSWORD})), &[]);
+    assert_eq!((status, said["error"].as_str()), (401, Some("device_unknown")), "{said}");
+}
+
+#[test]
+fn a_headless_first_admin_writes_the_device_list_start_before_the_account() {
+    let data = folder("l2-headless");
+    std::fs::create_dir_all(&data).unwrap();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_hyperview-server"))
+        .env("HYPERVIEW_FIRST_ADMIN", "1") // WHAT: the headless way. WHY: under test
+        .env("HYPERVIEW_DATA", &data) // WHAT: its own folder. WHY: never a real server's
+        .env("HYPERVIEW_LISTEN", "127.0.0.1:0") // WHAT: any free port. WHY: tests run side by side
+        .env("HYPERVIEW_TLS", "off") // WHAT: plain. WHY: nothing to pin here
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let config = config(&data);
+    let mut seen = None; // WHAT: the began time and the account's time. WHY: compared below
+    for _ in 0..300 {
+        std::thread::sleep(std::time::Duration::from_millis(100)); // WHAT: a pause. WHY: the process starts on its own
+        if let Ok(db) = rusqlite::Connection::open_with_flags(config.database(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            let made = db.query_row("SELECT created FROM people LIMIT 1", [], |r| r.get::<_, String>(0)).ok(); // WHAT: when the account was made, if there is one. WHY: read without opening the server's database for writing
+            let began = db.query_row("SELECT value FROM settings WHERE key = ?1", params![devices::settings::BEGAN], |r| r.get::<_, String>(0)).ok(); // WHAT: when the device list began, if noted. WHY: likewise
+            if let (Some(made), Some(began)) = (made, began) {
+                seen = Some((began, made));
+                break;
+            }
+        }
+    }
+    let _ = child.kill(); // WHAT: the test's own server stopped. WHY: it serves until told
+    let _ = child.wait(); // WHAT: reaped. WHY: nothing left behind
+    let (began, made) = seen.expect("the headless server made its administrator and noted the start");
+    assert!(parsed(&began) <= parsed(&made), "the start ({began}) is written before the account ({made})");
+}
+
+#[test]
+fn a_0_6_x_database_is_upgraded_even_when_its_licensing_start_ran_ahead() {
+    let data = folder("l2-marker-only");
+    let _ = as_0_6_31_left_it(&data);
+    let db = rusqlite::Connection::open(config(&data).database()).unwrap(); // WHAT: the database before the server opens it. WHY: its clock-ahead start is set as 0.6.x left it
+    db.execute("UPDATE settings SET value = ?1 WHERE key = 'licensing_began'", params![now_text(3)]).unwrap(); // WHAT: licensing's start in the future. WHY: a 0.6.x clock that ran ahead; the licensing mark alone would call it fresh
+    drop(db); // WHAT: closed. WHY: the server opens it next
+    let office = start(&data);
+    assert!(office.setting(devices::settings::GRACE_UNTIL).is_some(), "the schema's own mark is enough: no device table, with people");
 }

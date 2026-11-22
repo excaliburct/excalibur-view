@@ -12,6 +12,16 @@ use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
+/// The setting written when a database from before the device list (people,
+/// no device table) is first opened by a version that has one.
+pub const FROM_BEFORE_DEVICES: &str = "came_from_before_devices"; // WHAT: the marker's name. WHY: only a 0.6.x database ever has it, so "upgraded" never rests on a clock
+
+/// Whether `db` has a table called `name`.
+fn has_table(db: &Connection, name: &str) -> rusqlite::Result<bool> {
+    let found: i64 = db.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", params![name], |r| r.get(0))?; // WHAT: how many tables have that name. WHY: asked before the schema is run
+    Ok(found > 0) // WHAT: whether there is one. WHY: the caller's question
+}
+
 pub struct Store {
     db: std::sync::Mutex<Connection>,
     blobs: PathBuf,
@@ -365,7 +375,11 @@ impl Store {
         std::fs::create_dir_all(blobs).with_context(|| format!("making {}", blobs.display()))?;
         let db = Connection::open(database)
             .with_context(|| format!("opening {}", database.display()))?;
+        let from_before_devices = has_table(&db, "people")? && !has_table(&db, "devices")?; // WHAT: whether this database has people and no device list yet. WHY: asked before the schema makes the table; that is a 0.6.x office meeting 0.7.x
         db.execute_batch(SCHEMA).context("setting up the database")?;
+        if from_before_devices {
+            db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)", params![FROM_BEFORE_DEVICES, crate::api::now()])?; // WHAT: the marker, kept once. WHY: the upgrade is read from it for good, even after the device table exists
+        }
         db.execute_batch(crate::cad::SCHEMA).context("setting up CAD's drawings")?; // WHAT: the cad part's tables, in the same database. WHY: one backup and one restore carry them
         crate::cad::upgrade(&db).context("bringing CAD's drawings up to date")?; // WHAT: an earlier build's CAD tables brought up to date. WHY: the check-out's account column
         db.execute_batch(crate::archetype::SCHEMA).context("setting up Archetype's jobs")?; // WHAT: the archetype part's tables. WHY: the same

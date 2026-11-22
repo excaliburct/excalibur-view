@@ -48,6 +48,9 @@ pub mod settings {
     /// Until when computers from before 0.7.0 are let in without a device,
     /// after an upgrade (RFC 3339; docs/OFFICE-ENROLLMENT.md §3a).
     pub const GRACE_UNTIL: &str = "device_grace_until"; // WHAT: the end of the upgrade grace. WHY: kept, so a restart never reopens or stretches it
+    /// Written by the store, once, when it first opens a database that has
+    /// people but no device list: a 0.6.x office meeting 0.7.x (RFC 3339).
+    pub const FROM_BEFORE_DEVICES: &str = crate::store::FROM_BEFORE_DEVICES; // WHAT: the store's marker, named here. WHY: the upgrade is read from it, never from the dates on accounts (review L2)
     /// When this server first saw that its office had people before the
     /// device list began (RFC 3339). Written once.
     pub const UPGRADE_SEEN: &str = "device_upgrade_seen"; // WHAT: the upgrade, noted once. WHY: the grace and the claim open on the first start after it, never again on a restart
@@ -191,6 +194,14 @@ fn parse(text: &str) -> Option<time::OffsetDateTime> {
     time::OffsetDateTime::parse(text.trim(), &time::format_description::well_known::Rfc3339).ok() // WHAT: read, or none. WHY: a time that doesn't read never opens anything
 }
 
+/// Writes when the device list began, once. Called before anything makes an
+/// account on a fresh server (review L2), and again as the server starts.
+pub fn note_began(store: &crate::Store, now: time::OffsetDateTime) {
+    if !matches!(store.setting(settings::BEGAN), Ok(Some(_))) {
+        let _ = store.set_setting(settings::BEGAN, &rfc3339(now)); // WHAT: written once. WHY: sessions issued after it can't carry a seat over
+    }
+}
+
 /// Notes, once, when the device list began and until when the first computer
 /// may claim the server. Called as the server starts.
 ///
@@ -200,9 +211,7 @@ fn parse(text: &str) -> Option<time::OffsetDateTime> {
 /// seats come over with their sessions instead.
 pub fn begin(server: &Server) {
     let now = time::OffsetDateTime::now_utc(); // WHAT: this start. WHY: the device list's beginning, if it has none yet
-    if !matches!(server.store.setting(settings::BEGAN), Ok(Some(_))) {
-        let _ = server.store.set_setting(settings::BEGAN, &rfc3339(now)); // WHAT: written once. WHY: sessions issued after it can't carry a seat over
-    }
+    note_began(&server.store, now); // WHAT: the beginning written, if it is not. WHY: sessions issued after it can't carry a seat over
     if !matches!(server.store.setting(settings::CLAIM_UNTIL), Ok(Some(_))) {
         let first_person = server
             .store
@@ -217,20 +226,38 @@ pub fn begin(server: &Server) {
     open_for_the_upgrade(&server.store, now); // WHAT: the grace and the claim, after an upgrade. WHY: §3a: an upgrade never locks an office out
 }
 
-/// Whether this office had people before its device list began: a server
-/// upgraded from before 0.7.0, not one installed fresh.
+/// Whether this office is one upgraded from before 0.7.0, not one installed
+/// fresh.
+///
+/// Never read from the dates on accounts: a clock that ran ahead makes a
+/// fresh install's first account look older than its device list (review L2).
+/// Two markers a fresh 0.7.x install cannot have, either one enough:
+///
+/// - the store's own, written when it first opened a database with people
+///   and no device table: only a 0.6.x database is ever like that;
+/// - `licensing_began`, which every server since 0.6.x writes at its first
+///   start, older than `devices_began` by more than [`DATE_MARGIN`]: on a
+///   fresh install both are written in the same start, by the same clock,
+///   so skew moves them together. This is the way Mesa Fab's 0.7.1 database,
+///   which already has its device table, is told from LatCon's.
 fn upgraded(db: &Connection, began: time::OffsetDateTime) -> rusqlite::Result<bool> {
-    let mut statement = db.prepare("SELECT created FROM people")?; // WHAT: when each account was made. WHY: parsed one by one, since two ways of writing a time don't sort as text
-    let created = statement.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?; // WHAT: every one. WHY: an office has a handful
-    Ok(created.iter().filter_map(|t| parse(t)).any(|t| t < began)) // WHAT: any account older than the device list. WHY: a fresh office's accounts are all made after its first start
+    let people: i64 = db.query_row("SELECT count(*) FROM people", [], |r| r.get(0))?; // WHAT: how many accounts there are. WHY: an office with nobody has nobody to carry over
+    if people == 0 {
+        return Ok(false); // WHAT: nobody. WHY: nothing to carry over, whatever the markers say
+    }
+    let marked: i64 = db.query_row("SELECT count(*) FROM settings WHERE key = ?1", params![settings::FROM_BEFORE_DEVICES], |r| r.get(0))?; // WHAT: whether the store marked it. WHY: the schema's own proof of a 0.6.x database
+    let licensing: Option<String> = db.query_row("SELECT value FROM settings WHERE key = ?1", params![crate::license::BEGAN], |r| r.get(0)).optional()?; // WHAT: when licensing began here. WHY: the second marker
+    let long_before = licensing.as_deref().and_then(parse).is_some_and(|l| l < began - DATE_MARGIN); // WHAT: whether licensing began well before the device list. WHY: a fresh install writes both in one start
+    Ok(marked > 0 || long_before) // WHAT: either marker. WHY: a direct upgrade has the first, Mesa's 0.7.1 database the second
 }
 
 /// The first start after an upgrade from before 0.7.0 (§3a), once: computers
 /// from before 0.7.0 are let in for [`GRACE_DAYS`] while they update
-/// themselves, and an office with no admin computer can be claimed for a
-/// day, exactly as a fresh install can. Only within [`MIGRATION_DAYS`] of the
-/// device list's beginning: an office that has run with it for a month has
-/// long since sorted itself out.
+/// themselves. The claiming window is not reopened (review M1): the only way
+/// to the admin seat after an upgrade is an administrator account's sign-in
+/// on a new computer, when the office has no admin computer. Only within
+/// [`MIGRATION_DAYS`] of the device list's beginning: an office that has run
+/// with it for a month has long since sorted itself out.
 pub fn open_for_the_upgrade(store: &crate::Store, now: time::OffsetDateTime) {
     if matches!(store.setting(settings::UPGRADE_SEEN), Ok(Some(_))) {
         return; // WHAT: done before. WHY: a restart never reopens the grace or the claim
@@ -248,12 +275,6 @@ pub fn open_for_the_upgrade(store: &crate::Store, now: time::OffsetDateTime) {
     let until = rfc3339(now + time::Duration::days(GRACE_DAYS)); // WHAT: two weeks from this start. WHY: the old computers update themselves meanwhile
     if store.set_setting(settings::GRACE_UNTIL, &until).is_ok() {
         let _ = store.audit(&Entry::new(action::GRACE_OPENED, "").saying(format!("until {until}, from the office network only"))); // WHAT: written. WHY: every change to who gets in is in the audit log
-    }
-    if matches!(store.with(|db| Ok(admins(db)?)), Ok(0)) {
-        let claim = rfc3339(now + time::Duration::hours(CLAIM_HOURS)); // WHAT: a day from this start. WHY: §3a: the same rule as a fresh install
-        if store.set_setting(settings::CLAIM_UNTIL, &claim).is_ok() {
-            let _ = store.audit(&Entry::new(action::REOPENED_CLAIM, "").saying(format!("after the upgrade, until {claim}"))); // WHAT: written. WHY: every call is in the audit log
-        }
     }
 }
 
@@ -564,10 +585,14 @@ pub(crate) fn on_the_office_network(headers: &HeaderMap) -> bool {
     !api::from_outside(headers) && !proxied(headers) && api::seen_from(headers).parse::<std::net::IpAddr>().is_ok_and(hub::office::is_local) // WHAT: all three. WHY: §3; a router forwarding the port straight in, or a proxy, is not the office network
 }
 
+/// How much older than the device list an account must be to count as one
+/// from before it.
+const DATE_MARGIN: time::Duration = time::Duration::hours(1); // WHAT: an hour. WHY: review L2: clock skew can't make a new account look old
+
 /// Whether the account `person` was made before the device list began.
 fn predates(db: &Connection, person: &str, began: time::OffsetDateTime) -> rusqlite::Result<bool> {
     let created: Option<String> = db.query_row("SELECT created FROM people WHERE id = ?1", params![person], |r| r.get(0)).optional()?; // WHAT: when the account was made. WHY: compared below
-    Ok(created.as_deref().and_then(parse).is_some_and(|c| c < began)) // WHAT: older than the device list. WHY: only accounts the office had before the upgrade get the grace; one made since was made for a computer that can ask
+    Ok(created.as_deref().and_then(parse).is_some_and(|c| c < began - DATE_MARGIN)) // WHAT: older than the device list by a margin. WHY: only accounts the office had before the upgrade get the grace, and one dated near or after the list's start (a clock that ran ahead, review L2) is never taken for one of them
 }
 
 /// When the device list began, read.
@@ -595,6 +620,9 @@ fn old_seat(server: &Server, headers: &HeaderMap, method: &str, route: &str) -> 
     if method == "POST" && matches!(route, "/join" | "/setup") {
         return OldSeat::Held; // WHAT: joining and setting up, never. WHY: they make accounts; the grace is for the accounts the office already had
     }
+    if method == "POST" && route == "/auth/token" {
+        return OldSeat::Through(Some(Grace::Old), String::new()); // WHAT: a sign-in, whatever Authorization it carries. WHY: review L1: it always goes through the route's older-account rule, and a stale bearer on it never blocks a correct sign-in nor skips that rule
+    }
     match api::bearer(headers) {
         Some(token) if token.starts_with(crate::auth::KEY_PREFIX) => OldSeat::Held, // WHAT: a program's key. WHY: keys are let in above, or not at all
         Some(token) => {
@@ -608,7 +636,6 @@ fn old_seat(server: &Server, headers: &HeaderMap, method: &str, route: &str) -> 
                 _ => OldSeat::Held, // WHAT: an account made since, or the database failed. WHY: failing closed
             }
         }
-        None if method == "POST" && route == "/auth/token" => OldSeat::Through(Some(Grace::Old), String::new()), // WHAT: a sign-in. WHY: the route takes only an account older than the device list
         None => OldSeat::Held, // WHAT: anything else, signed in as nobody. WHY: never a route that doesn't check who is asking
     }
 }
