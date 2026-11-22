@@ -103,6 +103,109 @@ When the server has **no approved device** yet, it is unclaimed. The first local
 - A refused or removed device is never brought back by asking again, by a session or by a join: only an admin's Approve does that.
 - The open update routes never keep a session alive.
 
+## 3a. An upgrade never locks an office out (0.7.2)
+
+What happened at Mesa Fab on 2026-11-20, and what each part of 0.7.2 changes:
+
+1. 0.7.1 was published as an early release (a GitHub prerelease, `preview` in its `release.json`). Mesa's Office Server, set
+   to take them early, updated itself. Every desktop follows the stable channel, which skips prereleases
+   (`hub::feed::choose`), so none could update except through that server. **Fixed:** `publish.py sign` and `release` and
+   `release_now.py` make a full, stable release unless `--channel preview` / `--preview` is asked for
+   (`tools/test_release_channel.py`).
+2. The 0.6.30 and 0.6.31 desktops (and the App Store iPads on 0.6.31) can't sign requests, so the device gate turned
+   them all away. **Fixed:** the upgrade grace, below.
+3. An upgraded server never opened the first-admin claim, so a new 0.7.1 computer waited with no admin anywhere.
+   **Fixed:** the claim opens after an upgrade too, below.
+4. **Fixed:** the update routes answer any seat on the office network, signed in or not; a 0.7.2 desktop that its server
+   turns away asks the publisher's feed itself, and shows "Update Excalibur View" where it would say only "Not connected".
+
+### The upgrade
+
+The server counts as **upgraded** when any account in its `people` table was made before the device list began
+(`devices_began`): accounts on a fresh install are all made after its first start. On the first start of 0.7.2 or later
+that finds the office upgraded (`devices::open_for_the_upgrade`), **once** (it writes `device_upgrade_seen`, and a restart
+never does it again), and only when the device list began less than 30 days before:
+
+- **the grace opens** for 14 days (`device_grace_until`), written in the audit log;
+- **the claim opens** for 24 hours from that start, the same rule as a fresh install, but only when the office has **no**
+  admin computer (§3, "The first device"). An office with an admin computer is never opened to a claim.
+
+Mesa Fab, already on 0.7.1 with its admin set: its accounts predate its device list (2026-11-20), so the grace opens on
+0.7.2's first start; the claim does not. A fresh install (LatCon): nothing changes.
+
+### The grace, while it lasts
+
+Every rule below is held to the office network as §3 defines it (no tunnel mark, no sign of a proxy, a local socket
+address). From outside, nothing changes.
+
+- **A computer from before 0.7.0** (a request with no `X-Excalibur-Device` header at all) is let past the device gate:
+  - with a session that is valid now, of an account made before the device list began; the route's own sign-in checks
+    run as always, and the session is never extended by the gate;
+  - or to sign in (`POST /api/v1/auth/token`); the sign-in takes only an account made before the device list began
+    (anything else is 401 `device_unknown`, as the gate says);
+  - a session that has run out is answered 401 `unauthorised` by the gate itself, the word an old seat signs in again on;
+  - any other request, signed in as nobody (`/join`, `/setup`...), is held by the gate as ever.
+- **A computer on 0.7.0 or later that is waiting** may sign in. When the password matches and the account was made before
+  the device list began, the sign-in approves that computer in the same step (`how = grace`), as an ordinary computer, or
+  as the admin computer when the account is an administrator's and the office has **no** admin computer. A refused or
+  removed computer stays so, whoever signs in on it; only an admin's Approve brings it back. A 0.7.2 desktop that is
+  told to wait tries its sign-in once, so this needs nothing from the person.
+- Every computer let in is written in the audit log: an old seat at most every six hours a person and address ("a
+  computer from before 0.7.0 was let in during the upgrade grace"), each approval once ("a computer was approved by its
+  person's sign-in during the upgrade grace").
+- On the server PC: `hyperview-server --upgrade-grace <days>` sets the grace to that many days from now (0 to 30; 0 ends it
+  now), written in the audit log. For an iPad still waiting on the App Store's review, say.
+
+When the grace ends, the device gate holds exactly as in 0.7.1. A request with no device at all is then answered 401
+`device_unknown` with words saying to update Excalibur View.
+
+### The update, always
+
+`GET /api/v1/update/latest` and `GET /api/v1/update/{version}/download` answer any seat **on the office network**, signed
+in or not, approved or not, in the grace or after it. From outside they still need a session or a key (security review
+H2e: they never extend one). What they hand out is the same signed build that is public on the release page, and every
+seat checks its signature itself before installing it.
+
+A 0.7.2 desktop that its server turns away (`device_unknown`, `unauthorised` or `clock_behind` on the update question)
+asks the publisher's feed for its own channel instead, and so does one with no server (as before). One signed in whose
+server's gate refuses it after letting it in shows the server's words and **Update Excalibur View** in the Studio panel.
+
+### Threats, and what holds them
+
+| Threat | What holds it |
+|---|---|
+| A stranger on the office network uses the grace to get in | They need a valid session or the password of an account the office had before the upgrade. That is exactly the bar every computer met before 0.7.0, and only for 14 days. Wrong passwords are counted and slowed as every sign-in is. |
+| The same from the internet, through the tunnel or a forwarded port | The grace, the open update routes and the claim are all office-network only; a tunnel mark or any sign of a proxy counts as outside. |
+| **Any existing account, not only an administrator's, approves a new computer by signing in on it** (a deliberate choice, for review) | Without it, every desktop that updates during the grace would wait for the admin, which is the lockout this fixes. It needs a password the office had before the upgrade, typed on the office network, inside the 14 days; that is the same bar the grace already sets for old seats, and the bar every computer met before 0.7.0. Such a computer is approved as an ordinary one, never an admin unless the account is an administrator's and the office has no admin computer. Each one is in the audit log and marked `how = grace` in Computers, where an admin can remove it. |
+| A stolen old password gets a computer approved for good | Only during the grace, only from the office network, and every approval is written in the audit log with `how = grace` on the device, so an admin sees and removes it in Computers. A removed computer never comes back by signing in. |
+| A newly made account (or one made by a stranger with a join code) uses the grace | Only accounts made before the device list began get it. |
+| An attacker strips a 0.7 computer's device headers to look old | Then it is held to the old rule (password or session, office network, 14 days), never more. |
+| A stranger races the owner for the reopened claim | The claim reopens only for an office with no admin computer, for the same 24 hours as a fresh install, from the office network, never through a proxy. `--make-admin <code>` at the server is still the sure way. |
+| A restart, a rollback or a later update stretches the grace or reopens the claim | `device_upgrade_seen` is written before either opens; nothing opens them again but the console. |
+| The grace is used forever on an office that never noticed | It ends by itself after 14 days; the console can set at most 30; none opens more than 30 days after the device list began. |
+| The open update routes leak something or are abused | They serve the public signed build and its manifest only; seats verify the signature against keys built into them. The feed is looked at at most once a minute however often they are asked. |
+| A man in the middle offers an old build to roll a seat back | Unchanged: a seat takes a build that is not newer only from its own pinned server's administrator's hold (audit, 2026-11-11). |
+
+### What each office sees when 0.7.2 rolls out (for the owner)
+
+**Mesa Fab** (on 0.7.1, the admin computer set with `--make-admin`):
+
+1. Within half an hour of the release, the office server updates itself to 0.7.2. Nothing to do.
+2. The computers still on 0.6.30 and 0.6.31, and the iPads, connect again as they used to: open View and, if asked, sign
+   in with the same email and password. They keep working for two weeks.
+3. Each desktop updates itself to 0.7.2 (from the office server, or from the internet if it isn't connected), usually
+   the next time View is opened. When it restarts on 0.7.2 it asks to be approved; the person's own sign-in approves it.
+   The owner doesn't have to do anything, and can see each one in Studio, Office, Computers.
+4. The iPads stay on 0.6.31 until the App Store approves the new build. If that takes longer than two weeks, run
+   `Hyperview-Server.exe --upgrade-grace 14` on the server for two more.
+5. The admin computer stays the admin computer. Nobody new can claim the office.
+
+**LatCon** (installed fresh on 0.7.1):
+
+1. The office server updates itself to 0.7.2. Nothing else changes: there is no grace and no new claim, because every
+   computer there was set up on 0.7.1 and is already approved. Mark approves new computers as before.
+2. The desktops update themselves to 0.7.2, from the office server or from the internet.
+
 ### Waiting
 
 `GET /api/v1/devices/me` is signed by the device (§4). It answers `{ state: waiting|approved|refused|removed, admin: bool, approved_by, approved_at }`. The app checks every 5 s while its "Waiting for approval" screen is open.
@@ -344,3 +447,6 @@ At every start of the cell (`crate::cellkey` decides; `cell::tlskey` hands it to
 6. An app that has seen a verified office certificate never accepts that server unverified.
 7. The Citadel cell refuses a device the Office Server hasn't approved, and fails closed when the pipe is down.
 8. A seat migrated with a session is approved only if its session was valid at the moment of migration.
+9. The upgrade grace (§3a) is for the office network only, for accounts made before the device list began, opens once,
+   and never brings back a refused or removed computer; the claim reopens after an upgrade only when there is no admin
+   computer. The update routes need a sign-in from outside.

@@ -107,9 +107,9 @@ copy for the trip.
    About twenty minutes, most of it Apple. You do not have to watch it.
 2. On the PC, double-click **Release Excalibur View**.
    It fetches what GitHub built, runs the tests, builds the Windows programs,
-   signs everything with your key and publishes.
-3. Try it on one seat.
-4. Double-click **Give it to everyone**.
+   signs everything with your key and publishes it to every office (since
+   0.7.2; an early release first is `release_now.py --preview`, then
+   **Give it to everyone**, docs/RELEASING.md).
 
 ## If the Mac build fails
 

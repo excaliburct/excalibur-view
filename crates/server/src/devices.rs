@@ -45,6 +45,12 @@ pub mod settings {
     /// The office certificate, as it was stored, served at
     /// `GET /api/v1/office/identity` (§2.4).
     pub const OFFICE_CERT: &str = "office_cert"; // WHAT: the setting's name. WHY: the contract names it
+    /// Until when computers from before 0.7.0 are let in without a device,
+    /// after an upgrade (RFC 3339; docs/OFFICE-ENROLLMENT.md §3a).
+    pub const GRACE_UNTIL: &str = "device_grace_until"; // WHAT: the end of the upgrade grace. WHY: kept, so a restart never reopens or stretches it
+    /// When this server first saw that its office had people before the
+    /// device list began (RFC 3339). Written once.
+    pub const UPGRADE_SEEN: &str = "device_upgrade_seen"; // WHAT: the upgrade, noted once. WHY: the grace and the claim open on the first start after it, never again on a restart
 }
 
 /// The `YubiKey` slot the office certificate will be signed from (§2.4). A
@@ -54,6 +60,13 @@ pub const OFFICE_KEY_SLOT: &str = "office"; // WHAT: the slot's name. WHY: the l
 /// How long after the device list began a seat may still be carried over
 /// with a session from before it.
 pub const MIGRATION_DAYS: i64 = 30; // WHAT: thirty days. WHY: every seat that is in use comes back within a month; after that an old session is only a stolen one
+
+/// How long computers from before 0.7.0 keep working after an upgrade,
+/// while each one updates itself.
+pub const GRACE_DAYS: i64 = 14; // WHAT: two weeks. WHY: every desktop updates itself within a day of being opened; an iPad waits on the App Store's review, which takes days, not weeks
+
+/// The longest the server's console may set the grace to.
+pub const MOST_GRACE_DAYS: i64 = 30; // WHAT: a month. WHY: the same as the migration window; a longer grace is an office running without device approval
 
 /// How long after the service's first start the first computer may claim it.
 pub const CLAIM_HOURS: i64 = 24; // WHAT: one day. WHY: §3; a stranger can't race the owner a week later
@@ -86,6 +99,10 @@ pub mod action {
     pub const CARRIED_FROM_CITADEL: &str = "computers paired with Citadel Server were carried over"; // WHAT: the cell's migration. WHY: likewise
     pub const REFUSED_REQUEST: &str = "a computer's signed request was refused"; // WHAT: a failed signature check. WHY: written at most once a minute an address, so a stranger can't fill the log
     pub const REOPENED_CLAIM: &str = "claiming the office server was reopened"; // WHAT: the Manager's reopen. WHY: likewise
+    pub const GRACE_OPENED: &str = "the upgrade grace for computers from before 0.7.0 was opened"; // WHAT: the grace, opened at the first start after an upgrade. WHY: an admin can see when, and until when, old computers get in without a device
+    pub const GRACE_SEAT: &str = "a computer from before 0.7.0 was let in during the upgrade grace"; // WHAT: an old seat let through. WHY: written at most every six hours a person and address, so an admin sees who still needs to update
+    pub const GRACE_APPROVED: &str = "a computer was approved by its person's sign-in during the upgrade grace"; // WHAT: a new computer approved by an existing account. WHY: an admin can review every computer the grace let in
+    pub const GRACE_CHANGED: &str = "the upgrade grace was changed at the server"; // WHAT: the console's change. WHY: likewise
 }
 
 /// The SDDL-free description of one device, as the server keeps it.
@@ -197,6 +214,69 @@ pub fn begin(server: &Server) {
         let until = first_start + time::Duration::hours(CLAIM_HOURS); // WHAT: a day after. WHY: §3
         let _ = server.store.set_setting(settings::CLAIM_UNTIL, &rfc3339(until)); // WHAT: kept. WHY: a restart never reopens it
     }
+    open_for_the_upgrade(&server.store, now); // WHAT: the grace and the claim, after an upgrade. WHY: §3a: an upgrade never locks an office out
+}
+
+/// Whether this office had people before its device list began: a server
+/// upgraded from before 0.7.0, not one installed fresh.
+fn upgraded(db: &Connection, began: time::OffsetDateTime) -> rusqlite::Result<bool> {
+    let mut statement = db.prepare("SELECT created FROM people")?; // WHAT: when each account was made. WHY: parsed one by one, since two ways of writing a time don't sort as text
+    let created = statement.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?; // WHAT: every one. WHY: an office has a handful
+    Ok(created.iter().filter_map(|t| parse(t)).any(|t| t < began)) // WHAT: any account older than the device list. WHY: a fresh office's accounts are all made after its first start
+}
+
+/// The first start after an upgrade from before 0.7.0 (§3a), once: computers
+/// from before 0.7.0 are let in for [`GRACE_DAYS`] while they update
+/// themselves, and an office with no admin computer can be claimed for a
+/// day, exactly as a fresh install can. Only within [`MIGRATION_DAYS`] of the
+/// device list's beginning: an office that has run with it for a month has
+/// long since sorted itself out.
+pub fn open_for_the_upgrade(store: &crate::Store, now: time::OffsetDateTime) {
+    if matches!(store.setting(settings::UPGRADE_SEEN), Ok(Some(_))) {
+        return; // WHAT: done before. WHY: a restart never reopens the grace or the claim
+    }
+    let Some(began) = store.setting(settings::BEGAN).ok().flatten().as_deref().and_then(parse) else { return }; // WHAT: when the device list began. WHY: without it nothing can be shown to predate it
+    if !matches!(store.with(|db| Ok(upgraded(db, began)?)), Ok(true)) {
+        return; // WHAT: a fresh office, or the database couldn't say. WHY: a fresh office has its own day to claim, and nothing to carry over; failing closed
+    }
+    if store.set_setting(settings::UPGRADE_SEEN, &rfc3339(now)).is_err() {
+        return; // WHAT: the mark couldn't be kept. WHY: never open a grace that a restart would open again
+    }
+    if now >= began + time::Duration::days(MIGRATION_DAYS) {
+        return; // WHAT: the device list began over a month ago. WHY: as above; the console can still open the grace or the claim
+    }
+    let until = rfc3339(now + time::Duration::days(GRACE_DAYS)); // WHAT: two weeks from this start. WHY: the old computers update themselves meanwhile
+    if store.set_setting(settings::GRACE_UNTIL, &until).is_ok() {
+        let _ = store.audit(&Entry::new(action::GRACE_OPENED, "").saying(format!("until {until}, from the office network only"))); // WHAT: written. WHY: every change to who gets in is in the audit log
+    }
+    if matches!(store.with(|db| Ok(admins(db)?)), Ok(0)) {
+        let claim = rfc3339(now + time::Duration::hours(CLAIM_HOURS)); // WHAT: a day from this start. WHY: §3a: the same rule as a fresh install
+        if store.set_setting(settings::CLAIM_UNTIL, &claim).is_ok() {
+            let _ = store.audit(&Entry::new(action::REOPENED_CLAIM, "").saying(format!("after the upgrade, until {claim}"))); // WHAT: written. WHY: every call is in the audit log
+        }
+    }
+}
+
+/// Whether the upgrade grace is open at `now`.
+fn grace_open(store: &crate::Store, now: time::OffsetDateTime) -> bool {
+    store.setting(settings::GRACE_UNTIL).ok().flatten().as_deref().and_then(parse).is_some_and(|until| now < until) // WHAT: inside the grace. WHY: a grace that doesn't read is over
+}
+
+/// Sets the upgrade grace to `days` from now, from the server's own console
+/// (`hyperview-server --upgrade-grace <days>`); 0 ends it now. At most
+/// [`MOST_GRACE_DAYS`].
+///
+/// # Errors
+///
+/// When `days` is more than that, or the setting can't be written.
+pub fn set_grace_here(store: &crate::Store, days: i64) -> anyhow::Result<String> {
+    if !(0..=MOST_GRACE_DAYS).contains(&days) {
+        anyhow::bail!("the grace is 0 to {MOST_GRACE_DAYS} days"); // WHAT: refused. WHY: a longer grace is an office running without device approval
+    }
+    let until = rfc3339(time::OffsetDateTime::now_utc() + time::Duration::days(days)); // WHAT: the new end. WHY: from now, as typed
+    store.set_setting(settings::GRACE_UNTIL, &until)?; // WHAT: kept. WHY: read by the next request
+    let _ = store.audit(&Entry::new(action::GRACE_CHANGED, "the server console").saying(format!("{days} days, until {until}"))); // WHAT: written. WHY: every change to who gets in is in the audit log
+    Ok(until)
 }
 
 /// Opens claiming again for a day, from now: the Manager's "reopen", on the
@@ -469,6 +549,135 @@ pub fn door(method: &str, route: &str) -> Door {
     }
 }
 
+// ---- the upgrade grace (§3a) ------------------------------------------------------
+
+/// How a computer was let past the gate by the upgrade grace, for the route.
+#[derive(Clone, Debug)]
+pub(crate) enum Grace {
+    Old, // WHAT: a computer from before 0.7.0, signing in with no device. WHY: the sign-in takes only an account older than the device list
+    Waiting(Box<Device>), // WHAT: a 0.7.0 or later computer still waiting, signing in, boxed. WHY: an account older than the device list approves it; boxed so the enum stays small (clippy::large_enum_variant)
+}
+
+/// Whether a request came from the office network: not marked as from the
+/// internet, no sign of a proxy, and the socket's address local.
+pub(crate) fn on_the_office_network(headers: &HeaderMap) -> bool {
+    !api::from_outside(headers) && !proxied(headers) && api::seen_from(headers).parse::<std::net::IpAddr>().is_ok_and(hub::office::is_local) // WHAT: all three. WHY: §3; a router forwarding the port straight in, or a proxy, is not the office network
+}
+
+/// Whether the account `person` was made before the device list began.
+fn predates(db: &Connection, person: &str, began: time::OffsetDateTime) -> rusqlite::Result<bool> {
+    let created: Option<String> = db.query_row("SELECT created FROM people WHERE id = ?1", params![person], |r| r.get(0)).optional()?; // WHAT: when the account was made. WHY: compared below
+    Ok(created.as_deref().and_then(parse).is_some_and(|c| c < began)) // WHAT: older than the device list. WHY: only accounts the office had before the upgrade get the grace; one made since was made for a computer that can ask
+}
+
+/// When the device list began, read.
+fn began(store: &crate::Store) -> Option<time::OffsetDateTime> {
+    store.setting(settings::BEGAN).ok().flatten().as_deref().and_then(parse) // WHAT: the beginning, or none. WHY: none means no grace
+}
+
+/// What the gate does with a request that carries no device at all, during
+/// the upgrade grace: through, told to sign in again, or held as ever.
+enum OldSeat {
+    Through(Option<Grace>, String), // WHAT: let past, with what the route must know and who it is. WHY: §3a
+    SignInAgain, // WHAT: a session that has run out or never was. WHY: answered 401 `unauthorised`, the word an old seat signs in again on; never passed to a route that might not check it
+    Held, // WHAT: not for the grace. WHY: the gate's ordinary answer
+}
+
+/// A request with no device headers, during the upgrade grace and from the
+/// office network: a session of an account older than the device list goes
+/// through, and so does a sign-in, which takes only such an account.
+fn old_seat(server: &Server, headers: &HeaderMap, method: &str, route: &str) -> OldSeat {
+    let now = time::OffsetDateTime::now_utc(); // WHAT: the time. WHY: the grace and the session are read against it
+    if !grace_open(&server.store, now) || !on_the_office_network(headers) {
+        return OldSeat::Held; // WHAT: no grace, or from outside. WHY: §3a: the grace is for the office network only
+    }
+    let Some(began) = began(&server.store) else { return OldSeat::Held }; // WHAT: the beginning. WHY: nothing predates an unknown time
+    if method == "POST" && matches!(route, "/join" | "/setup") {
+        return OldSeat::Held; // WHAT: joining and setting up, never. WHY: they make accounts; the grace is for the accounts the office already had
+    }
+    match api::bearer(headers) {
+        Some(token) if token.starts_with(crate::auth::KEY_PREFIX) => OldSeat::Held, // WHAT: a program's key. WHY: keys are let in above, or not at all
+        Some(token) => {
+            let found = server.store.with(|db| {
+                let Some(who) = crate::auth::whose_still(db, &token, &api::now())? else { return Ok(None) }; // WHAT: the session's person, the session untouched. WHY: valid now, or nobody
+                Ok(Some((predates(db, &who.id, began)?, who.email))) // WHAT: whether the account is old enough, and its address. WHY: below
+            });
+            match found {
+                Ok(Some((true, email))) => OldSeat::Through(None, email), // WHAT: through, to the route's own checks. WHY: §3a
+                Ok(None) => OldSeat::SignInAgain, // WHAT: no such session now. WHY: the old seat is told to sign in again, which the grace lets it do
+                _ => OldSeat::Held, // WHAT: an account made since, or the database failed. WHY: failing closed
+            }
+        }
+        None if method == "POST" && route == "/auth/token" => OldSeat::Through(Some(Grace::Old), String::new()), // WHAT: a sign-in. WHY: the route takes only an account older than the device list
+        None => OldSeat::Held, // WHAT: anything else, signed in as nobody. WHY: never a route that doesn't check who is asking
+    }
+}
+
+/// Whether the old seat of `who` from `from` is worth a line in the audit
+/// log now: at most once every six hours each.
+fn grace_worth_a_line(who: &str, from: &str) -> bool {
+    static SEEN: std::sync::OnceLock<Mutex<HashMap<String, std::time::Instant>>> = std::sync::OnceLock::new(); // WHAT: when each was last written. WHY: one process, one list
+    let Ok(mut seen) = SEEN.get_or_init(Default::default).lock() else { return true }; // WHAT: a poisoned lock writes. WHY: losing the line is the wrong way round
+    let at = std::time::Instant::now(); // WHAT: now. WHY: compared below
+    let quiet = std::time::Duration::from_secs(6 * 60 * 60); // WHAT: six hours. WHY: an old seat asks every few seconds; one line a morning and afternoon says it is still there
+    let name = format!("{who}\u{1}{from}"); // WHAT: the person and the address together. WHY: one line for each computer
+    if seen.get(&name).is_some_and(|last| at.duration_since(*last) < quiet) {
+        return false; // WHAT: written lately. WHY: as above
+    }
+    if seen.len() >= 4096 {
+        seen.retain(|_, last| at.duration_since(*last) < quiet); // WHAT: the old ones forgotten. WHY: the list stays small
+    }
+    seen.insert(name, at); // WHAT: this line's time. WHY: the next six hours are quiet
+    true
+}
+
+/// The route's half of the grace, for a sign-in whose password matched:
+/// only an account older than the device list, while the grace is open,
+/// and a waiting computer approved by it in one step, as the admin
+/// computer when the office has none and the person is an administrator.
+///
+/// # Errors
+///
+/// 401 `device_unknown` when the account is newer than the device list, or
+/// the grace closed meanwhile; 500 when the database fails.
+pub(crate) fn signed_in_in_grace(server: &Server, grace: &Grace, person: &str, email: &str, role: &str, from: &str) -> Answer<()> {
+    let now = time::OffsetDateTime::now_utc(); // WHAT: the time. WHY: the grace is read against it
+    let Some(began) = began(&server.store).filter(|_| grace_open(&server.store, now)) else { return Err(unknown()) }; // WHAT: the beginning, while the grace is open. WHY: the gate's own answer once it closes
+    let old = server.store.with(|db| Ok(predates(db, person, began)?)).map_err(|e| Denied::broke("check that account", e))?; // WHAT: whether the account is old enough. WHY: §3a
+    if !old {
+        return Err(unknown()); // WHAT: refused as the gate would have. WHY: an account made since the device list is for a computer that asks
+    }
+    match grace {
+        Grace::Old => {
+            if grace_worth_a_line(email, from) {
+                api::record(server, &Entry::new(action::GRACE_SEAT, email).by(person).saying("signed in").from(from.to_string())); // WHAT: written. WHY: an admin sees who still needs to update
+            }
+            Ok(())
+        }
+        Grace::Waiting(device) => {
+            let admin_now = role == "admin"; // WHAT: an administrator's account. WHY: §3a: the first such computer becomes the admin computer when there is none
+            let done = server
+                .store
+                .with(|db| {
+                    let admin = admin_now && admins(db)? == 0; // WHAT: the admin computer, only when the office has none. WHY: otherwise the admin computers decide who else is one
+                    let at = rfc3339(time::OffsetDateTime::now_utc()); // WHAT: now. WHY: written on the row
+                    let changed = db.execute(
+                        "UPDATE devices SET state = 'approved', admin = ?2, scope = 'all', approved_by = ?3, approved_at = ?4, person = ?5, how = 'grace', changed = ?4 WHERE id = ?1 AND state = 'waiting'",
+                        params![device.id, i64::from(admin), email, at, person],
+                    )?; // WHAT: approved, only if still waiting. WHY: a refused or removed computer is never brought back by a sign-in; one step, so two sign-ins can't both make an admin
+                    Ok((changed == 1, admin))
+                })
+                .map_err(|e| Denied::broke("approve that computer", e))?;
+            if !done.0 {
+                return Err(unknown()); // WHAT: no longer waiting. WHY: an admin refused or removed it meanwhile
+            }
+            let saying = if done.1 { format!("approved by {email}, as the office's admin computer") } else { format!("approved by {email}") }; // WHAT: the log's words. WHY: plain
+            api::record(server, &Entry::new(action::GRACE_APPROVED, email).by(person).about(format!("{} on {} ({})", device.label(), wire::app_title(&device.app), device.id)).saying(saying).from(from.to_string())); // WHAT: written. WHY: an admin can review every computer the grace let in
+            Ok(())
+        }
+    }
+}
+
 /// The most connections held at once while an empty body is seen to end.
 fn empty_turn() -> &'static tokio::sync::Semaphore {
     static TURNS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new(); // WHAT: one limit for the gate. WHY: review M2: a global bound on reads not yet finished
@@ -498,12 +707,34 @@ pub(crate) async fn gate(State(server): State<Shared>, request: axum::extract::R
         Door::Gated if is_live_key(&server, request.headers()) => return next.run(request).await, // WHAT: a program's key. WHY: keys are made by a signed-in person, scoped and taken back one at a time; the programs holding them are servers, not computers on the list
         _ => {}
     }
+    if door == Door::Gated && !request.headers().contains_key(wire::HEADER_DEVICE) {
+        match old_seat(&server, request.headers(), &method, &route) {
+            OldSeat::Through(grace, who) => {
+                let from = api::seen_from(request.headers()); // WHAT: where it came from. WHY: the audit line
+                if !who.is_empty() && grace_worth_a_line(&who, &from) {
+                    api::record(&server, &Entry::new(action::GRACE_SEAT, &who).saying(format!("{method} {route}")).from(from)); // WHAT: written, at most every six hours a computer. WHY: an admin sees who still needs to update
+                }
+                let mut request = request; // WHAT: the request, to carry the grace. WHY: the sign-in route reads it
+                if let Some(grace) = grace {
+                    request.extensions_mut().insert(grace); // WHAT: how it got past. WHY: the sign-in takes only an account older than the device list
+                }
+                return next.run(request).await; // WHAT: on, to the route's own sign-in checks. WHY: §3a: an old computer keeps working while it updates itself
+            }
+            OldSeat::SignInAgain => return api::turned_away(request.into_body(), Denied::unauthorised()).await, // WHAT: 401 `unauthorised`. WHY: the word a seat from before 0.7.0 signs in again on
+            OldSeat::Held => {} // WHAT: not for the grace. WHY: refused below, as ever
+        }
+    }
     let now = wire::unix_now(); // WHAT: the time, once. WHY: the window and the cache read the same clock
     let (mut parts, body) = request.into_parts(); // WHAT: the request in halves. WHY: the body is read only once the headers pass
-    let (signed, device) = match before_the_body(&server, &parts.headers, door == Door::Me, now) {
+    let grace_sign_in = door == Door::Gated && method == "POST" && route == "/auth/token" && grace_open(&server.store, time::OffsetDateTime::now_utc()) && on_the_office_network(&parts.headers); // WHAT: a sign-in from the office network during the upgrade grace. WHY: §3a: a waiting computer's sign-in with an account older than the device list approves it
+    let (signed, device) = match before_the_body(&server, &parts.headers, door == Door::Me || grace_sign_in, now) {
         Ok(found) => found, // WHAT: a device that may pass. WHY: its body is worth looking at now
         Err(why) => return refused(&server, &parts.headers, why, body).await, // WHAT: refused unread. WHY: a stranger's body is never read
     };
+    let waiting_in_grace = grace_sign_in && device.state == state::WAITING; // WHAT: a waiting computer signing in during the grace. WHY: the only state the grace moves on; refused and removed stay so
+    if door == Door::Gated && !(device.state == state::APPROVED && device.scope == scope::ALL) && !waiting_in_grace {
+        return refused(&server, &parts.headers, Refusal::NotApproved, body).await; // WHAT: refused unread. WHY: guard 3: only the sign-in during the grace lets a computer not yet approved past
+    }
     let target = parts
         .extensions
         .get::<axum::extract::OriginalUri>()
@@ -518,7 +749,7 @@ pub(crate) async fn gate(State(server): State<Shared>, request: axum::extract::R
         return refused(&server, &parts.headers, why, body).await; // WHAT: refused before a byte of the body is read. WHY: an unproven request never holds the server's memory or its upload turns
     }
     let approved = device.state == state::APPROVED && device.scope == scope::ALL; // WHAT: let in for every app. WHY: only such a device's body is worth more than nothing
-    let limit = if approved { body_limit(&server, &method, &route) } else { 0 }; // WHAT: the route's own most, or no body at all for a device not let in. WHY: a waiting computer only asks how it stands
+    let limit = if approved || waiting_in_grace { body_limit(&server, &method, &route) } else { 0 }; // WHAT: the route's own most, or no body at all for a device not let in. WHY: a waiting computer only asks how it stands, or signs in during the grace
     let bytes = if declared == wire::body_hash(b"") {
         let Ok(_turn) = empty_turn().try_acquire() else {
             return Denied::new(StatusCode::SERVICE_UNAVAILABLE, Problem::new("busy", "The office server is busy. Try again in a moment.")).into_response(); // WHAT: 503. WHY: review M2: a bounded number of connections are held while an empty body is seen to end
@@ -543,6 +774,9 @@ pub(crate) async fn gate(State(server): State<Shared>, request: axum::extract::R
             Problem::new("not_an_admin", "Only an admin's computer can approve, refuse or remove computers. An admin can make this one an admin."),
         )
         .into_response(); // WHAT: 403. WHY: guard 4
+    }
+    if waiting_in_grace {
+        parts.extensions.insert(Grace::Waiting(Box::new(device.clone()))); // WHAT: the waiting computer, for the sign-in. WHY: approved there once the password matches
     }
     parts.extensions.insert(device); // WHAT: the device, for the route. WHY: /devices/me and the admin routes read it
     next.run(axum::extract::Request::from_parts(parts, Body::from(bytes))).await // WHAT: on, with the body read. WHY: the routes read it as always
@@ -607,8 +841,23 @@ async fn refused(server: &Server, headers: &HeaderMap, why: Refusal, body: Body)
     if api::refusal_worth_a_line(server, &format!("device {from}")) {
         api::record(server, &Entry::new(action::REFUSED_REQUEST, "").saying(format!("{why:?}")).from(from)); // WHAT: one line. WHY: an admin can see a computer being turned away
     }
-    let answer = if why == Refusal::BeforeStart { clock_behind() } else { unknown() }; // WHAT: the clock's own words, or §4's one answer. WHY: a computer whose clock runs slow is told what to do, not that it is a stranger
+    let answer = if why == Refusal::BeforeStart {
+        clock_behind() // WHAT: the clock's own words. WHY: a computer whose clock runs slow is told what to do, not that it is a stranger
+    } else if why == Refusal::Missing && !headers.contains_key(wire::HEADER_DEVICE) {
+        too_old() // WHAT: words for a computer that sent no device at all. WHY: that is a copy from before 0.7.0, and updating is what lets it in
+    } else {
+        unknown() // WHAT: §4's one answer. WHY: the same whatever failed, so a stranger learns nothing
+    };
     api::turned_away(body, answer).await // WHAT: 401, with a little of the body read. WHY: as every refusal
+}
+
+/// The answer for a request with no device at all: 401 `device_unknown`,
+/// the word every copy knows, with words saying to update.
+pub(crate) fn too_old() -> Denied {
+    Denied::new(
+        StatusCode::UNAUTHORIZED,
+        Problem::new("device_unknown", "This copy of Excalibur View is older than the office server, which now approves each computer. Update Excalibur View (Help, Check for Updates, or excaliburct.com), then connect again."),
+    ) // WHAT: §4's word, with what to do. WHY: a seat from before 0.7.0 shows the server's words; it can't ask to be approved until it updates
 }
 
 /// The answer for a request dated before this server started: 401
@@ -1131,5 +1380,34 @@ mod tests {
         assert_eq!(door("GET", "/projects"), Door::Gated);
         assert_eq!(door("POST", "/auth/token"), Door::Gated);
         assert_eq!(door("GET", "/something-new"), Door::Gated, "a new route is closed unless named");
+    }
+
+    /// The sign-in's own half of the grace, apart from the gate's: a refused
+    /// or removed computer is never approved by it, even when the gate's
+    /// check in front of it is gone. §3a.
+    #[test]
+    fn a_sign_in_in_the_grace_never_brings_back_a_refused_or_removed_computer() {
+        let store = crate::Store::temporary(&std::env::temp_dir().join(format!("hyperview-grace-{:016x}", rand::random::<u64>()))).expect("a store"); // WHAT: an in-memory database, blobs in a folder of its own. WHY: tests run side by side
+        let now = time::OffsetDateTime::now_utc(); // WHAT: the time. WHY: the grace and the beginning are set against it
+        store.set_setting(settings::BEGAN, &rfc3339(now - time::Duration::days(1))).unwrap(); // WHAT: the device list began yesterday. WHY: the account below predates it
+        store.set_setting(settings::GRACE_UNTIL, &rfc3339(now + time::Duration::days(1))).unwrap(); // WHAT: the grace open. WHY: so only the state can refuse
+        store
+            .with(|db| {
+                db.execute("INSERT INTO people (id, name, email, password, role, created) VALUES ('usr_dana', 'Dana', 'dana@mesa.example', 'x', 'admin', '2026-03-02T09:00:00Z')", [])?; // WHAT: an administrator from before the device list. WHY: the strongest account the grace takes
+                for (id, state) in [("dev_refused", state::REFUSED), ("dev_removed", state::REMOVED), ("dev_waiting", state::WAITING)] {
+                    db.execute("INSERT INTO devices (id, public_key, app, machine, state, asked, changed) VALUES (?1, ?1, 'view', 'PC', ?2, '2026-11-20T00:00:00Z', '2026-11-20T00:00:00Z')", params![id, state])?; // WHAT: one computer in each state. WHY: only the waiting one may move
+                }
+                Ok(())
+            })
+            .unwrap();
+        let server = crate::api::Server::new(store, crate::Config::default()); // WHAT: the server over it. WHY: the route's half takes one
+        let device = |id: &str| Device { id: id.into(), public_key: [0; 32], state: state::WAITING.into(), admin: false, app: "view".into(), machine: "PC".into(), os_user: String::new(), display_name: String::new(), approved_by: None, approved_at: None, scope: scope::ALL.into() }; // WHAT: the device as the gate would carry it, said to be waiting. WHY: the route must trust nothing on it but its id
+        let state_of = |id: &str| server.store.with(|db| Ok(db.query_row("SELECT state FROM devices WHERE id = ?1", params![id], |r| r.get::<_, String>(0))?)).unwrap(); // WHAT: the row's state now. WHY: checked below
+        for (id, was) in [("dev_refused", state::REFUSED), ("dev_removed", state::REMOVED)] {
+            assert!(signed_in_in_grace(&server, &Grace::Waiting(Box::new(device(id))), "usr_dana", "dana@mesa.example", "admin", "192.168.1.20").is_err(), "{id} is refused"); // WHAT: refused. WHY: only an admin's Approve brings it back
+            assert_eq!(state_of(id), was, "{id} stays as it was"); // WHAT: unchanged. WHY: as above
+        }
+        assert!(signed_in_in_grace(&server, &Grace::Waiting(Box::new(device("dev_waiting"))), "usr_dana", "dana@mesa.example", "admin", "192.168.1.20").is_ok(), "a waiting computer is approved"); // WHAT: the one that may move. WHY: the test above means something only if this passes
+        assert_eq!(state_of("dev_waiting"), state::APPROVED); // WHAT: approved. WHY: as above
     }
 }

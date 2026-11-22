@@ -18,7 +18,9 @@ the key is plugged into:
     python3 tools/release_now.py --prepare --slot SLOT
     python3 tools/release_now.py --finish REQUEST --signatures SIGNATURES
 
-and the same with --promote for handing a release to every office. The first
+and the same with --promote for handing an early release to every office.
+A release goes to every office unless it is run with --preview, which puts
+it up early, for offices set to get them early, until --promote. The first
 does everything up to signing and keeps what it made; the second checks the
 signatures and publishes. See "Signing on a hardware key" in docs/RELEASING.md.
 """
@@ -384,6 +386,11 @@ def run(args):
     return subprocess.call(args, cwd=ROOT)
 
 
+def channel_from(argv):
+    """`stable` unless --preview was typed: a release is for everyone by default."""
+    return "preview" if "--preview" in argv else "stable"  # WHAT: the channel the release is signed for. WHY: 0.7.2: an early-only 0.7.1 reached the office servers but no desktop, which locked Mesa Fab out
+
+
 def given(argv, flag):
     """The value typed after `flag`, or None."""
     if flag in argv:
@@ -424,6 +431,7 @@ def finish_on_hardware_key(promote, request, signatures):
 def main():
     argv = sys.argv[1:]
     promote = "--promote" in argv
+    channel = channel_from(argv)  # WHAT: stable, or preview when asked. WHY: see channel_from
     # For the case where the Mac build is a commit or two behind and every
     # one of them is a note or a workflow. It has to be typed out, because
     # the point of the check is that nobody talks themselves past it by
@@ -580,14 +588,18 @@ def main():
         say("This will get everything ready to sign on the hardware key, and keep it")
         say("together in one folder. Nothing is signed or published until you finish.")
     elif app:
-        say("This will sign everything with your key and publish it as an early")
-        say("release. GitHub built and tested both halves; the signing is the")
+        say("This will sign everything with your key and publish it" + (" as an early release." if channel == "preview" else "."))  # WHAT: what is about to happen. WHY: early only when asked for
+        say("GitHub built and tested both halves; the signing is the")
         say("part only this computer can do.")
     else:
         say("This will run the tests, build both Windows programs, sign everything")
-        say("with your key, and publish it as an early release.")
-    say("Offices set to try new versions first will take it; everybody else")
-    say("waits until you say so.")
+        say("with your key, and publish it" + (" as an early release." if channel == "preview" else "."))  # WHAT: likewise. WHY: likewise
+    if channel == "preview":
+        say("Offices set to try new versions first will take it; everybody else")
+        say("waits until you say so.")  # WHAT: what early means. WHY: as before
+    else:
+        say("Every office and every computer will take it, the ones with no")
+        say("office server too.")  # WHAT: what a full release means. WHY: 0.7.2: the default
     say()
     if input("Press return to go ahead, or type no to stop: ").strip().lower() in ("n", "no"):
         say("\nStopped. Nothing was published.")
@@ -597,6 +609,7 @@ def main():
     args = [sys.executable, os.path.join("tools", "publish.py"), "release"]
     args += ["--prepare", "--slot", slot] if prepare else ["--key", key]
     args += ["--token-file", token, "--repo", REPO, "--version", version]
+    args += ["--channel", channel]  # WHAT: said outright. WHY: the release is signed for exactly this channel, whatever publish.py's default
     if notes:
         args += ["--notes-file", notes]
     if app and server:
@@ -628,10 +641,13 @@ def main():
     say(f"  https://github.com/{REPO}/releases/tag/v{version}")
     say()
     say("  The website's download page will show it within a few minutes.")
-    say("  Offices on the early channel will be offered it within half an hour.")
-    say()
-    say("  When you have run it on one seat and it was fine, double-click")
-    say("  'Give it to everyone' to hand it to the rest.")
+    if channel == "preview":
+        say("  Offices on the early channel will be offered it within half an hour.")
+        say()
+        say("  When you have run it on one seat and it was fine, double-click")
+        say("  'Give it to everyone' to hand it to the rest.")  # WHAT: the next step for an early release. WHY: as before
+    else:
+        say("  Every office and every computer will be offered it within half an hour.")  # WHAT: what happens next. WHY: a full release needs no second step
     wait_to_close()
 
 

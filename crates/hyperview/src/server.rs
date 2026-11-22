@@ -292,6 +292,9 @@ pub enum Told {
     /// A kept sign-in would have gone to a server this computer holds no
     /// pin for, so it wasn't sent: the person signs in again, which links it.
     SignInAgain { why: String }, // WHAT: the reason, in words. WHY: security review L1: no kept token over a connection first trusted on the way
+    /// The office server's device gate turned this computer away although
+    /// it was let in: the server needs a newer Excalibur View.
+    TurnedAway { why: String }, // WHAT: the server's words. WHY: 0.7.2: the panel offers "Update Excalibur View" right there, not only "Not connected"
     /// What the server says about reaching it from outside the shop.
     RemoteIs(Box<hub::Remote>),
     Projects(Vec<Project>),
@@ -628,6 +631,7 @@ struct Resuming {
     unreachable: Option<String>, // WHAT: why the last address didn't answer. WHY: said while the window tries again
     first_contact: Option<String>, // WHAT: the kept sign-in would have gone to a server this computer holds no pin for. WHY: security review L1: the person signs in instead
     pinned: bool, // WHAT: the shop's server is held to a pin, or checked by its certificate authority (https). WHY: security review L1: only then is a kept sign-in tried again by itself
+    turned_away: Option<String>, // WHAT: the device gate's words, when it refused a computer it had let in. WHY: 0.7.2: updating is the way back, so it is offered
 }
 
 impl Resuming {
@@ -676,6 +680,12 @@ impl Resuming {
             self.rejected = true; // WHAT: the token is no good. WHY: a real sign-out; it is forgotten
             return true;
         }
+        if let hub::client::Trouble::Refused(p) = e {
+            if p.error == "device_unknown" {
+                self.turned_away = Some(p.message.clone()); // WHAT: the gate's words. WHY: the server let this computer in and still won't take its requests, so this copy is too old for it
+                return true; // WHAT: nothing else tried. WHY: another address is the same server
+            }
+        }
         self.unreachable = Some(e.to_string()); // WHAT: a dropped connection, a 5xx, or a gate in between. WHY: the token wasn't refused, so it is kept and tried again
         false
     }
@@ -688,6 +698,9 @@ impl Resuming {
         }
         if let Some(why) = self.first_contact {
             return Some(Told::SignInAgain { why }); // WHAT: the sign-in window. WHY: linking a server is the person's step, never a kept token's
+        }
+        if let Some(why) = self.turned_away {
+            return Some(Told::TurnedAway { why }); // WHAT: the gate's words, with the update offered. WHY: 0.7.2; the kept sign-in stays, for after the update
         }
         match self.refused {
             Some(why) if why.is_empty() => None, // WHAT: waiting. WHY: the waiting screen is open
@@ -868,6 +881,13 @@ pub fn start(repaint: egui::Context) -> Link {
                         };
                         match admitted(&fresh) {
                             Ok(Admission::Waiting(device)) => {
+                                if let Ok(session) = fresh.sign_in(&email, &password) {
+                                    if matches!(admitted(&fresh), Ok(Admission::In)) {
+                                        client = Some(fresh); // WHAT: signed in. WHY: below, as any sign-in
+                                        say(&told, Told::SignedIn(Box::new(session))); // WHAT: told. WHY: the window carries on
+                                        continue;
+                                    }
+                                } // WHAT: the sign-in tried once while waiting. WHY: 0.7.2: during an office's upgrade grace an account it had before approves this computer by signing in (docs/OFFICE-ENROLLMENT.md §3a); otherwise the server refuses it and this waits as before
                                 waiting = Some((base.clone(), Ask::SignIn { base: base.clone(), email: email.clone(), password: password.clone() })); // WHAT: kept. WHY: signed in once approved
                                 say(&told, Told::Waiting { device });
                                 continue;
@@ -883,6 +903,7 @@ pub fn start(repaint: egui::Context) -> Link {
                                 client = Some(fresh);
                                 say(&told, Told::SignedIn(Box::new(session)));
                             }
+                            Err(hub::client::Trouble::Refused(p)) if p.error == "device_unknown" => say(&told, Told::TurnedAway { why: p.message }), // WHAT: the gate refused a computer it let in. WHY: 0.7.2: this copy is too old for the server, so the update is offered
                             Err(e) => say(&told, Told::Trouble(e.to_string())),
                         }
                     }
@@ -1854,6 +1875,42 @@ pub fn update_interval(signed_in: bool, server_looking: bool) -> std::time::Dura
     std::time::Duration::from_secs(minutes * 60)
 }
 
+/// Where an offered update came from.
+enum Source {
+    Server, // WHAT: the office server. WHY: downloaded from it, and its hold honoured
+    Feed(hub::feed::Feed, hub::feed::Found), // WHAT: the publisher's feed. WHY: downloaded from the release itself
+}
+
+/// Whether the office server's refusal means it turned this computer away
+/// (its device list, or a sign-in it no longer takes), rather than that it
+/// couldn't answer.
+fn turned_away(error: &str) -> bool {
+    matches!(error, "device_unknown" | "unauthorised" | "clock_behind") // WHAT: the gate's and the sign-in's words. WHY: 0.7.2: then the publisher's feed is asked instead, so a computer its server shuts out can always update
+}
+
+/// The newest build on the publisher's feed for this platform and channel,
+/// when it is newer than `running`; otherwise the words to say.
+fn newest_on_the_feed(running: &str, channel: Channel) -> Result<(UpdateOffer, Source), String> {
+    let url = crate::trust::HOME_FEED.trim(); // WHAT: the publisher's releases page. WHY: built in, never taken from a server
+    if url.is_empty() {
+        return Err("This copy was built without an update page to read.".into()); // WHAT: said. WHY: nothing to ask
+    }
+    let feed = hub::feed::Feed::new(url); // WHAT: the feed's reader. WHY: kept with the offer, to download from
+    match feed.newest(channel) { // WHAT: the newest release on this seat's channel. WHY: a stable seat sees only full releases marked stable
+        // Its own platform's build, not whichever one the manifest happens to
+        // name first. A release with nothing for this Mac is "nothing new",
+        // the same as no release at all.
+        Ok(Some(found)) if found.published.app_for(platform()).is_some_and(|r| hub::update::newer(&r.version, running)) => {
+            let release = found.published.app_for(platform()).cloned(); // WHAT: this platform's build. WHY: offered
+            Ok((UpdateOffer { release, pinned_to: None, required: false, looking: false }, Source::Feed(feed, found)))
+        }
+        Ok(_) => Err(format!("Excalibur View {running} is the newest version.")), // WHAT: nothing newer. WHY: said when asked
+        // Quietly unless somebody asked. A seat that cannot reach the
+        // internet is an ordinary Tuesday on a shop floor.
+        Err(e) => Err(format!("The update page could not be reached: {e}")), // WHAT: why not. WHY: said when asked
+    }
+}
+
 /// Asks whether there is a newer Hyperview and, when this copy looks after
 /// itself, fetches it, checks it against the signing key compiled into this
 /// program, and puts it in place for the next start.
@@ -1890,53 +1947,21 @@ fn check_for_update(
     if let Some(version) = waiting.clone() {
         say(Told::UpdateReady(version));
     }
-    enum From {
-        Server,
-        Feed(hub::feed::Feed, hub::feed::Found),
-    }
-    let (offer, from) = match client {
-        Some(client) => {
-            let answer = if asked {
-                client.update_offer_now(running, channel, platform())
-            } else {
-                client.update_offer(running, channel, platform())
-            };
-            match answer {
-                Ok(offer) => (offer, From::Server),
-                Err(e) => return note(format!("Your server could not be asked about updates: {e}")),
+    let asked_server = client.map(|client| if asked { client.update_offer_now(running, channel, platform()) } else { client.update_offer(running, channel, platform()) }); // WHAT: the office server's answer, when there is a server. WHY: it may be holding the office on one version
+    let (offer, from) = match asked_server {
+        Some(Ok(offer)) => (offer, Source::Server), // WHAT: the server's offer. WHY: as always
+        Some(Err(hub::client::Trouble::Refused(p))) if turned_away(&p.error) => {
+            log::info!("update check: the office server turned this computer away ({}); asking the publisher's feed", p.error); // WHAT: noted. WHY: 0.7.2: a computer its server no longer lets in still finds the version that can ask to be let in
+            match newest_on_the_feed(running, channel) {
+                Ok(found) => found, // WHAT: the feed's newer build. WHY: checked against the keys built into this program like any other
+                Err(words) => return note(words), // WHAT: nothing newer, or no feed. WHY: said when asked
             }
         }
-        None => {
-            let url = crate::trust::HOME_FEED.trim();
-            if url.is_empty() {
-                return note("This copy was built without an update page to read.".into());
-            }
-            let feed = hub::feed::Feed::new(url);
-            match feed.newest(channel) {
-                // Its own platform's build, not whichever one the manifest
-                // happens to name first. A release with nothing for this Mac
-                // is "nothing new", the same as no release at all.
-                Ok(Some(found))
-                    if found
-                        .published
-                        .app_for(platform())
-                        .is_some_and(|r| hub::update::newer(&r.version, running)) =>
-                {
-                    let release = found.published.app_for(platform()).cloned();
-                    let offer = UpdateOffer {
-                        release,
-                        pinned_to: None,
-                        required: false,
-                        looking: false,
-                    };
-                    (offer, From::Feed(feed, found))
-                }
-                Ok(_) => return note(format!("Excalibur View {running} is the newest version.")),
-                // Quietly unless somebody asked. A seat that cannot reach the
-                // internet is an ordinary Tuesday on a shop floor.
-                Err(e) => return note(format!("The update page could not be reached: {e}")),
-            }
-        }
+        Some(Err(e)) => return note(format!("Your server could not be asked about updates: {e}")), // WHAT: not reached, or another trouble. WHY: as always; tried again at the next check
+        None => match newest_on_the_feed(running, channel) {
+            Ok(found) => found, // WHAT: the feed's newer build. WHY: a seat with no server looks after itself
+            Err(words) => return note(words), // WHAT: nothing newer, or no feed. WHY: said when asked
+        },
     };
     let release = offer.release.clone();
     let looking = offer.looking;
@@ -1969,7 +1994,7 @@ fn check_for_update(
     if !hub::update::newer(&release.version, running) {
         let trusted = client.is_some_and(|c| c.pin().is_some() || c.base().starts_with("https://")); // WHAT: pinned HTTPS, or HTTPS its certificate authority vouches for. WHY: the offer can't have been changed on the way
         let held_there = pinned.as_deref() == Some(release.version.as_str()) && release.version != running; // WHAT: the administrator's hold names this very version, not the one running. WHY: the only reason to go back; the running build is never put in again on every check (audit re-check)
-        if !(matches!(from, From::Server) && trusted && held_there) {
+        if !(matches!(from, Source::Server) && trusted && held_there) {
             log::warn!("update check: version {} is not newer than {running}; not taken", release.version);
             return note(format!("Excalibur View {running} is not replaced by the older {} it was offered.", release.version));
         }
@@ -1985,10 +2010,10 @@ fn check_for_update(
         return say(Told::UpdateReady(version));
     }
     let bytes = match &from {
-        From::Server => client
+        Source::Server => client
             .map(|c| c.download_update(&release.download).map_err(|e| e.to_string()))
             .unwrap_or_else(|| Err("no server".into())),
-        From::Feed(feed, found) => match found.url(&release.download) {
+        Source::Feed(feed, found) => match found.url(&release.download) {
             Some(url) => feed.fetch(url),
             None => Err(format!("the release has no file called {}", release.download)),
         },
@@ -2228,6 +2253,7 @@ pub struct Standing {
     pub update_looking: bool,
     /// How many times in a row the kept sign-in couldn't reach the server.
     pub resume_tries: u32, // WHAT: failed tries so far. WHY: each wait is longer than the last
+    pub turned_away: Option<String>, // WHAT: the office server's device gate turned this computer away, in its words. WHY: 0.7.2: the panel offers "Update Excalibur View" there
     /// When to try the kept sign-in again, while the server isn't answering.
     pub resume_at: Option<std::time::Instant>, // WHAT: the next try, if one is due. WHY: a seat reconnects by itself once the network is back
     pub pinned_to: Option<String>,
@@ -2419,6 +2445,14 @@ mod tests {
         assert!(!went.open_failed(hub::client::Trouble::Unreachable("down".into()), false)); // WHAT: one address down first. WHY: a 401 still wins over it
         assert!(went.me_failed(&problem("unauthorised")), "a refused token is sent nowhere else"); // WHAT: the 401. WHY: stop at once
         assert!(matches!(went.told(), Some(Told::SignedOut)), "forgotten"); // WHAT: SignedOut. WHY: the server ended the sign-in
+    }
+
+    #[test]
+    fn a_gate_that_turns_away_a_computer_it_let_in_offers_the_update() {
+        let mut went = Resuming::default(); // WHAT: a resume under way. WHY: as the worker keeps it
+        assert!(went.me_failed(&problem("device_unknown")), "nothing else is tried"); // WHAT: the gate's 401 on /me. WHY: the same server at every address
+        assert!(matches!(went.told(), Some(Told::TurnedAway { .. })), "the update is offered, not Not connected"); // WHAT: TurnedAway. WHY: 0.7.2
+        assert!(turned_away("device_unknown") && turned_away("unauthorised") && !turned_away("server_error"), "the feed is asked only when the server turned this computer away"); // WHAT: the words that send the update check to the feed. WHY: a server that is just down is asked again later
     }
 
     #[test]

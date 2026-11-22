@@ -181,7 +181,7 @@ pub(crate) type Answer<T> = Result<T, Denied>;
 
 // ---- who is asking --------------------------------------------------------
 
-fn bearer(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<String> { // WHAT: crate-wide now. WHY: the device gate reads an old seat's session during the upgrade grace
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     value
         .strip_prefix("Bearer ")
@@ -931,6 +931,7 @@ fn how_joining(server: &Server) -> (String, String, String) {
 async fn sign_in(
     State(server): State<Shared>,
     headers: HeaderMap,
+    grace: Option<axum::Extension<crate::devices::Grace>>, // WHAT: how the gate let this sign-in past during the upgrade grace, if it did. WHY: then only an account older than the device list may sign in
     Json(body): Json<SignIn>,
 ) -> Answer<Json<Session>> {
     let email = body.email.trim().to_lowercase();
@@ -1019,6 +1020,10 @@ async fn sign_in(
             StatusCode::UNAUTHORIZED,
             Problem::new("unauthorised", "That email address and password do not match."),
         ));
+    }
+
+    if let Some(axum::Extension(grace)) = &grace {
+        crate::devices::signed_in_in_grace(&server, grace, &id, &email, &role, &from)?; // WHAT: the grace's own rule, and a waiting computer approved. WHY: docs/OFFICE-ENROLLMENT.md §3a
     }
 
     // Right. Whatever was held against them goes.
@@ -2887,7 +2892,9 @@ async fn update_latest(
     headers: HeaderMap,
     Query(asking): Query<Asking>,
 ) -> Answer<Json<UpdateOffer>> {
-    caller_still(&server, &headers)?; // WHAT: who is asking, without keeping their session alive. WHY: security review H2e: this door is open to seats that can't sign, so it must never make an old session last for ever
+    if !crate::devices::on_the_office_network(&headers) {
+        caller_still(&server, &headers)?; // WHAT: who is asking from outside, without keeping their session alive. WHY: security review H2e: this door is open to seats that can't sign, so it must never make an old session last for ever
+    } // WHAT: on the office network, nobody need be signed in. WHY: 0.7.2: a seat from before 0.7.0 that the device list turned away must still find the version that can ask to be approved; the builds are public on the release page anyway
     // A seat asking is a reason to look at the publisher's feed, when the last
     // look was a while ago: the office hears about a fix within minutes of
     // somebody opening Hyperview, not at the server's next turn. Somebody who
@@ -3004,7 +3011,9 @@ async fn update_download(
     Path(version): Path<String>,
     Query(asking): Query<Asking>,
 ) -> Answer<Response> {
-    caller_still(&server, &headers)?; // WHAT: who is asking, their session untouched. WHY: security review H2e
+    if !crate::devices::on_the_office_network(&headers) {
+        caller_still(&server, &headers)?; // WHAT: who is asking from outside, their session untouched. WHY: security review H2e
+    } // WHAT: on the office network, nobody need be signed in. WHY: 0.7.2: as `update_latest`; the download is a signed public build that every seat checks itself
     let platform = if asking.platform.trim().is_empty() {
         hub::feed::ASSUMED_PLATFORM.to_string()
     } else {
