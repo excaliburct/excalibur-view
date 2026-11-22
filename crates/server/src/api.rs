@@ -62,6 +62,8 @@ pub struct Server {
     pub started: i64, // WHAT: the start time. WHY: security review L3
     /// The Citadel cell, as its supervisor last saw it (`crate::cell`).
     pub cell: crate::cell::Watch, // WHAT: the cell's state. WHY: /api/v1/office reports it
+    /// The limits on the update download for computers nobody signed in on.
+    pub downloads: crate::download::Limits, // WHAT: the places and per-address counts. WHY: security review M2: an open route that streams a build can't be used to hold the server
 }
 
 impl Server {
@@ -80,6 +82,7 @@ impl Server {
             replays: crate::devices::Replays::default(), // WHAT: nothing seen yet. WHY: empty on every start; a signature older than five minutes is refused by its time anyway
             started: hub::device::unix_now(), // WHAT: now. WHY: nothing signed before this start is taken
             cell: crate::cell::Watch::default(), // WHAT: no cell yet. WHY: started by run::serve when the licence and the files allow
+            downloads: crate::download::Limits::default(), // WHAT: all places free, nobody counted. WHY: empty on every start
         };
         crate::license::begin(&server);
         crate::devices::begin(&server); // WHAT: when the device list began and until when it can be claimed, noted once. WHY: guard 2 and guard 8 read them
@@ -181,7 +184,7 @@ pub(crate) type Answer<T> = Result<T, Denied>;
 
 // ---- who is asking --------------------------------------------------------
 
-fn bearer(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<String> { // WHAT: crate-wide now. WHY: the device gate reads an old seat's session during the upgrade grace
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     value
         .strip_prefix("Bearer ")
@@ -931,6 +934,7 @@ fn how_joining(server: &Server) -> (String, String, String) {
 async fn sign_in(
     State(server): State<Shared>,
     headers: HeaderMap,
+    grace: Option<axum::Extension<crate::devices::Grace>>, // WHAT: how the gate let this sign-in past during the upgrade grace, if it did. WHY: then only an account older than the device list may sign in
     Json(body): Json<SignIn>,
 ) -> Answer<Json<Session>> {
     let email = body.email.trim().to_lowercase();
@@ -1019,6 +1023,10 @@ async fn sign_in(
             StatusCode::UNAUTHORIZED,
             Problem::new("unauthorised", "That email address and password do not match."),
         ));
+    }
+
+    if let Some(axum::Extension(grace)) = &grace {
+        crate::devices::signed_in_in_grace(&server, grace, &id, &email, &role, &from)?; // WHAT: the grace's own rule, and a waiting computer approved. WHY: docs/OFFICE-ENROLLMENT.md §3a
     }
 
     // Right. Whatever was held against them goes.
@@ -2887,20 +2895,17 @@ async fn update_latest(
     headers: HeaderMap,
     Query(asking): Query<Asking>,
 ) -> Answer<Json<UpdateOffer>> {
-    caller_still(&server, &headers)?; // WHAT: who is asking, without keeping their session alive. WHY: security review H2e: this door is open to seats that can't sign, so it must never make an old session last for ever
+    let signed_in = signed_in_or_on_the_office_network(&server, &headers)?; // WHAT: whether a session stands behind the question. WHY: security review M2: outside the office a session is needed; inside, nobody need be signed in, but then only the office's own offer is shown
     // A seat asking is a reason to look at the publisher's feed, when the last
     // look was a while ago: the office hears about a fix within minutes of
     // somebody opening Hyperview, not at the server's next turn. Somebody who
     // pressed "Check for Updates" is waiting, so that look is waited for;
     // any other asking is answered at once and the look goes on behind it.
-    let looking = crate::updates::on_asking(&server, asking.fresh).await;
+    let looking = crate::updates::on_asking(&server, asking.fresh && signed_in).await; // WHAT: a fresh look only for somebody signed in. WHY: security review M2: a stranger can't make the server go to the publisher and wait
     // The office's channel and the seat's, whichever is earlier. A shop that
     // has asked to try new versions first gets them on every seat, not only on
     // the seat that happened to be told.
-    let channel = match (asking.channel.as_str(), crate::updates::office_channel(&server)) {
-        ("preview", _) | (_, Channel::Preview) => Channel::Preview,
-        _ => Channel::Stable,
-    };
+    let channel = channel_for(&server, &asking.channel, signed_in); // WHAT: the channel, the seat's own word only when signed in. WHY: security review M2: an unsigned asker sees only what the office itself would install
     let platform = if asking.platform.trim().is_empty() {
         hub::feed::ASSUMED_PLATFORM.to_string()
     } else {
@@ -2976,6 +2981,9 @@ async fn update_latest(
 
     let release = chosen.map(|mut r| {
         r.download = format!("{API_ROOT}/update/{}/download?platform={}", r.version, r.platform);
+        if r.channel == Channel::Preview {
+            r.download.push_str("&channel=preview"); // WHAT: the channel said in the address. WHY: the download serves only the office's channel, or the preview one to somebody signed in who asks for it
+        }
         r
     });
     let required = release
@@ -2984,10 +2992,34 @@ async fn update_latest(
 
     Ok(Json(UpdateOffer {
         release,
-        pinned_to: pinned,
+        pinned_to: pinned.filter(|_| signed_in), // WHAT: the hold, said only to somebody signed in. WHY: security review M2: who holds the office on which version is for the office's people
         required,
-        looking,
+        looking: looking && signed_in, // WHAT: whether the server was still looking, said only to somebody signed in. WHY: as above; an unsigned asker was never waited for
     }))
+}
+
+/// Whether somebody is signed in behind a request to an update route: true
+/// for a good session, false for none on the office network.
+///
+/// # Errors
+///
+/// 401 when nobody is signed in and the request came from outside the office.
+fn signed_in_or_on_the_office_network(server: &Server, headers: &HeaderMap) -> Answer<bool> {
+    match caller_still(server, headers) {
+        Ok(_) => Ok(true), // WHAT: a session. WHY: left exactly as it was (security review H2e)
+        Err(_) if crate::devices::on_the_office_network(headers) => Ok(false), // WHAT: nobody, on the office network. WHY: 0.7.2: a seat from before 0.7.0 that the device list turned away must still find the version that can ask to be approved; the builds are public on the release page anyway
+        Err(e) => Err(e), // WHAT: nobody, from outside. WHY: a sign-in is needed
+    }
+}
+
+/// The channel an update question is answered on: the office's own, or the
+/// preview one when the asker is signed in and asked for it.
+fn channel_for(server: &Server, asked: &str, signed_in: bool) -> Channel {
+    match (asked, crate::updates::office_channel(server)) {
+        ("preview", _) if signed_in => Channel::Preview, // WHAT: the seat's own wish. WHY: a shop's people may try new versions; a stranger may not choose
+        (_, Channel::Preview) => Channel::Preview, // WHAT: the office's choice. WHY: a shop that tries new versions first gets them on every seat
+        _ => Channel::Stable, // WHAT: stable. WHY: what an office installs unless it says otherwise
+    }
 }
 
 #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
@@ -3004,44 +3036,54 @@ async fn update_download(
     Path(version): Path<String>,
     Query(asking): Query<Asking>,
 ) -> Answer<Response> {
-    caller_still(&server, &headers)?; // WHAT: who is asking, their session untouched. WHY: security review H2e
+    let signed_in = signed_in_or_on_the_office_network(&server, &headers)?; // WHAT: whether a session stands behind it. WHY: security review M2: nobody need be signed in on the office network (the build is signed and every seat checks it itself), but then the download is limited
+    let place = if signed_in {
+        None // WHAT: no place taken. WHY: a signed-in person is not the stranger the limit is for
+    } else {
+        match server.downloads.take(&seen_from(&headers)) {
+            Ok(place) => Some(place), // WHAT: a place, held until the last byte. WHY: only a few at once
+            Err(crate::download::Turned::TooOften) => return Err(Denied::new(StatusCode::TOO_MANY_REQUESTS, Problem::new("too_many", "This computer has asked for the update too often. Try again in a few minutes."))), // WHAT: 429. WHY: the per-address limit
+            Err(crate::download::Turned::Busy) => return Err(Denied::new(StatusCode::SERVICE_UNAVAILABLE, Problem::new("busy", "The server is sending updates to other computers. Try again in a minute."))), // WHAT: 503. WHY: the seat retries; waiting connections cost nothing
+        }
+    };
     let platform = if asking.platform.trim().is_empty() {
         hub::feed::ASSUMED_PLATFORM.to_string()
     } else {
-        asking.platform
+        asking.platform.clone()
     };
+    let channel = channel_name(channel_for(&server, &asking.channel, signed_in)); // WHAT: the channel it may come from. WHY: security review M2: a preview build is not served to a stable office
     let digest = server
         .store
         .with(|db| {
             Ok(db
                 .query_row(
-                    "SELECT digest FROM releases WHERE version = ?1 AND platform = ?2",
-                    params![version, platform],
+                    "SELECT digest FROM releases WHERE version = ?1 AND platform = ?2 AND ready = 1 AND (channel = 'stable' OR ?3 = 'preview')",
+                    params![version, platform, channel],
                     |r| r.get::<_, String>(0),
                 )
                 .optional()?)
         })
-        .map_err(|e| Denied::broke("find that release", e))?;
+        .map_err(|e| Denied::broke("find that release", e))?; // WHAT: only a release that is ready and on the channel. WHY: security review M2: a build still being made or held for preview is nobody's download
     let digest = digest.ok_or_else(|| Denied::missing("release"))?;
     // The version came from outside, so the file is found by its digest out of
     // the database rather than by building a path from what was asked for.
     if !is_digest(&digest) {
         return Err(Denied::broke("read that release", "its digest is malformed"));
     }
-    let bytes = server
-        .store
-        .get_blob(&digest)
-        .map_err(|e| Denied::broke("read that release", e))?;
+    let (body, size) = crate::download::Streamed::open(&server.store.blob_path(&digest), place)
+        .await
+        .map_err(|e| Denied::broke("read that release", e))?; // WHAT: the file, opened to be sent a piece at a time. WHY: security review M2: never the whole installer in memory
     Ok((
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+            (header::CONTENT_LENGTH, size.to_string()), // WHAT: its length. WHY: the seat shows progress and spots a short file
             (
                 header::CONTENT_DISPOSITION,
                 format!("attachment; filename=\"Hyperview-{}-Setup.exe\"", safe_filename(&version)),
             ),
         ],
-        Body::from(bytes),
+        Body::new(body),
     )
         .into_response())
 }

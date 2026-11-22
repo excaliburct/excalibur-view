@@ -626,13 +626,13 @@ const TABLE: &[Route] = &[
     Route {
         method: "GET",
         path: "/update/latest",
-        door: Door::Signed,
+        door: Door::Public, // WHAT: open to anybody on the office network, which every knock here is. WHY: 0.7.2: a seat the device list turned away still fetches its update; from outside it needs a sign-in, proven by upgraded_from_before_devices
         sync: false,
     },
     Route {
         method: "GET",
         path: "/update/{version}/download",
-        door: Door::Signed,
+        door: Door::Public, // WHAT: open to anybody on the office network, which every knock here is. WHY: 0.7.2: a seat the device list turned away still fetches its update; from outside it needs a sign-in, proven by upgraded_from_before_devices
         sync: false,
     },
     Route {

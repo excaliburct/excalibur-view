@@ -2,9 +2,10 @@
 title Excalibur View - handing the release to every office
 cd /d "%~dp0"
 
-rem Double-click this after a release has been tried on one seat and was fine.
-rem It takes the newest release off the early channel and gives it to every
-rem office, which is the moment it becomes the version everybody runs.
+rem Double-click this after an early release (made with --preview) has been
+rem tried on one seat and was fine. It takes the newest release off the early
+rem channel and gives it to every office, which is the moment it becomes the
+rem version everybody runs. A normal release is for everyone already (0.7.2).
 
 set PY=
 for %%p in (py.exe) do if not "%%~$PATH:p"=="" set PY=py -3

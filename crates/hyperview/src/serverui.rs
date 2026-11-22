@@ -395,6 +395,14 @@ impl App {
                         log::info!("the office server didn't answer ({why}); it isn't pinned, so it isn't retried by itself"); // WHAT: noted. WHY: security review L1
                     }
                 }
+                Told::TurnedAway { why } => {
+                    if let Some(signing) = self.signing_in.as_mut() {
+                        signing.waiting = false; // WHAT: the spinner stops. WHY: the answer came
+                        signing.error = Some(why.clone()); // WHAT: said in the sign-in window too. WHY: that is where the person is looking
+                    }
+                    self.status = "The office server needs a newer Excalibur View.".into(); // WHAT: said on the status line. WHY: plain, and not a box to dismiss each time
+                    self.standing.turned_away = Some(why); // WHAT: kept for the panel. WHY: 0.7.2: it offers "Update Excalibur View" right there
+                }
                 Told::SignInAgain { why } => {
                     // Not forgotten: the person signs in, which links the
                     // server properly, and the new sign-in replaces it.
@@ -1189,6 +1197,15 @@ impl App {
                 ui.add_space(10.0);
                 ui.label(RichText::new("Not connected").strong());
                 ui.add_space(4.0);
+                if let Some(why) = self.standing.turned_away.clone() {
+                    ui.label(RichText::new(why).color(theme.faint).size(11.0)); // WHAT: the office server's words. WHY: why it isn't connected, said once and plainly
+                    ui.add_space(8.0);
+                    if ui.button("Update Excalibur View").clicked() {
+                        self.ask(Ask::CheckForUpdate { running: env!("CARGO_PKG_VERSION").to_string(), channel: self.prefs.channel, asked: true }); // WHAT: an update check somebody asked for. WHY: 0.7.2: the server turned this copy away, and the publisher's feed is asked when it does
+                        self.status = "Looking for a newer Excalibur View…".into(); // WHAT: said. WHY: the answer comes on the status line and the update bar
+                    }
+                    ui.add_space(12.0);
+                }
                 ui.label(
                     RichText::new(
                         "Studio is where an office shares drawings and takeoff. Connect to your \

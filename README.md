@@ -162,8 +162,11 @@ python3 publish.py upload  --token-file github-token.txt \
                            release.json Hyperview.exe Hyperview-Server.exe
 ```
 
-A release goes up as `preview` — a GitHub prerelease, taken only by an office
-whose administrator chose "get them early". Once it has been tried there:
+The example above is an early release (`--channel preview`): a GitHub
+prerelease, taken only by an office whose administrator chose "get them
+early". Without `--channel`, a release is `stable`, a full release that every
+office and seat takes (since 0.7.2; see docs/RELEASING.md). Once an early one
+has been tried:
 
 ```
 python3 publish.py promote --key hyperview-signing.key \

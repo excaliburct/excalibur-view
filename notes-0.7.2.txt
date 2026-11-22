@@ -1,0 +1,29 @@
+AN UPDATE NEVER LOCKS AN OFFICE OUT
+
+When an office server updates to 0.7.2 from a version that didn't approve
+each computer, the computers it had keep working for two weeks while they
+update themselves. Sign in as before, with the same email and password. A
+computer that updates to 0.7.2 meanwhile is approved by its person's own
+sign-in, and the office owner sees each one under Studio, Office, Computers.
+This is on the office network only.
+
+AN OFFICE WITH NO ADMIN COMPUTER CAN BE CLAIMED AFTER AN UPDATE
+
+When an office server updates and has no admin computer yet, the first new
+computer to ask on the office network becomes the admin computer, for a day,
+exactly as on a new server. An office that has its admin computer is not
+opened to a claim.
+
+EVERY COMPUTER CAN ALWAYS GET THE UPDATE
+
+A release now goes to every office and every computer at once, the ones
+with no office server too. A computer the office server won't let in is
+still handed the update by it, and asks the internet for it as well. When
+the office server needs a newer Excalibur View, the Studio panel says so and
+has an Update Excalibur View button.
+
+ON THE SERVER
+
+hyperview-server --upgrade-grace 14 gives the computers from before 0.7.0
+fourteen more days (at most 30; 0 ends it now), for an iPad still waiting
+on the App Store.

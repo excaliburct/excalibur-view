@@ -6,10 +6,19 @@
    **Mac build** and **Linux build**, all on the commit you are releasing. About twenty
    minutes, most of the Mac's share being Apple.
 2. On the PC, double-click **Release Excalibur View**.
-3. Try it on one seat.
-4. Double-click **Give it to everyone**.
 
-That is the whole job. The rest of this file is what those four steps are
+That is the whole job. Since 0.7.2 a release is a full, stable one: every
+office server and every seat takes it, the ones with no office server too.
+
+To try a release on the offices set to get them early first, run
+`python3 tools/release_now.py --preview` (with `--prepare --slot SLOT` on the
+hardware key) instead of step 2, try it on one seat, then double-click
+**Give it to everyone**. Never leave a release early-only once an office
+server has it: 0.7.1 went up early-only on 2026-11-20, Mesa Fab's server took
+it, and its desktops, which follow the stable channel and skip prereleases,
+couldn't follow it (docs/OFFICE-ENROLLMENT.md §3a).
+
+That is all of it. The rest of this file is what those four steps are
 doing and why, for whoever has to change one of them later.
 
 Instead of step 1, **Actions → Release** builds all five platforms on the

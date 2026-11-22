@@ -108,7 +108,7 @@ fn main() {
                 }
             }
         }
-        "--reopen-claim" | "--make-admin" | "--reset-admins" | "--retry-citadel-move" => device_console(&first, Some(given.get(2..).map(|rest| rest.join(" ")).unwrap_or_default().as_str()).filter(|code| !code.is_empty())), // WHAT: the device list's console commands. WHY: §3 and the security review's M3; on the server itself
+        "--reopen-claim" | "--make-admin" | "--reset-admins" | "--retry-citadel-move" | "--upgrade-grace" => device_console(&first, Some(given.get(2..).map(|rest| rest.join(" ")).unwrap_or_default().as_str()).filter(|code| !code.is_empty())), // WHAT: the device list's console commands. WHY: §3 and the security review's M3; on the server itself
         #[cfg(windows)]
         "--install-citadel-cell" => { // WHAT: the Citadel cell installed from the office's private IT kit. WHY: View's public release never carries it (Creede, 2026-11-13)
             let Some(zip) = std::env::args_os().nth(2) else {
@@ -147,7 +147,8 @@ fn main() {
 }
 
 /// The device list's commands, on the server itself: `--reopen-claim`,
-/// `--make-admin <device code or id>` and `--reset-admins`. Each needs the server's
+/// `--make-admin <device code or id>`, `--reset-admins` and
+/// `--upgrade-grace <days>`. Each needs the server's
 /// own data folder, so it runs only on the server, and each is written in
 /// the audit log.
 fn device_console(command: &str, id: Option<&str>) {
@@ -158,6 +159,7 @@ fn device_console(command: &str, id: Option<&str>) {
     let done = Store::open(&config.database(), &config.blobs()).and_then(|store| match command {
         "--reopen-claim" => hyperview_server::devices::reopen_claim(&store).map(|until| format!("  The first computer to ask, until {until}, becomes the office's admin.")), // WHAT: claiming open for a day. WHY: only while the office has no admin
         "--retry-citadel-move" => hyperview_server::cellmove::retry(&store).map(|()| "  The failed Citadel move is cleared. Restart the Office Server service and it tries once more.".to_string()), // WHAT: a failure cleared. WHY: the console way to try the move again
+        "--upgrade-grace" => id.unwrap_or_default().trim().parse::<i64>().map_err(|_| anyhow::anyhow!("say how many days, 0 to {}: hyperview-server --upgrade-grace 7", hyperview_server::devices::MOST_GRACE_DAYS)).and_then(|days| hyperview_server::devices::set_grace_here(&store, days)).map(|until| format!("  Computers from before 0.7.0 are let in from the office network until {until}.")), // WHAT: the upgrade grace set, or ended with 0. WHY: an iPad waiting on the App Store may need longer; an owner may want it over sooner
         "--make-admin" => hyperview_server::devices::make_admin_here(&store, id.unwrap_or_default()).map(|id| format!("  The computer {id} is approved, and an admin.")), // WHAT: one computer made an admin. WHY: the way back when every admin computer is lost
         _ => hyperview_server::devices::reset_admins_here(&store).map(|until| format!("  No computer is an admin now. Until {until}, the next NEW computer to ask from the office network becomes the admin, whoever's it is.\n  To pick a computer you know instead, use: hyperview-server --make-admin <device code>, with the 12-digit code its Excalibur app shows (for example 29AC 6B9D EFA9).")), // WHAT: every admin unmade, claiming open, said plainly. WHY: audit: the next new computer to ask takes the office, so the safer way is named
     });
@@ -217,6 +219,7 @@ async fn serve() -> Result<()> {
     if std::env::var("HYPERVIEW_FIRST_ADMIN").is_ok() {
         let store = Store::open(&config.database(), &config.blobs())?;
         if store.is_empty()? {
+            hyperview_server::devices::note_began(&store, time::OffsetDateTime::now_utc()); // WHAT: the device list's beginning, written before the first account. WHY: review L2: a fresh headless server never counts as upgraded
             let password = run::first_administrator(&store)?;
             println!();
             println!("  A first administrator has been created.");

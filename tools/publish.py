@@ -5,7 +5,7 @@ Runs on the publisher's own computer, beside the signing key, because the key
 never goes anywhere else. Standard library plus `cryptography` for Ed25519.
 
     python3 publish.py sign     --key hyperview-signing.key --version 0.5.0 \\
-                                --channel preview --notes-file notes.txt \\
+                                --notes-file notes.txt \\
                                 --app ExcaliburView.exe --server ExcaliburView-Server.exe \\
                                 --mac ExcaliburView-mac.zip \\
                                 --out release.json
@@ -26,10 +26,13 @@ to be done on its own.
                                 --version 1.0.0 --name "Acme Estimating" \\
                                 acme_estimating.wasm
 
-A release goes up as `preview` first — a GitHub prerelease, which only an
-office set to "get them early" takes — and is promoted to `stable` once it has
-been tried. The channel is part of what is signed, so promoting re-signs the
-manifest; the program files themselves do not change.
+A release goes up as `stable`, a full GitHub release that every office and
+every seat takes (since 0.7.2: 0.7.1 went up early-only, its office servers
+took it and the desktops couldn't follow, because a stable seat never sees a
+prerelease). `--channel preview` puts one up early instead, as a GitHub
+prerelease only an office set to "get them early" takes, and `promote` hands
+it to everyone once it has been tried. The channel is part of what is signed,
+so promoting re-signs the manifest; the program files themselves do not change.
 
 The signed text must match `hub::update::Release::signing_payload` byte for
 byte. There is a test in the Rust code that checks a manifest this script made.
@@ -1116,6 +1119,15 @@ class GitHubRefused(Exception):
         self.code = code
 
 
+def github_flags(channel):
+    """How GitHub is told to show a release of `channel`: a stable one as a
+    full release and the latest, a preview one as a prerelease that is not.
+    Every seat on the stable channel skips prereleases (hub::feed::choose), so
+    this is what decides whether the desktops can update without their server."""
+    stable = channel == "stable"  # WHAT: meant for everyone. WHY: the default since 0.7.2
+    return {"prerelease": not stable, "make_latest": "true" if stable else "false"}  # WHAT: GitHub's two flags. WHY: a stable manifest on a prerelease reaches no stable seat
+
+
 def cmd_upload(a):
     gh = GitHub(a.token_file, a.repo)
     manifest = json.load(open(a.files[0], encoding="utf-8"))
@@ -1153,7 +1165,7 @@ def cmd_upload(a):
         # A draft first, so no server sees a release with half its files.
         release = gh.call("POST", "/releases", {
             "tag_name": tag, "target_commitish": "main", "name": f"Excalibur View {a.version}",
-            "body": notes + HOW_TO, "draft": True, "prerelease": channel != "stable",
+            "body": notes + HOW_TO, "draft": True, "prerelease": github_flags(channel)["prerelease"],  # WHAT: a draft, early or not by its channel. WHY: as github_flags says
         })
     elif release.get("draft"):
         print(f"finishing {tag}, which an earlier try left as a draft")
@@ -1167,10 +1179,9 @@ def cmd_upload(a):
         asset = there.get(name)
         if not asset or asset.get("state") != "uploaded" or asset.get("size") != os.path.getsize(path):
             raise SystemExit(f"{name} is not on the release in full - it stays a draft. Running this again is safe.")
-    gh.call("PATCH", f"/releases/{release['id']}", {
-        "name": f"Excalibur View {a.version}", "draft": False, "prerelease": channel != "stable",
-        "body": notes + HOW_TO, "make_latest": "true" if channel == "stable" else "false",
-    })
+    gh.call("PATCH", f"/releases/{release['id']}", dict(github_flags(channel), **{  # WHAT: the release made public, full or early by its channel. WHY: github_flags is the one place that decides
+        "name": f"Excalibur View {a.version}", "draft": False, "body": notes + HOW_TO,
+    }))
     print(f"published {tag} as {'a full release' if channel == 'stable' else 'an early release'}: "
           f"{', '.join(name for _, name in uploads)}")
 
@@ -1423,7 +1434,7 @@ def cmd_promote(a):
     out = os.path.join(os.path.dirname(os.path.abspath(a.key)), f"release-{a.version}-stable.json")
     write_manifest(manifest, out)
     gh.replace_asset(release, out, MANIFEST)
-    gh.call("PATCH", f"/releases/{release['id']}", {"prerelease": False, "make_latest": "true"})
+    gh.call("PATCH", f"/releases/{release['id']}", github_flags("stable"))  # WHAT: a full release, the latest. WHY: the stable manifest reaches every stable seat only then
     print(f"promoted {tag}: every office now takes it")
 
 
@@ -1439,12 +1450,13 @@ def finish_promotion(a):
     out = os.path.join(folder, f"release-{request['version']}-stable.json")
     write_manifest(manifest, out)
     gh.replace_asset(release, out, MANIFEST)
-    gh.call("PATCH", f"/releases/{release['id']}", {"prerelease": False, "make_latest": "true"})
+    gh.call("PATCH", f"/releases/{release['id']}", github_flags("stable"))  # WHAT: a full release, the latest. WHY: the stable manifest reaches every stable seat only then
     print(f"promoted {tag}, signed on the hardware key: every office now takes it")
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def parser():
+    """Every command and its options. Apart from main so the tests can read the defaults."""
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)  # WHAT: the command line. WHY: as before
     sub = p.add_subparsers(dest="command", required=True)
     def ways_to_sign(parser):
         """--key, or the two halves of signing on a hardware key."""
@@ -1462,7 +1474,8 @@ def main():
     s = sub.add_parser("sign")
     ways_to_sign(s)
     s.add_argument("--version", help="needed with --key and --prepare")
-    s.add_argument("--channel", choices=["preview", "stable"], default="preview")
+    s.add_argument("--channel", choices=["preview", "stable"], default="stable",
+                   help="stable (the default): every office and seat takes it; preview: only offices set to get them early")  # WHAT: stable unless asked. WHY: 0.7.2: an early-only 0.7.1 locked Mesa Fab's desktops out
     s.add_argument("--notes-file")
     s.add_argument("--app", help="the Windows program; needed with --key and --prepare")
     s.add_argument("--mac", help="the Mac program, zipped by deploy/macos/build.sh")
@@ -1490,7 +1503,8 @@ def main():
     rel.add_argument("--token-file", help="needed with --key and --finish")
     rel.add_argument("--repo", help="needed with --key and --finish")
     rel.add_argument("--version", help="defaults to the version in Cargo.toml")
-    rel.add_argument("--channel", choices=["preview", "stable"], default="preview")
+    rel.add_argument("--channel", choices=["preview", "stable"], default="stable",
+                     help="stable (the default): every office and seat takes it; preview: only offices set to get them early")  # WHAT: stable unless asked. WHY: as for sign
     rel.add_argument("--notes-file")
     rel.add_argument("--app", help="ExcaliburView.exe, already built (GitHub builds it)")
     rel.add_argument("--server", help="ExcaliburView-Server.exe, already built")
@@ -1533,7 +1547,11 @@ def main():
     g.add_argument("--name")
     g.add_argument("--out")
     g.add_argument("wasm")
-    a = p.parse_args()
+    return p  # WHAT: the parser. WHY: main parses with it, the tests read it
+
+
+def main():
+    a = parser().parse_args()  # WHAT: what was typed. WHY: as before
     try:
         {"sign": cmd_sign, "upload": cmd_upload, "promote": cmd_promote,
          "release": cmd_release, "publish-license": cmd_publish_license,

@@ -48,7 +48,7 @@ pub const BUILT: &str = env!("HYPERVIEW_BUILT");
 /// How long before a license's updates end its administrators are told.
 pub const RENEWAL_NOTICE_DAYS: i64 = 30;
 
-const BEGAN: &str = "licensing_began";
+pub(crate) const BEGAN: &str = "licensing_began"; // WHAT: the licensing start's name, shared with the device list. WHY: written by 0.6.x at the first start, so an office from before the device list shows it older than devices_began (review L2)
 const FOUNDING: &str = "founding_install";
 const LICENSE: &str = "license";
 
@@ -690,6 +690,7 @@ mod tests {
                 replays: crate::devices::Replays::default(), // WHAT: nothing seen. WHY: a test server
                 started: 0, // WHAT: the dawn of time. WHY: a test server takes any signature time
                 cell: crate::cell::Watch::default(), // WHAT: no cell. WHY: a test server
+                downloads: crate::download::Limits::default(), // WHAT: no downloads counted. WHY: a test server
             },
             dir,
         )
