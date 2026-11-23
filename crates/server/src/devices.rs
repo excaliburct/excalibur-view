@@ -642,9 +642,8 @@ fn old_seat(server: &Server, headers: &HeaderMap, method: &str, route: &str) -> 
 
 /// Whether the old seat of `who` from `from` is worth a line in the audit
 /// log now: at most once every six hours each.
-fn grace_worth_a_line(who: &str, from: &str) -> bool {
-    static SEEN: std::sync::OnceLock<Mutex<HashMap<String, std::time::Instant>>> = std::sync::OnceLock::new(); // WHAT: when each was last written. WHY: one process, one list
-    let Ok(mut seen) = SEEN.get_or_init(Default::default).lock() else { return true }; // WHAT: a poisoned lock writes. WHY: losing the line is the wrong way round
+fn grace_worth_a_line(server: &Server, who: &str, from: &str) -> bool {
+    let Ok(mut seen) = server.grace_lines.lock() else { return true }; // WHAT: a poisoned lock writes. WHY: losing the line is the wrong way round
     let at = std::time::Instant::now(); // WHAT: now. WHY: compared below
     let quiet = std::time::Duration::from_secs(6 * 60 * 60); // WHAT: six hours. WHY: an old seat asks every few seconds; one line a morning and afternoon says it is still there
     let name = format!("{who}\u{1}{from}"); // WHAT: the person and the address together. WHY: one line for each computer
@@ -676,7 +675,7 @@ pub(crate) fn signed_in_in_grace(server: &Server, grace: &Grace, person: &str, e
     }
     match grace {
         Grace::Old => {
-            if grace_worth_a_line(email, from) {
+            if grace_worth_a_line(server, email, from) {
                 api::record(server, &Entry::new(action::GRACE_SEAT, email).by(person).saying("signed in").from(from.to_string())); // WHAT: written. WHY: an admin sees who still needs to update
             }
             Ok(())
@@ -738,7 +737,7 @@ pub(crate) async fn gate(State(server): State<Shared>, request: axum::extract::R
         match old_seat(&server, request.headers(), &method, &route) {
             OldSeat::Through(grace, who) => {
                 let from = api::seen_from(request.headers()); // WHAT: where it came from. WHY: the audit line
-                if !who.is_empty() && grace_worth_a_line(&who, &from) {
+                if !who.is_empty() && grace_worth_a_line(&server, &who, &from) {
                     api::record(&server, &Entry::new(action::GRACE_SEAT, &who).saying(format!("{method} {route}")).from(from)); // WHAT: written, at most every six hours a computer. WHY: an admin sees who still needs to update
                 }
                 let mut request = request; // WHAT: the request, to carry the grace. WHY: the sign-in route reads it

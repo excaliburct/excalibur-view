@@ -64,6 +64,8 @@ pub struct Server {
     pub cell: crate::cell::Watch, // WHAT: the cell's state. WHY: /api/v1/office reports it
     /// The limits on the update download for computers nobody signed in on.
     pub downloads: crate::download::Limits, // WHAT: the places and per-address counts. WHY: security review M2: an open route that streams a build can't be used to hold the server
+    /// When each old seat (person and address) last had a grace line written.
+    pub grace_lines: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>, // WHAT: the six-hour memory, one to a server. WHY: it was one for the whole process, so a second server in the process (every test) saw the first's lines as already written and its own was silently lost
 }
 
 impl Server {
@@ -83,6 +85,7 @@ impl Server {
             started: hub::device::unix_now(), // WHAT: now. WHY: nothing signed before this start is taken
             cell: crate::cell::Watch::default(), // WHAT: no cell yet. WHY: started by run::serve when the licence and the files allow
             downloads: crate::download::Limits::default(), // WHAT: all places free, nobody counted. WHY: empty on every start
+            grace_lines: std::sync::Mutex::default(), // WHAT: no grace line written yet. WHY: empty on every start, as key_refusals_logged is
         };
         crate::license::begin(&server);
         crate::devices::begin(&server); // WHAT: when the device list began and until when it can be claimed, noted once. WHY: guard 2 and guard 8 read them

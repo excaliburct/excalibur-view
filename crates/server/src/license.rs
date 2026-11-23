@@ -691,6 +691,7 @@ mod tests {
                 started: 0, // WHAT: the dawn of time. WHY: a test server takes any signature time
                 cell: crate::cell::Watch::default(), // WHAT: no cell. WHY: a test server
                 downloads: crate::download::Limits::default(), // WHAT: no downloads counted. WHY: a test server
+                grace_lines: std::sync::Mutex::default(), // WHAT: no grace line written. WHY: a test server
             },
             dir,
         )
