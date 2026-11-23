@@ -227,6 +227,15 @@ pub fn fonts(ctx: &egui::Context) {
 static TEXT: &[u8] = include_bytes!("../fonts/text.ttf");
 static TEXT_BOLD: &[u8] = include_bytes!("../fonts/text-bold.ttf");
 
+/// The tablet layout's type: Inter 4.001, Regular and Bold, unmodified (see
+/// `fonts/LICENSE-inter.txt`), the type Fabwire Modern and the company site use.
+static INTER: &[u8] = include_bytes!("../fonts/inter.ttf"); // WHAT: Inter Regular. WHY: the tablet's words
+static INTER_BOLD: &[u8] = include_bytes!("../fonts/inter-bold.ttf"); // WHAT: Inter Bold. WHY: the tablet's titles and numbers
+
+/// The tablet layout's font families: Inter and Inter Bold.
+pub const TABLET_TYPE: &str = "excalibur-inter"; // WHAT: the family's name. WHY: the tablet screens ask for it by name
+pub const TABLET_TYPE_BOLD: &str = "excalibur-inter-bold"; // WHAT: the bold family's name. WHY: likewise
+
 /// The font family for words being typed onto a sheet, and its bold.
 pub const SHEET_TEXT: &str = "excalibur-text";
 pub const SHEET_TEXT_BOLD: &str = "excalibur-text-bold";
@@ -239,7 +248,7 @@ fn set_fonts(ctx: &egui::Context, classic: bool) {
         .get(&egui::FontFamily::Proportional)
         .cloned()
         .unwrap_or_default();
-    for (name, data) in [(SHEET_TEXT, TEXT), (SHEET_TEXT_BOLD, TEXT_BOLD)] {
+    for (name, data) in [(SHEET_TEXT, TEXT), (SHEET_TEXT_BOLD, TEXT_BOLD), (TABLET_TYPE, INTER), (TABLET_TYPE_BOLD, INTER_BOLD)] { // WHAT: the sheet's type and the tablet's, each a family of its own. WHY: asked for by name; anything they lack falls back to the ordinary type
         fonts
             .font_data
             .insert(name.into(), std::sync::Arc::new(egui::FontData::from_static(data)));

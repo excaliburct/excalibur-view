@@ -111,6 +111,15 @@ pub struct Prefs {
     /// The paper chosen last on that printer, by CUPS's own name for it.
     #[serde(default)]
     pub paper: String, // WHAT: the paper last printed on. WHY: kept with the printer, so a plot goes on the roll it went on before.
+    /// The shop-and-field layout on this computer even for the office (docs/TABLET-MANIFEST.md).
+    #[serde(default)]
+    pub tablet_mode: bool, // WHAT: "Tablet mode" turned on here. WHY: a desktop in the shop shows the tablet's screens; iPads, Android and shop or field accounts get them anyway
+    /// The bright outdoor look on the tablet screens.
+    #[serde(default)]
+    pub tablet_bright: bool, // WHAT: the light look. WHY: one button in the top bar; kept so a field tablet stays bright
+    /// The released sheets this person has opened, by set, for the NEW badge.
+    #[serde(default)]
+    pub tablet_seen: Vec<String>, // WHAT: sets opened on this tablet. WHY: a sheet shows NEW until it is opened here
 }
 
 /// The sizes a tablet's controls can be drawn at, with their names.
@@ -185,6 +194,9 @@ impl Default for Prefs {
             quick_tools_shown: true, // WHAT: the side bar shown. WHY: it is how somebody finds out it is there.
             printer: String::new(), // WHAT: no printer chosen. WHY: the system's default until one is.
             paper: String::new(), // WHAT: no paper chosen. WHY: the printer's own until one is.
+            tablet_mode: false, // WHAT: off. WHY: the office's desktop keeps its folder tree unless asked
+            tablet_bright: false, // WHAT: dark. WHY: the default indoors
+            tablet_seen: Vec::new(), // WHAT: nothing opened yet. WHY: every released sheet starts NEW
         }
     }
 }

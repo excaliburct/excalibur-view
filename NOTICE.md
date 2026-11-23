@@ -67,6 +67,8 @@ The program carries three small fonts, each cut down from a free font and
 renamed, as their licenses ask of a modified copy. "Excalibur Symbols" and
 "Excalibur Classic" come from DejaVu Sans, under the Bitstream Vera license.
 "Excalibur Text", used for words typed on a sheet, comes from Liberation Sans
-under the SIL Open Font License 1.1. The licenses are in `crates/ui/fonts`.
+under the SIL Open Font License 1.1. The tablet layout is set in Inter 4.001
+(Regular and Bold, unmodified), by The Inter Project Authors, also under the SIL
+Open Font License 1.1. The licenses are in `crates/ui/fonts`.
 
 Excalibur Construction Technologies · Pueblo, Colorado · hello@excaliburct.com

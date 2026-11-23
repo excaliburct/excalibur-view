@@ -2321,6 +2321,14 @@ impl App {
                     };
                     self.chrome.theme.apply(ctx);
                 }
+                "View.TabletMode" => {
+                    self.prefs.tablet_mode = self.chrome.is_on("View.TabletMode"); // WHAT: kept as this computer's choice. WHY: the switch as it now stands
+                    self.tablet.desktop = !self.prefs.tablet_mode; // WHAT: turned off means off now, for anyone. WHY: the menu's switch is obeyed at once
+                    if let Err(e) = self.prefs.save() {
+                        self.error = Some(format!("Could not keep the setting: {e}")); // WHAT: say it was not kept. WHY: as for simple mode
+                    }
+                    self.status = if self.prefs.tablet_mode { "Tablet mode. Desktop, in the top bar, comes back.".into() } else { "The desktop layout is back.".into() }; // WHAT: how to get back. WHY: nobody should be stuck in it
+                }
                 "View.SimpleMode" => {
                     let on = self.chrome.is_on("View.SimpleMode"); // WHAT: the switch as it now stands. WHY: the menu or the bar has just turned it.
                     self.prefs.simple = Some(on); // WHAT: kept as this computer's choice. WHY: remembered per device, and no longer left to the first-run default.

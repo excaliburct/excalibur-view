@@ -53,6 +53,7 @@ pub mod prefs;
 pub mod properties;
 pub mod print;
 pub mod profiles;
+pub mod tablet; // WHAT: the shop-and-field layout: jobs, a job's home, its sheets and tickets, the signing pad. WHY: two taps to anything on a tablet, no folders (docs/TABLET-MANIFEST.md)
 pub mod signoffs; // WHAT: sign-offs asked for on an office drawing, signed with a finger. WHY: the shop signs travelers and tickets on its iPads.
 pub mod quicktools; // WHAT: each person's own tools down the right-hand side. WHY: the few used all day, one tap away, in simple mode or not.
 pub mod touchtap; // WHAT: reading a finger's taps and strokes. WHY: on a tablet the second tap of setting the scale was lost and pen strokes joined up.
