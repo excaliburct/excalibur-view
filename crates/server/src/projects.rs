@@ -495,7 +495,7 @@ pub(crate) fn stamp_seen(db: &Connection, id: &str, sight: &crate::folders::Sigh
         .query_map(params![id], |r| Ok(((r.get(0)?, r.get(1)?, r.get(2)?), r.get::<_, Option<String>>(3)?)))?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .filter(|(_, folder)| sight.sees(folder.as_deref())) // WHAT: only the sets this sight sees. WHY: a hidden folder must not show in a count or a change.
+        .filter(|(set, folder): &((String, i64, bool), Option<String>)| sight.sees_set(folder.as_deref(), &set.0, set.2)) // WHAT: only the sets this sight sees, the tablet manifest counted. WHY: a hidden folder must not show in a count or a change.
         .map(|(set, _)| set)
         .collect();
     let current: Vec<&(String, i64, bool)> = sets.iter().filter(|s| !s.2).collect();

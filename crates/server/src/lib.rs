@@ -47,6 +47,7 @@ pub mod presence;
 pub mod projects;
 pub mod quantities;
 pub mod run;
+pub mod tablet; // WHAT: the tablet manifest kept, served and enforced. WHY: shop and field accounts are served only what the office put on their tablets (docs/TABLET-MANIFEST.md)
 pub mod signoffs; // WHAT: signatures asked for on a set and signed on View. WHY: the shop signs travelers and shipping tickets on its iPads.
 pub mod store;
 pub mod tls; // WHAT: the server's own certificate and HTTPS. WHY: sign-ins and drawings encrypted, the seats pinning it

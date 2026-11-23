@@ -246,6 +246,26 @@ fn folder_paths() -> Value {
                 "parameters": [path_param("id", "The sign-off line.")],
                 "responses": { "200": { "description": "The picture." } }
             }
+        },
+        "/projects/{id}/tablet": {
+            "get": {
+                "summary": "The job's tablet manifest as the caller's tablet shows it (docs/TABLET-MANIFEST.md).",
+                "description": "A shop or field account gets only its sections and what it may reach, each ticket box with its live sign-off line; a sync key reads it as kept. 404 when the job has none.",
+                "parameters": [path_param("id", "The project.")],
+                "responses": { "200": { "description": "{project, version, updated, shop, field, manifest}." } }
+            },
+            "put": {
+                "summary": "Set the job's tablet manifest (schema 1). Only a program's sync key, on a project it keeps.",
+                "description": "Refused 400 with the contract's code first (not_released: ...). The same manifest again changes nothing. Every change is on the audit log.",
+                "parameters": [path_param("id", "The project.")],
+                "responses": { "200": { "description": "{project, version, changed}." } }
+            }
+        },
+        "/tablet": {
+            "get": {
+                "summary": "The caller's jobs for the tablet: every job they may see that has a manifest, with what needs doing.",
+                "responses": { "200": { "description": "A list of {project, number, name, town, shop, field, todo, updated}." } }
+            }
         }
     })
 }

@@ -60,6 +60,7 @@ enum Door {
     Person, // WHAT: a person signed in with a password, any role. WHY: their own keys and password.
     Admin,  // WHAT: an administrator signed in with a password. WHY: running the server.
     Folders, // WHAT: an administrator signed in, or a sync key. WHY: deciding who sees a folder.
+    Program, // WHAT: a program's sync key and nothing else, no person, not even an administrator. WHY: only Fabwire sets what a job's tablets show (docs/TABLET-MANIFEST.md)
     Device, // WHAT: a device's signature and nothing else; no session or key opens it. WHY: the office's device list (docs/OFFICE-ENROLLMENT.md); proven by devices_by_the_contract
 }
 
@@ -720,6 +721,24 @@ const TABLE: &[Route] = &[
         sync: false,
     }, // WHAT: a person, any role, never a key. WHY: only a person signs; the shop's viewers sign.
     Route {
+        method: "GET",
+        path: "/projects/{id}/tablet",
+        door: Door::Signed,
+        sync: true,
+    }, // WHAT: a job's tablet manifest, as the caller's tablet shows it. WHY: anybody on the job reads it; the program reads back what it sent
+    Route {
+        method: "PUT",
+        path: "/projects/{id}/tablet",
+        door: Door::Program,
+        sync: true,
+    }, // WHAT: setting it. WHY: only the program's sync key
+    Route {
+        method: "GET",
+        path: "/tablet",
+        door: Door::Person,
+        sync: false,
+    }, // WHAT: a person's tablet jobs. WHY: a program has no tablet
+    Route {
         method: "POST",
         path: "/signoffs/{id}/withdraw",
         door: Door::Writer,
@@ -755,6 +774,7 @@ fn let_in(route: &Route, knock: Knock) -> bool {
         ), // WHAT: anybody who may change drawings. WHY: a viewer reads only.
         Door::Person => matches!(knock, Knock::Viewer | Knock::Estimator | Knock::Admin), // WHAT: a person signed in. WHY: a key can't make keys, change a password or sign out.
         Door::Admin | Door::Folders => knock == Knock::Admin, // WHAT: an administrator with a password; for folders the sync key is let in by the list above. WHY: no key runs the server, and who sees a folder is theirs to say.
+        Door::Program => false, // WHAT: nobody but the sync key, let in by its list above. WHY: a person never sets a tablet manifest
         Door::Device => false, // WHAT: nobody here holds a device key. WHY: a session or a key never stands in for one
     }
 }

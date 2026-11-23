@@ -349,6 +349,29 @@ CREATE TABLE IF NOT EXISTS devices (
     scope       TEXT NOT NULL DEFAULT 'all'
 );
 CREATE INDEX IF NOT EXISTS devices_by_state ON devices(state, asked);
+
+-- The tablet manifest (docs/TABLET-MANIFEST.md): one per job, set only by a
+-- program's sync key (Fabwire). `body` is the manifest in the server's own
+-- canonical JSON and `digest` its SHA-256, so the same push again changes
+-- nothing; `version` counts the changes. `tablet_items` is what it lets the
+-- shop and the field reach, worked out once when it is set, so every request
+-- of a tablet account reads a short list instead of the whole manifest.
+CREATE TABLE IF NOT EXISTS tablet_manifests (
+    project     TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    body        TEXT NOT NULL,
+    digest      TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    updated     TEXT NOT NULL,
+    updated_by  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tablet_items (
+    project     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,
+    id          TEXT NOT NULL,
+    shop        INTEGER NOT NULL,
+    field       INTEGER NOT NULL,
+    PRIMARY KEY (project, kind, id)
+);
 "#;
 
 /// An invitation as it is written down.
