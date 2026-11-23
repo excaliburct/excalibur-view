@@ -1878,7 +1878,7 @@ pub fn update_interval(signed_in: bool, server_looking: bool) -> std::time::Dura
 /// Where an offered update came from.
 enum Source {
     Server, // WHAT: the office server. WHY: downloaded from it, and its hold honoured
-    Feed(hub::feed::Feed, hub::feed::Found), // WHAT: the publisher's feed. WHY: downloaded from the release itself
+    Feed(Box<(hub::feed::Feed, hub::feed::Found)>), // WHAT: the publisher's feed, boxed. WHY: downloaded from the release itself; boxed so the enum stays small (clippy large_enum_variant)
 }
 
 /// Whether the office server's refusal means it turned this computer away
@@ -1902,7 +1902,7 @@ fn newest_on_the_feed(running: &str, channel: Channel) -> Result<(UpdateOffer, S
         // the same as no release at all.
         Ok(Some(found)) if found.published.app_for(platform()).is_some_and(|r| hub::update::newer(&r.version, running)) => {
             let release = found.published.app_for(platform()).cloned(); // WHAT: this platform's build. WHY: offered
-            Ok((UpdateOffer { release, pinned_to: None, required: false, looking: false }, Source::Feed(feed, found)))
+            Ok((UpdateOffer { release, pinned_to: None, required: false, looking: false }, Source::Feed(Box::new((feed, found)))))
         }
         Ok(_) => Err(format!("Excalibur View {running} is the newest version.")), // WHAT: nothing newer. WHY: said when asked
         // Quietly unless somebody asked. A seat that cannot reach the
@@ -2010,11 +2010,9 @@ fn check_for_update(
         return say(Told::UpdateReady(version));
     }
     let bytes = match &from {
-        Source::Server => client
-            .map(|c| c.download_update(&release.download).map_err(|e| e.to_string()))
-            .unwrap_or_else(|| Err("no server".into())),
-        Source::Feed(feed, found) => match found.url(&release.download) {
-            Some(url) => feed.fetch(url),
+        Source::Server => client.map_or_else(|| Err("no server".into()), |c| c.download_update(&release.download).map_err(|e| e.to_string())), // WHAT: from the office server, or why not. WHY: clippy map_unwrap_or
+        Source::Feed(boxed) => match boxed.1.url(&release.download) {
+            Some(url) => boxed.0.fetch(url), // WHAT: from the publisher's feed. WHY: the release's own file
             None => Err(format!("the release has no file called {}", release.download)),
         },
     };
