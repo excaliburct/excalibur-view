@@ -774,8 +774,7 @@ fn let_in(route: &Route, knock: Knock) -> bool {
         ), // WHAT: anybody who may change drawings. WHY: a viewer reads only.
         Door::Person => matches!(knock, Knock::Viewer | Knock::Estimator | Knock::Admin), // WHAT: a person signed in. WHY: a key can't make keys, change a password or sign out.
         Door::Admin | Door::Folders => knock == Knock::Admin, // WHAT: an administrator with a password; for folders the sync key is let in by the list above. WHY: no key runs the server, and who sees a folder is theirs to say.
-        Door::Program => false, // WHAT: nobody but the sync key, let in by its list above. WHY: a person never sets a tablet manifest
-        Door::Device => false, // WHAT: nobody here holds a device key. WHY: a session or a key never stands in for one
+        Door::Program | Door::Device => false, // WHAT: nobody here: a program door is the sync key's alone, let in by its list above; a device door takes only a device's signature. WHY: a person never sets a tablet manifest
     }
 }
 
