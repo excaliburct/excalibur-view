@@ -239,7 +239,7 @@ pub fn begin(server: &Server) {
 ///   start, older than `devices_began` by more than [`DATE_MARGIN`]: on a
 ///   fresh install both are written in the same start, by the same clock,
 ///   so skew moves them together. This is the way Mesa Fab's 0.7.1 database,
-///   which already has its device table, is told from LatCon's.
+///   which already has its device table, is told from `LatCon`'s.
 fn upgraded(db: &Connection, began: time::OffsetDateTime) -> rusqlite::Result<bool> {
     let people: i64 = db.query_row("SELECT count(*) FROM people", [], |r| r.get(0))?; // WHAT: how many accounts there are. WHY: an office with nobody has nobody to carry over
     if people == 0 {
