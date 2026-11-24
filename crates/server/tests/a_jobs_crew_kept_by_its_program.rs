@@ -1,5 +1,5 @@
 //! A job's crew, kept by its program, run for real over a socket
-//! (`GET` and `POST /projects/{id}/crew`, crate::crew).
+//! (`GET` and `POST /projects/{id}/crew`, `crate::crew`).
 //!
 //! Fabwire sets who sees each of its jobs on the iPads by sign-in, through
 //! its sync key. Only Fabwire's key, only on a project it filed; a sign-in
