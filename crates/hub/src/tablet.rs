@@ -484,6 +484,31 @@ impl Audience {
     }
 }
 
+/// Whether a manifest holds nothing for any tablet: the one Fabwire pushes when a job leaves active.
+#[must_use] // WHAT: the answer is the point. WHY: dropping it is a mistake
+pub fn is_empty(m: &Manifest) -> bool {
+    m.sections.shop.is_empty()
+        && m.sections.field.is_empty()
+        && m.sheets.is_empty()
+        && m.documents.is_empty()
+        && m.loads.is_empty()
+        && m.traveler.is_none()
+        && m.loading.is_none()
+        && m.todo.is_empty() // WHAT: nothing in any part. WHY: a tablet has nothing to show of the job, so it drops off the job list
+}
+
+/// Whether somebody in `audience` (the office is both) may sign a ticket's box of kind `role`.
+/// Received by and Driver are signed on site, by the field or the office; Loaded by by the shop, the field or the office.
+/// A line with no kind (asked before kinds existed) is open to anyone who reaches its set, as it always was.
+#[must_use] // WHAT: the answer is the point. WHY: dropping it is a mistake
+pub fn may_sign(role: &str, audience: Audience) -> bool {
+    match role {
+        "loaded_by" => audience.shop || audience.field, // WHAT: the shop, the field or the office. WHY: the owner's rule: loading is the shop's, and the field may load too
+        "driver" | "received_by" => audience.field, // WHAT: the field or the office. WHY: the owner's rule: only people on site take a delivery or sign for the driver
+        _ => true, // WHAT: no kind, or one that isn't a ticket box. WHY: the old rule (anyone who reaches the set) stands for lines that never had one
+    }
+}
+
 /// What a tablet account in `audience` may reach of a job (§5), before the
 /// folder rules: the sets and the files, sorted.
 #[must_use] // WHAT: the answer is the point. WHY: dropping it is a mistake

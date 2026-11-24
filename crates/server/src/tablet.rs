@@ -29,6 +29,9 @@ use crate::auth::{self, Who}; // WHAT: who is asking. WHY: only the program sets
 /// The most a manifest may be.
 pub const TABLET_BODY: usize = 8 * 1024 * 1024; // WHAT: 8 MiB. WHY: five thousand sheets and a week of loads fit with room; read only after the gate.
 
+/// What a key's name begins with when Fabwire made it (`Fabwire V2`), lower case.
+const PROGRAM: &str = "fabwire"; // WHAT: the program's name. WHY: the one program whose key may set a manifest, named as Fabwire makes its key
+
 /// What a tablet account may reach of one job: the sets and files its manifest lets its audience have.
 #[derive(Clone, Debug, Default)]
 pub struct Only {
@@ -108,6 +111,15 @@ pub async fn put(
                 ),
             )); // WHAT: a person or any other key, refused. WHY: only Fabwire's program key sets it (docs/TABLET-MANIFEST.md §2)
         }
+        if !who.key.as_ref().is_some_and(|k| k.name.trim().to_lowercase().starts_with(PROGRAM)) {
+            return Err(Denied::new(
+                StatusCode::FORBIDDEN,
+                Problem::new(
+                    "program_only",
+                    "Only Fabwire's own key sets what a job's tablets show: a key for another program is refused.",
+                ),
+            )); // WHAT: a sync key made for another program, refused. WHY: any administrator can make a sync key, but only the key Fabwire makes (named for it) may set a manifest
+        }
         may_reach_project(&server, &who, &project).map(|()| who) // WHAT: a project the program keeps. WHY: a sync key never touches a job somebody made by hand
     });
     let who = match gate {
@@ -118,7 +130,7 @@ pub async fn put(
         Ok(bytes) => bytes,                           // WHAT: the body. WHY: read below
         Err(denied) => return denied.into_response(), // WHAT: too big. WHY: said plainly
     };
-    let manifest: Manifest = match serde_json::from_slice(&bytes) {
+    let mut manifest: Manifest = match serde_json::from_slice(&bytes) {
         Ok(m) => m, // WHAT: read. WHY: checked below
         Err(e) => {
             return Denied::wrong(format!(
@@ -127,9 +139,18 @@ pub async fn put(
             .into_response()
         } // WHAT: refused with the contract's code. WHY: an unknown or mistyped field is never half-read
     };
+    once(&mut manifest.sheets); // WHAT: a sheet listed twice kept once. WHY: the same sheet twice is one sheet on a tablet, and a flood of repeats is never stored
+    once(&mut manifest.documents); // WHAT: a pinned document listed twice kept once. WHY: likewise
+    once(&mut manifest.loads); // WHAT: a load listed twice kept once. WHY: likewise
     set(&server, &who, &project, &manifest)
         .map(Json)
         .into_response() // WHAT: checked and kept. WHY: apart, so it reads as one function
+}
+
+/// `items` with every exact repeat of an earlier item taken out, order kept.
+fn once<T: serde::Serialize>(items: &mut Vec<T>) {
+    let mut seen = HashSet::new(); // WHAT: each item as text, as met. WHY: an item met before is a repeat
+    items.retain(|item| serde_json::to_string(item).map_or(true, |text| seen.insert(text))); // WHAT: only the first of each kept. WHY: an item that can't be written as text is kept, never dropped quietly
 }
 
 /// Checks a manifest against the project and keeps it when it changed.
@@ -296,7 +317,7 @@ fn kept(server: &Shared, project: &str) -> Answer<Option<(Manifest, i64, String)
 }
 
 /// The person's groups, lower case.
-fn groups_of(server: &Shared, who: &Who) -> Answer<Vec<String>> {
+pub(crate) fn groups_of(server: &Shared, who: &Who) -> Answer<Vec<String>> {
     server
         .store
         .with(|db| {
@@ -515,6 +536,9 @@ pub async fn jobs(
         let Some((manifest, _, updated)) = kept(&server, &project)? else {
             continue;
         }; // WHAT: its manifest. WHY: gone since the list was read
+        if tablet::is_empty(&manifest) {
+            continue; // WHAT: an empty manifest. WHY: Fabwire pushes one when the job leaves active, so its tablets drop it
+        }
         let (m, audience) = as_seen(&server, &who, &project, manifest)?; // WHAT: cut to them. WHY: the card says only what's theirs
         if !crate::folders::is_office(&who) && !audience.shop && !audience.field {
             continue; // WHAT: neither shop nor field. WHY: nothing of it is theirs

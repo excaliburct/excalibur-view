@@ -57,6 +57,7 @@ enum Door {
     Public,  // WHAT: open to anybody. WHY: finding the server, signing in, joining.
     Signed,  // WHAT: anybody signed in, or a program's key. WHY: reading what the office holds.
     Writer, // WHAT: estimators and administrators, or a program acting as one. WHY: changing drawings.
+    Office, // WHAT: the office only: an estimator or administrator, or a program key acting as one; never a viewer (shop or field). WHY: CAD's and Archetype's reads have no manifest or folder rule to narrow them
     Person, // WHAT: a person signed in with a password, any role. WHY: their own keys and password.
     Admin,  // WHAT: an administrator signed in with a password. WHY: running the server.
     Folders, // WHAT: an administrator signed in, or a sync key. WHY: deciding who sees a folder.
@@ -445,7 +446,7 @@ const TABLE: &[Route] = &[
     Route {
         method: "GET",
         path: "/cad/drawings",
-        door: Door::Signed,
+        door: Door::Office,
         sync: false,
     }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
     Route {
@@ -457,13 +458,13 @@ const TABLE: &[Route] = &[
     Route {
         method: "GET",
         path: "/cad/drawings/{id}",
-        door: Door::Signed,
+        door: Door::Office,
         sync: false,
     }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
     Route {
         method: "GET",
         path: "/cad/drawings/{id}/file",
-        door: Door::Signed,
+        door: Door::Office,
         sync: false,
     }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
     Route {
@@ -487,7 +488,7 @@ const TABLE: &[Route] = &[
     Route {
         method: "GET",
         path: "/cad/drawings/{id}/versions",
-        door: Door::Signed,
+        door: Door::Office,
         sync: false,
     }, // WHAT: CAD's office drawings. WHY: the cad part, switched on by this office's licence
     Route {
@@ -511,7 +512,7 @@ const TABLE: &[Route] = &[
     Route {
         method: "GET",
         path: "/archetype/jobs",
-        door: Door::Signed,
+        door: Door::Office,
         sync: false,
     }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
     Route {
@@ -523,19 +524,19 @@ const TABLE: &[Route] = &[
     Route {
         method: "GET",
         path: "/archetype/jobs/{id}",
-        door: Door::Signed,
+        door: Door::Office,
         sync: false,
     }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
     Route {
         method: "GET",
         path: "/archetype/jobs/{id}/files",
-        door: Door::Signed,
+        door: Door::Office,
         sync: false,
     }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
     Route {
         method: "GET",
         path: "/archetype/jobs/{id}/history",
-        door: Door::Signed,
+        door: Door::Office,
         sync: false,
     }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
     Route {
@@ -553,7 +554,7 @@ const TABLE: &[Route] = &[
     Route {
         method: "POST",
         path: "/archetype/jobs/{id}/release",
-        door: Door::Signed,
+        door: Door::Office,
         sync: false,
     }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
     Route {
@@ -577,7 +578,7 @@ const TABLE: &[Route] = &[
     Route {
         method: "GET",
         path: "/archetype/files/{digest}",
-        door: Door::Signed,
+        door: Door::Office,
         sync: false,
     }, // WHAT: Archetype's jobs. WHY: the archetype part, switched on by this office's licence
     Route {
@@ -768,10 +769,10 @@ fn let_in(route: &Route, knock: Knock) -> bool {
                 | Knock::DemotedProgram
                 | Knock::ViewerProgram
         ), // WHAT: a person or a program's key. WHY: reading; an assistant key is for /mcp only, and a key run out is nobody.
-        Door::Writer => matches!(
+        Door::Writer | Door::Office => matches!(
             knock,
             Knock::Estimator | Knock::Admin | Knock::Integration | Knock::DemotedProgram
-        ), // WHAT: anybody who may change drawings. WHY: a viewer reads only.
+        ), // WHAT: anybody who may change drawings, and the office's reads that go with them. WHY: a viewer (shop or field) reads only what its folders and manifest allow; CAD and Archetype are not among them.
         Door::Person => matches!(knock, Knock::Viewer | Knock::Estimator | Knock::Admin), // WHAT: a person signed in. WHY: a key can't make keys, change a password or sign out.
         Door::Admin | Door::Folders => knock == Knock::Admin, // WHAT: an administrator with a password; for folders the sync key is let in by the list above. WHY: no key runs the server, and who sees a folder is theirs to say.
         Door::Program | Door::Device => false, // WHAT: nobody here: a program door is the sync key's alone, let in by its list above; a device door takes only a device's signature. WHY: a person never sets a tablet manifest
@@ -916,6 +917,11 @@ fn session(office: &Office, person: &str) -> String {
 
 /// A new key for `person` of `purpose`, ending at `expires` if given.
 fn key(office: &Office, person: &str, purpose: &str, expires: Option<&str>) -> (String, String) {
+    key_named(office, person, purpose, expires, None) // WHAT: a key named by its id. WHY: most knocks don't care what a key is called
+}
+
+/// A key called `name` when given (else its id). Fabwire's key is called for it, which only that key's door looks at.
+fn key_named(office: &Office, person: &str, purpose: &str, expires: Option<&str>, name: Option<&str>) -> (String, String) {
     let (key, digest) = auth::fresh_key(); // WHAT: a key and its digest. WHY: as making one through the API does.
     let id = format!("key_probe_{}", rand::random::<u32>()); // WHAT: its id. WHY: a revoke needs one.
     office
@@ -924,7 +930,7 @@ fn key(office: &Office, person: &str, purpose: &str, expires: Option<&str>) -> (
         .with(|db| {
             db.execute(
                 "INSERT INTO keys (id, digest, person, purpose, name, made, expires) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![id, digest, person, purpose, id, "2026-01-01T00:00:00Z", expires],
+                params![id, digest, person, purpose, name.unwrap_or(&id), "2026-01-01T00:00:00Z", expires], // WHAT: its name, the id unless one is given. WHY: the manifest door asks whose key it is
             )?;
             Ok(())
         })
@@ -942,7 +948,7 @@ fn token_for(office: &Office, knock: Knock) -> Option<String> {
         Knock::Integration => Some(key(office, ADMIN, "integration", None).0),
         Knock::DemotedProgram => Some(key(office, ESTIMATOR, "integration", None).0), // WHAT: an integration key standing for one whose maker was made an estimator. WHY: it must act as an estimator now.
         Knock::ViewerProgram => Some(key(office, VIEWER, "integration", None).0), // WHAT: an integration key whose maker was made a viewer. WHY: it must read and change nothing, as a viewer does.
-        Knock::Sync => Some(key(office, ADMIN, "sync", None).0),
+        Knock::Sync => Some(key_named(office, ADMIN, "sync", None, Some("Fabwire V2")).0), // WHAT: a sync key called as Fabwire calls its own. WHY: only that key sets a tablet manifest
         Knock::Assistant => Some(key(office, ADMIN, "assistant", None).0),
         Knock::Expired => Some(key(office, ADMIN, "integration", Some("2020-01-01T00:00:00Z")).0),
     }

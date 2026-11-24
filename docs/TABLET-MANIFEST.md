@@ -19,6 +19,7 @@ and **holds every shop and field account to it**: it is the only thing such an a
   hidden whatever the manifest says.
 - Signing is unchanged: the tablet signs the ticket's existing sign-off line (`POST /signoffs/{id}/sign`), Fabwire
   reads it back and writes RECEIVED BY, Delivered and the signed ticket as before (Decisions 0404, 0410, 0411).
+  One rule is added: **who may sign which box** (section 5, "Who signs which box").
 
 ## 2. The routes
 
@@ -28,7 +29,13 @@ and **holds every shop and field account to it**: it is the only thing such an a
 | `GET /api/v1/projects/{id}/tablet` | a person who may see the project; a sync key | The manifest **as this person's tablet shows it** (section 5). A sync key reads it as stored. |
 | `GET /api/v1/tablet` | a person | Their jobs for the tablet: every project they may see that has a manifest, with its card words. |
 
-- `PUT` from a person (even an administrator) or any other kind of key: **403**. Only Fabwire sets it.
+- `PUT` from a person (even an administrator) or any other kind of key: **403**. Only Fabwire sets it. Among sync
+  keys only the one Fabwire makes (its name begins `Fabwire`, as `Fabwire V2`) may; a sync key an administrator
+  made for another program is **403** `program_only` too.
+- An exact repeat of a sheet, a pinned document or a load in the body is kept once (the first stays, in order); the
+  manifest is never refused for it.
+- A job that leaves active (completed, on hold, past, cancelled) is pushed as an **empty manifest**: no sheets,
+  documents, loads, traveler, loading or to-dos, and no sections for either audience, so its tablets drop it.
 - `PUT` answers `{"project": "<id>", "version": N, "changed": true|false}`. A body identical to the one kept
   (the same bytes after the server's own canonical form) changes nothing, writes no audit line and answers
   `changed: false`, so Fabwire may push every minute.
@@ -124,6 +131,14 @@ superseded in View, or in an `` `OUT OF USE (OFFICE ONLY) `` folder, is refused.
 
 A project with **no manifest** is served by the folder rules alone, as before 0.8.0.
 
+**Who signs which box.** Fabwire asks each ticket line with a `role` (`loaded_by`, `driver` or `received_by`) on
+`POST /sets/{id}/signoffs`; a line asked again with a role it had none for takes it once, and a role is never changed
+after. `POST /signoffs/{id}/sign` then refuses (**403**) any account the line's role doesn't allow: **Received by**
+and **Driver** are signed by the field or the office; **Loaded by** by the shop, the field or the office. The
+office is every audience; a tablet account is its `Shop` and `Field` groups. A line with no role is signed by
+anyone who reaches its set, as before. The tablet offers only the Sign buttons its account may use. A role that
+isn't one of the three is **400**.
+
 `GET /projects/{id}/tablet` for a tablet account answers the manifest cut to what that person may reach: sections
 for its audiences, only reachable sheets, documents and loads, and on each load box the **live** sign-off line
 (`line`: its id, `status`, `signer`, `signed`), so a box signed a moment ago shows signed before Fabwire's next pass.
@@ -132,7 +147,8 @@ for its audiences, only reachable sheets, documents and loads, and on each load 
 
 Fabwire's starting folder rule for `08 SHIPPING DOCS` was `office+shop`, which hid the tickets from the field crew
 that signs them on site. It is `office+shop+field` from this release (an office that kept the old starting rule is
-moved to the new one; one it changed itself is left alone). The manifest then narrows the field to the tickets of
+moved to the new one, once, only while the connected View is 0.8.0 or later and only when its saved rule is exactly
+the old starting rule; one it changed itself is left alone, and the office is told in a notice when it is moved). The manifest then narrows the field to the tickets of
 this week's loads, nothing else in that folder.
 
 ## 7. The shared examples

@@ -253,6 +253,15 @@ pub(crate) fn writer(server: &Server, headers: &HeaderMap) -> Answer<Who> {
     Ok(who)
 }
 
+/// Someone in the office, for reading what only the office's detailers use (CAD's and Archetype's drawings and jobs).
+pub(crate) fn office(server: &Server, headers: &HeaderMap) -> Answer<Who> {
+    let who = caller(server, headers)?; // WHAT: whoever is signed in, or a program's key. WHY: asked first, so a stranger is told 401
+    if !crate::folders::is_office(&who) {
+        return Err(Denied::forbidden("open the office's drawings")); // WHAT: a viewer (shop or field) turned away. WHY: CAD and Archetype are the office's tools, with no manifest or folder rule to narrow them
+    }
+    Ok(who) // WHAT: the office's person. WHY: they may read
+}
+
 /// New work can be shared through the server: always, unless an Office trial
 /// has ended with no license. Reading and exporting are never behind this.
 pub(crate) fn sharing(server: &Server) -> Answer<()> {

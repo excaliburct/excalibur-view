@@ -630,3 +630,107 @@ fn the_receiver_signs_the_tickets_own_line_and_the_account_that_collected_it_is_
         404
     ); // WHAT: the ticket gone for her. WHY: a section turned off is enforced too
 }
+
+#[test]
+fn a_sync_key_made_for_another_program_never_sets_a_manifest() {
+    let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
+    let job = a_job(&office); // WHAT: the job. WHY: filed under Fabwire's reference, which any sync key reaches.
+    let other = office.post(
+        &office.admin,
+        "/me/keys",
+        json!({ "purpose": "sync", "name": "LatCon" }),
+    )["key"]
+        .as_str()
+        .unwrap()
+        .to_string(); // WHAT: an administrator's sync key for another program. WHY: any administrator can make one.
+    let (status, said) = office.put(&other, &job.project, &steel(&job)); // WHAT: it tries. WHY: only Fabwire's own key may.
+    assert_eq!(
+        (status, said["error"].as_str()),
+        (403, Some("program_only")),
+        "{said}"
+    ); // WHAT: refused with the program-only word. WHY: the review's finding, closed.
+    assert_eq!(office.audited("changed what a job's tablets show"), 0); // WHAT: nothing written. WHY: nothing changed.
+    assert_eq!(office.put(&office.sync, &job.project, &steel(&job)).0, 200); // WHAT: Fabwire's key still sets it. WHY: only the other program was shut out.
+}
+
+#[test]
+fn a_manifest_listing_the_same_item_again_keeps_it_once() {
+    let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
+    let job = a_job(&office); // WHAT: the job. WHY: under test.
+    let mut flood = steel(&job); // WHAT: the example. WHY: its first sheet repeated below.
+    let one = flood["sheets"][0].clone(); // WHAT: the first sheet. WHY: repeated.
+    flood["sheets"] = json!(vec![one; 5000]); // WHAT: the same sheet five thousand times. WHY: the review's probe.
+    let doc = steel(&job)["documents"][0].clone(); // WHAT: a pinned document. WHY: listed twice.
+    flood["documents"] = json!([doc.clone(), doc]);
+    let (status, said) = office.put(&office.sync, &job.project, &flood); // WHAT: sent. WHY: kept once, not refused.
+    assert_eq!(status, 200, "{said}");
+    let (_, kept) = office.get(&office.sync, &format!("/projects/{}/tablet", job.project)); // WHAT: read back. WHY: what was stored.
+    assert_eq!(kept["manifest"]["sheets"].as_array().unwrap().len(), 1); // WHAT: one sheet. WHY: repeats dropped on the way in.
+    assert_eq!(kept["manifest"]["documents"].as_array().unwrap().len(), 1); // WHAT: one document. WHY: likewise.
+}
+
+#[test]
+fn a_ticket_box_is_signed_only_by_the_accounts_its_kind_allows() {
+    let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
+    let job = a_job(&office); // WHAT: the job. WHY: its tickets are in 08 SHIPPING DOCS, which Shop and Field see.
+    let ask = |ticket: &str, with_role: bool| {
+        let line = |words: &str, role: &str| {
+            let mut one = json!({ "label": format!("Load #2 \u{b7} {words}"), "group": "Load #2", "ref": format!("ship:{role}") });
+            if with_role {
+                one["role"] = json!(role); // WHAT: the box's kind, as Fabwire sends it. WHY: what the server holds signing to.
+            }
+            one
+        };
+        office.post(
+            &office.sync,
+            &format!("/sets/{ticket}/signoffs"),
+            json!([line("Loaded by", "loaded_by"), line("Driver", "driver"), line("Received by", "received_by")]),
+        ) // WHAT: the three lines asked for. WHY: as Fabwire asks a ticket's.
+    };
+    let ids = |lines: &Value| -> Vec<String> {
+        ["loaded_by", "driver", "received_by"]
+            .iter()
+            .map(|r| {
+                lines.as_array().unwrap().iter().find(|l| l["ref"] == format!("ship:{r}").as_str()).unwrap()["id"].as_str().unwrap().to_string()
+            })
+            .collect() // WHAT: each line's id, in the box order. WHY: signed by id
+    };
+    let pad = json!({ "name": "Someone", "strokes": [[[20.0, 100.0], [80.0, 30.0], [140.0, 100.0]]] }); // WHAT: a signature. WHY: what each tries to sign with.
+    let sign = |who: &str, id: &str| office.ask(who, "POST", &format!("/signoffs/{id}/sign"), Some(pad.clone())).0;
+    let bad = office.ask(&office.sync, "POST", &format!("/sets/{}/signoffs", job.id("set_ticket2")), Some(json!([{ "label": "x", "ref": "x", "role": "boss" }]))); // WHAT: a role that is no box. WHY: refused whole.
+    assert_eq!(bad.0, 400, "{}", bad.1);
+    let two = ids(&ask(job.id("set_ticket2"), true)); // WHAT: load 2's lines, with kinds. WHY: the shop and the field try them.
+    assert_eq!(sign(&office.sid, &two[1]), 403); // WHAT: the shop signs Driver. WHY: field or office only.
+    assert_eq!(sign(&office.sid, &two[2]), 403); // WHAT: the shop signs Received by. WHY: field or office only.
+    assert_eq!(sign(&office.sid, &two[0]), 200); // WHAT: the shop signs Loaded by. WHY: the shop may.
+    assert_eq!(sign(&office.fay, &two[1]), 200); // WHAT: the field signs Driver. WHY: the field may.
+    assert_eq!(sign(&office.fay, &two[2]), 200); // WHAT: the field signs Received by. WHY: the field may.
+    let three = ids(&ask(job.id("set_ticket3"), true)); // WHAT: load 3's lines. WHY: the office tries them.
+    for id in &three {
+        assert_eq!(sign(&office.eve, id), 200); // WHAT: the office signs every box. WHY: it may.
+    }
+    let four = ids(&ask(job.id("set_loadlog"), false)); // WHAT: lines asked with no kind. WHY: asked before kinds existed.
+    assert_eq!(office.get(&office.sync, &format!("/sets/{}/signoffs", job.id("set_loadlog"))).1[0].get("role"), None); // WHAT: none says a kind. WHY: nothing was sent.
+    let again = ids(&ask(job.id("set_loadlog"), true)); // WHAT: the same lines asked again with kinds. WHY: a kind is given to a line that had none.
+    assert_eq!(four, again); // WHAT: the same lines. WHY: asking again makes no doubles.
+    assert_eq!(sign(&office.sid, &again[2]), 403); // WHAT: now held to its kind. WHY: the rule reaches lines asked before it.
+}
+
+#[test]
+fn a_job_pushed_empty_drops_off_every_tablet() {
+    let office = an_office(); // WHAT: a fresh office. WHY: nothing from another test.
+    let job = a_job(&office); // WHAT: the job. WHY: under test.
+    assert_eq!(office.put(&office.sync, &job.project, &steel(&job)).0, 200); // WHAT: the live manifest. WHY: Fay has the job on her tablet.
+    assert_eq!(office.get(&office.fay, "/tablet").1.as_array().unwrap().len(), 1); // WHAT: one job on her list. WHY: before it leaves active.
+    let mut empty = steel(&job); // WHAT: the example emptied. WHY: what Fabwire pushes when a job completes, goes on hold or is cancelled.
+    empty["sections"] = json!({ "shop": [], "field": [] });
+    for part in ["sheets", "documents", "loads", "todo"] {
+        empty[part] = json!([]);
+    }
+    empty["traveler"] = Value::Null;
+    empty["loading"] = Value::Null;
+    assert_eq!(office.put(&office.sync, &job.project, &empty).0, 200); // WHAT: pushed. WHY: the same route, nothing in it.
+    assert_eq!(office.get(&office.fay, "/tablet").1.as_array().unwrap().len(), 0); // WHAT: her list is empty. WHY: the job dropped off.
+    assert_eq!(office.get(&office.eve, "/tablet").1.as_array().unwrap().len(), 0); // WHAT: the office's too. WHY: nothing for any tablet.
+    assert_eq!(office.get(&office.fay, &format!("/sets/{}", job.id("set_s101"))).0, 404); // WHAT: its sheet gone for her. WHY: the empty manifest reaches nothing.
+}

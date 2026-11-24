@@ -38,7 +38,7 @@ use std::collections::BTreeSet; // WHAT: the sheets opened here. WHY: the NEW ba
 use egui::{
     Align2, Color32, CornerRadius, FontFamily, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2,
 }; // WHAT: egui's drawing parts. WHY: every screen is painted to the mockups' sizes.
-use hub::tablet::{Load, Sheet, TabletJob, TabletView, TicketBox}; // WHAT: the manifest's shapes. WHY: what the screens show.
+use hub::tablet::{may_sign, Audience, Load, Sheet, TabletJob, TabletView, TicketBox}; // WHAT: the manifest's shapes and the signing rule. WHY: what the screens show, and who may sign which box.
 
 use crate::app::{App, Tool}; // WHAT: the window and its tools. WHY: the glue at the bottom.
 
@@ -532,8 +532,14 @@ pub fn box_words(which: &str) -> &'static str {
 
 /// Whether a box is waiting for a signature on this tablet: its line is there and open.
 #[must_use] // WHAT: the answer is the point. WHY: dropping it is a mistake
-pub fn open_box(b: &TicketBox) -> bool {
-    b.line.as_ref().is_some_and(|l| l.status == "open") // WHAT: a live open line. WHY: only a line the server has can be signed
+pub fn open_box(b: &TicketBox, who: Audience) -> bool {
+    b.line.as_ref().is_some_and(|l| l.status == "open") && may_sign(&b.which, who) // WHAT: a live open line, and a box this tablet's account may sign. WHY: only a line the server has can be signed, and only by the accounts the owner's rule allows (the server says no to the rest)
+}
+
+/// Who is holding this tablet: the shop, the field, or both (the office).
+#[must_use] // WHAT: the answer is the point. WHY: dropping it is a mistake
+pub fn holder(job: &TabletView) -> Audience {
+    Audience { shop: job.shop, field: job.field } // WHAT: the account's audience as the server named it. WHY: the same rule the server signs by
 }
 
 /// Whether a box is signed, in the office or here, and by whom.
@@ -550,7 +556,7 @@ fn signed_by(b: &TicketBox) -> Option<(String, String)> {
 
 /// The box this person's big button signs on a load: the field's receiver first, the shop's own boxes first.
 #[must_use] // WHAT: the answer is the point. WHY: dropping it is a mistake
-pub fn next_box(load: &Load, field_first: bool) -> Option<&TicketBox> {
+pub fn next_box(load: &Load, field_first: bool, who: Audience) -> Option<&TicketBox> {
     let order: [&str; 3] = if field_first {
         ["received_by", "driver", "loaded_by"]
     } else {
@@ -558,7 +564,7 @@ pub fn next_box(load: &Load, field_first: bool) -> Option<&TicketBox> {
     }; // WHAT: who signs first here. WHY: a field tablet is at the receiving end
     order
         .iter()
-        .find_map(|w| load.boxes.iter().find(|b| b.which == *w && open_box(b))) // WHAT: the first open one in that order. WHY: the one big button
+        .find_map(|w| load.boxes.iter().find(|b| b.which == *w && open_box(b, who))) // WHAT: the first open one in that order. WHY: the one big button
 }
 
 /// The sheets a filter and a search leave, by sheet number.
@@ -617,12 +623,12 @@ fn natural(text: &str) -> Vec<(String, u64)> {
 }
 
 /// Whether a load ships today, this week, or at all, by the three buttons.
-fn load_shown(load: &Load, which: usize, today: &str) -> bool {
+fn load_shown(load: &Load, which: usize, today: &str, who: Audience) -> bool {
     match which {
         0 => {
             load.ships == today
                 || load.status == "in_transit"
-                || (load.boxes.iter().any(open_box) && load.status != "loading")
+                || (load.boxes.iter().any(|b| open_box(b, who)) && load.status != "loading")
         } // WHAT: Today: shipping today, on the road, or waiting to be signed. WHY: what needs doing now
         1 => load.ships.is_empty() || within_week(&load.ships, today), // WHAT: This week. WHY: the manifest holds this week's
         _ => true, // WHAT: All loads. WHY: everything sent
@@ -1836,7 +1842,7 @@ impl Tablet {
             .manifest
             .loads
             .iter()
-            .filter(|l| load_shown(l, self.ship, &env.today))
+            .filter(|l| load_shown(l, self.ship, &env.today, holder(job)))
             .collect(); // WHAT: the loads it leaves. WHY: Today, This week, All
         let list = Rect::from_min_max(
             Pos2::new(body.left(), body.top() + 22.0 + SMALLEST + 16.0),
@@ -1870,7 +1876,7 @@ impl Tablet {
                             Vec2::new(list.width() - pad * 2.0, h),
                         ); // WHAT: the card. WHY: one per load
                         let painter = ui.painter().clone(); // WHAT: inside the scroll. WHY: clipped
-                        let waiting = load.boxes.iter().any(open_box); // WHAT: a box to sign. WHY: edged amber
+                        let waiting = load.boxes.iter().any(|b| open_box(b, holder(job))); // WHAT: a box to sign. WHY: edged amber
                         card(
                             &painter,
                             rect,
@@ -1930,7 +1936,7 @@ impl Tablet {
                         for b in &load.boxes {
                             let label = match signed_by(b) {
                                 Some(_) => (format!("✓ {}", box_words(&b.which)), pal.green), // WHAT: signed, green. WHY: done
-                                None if open_box(b) => {
+                                None if open_box(b, holder(job)) => {
                                     (format!("{} to sign", box_words(&b.which)), pal.amber)
                                 } // WHAT: to sign, amber. WHY: waiting here
                                 None => (
@@ -1949,7 +1955,7 @@ impl Tablet {
                                 break; // WHAT: no more room. WHY: the ticket shows them all
                             }
                         }
-                        let label = match next_box(load, field_first) {
+                        let label = match next_box(load, field_first, holder(job)) {
                             Some(b) => format!("Sign: {}", box_words(&b.which).to_lowercase()),
                             None => "Open ticket".to_string(),
                         }; // WHAT: the one big button's words. WHY: what to do
@@ -2161,7 +2167,7 @@ impl Tablet {
         for b in &load.boxes {
             let rect =
                 Rect::from_min_size(Pos2::new(right.left(), y), Vec2::new(right.width(), 70.0)); // WHAT: the box. WHY: 70 tall
-            let open = open_box(b); // WHAT: to sign here. WHY: amber and tappable
+            let open = open_box(b, holder(job)); // WHAT: to sign here. WHY: amber and tappable
             let (edge, fill) = match (signed_by(b), open) {
                 (Some(_), _) => (pal.line, pal.card), // WHAT: signed. WHY: plain
                 (None, true) => (pal.amber.0, pal.amber.1), // WHAT: to sign. WHY: amber
@@ -2293,7 +2299,7 @@ impl Tablet {
         ) {
             self.problem = !self.problem; // WHAT: opened. WHY: who to call
         }
-        let next = next_box(load, job.field).cloned(); // WHAT: the box the big button signs. WHY: one main action
+        let next = next_box(load, job.field, holder(job)).cloned(); // WHAT: the box the big button signs. WHY: one main action
         let main = Rect::from_min_max(
             Pos2::new(problem.right() + 14.0, bottom),
             Pos2::new(body.right() - pad, bottom + MAIN),
@@ -3140,7 +3146,7 @@ fn waiting(job: &TabletView, key: &str) -> usize {
             .manifest
             .loads
             .iter()
-            .filter(|l| l.boxes.iter().any(open_box))
+            .filter(|l| l.boxes.iter().any(|b| open_box(b, holder(job))))
             .count(), // WHAT: tickets to sign. WHY: the amber dot
         "traveler" => job
             .manifest
@@ -3684,5 +3690,23 @@ mod tests {
         assert_eq!(tablet.screen, Some(Screen::Pad)); // WHAT: still the pad. WHY: never a tick the server can't back
         assert!(tablet.pad.as_ref().unwrap().said.is_some()); // WHAT: said why. WHY: never quietly
         assert_eq!(thousands(18450), "18,450"); // WHAT: weights read. WHY: as the ticket
+    }
+
+    #[test]
+    fn a_tablet_is_offered_only_the_sign_buttons_its_account_may_use() {
+        let mut view = steel_view(); // WHAT: the steel job. WHY: load 2 has the three boxes.
+        for b in &mut view.manifest.loads[0].boxes {
+            b.line = Some(BoxLine { id: format!("so_{}", b.which), status: "open".into(), signer: String::new(), signed: String::new() }); // WHAT: every box's line open. WHY: each is offered or not by its account alone
+        }
+        let load = &view.manifest.loads[0]; // WHAT: load 2. WHY: under test.
+        let open = |shop: bool, field: bool| -> Vec<&str> {
+            let who = Audience { shop, field }; // WHAT: the account's audience. WHY: what the tablet is told
+            load.boxes.iter().filter(|b| open_box(b, who)).map(|b| b.which.as_str()).collect() // WHAT: the boxes with a Sign button. WHY: the rule's own answer
+        };
+        assert_eq!(open(true, false), ["loaded_by"]); // WHAT: the shop. WHY: Loaded by only.
+        assert_eq!(open(false, true), ["loaded_by", "driver", "received_by"]); // WHAT: the field. WHY: all three.
+        assert_eq!(open(true, true), ["loaded_by", "driver", "received_by"]); // WHAT: the office, which is both. WHY: all three.
+        assert!(open(false, false).is_empty()); // WHAT: neither crew. WHY: none.
+        assert!(next_box(load, true, Audience { shop: true, field: false }).is_some_and(|b| b.which == "loaded_by")); // WHAT: the shop's big button. WHY: skips the boxes it may not sign.
     }
 }
