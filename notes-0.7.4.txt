@@ -1,0 +1,20 @@
+A SHEET'S SCALE IS KEPT BY THE OFFICE
+
+A scale set on a sheet of an office drawing (Measure, Set Scale..., a scale
+picked from the list, a calibration, or one put on every sheet) now goes to
+the office server with the markups. It is there the next time the drawing
+opens, on every computer, and the office server measures the takeoff with it.
+Before, it lived only in the copy on the computer it was set on, and was gone
+the next time the drawing opened.
+
+A TAKEOFF PULLED BY FABWIRE IS MEASURED AS THE VIEWER MEASURES IT
+
+Each measurement is worked out with the scale it was drawn with, the one the
+viewer writes on every measurement, and the sheet's own scale only for a
+markup that carries none. Measurements drawn on a calibrated sheet no longer
+come back to Fabwire as "their sheet has no scale".
+
+FOR PROGRAMS
+
+POST /api/v1/sets/{id}/scale sets or clears a sheet's scale; GET
+/api/v1/sets/{id}/sheets says it as "measure". See docs/integrating.md.

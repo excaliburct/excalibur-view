@@ -169,6 +169,11 @@ pub struct Sheet {
     /// How the sheet reads: `1/4" = 1'-0"`. Absent means no scale is set, and
     /// that is never the same as a scale of zero.
     pub scale: Option<String>,
+    /// The scale as a person set it in the viewer (picked, calibrated or put
+    /// on every sheet): the `/Measure` dictionary, written as PDF and base64.
+    /// Absent when nobody has set one on the office's copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measure: Option<String>, // WHAT: the sheet's scale as the viewer set it. WHY: it lived only in one seat's downloaded copy, and the next open downloaded the drawing again without it (Mesa, 2026-11-24)
 }
 
 // ---- markups -------------------------------------------------------------

@@ -189,6 +189,7 @@ const TABLE: &[(&str, &str, Door)] = &[
     ("GET", "/sets/{id}/sheets", Door::Gated),
     ("GET", "/sets/{id}/markups", Door::Gated),
     ("POST", "/sets/{id}/markups", Door::Gated),
+    ("POST", "/sets/{id}/scale", Door::Gated), // WHAT: a sheet's scale. WHY: a person's, as a markup is
     ("GET", "/sets/{id}/takeoff", Door::Gated),
     ("GET", "/sets/{id}/takeoff.csv", Door::Gated),
     ("GET", "/people", Door::Gated),

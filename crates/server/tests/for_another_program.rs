@@ -645,3 +645,73 @@ fn a_drawing_keeps_its_folder_and_one_issued_again_replaces_only_the_one_in_the_
     assert_eq!(code, 400);
     assert!(said.contains("folder"), "{said}");
 }
+
+/// A beam `points` long carrying the scale the viewer measured it with, as
+/// the viewer writes every measurement on a sheet it calibrated.
+fn a_calibrated_beam(points: f64) -> String {
+    let mut m = annot::Markup::new(annot::Subtype::Line); // WHAT: a line markup. WHY: a length tool makes one
+    m.set("IT", pdf::Object::name("LineDimension")); // WHAT: a length. WHY: as the viewer marks it
+    m.set_subject("W10x22"); // WHAT: Mesa's beam. WHY: the shape on the bid that came back unscaled
+    m.set_line([100.0, 100.0], [100.0 + points, 100.0]); // WHAT: its two ends. WHY: its length on paper
+    m.set("Measure", pdf::Object::Dict(annot::measure::imperial(48.0, "calibrated, 1/4\" = 1'-0\"", 16).write())); // WHAT: the calibration, carried on the markup. WHY: hyperview's sheet.rs writes it on every measurement
+    encoded(m)
+}
+
+#[test]
+fn a_markup_measured_on_a_sheet_calibrated_in_the_viewer_comes_back_scaled() {
+    // Mesa, 2026-11-24: 17 markups on a sheet calibrated in the viewer came
+    // back to Fabwire as "their sheet has no scale", and were left out.
+    let server = start(); // WHAT: a server. WHY: over the wire
+    let project = server.post("/projects", json!({ "number": "2655", "name": "Pueblo West" })); // WHAT: a bid's project. WHY: pulled whole
+    let id = project["id"].as_str().unwrap(); // WHAT: its id. WHY: the routes take it
+    let set = server.upload(id, "S-501.pdf", &a_drawing(3024, 2160, "rev0"), false); // WHAT: a drawing whose sheet names no scale. WHY: the server's sheet has none; the viewer calibrated it
+    server.push(&set.id, &[a_calibrated_beam(720.0), a_beam(720.0, 1.0)]); // WHAT: one markup with its calibration, one with none. WHY: only the first has a scale anywhere
+    let pull = server.get(&format!("/projects/{id}/markuplist")); // WHAT: the pull, as Fabwire asks. WHY: what it reads
+    let markups = every_markup(&pull); // WHAT: its markups. WHY: checked one by one
+    let calibrated = markups.iter().find(|m| m["Subject"] == "W10x22").expect("the calibrated beam"); // WHAT: the one measured with a scale. WHY: the bug
+    assert_eq!(calibrated["Hyperview"]["Scaled"], true, "measured with the scale it carries"); // WHAT: scaled. WHY: the viewer measured it so
+    assert!((calibrated["Hyperview"]["LengthFt"].as_f64().unwrap() - 40.0).abs() < 0.01, "720 points at 1/4\" is 40 ft, as the written scale rounds it: {calibrated}"); // WHAT: the right feet. WHY: the number the viewer shows
+    let bare = markups.iter().find(|m| m["Subject"] == "W12x26").expect("the bare beam"); // WHAT: the one with no scale anywhere. WHY: still told apart
+    assert_eq!(bare["Hyperview"]["Scaled"], false, "nothing is estimated"); // WHAT: unscaled. WHY: never guessed
+    assert!(bare["Hyperview"]["LengthFt"].is_null(), "absent, never zero"); // WHAT: no number. WHY: the same rule
+    let takeoff = server.get(&format!("/sets/{}/takeoff", set.id)); // WHAT: the set's takeoff. WHY: the same scale rule there
+    assert_eq!(takeoff["left_out"], 1, "only the bare beam is left out: {takeoff}"); // WHAT: one left out. WHY: the calibrated one counts
+}
+
+/// A calibrated scale, written as PDF and base64, as the viewer sends it.
+fn a_calibration() -> String {
+    use base64::Engine;
+    let mut bytes = Vec::new(); // WHAT: the /Measure's bytes. WHY: as the viewer writes it
+    pdf::write::write_object(&pdf::Object::Dict(annot::measure::imperial(48.0, "calibrated, 1/4\" = 1'-0\"", 16).write()), &mut bytes); // WHAT: 1/4" = 1'-0", calibrated. WHY: what Set Scale... makes
+    base64::engine::general_purpose::STANDARD.encode(bytes) // WHAT: base64. WHY: as markups travel
+}
+
+#[test]
+fn a_scale_set_in_the_viewer_is_kept_by_the_office_and_measures_the_takeoff() {
+    // Mesa, 2026-11-24: the scale set on p.25 lived only in one seat's
+    // downloaded copy. The next open downloaded the drawing again without it,
+    // and the server's takeoff never had it.
+    let server = start(); // WHAT: a server. WHY: over the wire
+    let project = server.post("/projects", json!({ "number": "2656", "name": "Pueblo West" })); // WHAT: a project. WHY: pulled whole
+    let id = project["id"].as_str().unwrap(); // WHAT: its id. WHY: the routes take it
+    let set = server.upload(id, "S-525.pdf", &a_drawing(3024, 2160, "rev0"), false); // WHAT: a sheet naming no scale. WHY: as p.25
+    server.push(&set.id, &[a_beam(720.0, 1.0)]); // WHAT: a beam drawn before the scale was set, carrying none. WHY: the hardest case
+    let before = server.get(&format!("/projects/{id}/stamp")); // WHAT: the stamp before. WHY: it must move
+    let sheets = server.post(&format!("/sets/{}/scale", set.id), json!({ "page": 0, "measure": a_calibration() })); // WHAT: the scale set, as the viewer sends it. WHY: the route under test
+    assert!(sheets[0]["measure"].is_string(), "kept and handed back: {sheets}"); // WHAT: the scale is on the sheet. WHY: every seat reads it on open
+    assert_eq!(sheets[0]["scale"], "calibrated, 1/4\" = 1'-0\"", "its words shown"); // WHAT: its words. WHY: shown where a sheet's scale is shown
+    assert_eq!(server.get(&format!("/sets/{}/sheets", set.id))[0]["measure"], sheets[0]["measure"], "read back by a second seat"); // WHAT: the same on another read. WHY: a second seat opens it so
+    assert_ne!(before["stamp"], server.get(&format!("/projects/{id}/stamp"))["stamp"], "the takeoff changed"); // WHAT: the stamp moved. WHY: Fabwire is told to pull again
+    let beam = every_markup(&server.get(&format!("/projects/{id}/markuplist"))).into_iter().find(|m| m["Subject"] == "W12x26").expect("the beam"); // WHAT: the beam, as Fabwire pulls it. WHY: measured with the sheet's scale now
+    assert_eq!(beam["Hyperview"]["Scaled"], true, "measured with the office's scale"); // WHAT: scaled. WHY: the bug
+    assert!((beam["Hyperview"]["LengthFt"].as_f64().unwrap() - 40.0).abs() < 0.01, "720 points at 1/4\" is 40 ft, as the written scale rounds it: {beam}"); // WHAT: the right feet. WHY: the number on screen
+    let copy = server.post(&format!("/sets/{}/copy", set.id), json!({ "name": "S-525 — Takeoff" })); // WHAT: a takeoff copy, as "— Takeoff" sets are. WHY: p.25 was on one
+    assert!(server.get(&format!("/sets/{}/sheets", copy["id"].as_str().unwrap()))[0]["measure"].is_string(), "a copy keeps the scale"); // WHAT: carried to the copy. WHY: a copy without its scales is worse than none
+    let (code, said) = server.refused(&format!("/sets/{}/scale", set.id), json!({ "page": 0, "measure": "bm90IGEgbWVhc3VyZQ==" })); // WHAT: bytes that aren't a /Measure. WHY: refused, never kept
+    assert_eq!(code, 400, "{said}"); // WHAT: refused. WHY: only a scale the takeoff can use is kept
+    let (code, _) = server.refused(&format!("/sets/{}/scale", set.id), json!({ "page": 9, "measure": a_calibration() })); // WHAT: a sheet it hasn't got. WHY: refused
+    assert_eq!(code, 400); // WHAT: refused. WHY: no such sheet
+    server.post(&format!("/sets/{}/scale", set.id), json!({ "page": 0, "measure": null })); // WHAT: cleared. WHY: a person took it off
+    let beam = every_markup(&server.get(&format!("/projects/{id}/markuplist"))).into_iter().find(|m| m["Subject"] == "W12x26").expect("the beam"); // WHAT: the beam again. WHY: unscaled again
+    assert_eq!(beam["Hyperview"]["Scaled"], false, "cleared, nothing is estimated"); // WHAT: unscaled. WHY: never guessed
+}

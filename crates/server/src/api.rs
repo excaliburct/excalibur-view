@@ -522,6 +522,7 @@ pub fn router(server: Shared) -> Router {
         .route("/sets/:id", get(one_set))
         .route("/sets/:id/file", get(set_file))
         .route("/sets/:id/sheets", get(sheets_of))
+        .route("/sets/:id/scale", post(set_sheet_scale)) // WHAT: a sheet's scale set or cleared. WHY: the scale a person sets in the viewer is the office's, not one seat's
         .route("/sets/:id/markups", get(markups_of).post(add_markups))
         .route("/sets/:id/copy", post(copy_set))
         .route("/sets/:id/takeoff", get(takeoff_of))
@@ -700,6 +701,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/sets/{id}/sheets"),
     ("GET", "/sets/{id}/markups"),
     ("POST", "/sets/{id}/markups"),
+    ("POST", "/sets/{id}/scale"), // WHAT: a sheet's scale set or cleared. WHY: listed with every route served
     ("GET", "/sets/{id}/takeoff"),
     ("GET", "/sets/{id}/takeoff.csv"),
     ("GET", "/people"),
@@ -1718,6 +1720,7 @@ fn sheets_in(bytes: Vec<u8>) -> Vec<Sheet> {
             height,
             rotation,
             scale,
+            measure: None, // WHAT: nobody has set one yet. WHY: a new upload carries only what the drawing says
         });
     }
     sheets
@@ -1784,11 +1787,12 @@ pub(crate) fn safe_filename(name: &str) -> String { // WHAT: crate-wide now. WHY
 
 pub(crate) fn sheets_for(db: &Connection, set: &str) -> rusqlite::Result<Vec<Sheet>> {
     let mut statement = db.prepare(
-        "SELECT page, number, title, width, height, rotation, scale
+        "SELECT page, number, title, width, height, rotation, scale, measure
          FROM sheets WHERE set_id = ?1 ORDER BY page",
-    )?;
+    )?; // WHAT: each sheet, with the scale a person set on it. WHY: a seat applies it on open
     let rows: Vec<Sheet> = statement
         .query_map(params![set], |r| {
+            use base64::Engine;
             Ok(Sheet {
                 page: int::index(r.get(0)?), // WHAT: read back as the unsigned number it was written as. WHY: SQLite keeps every integer signed
                 number: r.get(1)?,
@@ -1797,10 +1801,112 @@ pub(crate) fn sheets_for(db: &Connection, set: &str) -> rusqlite::Result<Vec<She
                 height: r.get(4)?,
                 rotation: r.get::<_, i32>(5)?, // WHAT: read as the 32-bit number it was written from. WHY: SQLite refuses to hand back one that doesn't fit, where the cast cut it short
                 scale: r.get(6)?,
+                measure: r.get::<_, Option<Vec<u8>>>(7)?.map(|b| base64::engine::general_purpose::STANDARD.encode(b)), // WHAT: the set scale, as base64. WHY: as the markups' dictionaries travel
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// A scale as kept: a `/Measure` dictionary written as PDF, read back.
+fn measure_of(base64_text: &str) -> Option<annot::measure::Measure> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(base64_text).ok()?; // WHAT: the kept bytes. WHY: read below
+    measure_from(&bytes)
+}
+
+/// A `/Measure` dictionary's bytes read as a scale, or `None`.
+fn measure_from(bytes: &[u8]) -> Option<annot::measure::Measure> {
+    let mut reader = pdf::Reader::new(bytes); // WHAT: a reader over the bytes. WHY: parsed as a PDF object
+    let object = reader.object().ok()?; // WHAT: the object. WHY: a dictionary is expected
+    if reader.went_too_deep() {
+        return None; // WHAT: nested past any real scale. WHY: as markups are refused
+    }
+    object.as_dict().and_then(annot::measure::Measure::read) // WHAT: the scale, when it reads as one. WHY: anything else is no scale
+}
+
+/// The most a sheet's scale may be, written.
+const MOST_MEASURE: usize = 16 * 1024; // WHAT: 16 KiB. WHY: a /Measure is a few hundred bytes; nothing bigger is one
+
+#[derive(Deserialize)]
+struct SheetScaleWrite {
+    page: usize, // WHAT: the sheet, from zero. WHY: as markups name it
+    measure: Option<String>, // WHAT: the /Measure written as PDF, base64; null to clear it. WHY: as markups' dictionaries travel
+}
+
+/// `POST /sets/{id}/scale` `{"page", "measure"}`: a sheet's scale, as a
+/// person set it in the viewer (picked, calibrated, or put on every sheet),
+/// kept with the office's copy, or cleared with `null`. Every seat applies
+/// it when it opens the drawing, and the takeoff measures with it. The
+/// set's revision moves, so a program asking whether the takeoff changed is
+/// told it did.
+async fn set_sheet_scale(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Body,
+) -> Response {
+    let gate = writer(&server, &headers).and_then(|who| may_reach_set(&server, &who, &id).map(|()| who)); // WHAT: who may mark this set up, asked before the body is read. WHY: the same people who may add markups to it
+    let who = match gate {
+        Ok(who) => who, // WHAT: let in. WHY: the body is read next
+        Err(denied) => return turned_away(body, denied).await, // WHAT: refused, the body read no further than a little. WHY: as every refusal
+    };
+    let asked: SheetScaleWrite = match json_once_let_in(body, SMALL_BODY).await {
+        Ok(asked) => asked, // WHAT: the sheet and its scale. WHY: kept below
+        Err(denied) => return denied.into_response(), // WHAT: too big, or not JSON. WHY: said plainly
+    };
+    sheet_scale_set(&server, &who, &id, &asked).into_response() // WHAT: kept. WHY: the answer is the set's sheets
+}
+
+fn sheet_scale_set(server: &Shared, who: &Who, id: &str, asked: &SheetScaleWrite) -> Answer<Json<Vec<Sheet>>> {
+    use base64::Engine;
+    let kept = match asked.measure.as_deref() {
+        None => None, // WHAT: cleared. WHY: a person took the scale off
+        Some(text) => {
+            let bytes = base64::engine::general_purpose::STANDARD.decode(text.as_bytes()).map_err(|_| Denied::wrong("The scale was not valid base64."))?; // WHAT: its bytes. WHY: as markups are read
+            if bytes.len() > MOST_MEASURE {
+                return Err(Denied::wrong("That is more than a sheet's scale is.")); // WHAT: refused. WHY: see MOST_MEASURE
+            }
+            let measure = measure_from(&bytes).ok_or_else(|| Denied::wrong("The scale could not be read as a PDF /Measure dictionary. Nothing was saved."))?; // WHAT: read as a scale. WHY: only a scale the takeoff can measure with is kept
+            let mut written = Vec::new(); // WHAT: the scale, written again. WHY: what is kept is what this server read, never the bytes as sent
+            pdf::write::write_object(&pdf::Object::Dict(measure.write()), &mut written);
+            Some((written, plain_label(&measure.ratio))) // WHAT: the bytes and its words. WHY: the words show where the sheet's scale is shown
+        }
+    };
+    let sheets = server
+        .store
+        .with(|db| {
+            if read_set(db, id)?.is_none() {
+                return Ok(None); // WHAT: no such set. WHY: 404 below
+            }
+            let page = int::of_index(asked.page); // WHAT: the page as SQLite keeps it. WHY: compared below
+            let (bytes, label) = kept.clone().map_or((None, None), |(b, l)| (Some(b), Some(l))); // WHAT: what goes in each column. WHY: null for both when cleared
+            let changed = db.execute(
+                "UPDATE sheets SET measure = ?1, scale = COALESCE(?2, CASE WHEN measure IS NULL THEN scale ELSE NULL END) WHERE set_id = ?3 AND page = ?4",
+                params![bytes, label, id, page],
+            )?; // WHAT: the sheet's scale and its words; cleared, the words go only if they were a person's. WHY: a scale the drawing itself names is never taken off by clearing a calibration
+            if changed == 0 {
+                return Ok(Some(None)); // WHAT: no such sheet. WHY: refused below
+            }
+            Store::bump(db, id)?; // WHAT: the set's revision moved. WHY: the takeoff's numbers changed, so its stamp must
+            Ok(Some(Some(sheets_for(db, id)?)))
+        })
+        .map_err(|e| Denied::broke("keep that scale", e))?;
+    let sheets = sheets.ok_or_else(|| Denied::missing("drawing set"))?.ok_or_else(|| Denied::wrong("That drawing set has no such sheet."))?; // WHAT: the sheets, or why not. WHY: said plainly
+    record(
+        server,
+        &crate::audit::Entry::new(crate::audit::action::SET_SCALE, &who.email)
+            .by(&who.id)
+            .about(id.to_string())
+            .saying(kept.map_or_else(|| format!("sheet {} cleared", asked.page + 1), |(_, l)| format!("sheet {}: {l}", asked.page + 1))),
+    ); // WHAT: written in the audit log. WHY: a takeoff's numbers moved; an admin can see who set the scale
+    crate::notices::changed(server, id); // WHAT: whoever asked to be told is told. WHY: the takeoff changed, as when a markup does
+    Ok(Json(sheets))
+}
+
+/// A scale's words, kept to one plain line.
+fn plain_label(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).take(120).collect() // WHAT: no control characters, 120 at most. WHY: shown and logged as it is
 }
 
 async fn sheets_of(
@@ -1944,7 +2050,8 @@ fn markups_added(server: &Shared, who: &Who, id: &str, incoming: &[NewMarkup]) -
                 let scale = sheets
                     .get(one.page)
                     .and_then(|s| s.scale.as_ref())
-                    .map(|_| ());
+                    .map(|_| ())
+                    .or_else(|| markup.dict.get("Measure").and_then(|o| o.as_dict()).and_then(annot::measure::Measure::read).map(|_| ())); // WHAT: the sheet's scale, or the markup's own. WHY: a sheet calibrated in the viewer has none here, and its markups' captions were blanked (quantities::scale_for)
                 let caption = if scale.is_some() {
                     markup.contents()
                 } else {
@@ -2119,7 +2226,7 @@ fn gather(server: &Server, id: &str) -> Answer<(u64, Vec<Stored>, Vec<SheetScale
                     // The scale is stored as the words the drawing uses. It is
                     // turned back into a measure by the same code the viewer
                     // uses, so the two cannot diverge.
-                    scale: s.scale.as_deref().and_then(scale_named),
+                    scale: s.measure.as_deref().and_then(measure_of).or_else(|| s.scale.as_deref().and_then(scale_named)), // WHAT: the scale a person set, else the one the drawing names. WHY: what the viewer measures with
                 })
                 .collect::<Vec<_>>();
 
@@ -3474,8 +3581,8 @@ async fn copy_set(
             // Taking off on a copy that has forgotten the scales would be
             // worse than no copy at all.
             db.execute(
-                "INSERT INTO sheets (set_id, page, number, title, width, height, rotation, scale)
-                 SELECT ?1, page, number, title, width, height, rotation, scale
+                "INSERT INTO sheets (set_id, page, number, title, width, height, rotation, scale, measure)
+                 SELECT ?1, page, number, title, width, height, rotation, scale, measure
                  FROM sheets WHERE set_id = ?2",
                 params![copy.id, from.id],
             )?;

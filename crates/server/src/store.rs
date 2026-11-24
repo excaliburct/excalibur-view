@@ -816,6 +816,7 @@ fn upgrade(db: &Connection) -> Result<()> {
     add_column(db, "keys", "device", "TEXT")?; // WHAT: the computer a key was made from. WHY: removing the computer takes its keys back (security review L5)
     add_column(db, "sessions", "migrated_device", "TEXT")?; // WHAT: the device a session carried over, once. WHY: a session from before 0.7.0 carries exactly one seat over (security review H2a)
     add_column(db, "devices", "scope", "TEXT NOT NULL DEFAULT 'all'")?; // WHAT: every app, or the Citadel cell only. WHY: a computer carried over from Citadel reaches nothing else (security review M1)
+    add_column(db, "sheets", "measure", "BLOB")?; // WHAT: the scale a person set on a sheet in the viewer, its /Measure written as PDF. WHY: kept with the office's copy, so it is there on the next open, on every seat, and in the takeoff (Mesa, 2026-11-24)
     db.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS projects_by_reference
              ON projects(reference) WHERE reference IS NOT NULL;

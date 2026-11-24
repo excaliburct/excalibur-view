@@ -317,6 +317,12 @@ const TABLE: &[Route] = &[
     },
     Route {
         method: "POST",
+        path: "/sets/{id}/scale", // WHAT: a sheet's scale set. WHY: written by whoever may add markups
+        door: Door::Writer,
+        sync: false,
+    },
+    Route {
+        method: "POST",
         path: "/sets/{id}/copy",
         door: Door::Writer,
         sync: false,
@@ -1160,6 +1166,7 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
             Some(("S-101.pdf", &a_drawing())),
         ),
         ("POST", "/sets/{id}/markups") => Body::Json(json!([])),
+        ("POST", "/sets/{id}/scale") => Body::Json(json!({"page": 0, "measure": null})), // WHAT: the first sheet's scale cleared. WHY: a body the route takes from anyone who may write
         ("POST", "/people") => Body::Json(
             json!({"name": "New", "email": format!("{unique}@example.com"), "password": PASSWORD, "role": "viewer"}),
         ),

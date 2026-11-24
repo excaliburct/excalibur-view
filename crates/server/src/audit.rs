@@ -63,6 +63,7 @@ pub mod action {
     pub const DOWNLOADED_SET: &str = "downloaded a drawing set";
     pub const EXPORTED_TAKEOFF: &str = "exported a takeoff";
     pub const UPLOADED_SET: &str = "uploaded a drawing set";
+    pub const SET_SCALE: &str = "set a sheet's scale"; // WHAT: a sheet's scale set or cleared. WHY: the takeoff's numbers move with it
     pub const ADDED_PERSON: &str = "added a person";
     pub const REMOVED_PERSON: &str = "removed a person";
     pub const CHANGED_ROLE: &str = "changed what a person may do";

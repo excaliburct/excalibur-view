@@ -86,6 +86,9 @@ pub enum Ask {
         since: u64,
         /// Each one as (page, the annotation dictionary base64).
         sending: Vec<(usize, String)>,
+        /// Each sheet's scale set here, as (page, its `/Measure` base64, or
+        /// `None` when cleared).
+        scales: Vec<(usize, Option<String>)>, // WHAT: scales to send. WHY: kept by the office, not one seat
         /// Asked by the clock rather than by somebody: a failure is written
         /// in the log, not put in front of anybody every few seconds.
         quiet: bool,
@@ -327,6 +330,14 @@ pub enum Told {
         markups: Vec<(String, usize, String, bool)>,
         /// Names this machine just sent, so it does not send them again.
         sent: Vec<String>,
+        /// The scale the server keeps on each sheet that has one, as (page,
+        /// its `/Measure` base64).
+        scales: Vec<(usize, String)>, // WHAT: the office's scales. WHY: applied here, so a scale set on any seat is on this one
+    },
+    /// Scales that couldn't be sent, to send with the next sync.
+    ScalesUnsent {
+        set: String, // WHAT: the drawing set. WHY: the tab they belong to
+        scales: Vec<(usize, Option<String>)>, // WHAT: what wasn't sent. WHY: tried again, never dropped
     },
     Chests(Vec<Chest>),
     ChestFetched {
@@ -1129,12 +1140,32 @@ pub fn start(repaint: egui::Context) -> Link {
                         set,
                         since,
                         sending,
+                        scales,
                         quiet,
                     } => match connected(&client) {
                         // No server is not a problem. The markups are already
                         // in the file on disk; the sync catches up later.
                         Err(_) => {}
                         Ok(client) => {
+                            let mut unsent = Vec::new(); // WHAT: scales the server didn't take. WHY: kept for the next sync
+                            let mut failed = None; // WHAT: why the first one failed. WHY: said once
+                            for (page, measure) in scales {
+                                if failed.is_some() {
+                                    unsent.push((page, measure)); // WHAT: not tried after a failure. WHY: the server is likely down; tried next time
+                                    continue;
+                                }
+                                if let Err(e) = client.set_sheet_scale(&set, page, measure.as_deref()) {
+                                    failed = Some(e.to_string()); // WHAT: why. WHY: said below
+                                    unsent.push((page, measure)); // WHAT: kept. WHY: tried again
+                                }
+                            }
+                            if !unsent.is_empty() {
+                                say(&told, Told::ScalesUnsent { set: set.clone(), scales: unsent }); // WHAT: back to the tab. WHY: never lost
+                            }
+                            if let Some(why) = failed {
+                                say(&told, sync_failed(&set, quiet, why)); // WHAT: said as a sync that failed. WHY: the same words as markups that didn't go
+                                continue;
+                            }
                             let push: Vec<hub::NewMarkup> = sending
                                 .iter()
                                 .map(|(page, dictionary)| hub::NewMarkup {
@@ -1158,6 +1189,10 @@ pub fn start(repaint: egui::Context) -> Link {
                                     }
                                 }
                             };
+                            let office_scales: Vec<(usize, String)> = client
+                                .sheets(&set)
+                                .map(|sheets| sheets.into_iter().filter_map(|s| s.measure.map(|m| (s.page, m))).collect())
+                                .unwrap_or_default(); // WHAT: the office's scales; none when they can't be read. WHY: a scale set on another seat is applied here
                             match client.markups(&set, since) {
                                 Ok(page) => say(
                                     &told,
@@ -1170,6 +1205,7 @@ pub fn start(repaint: egui::Context) -> Link {
                                             .map(|m| (m.id, m.page, m.dictionary, m.removed))
                                             .collect(),
                                         sent,
+                                        scales: office_scales, // WHAT: the office's scales. WHY: applied on this seat
                                     },
                                 ),
                                 Err(e) => {

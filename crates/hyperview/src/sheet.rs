@@ -559,6 +559,9 @@ pub struct Doc {
     pub marks: Vec<Mark>,
     /// Scales the user has set but not yet saved. `None` means cleared.
     pub scales: BTreeMap<u32, Option<Measure>>,
+    /// Scales the user has set on a drawing from the office server, not yet
+    /// sent to it. `None` means cleared.
+    pub scales_to_send: BTreeMap<u32, Option<Measure>>, // WHAT: each sheet's scale waiting to go up. WHY: a scale kept only in this seat's downloaded copy was lost on the next open, and the takeoff on the server never had it (Mesa, 2026-11-24)
     pub draft: Option<Draft>,
     pub selected: Option<usize>,
     /// The rest of the selection, when more than one markup is held at once.
@@ -710,6 +713,7 @@ impl Doc {
             asked: HashSet::new(),
             marks: Vec::new(),
             scales: Default::default(),
+            scales_to_send: BTreeMap::default(), // WHAT: nothing waiting. WHY: a drawing just opened has sent nothing
             draft: None,
             selected: None,
             also: Vec::new(),
@@ -856,9 +860,40 @@ impl Doc {
     }
 
     pub fn set_scale(&mut self, page: u32, measure: Option<Measure>) {
+        if self.attached.is_some() {
+            self.scales_to_send.insert(page, measure.clone()); // WHAT: kept to send to the office server. WHY: the scale is the office's, read by every seat and by the takeoff
+        }
         self.scales.insert(page, measure);
         self.dirty = true;
         self.recaption(page);
+    }
+
+    /// Takes the scale the office server keeps for `page` (a `/Measure`
+    /// written as PDF, base64), unless this seat has one of its own still to
+    /// send, or the sheet already reads the same. True when it changed.
+    pub fn take_server_scale(&mut self, page: u32, measure: &str) -> bool {
+        use base64::Engine;
+        if self.scales_to_send.contains_key(&page) || page as usize >= self.pages.len() {
+            return false; // WHAT: this seat's own scale wins, and a page it hasn't got is no page. WHY: a scale just set here is sent, never overwritten by the one it replaces
+        }
+        let Some(theirs) = base64::engine::general_purpose::STANDARD
+            .decode(measure.as_bytes())
+            .ok()
+            .and_then(|bytes| pdf::Reader::new(&bytes).object().ok())
+            .and_then(|o| o.as_dict().and_then(Measure::read))
+        else {
+            return false; // WHAT: one that doesn't read. WHY: nothing to apply
+        };
+        let written = |m: &Measure| {
+            let mut out = Vec::new();
+            pdf::write::write_object(&pdf::Object::Dict(m.write()), &mut out);
+            out
+        }; // WHAT: a scale as bytes. WHY: two scales compared exactly
+        if self.scale_of(page).is_some_and(|ours| written(&ours) == written(&theirs)) {
+            return false; // WHAT: the same scale already. WHY: nothing changes
+        }
+        self.scales.insert(page, Some(theirs)); // WHAT: taken, as if set here. WHY: measuring and the next save use it; it came from the server, so it isn't sent back
+        true
     }
 
     /// Any sheet with a scale at all, which is what a takeoff can total.
@@ -1861,6 +1896,61 @@ mod tests {
 
     fn quarter() -> Measure {
         imperial(48.0, "1/4\" = 1'-0\"", 16)
+    }
+
+    /// A one-page drawing on disk, opened as a tab is.
+    fn a_tab(name: &str) -> Doc {
+        let folder = std::env::temp_dir().join(format!("hv-scale-{name}-{}", std::process::id())); // WHAT: a folder of its own. WHY: tests run side by side
+        std::fs::create_dir_all(&folder).unwrap(); // WHAT: made. WHY: the drawing goes in it
+        let bodies = ["<</Type/Catalog/Pages 2 0 R>>", "<</Type/Pages/Kids[3 0 R]/Count 1>>", "<</Type/Page/Parent 2 0 R/MediaBox[0 0 3024 2160]>>"]; // WHAT: one sheet, naming no scale. WHY: as p.25
+        let mut file = b"%PDF-1.5\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in bodies.iter().enumerate() {
+            offsets.push(file.len());
+            file.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let table = file.len();
+        file.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
+        for offset in &offsets {
+            file.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        file.extend_from_slice(format!("trailer\n<</Size 4/Root 1 0 R>>\nstartxref\n{table}\n%%EOF\n").as_bytes());
+        let path = folder.join("S-525.pdf"); // WHAT: the drawing's place. WHY: opened from there
+        std::fs::write(&path, file).unwrap(); // WHAT: written. WHY: as a download is
+        Doc::open(path).unwrap() // WHAT: opened. WHY: as a tab
+    }
+
+    fn written(m: &Measure) -> String {
+        use base64::Engine;
+        let mut bytes = Vec::new();
+        pdf::write::write_object(&pdf::Object::Dict(m.write()), &mut bytes);
+        base64::engine::general_purpose::STANDARD.encode(bytes) // WHAT: the scale as the server keeps it. WHY: what a sync hands back
+    }
+
+    #[test]
+    fn a_scale_set_on_an_office_drawing_waits_to_go_to_the_office_and_one_set_on_another_seat_is_taken() {
+        // Mesa, 2026-11-24: a scale set on p.25 lived only in this seat's
+        // copy, and was gone the next time the drawing opened.
+        let mut ours = a_tab("ours"); // WHAT: a drawing from the office server. WHY: the case that lost its scale
+        ours.attached = Some(crate::sync::Attached { set: "set_1".into(), revision: 0, sent: HashSet::default() }); // WHAT: attached to its set. WHY: as a download is
+        ours.set_scale(0, Some(quarter())); // WHAT: the scale set, as Set Scale... does. WHY: the step that was lost
+        assert!(ours.scales_to_send.get(&0).is_some_and(Option::is_some), "waiting to go to the office"); // WHAT: queued. WHY: the next sync sends it
+        let other = imperial(96.0, "1/8\" = 1'-0\"", 16); // WHAT: another seat's scale. WHY: must not overwrite one set here
+        assert!(!ours.take_server_scale(0, &written(&other)), "this seat's own scale wins until it is sent"); // WHAT: not taken. WHY: it would undo what was just set
+
+        let mut loose = a_tab("loose"); // WHAT: a drawing on this computer only. WHY: nothing to send
+        loose.set_scale(0, Some(quarter())); // WHAT: a scale set. WHY: kept in the file at the next save, as always
+        assert!(loose.scales_to_send.is_empty(), "a drawing not from the office sends nothing"); // WHAT: nothing queued. WHY: there is no office copy
+
+        let mut theirs = a_tab("theirs"); // WHAT: the same drawing opened again, or on a second seat. WHY: the scale must be there
+        theirs.attached = Some(crate::sync::Attached { set: "set_1".into(), revision: 0, sent: HashSet::default() }); // WHAT: attached. WHY: as above
+        assert!(theirs.scale_of(0).is_none(), "the downloaded copy names no scale"); // WHAT: none in the file. WHY: the server's PDF is as uploaded
+        assert!(theirs.take_server_scale(0, &written(&quarter())), "the office's scale taken"); // WHAT: taken. WHY: the fix
+        assert_eq!(theirs.scale_of(0).map(|m| m.ratio), Some("1/4\" = 1'-0\"".to_string()), "and measured with"); // WHAT: in force. WHY: measuring uses it
+        assert!(!theirs.take_server_scale(0, &written(&quarter())), "the same scale again changes nothing"); // WHAT: not again. WHY: nothing to redraw
+        assert!(theirs.scales_to_send.is_empty(), "the office's own scale isn't sent back"); // WHAT: not queued. WHY: it came from there
+        assert!(!theirs.take_server_scale(0, "not base64!"), "nothing that doesn't read"); // WHAT: refused. WHY: never a broken scale
+        assert!(!theirs.take_server_scale(9, &written(&quarter())), "no page it hasn't got"); // WHAT: refused. WHY: no such sheet
     }
 
     #[test]

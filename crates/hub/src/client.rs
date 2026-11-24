@@ -927,6 +927,17 @@ impl Client {
         Self::read(self.get(&format!("/sets/{id}/sheets")).call())
     }
 
+    /// `POST /sets/{id}/scale`: a sheet's scale as a person set it (its
+    /// `/Measure` written as PDF, base64), or cleared with `None`, kept with
+    /// the office's copy. The set's sheets as they are now.
+    ///
+    /// # Errors
+    ///
+    /// Why not, in words: the server refused, or couldn't be reached.
+    pub fn set_sheet_scale(&self, id: &str, page: usize, measure: Option<&str>) -> Answer<Vec<Sheet>> {
+        Self::read(self.post(&format!("/sets/{id}/scale")).send_json(serde_json::json!({ "page": page, "measure": measure }))) // WHAT: the sheet and its scale. WHY: every seat and the takeoff read it from the server
+    }
+
     // ---- folders, who sees them, and files that aren't drawings -----------
 
     /// A project's folders this person may see, the empty ones too, each with

@@ -2548,10 +2548,24 @@ impl App {
                 )
             })
             .collect();
+        let scales: Vec<(usize, Option<String>)> = std::mem::take(&mut doc.scales_to_send)
+            .into_iter()
+            .map(|(page, measure)| {
+                (
+                    page as usize,
+                    measure.map(|m| {
+                        let mut bytes = Vec::new();
+                        pdf::write::write_object(&pdf::Object::Dict(m.write()), &mut bytes);
+                        base64::engine::general_purpose::STANDARD.encode(bytes)
+                    }),
+                )
+            })
+            .collect(); // WHAT: each sheet's scale set here since the last sync, written as PDF. WHY: sent with the markups, so the office keeps it
         self.ask(crate::server::Ask::Sync {
             set: attached.set,
             since: attached.revision,
             sending,
+            scales,
             quiet,
         });
     }

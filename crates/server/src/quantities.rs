@@ -55,7 +55,7 @@ pub fn measured(
             // than counted as nothing.
             continue;
         };
-        let scale = sheets.get(stored.page).and_then(|s| s.scale.clone());
+        let scale = scale_for(&markup, sheets.get(stored.page)); // WHAT: the markup's own scale, else its sheet's. WHY: what the viewer measured it with (takeoff::read_document); a sheet calibrated in the viewer has no scale here, so its markups came back unscaled (Mesa, 2026-11-24)
         let row = takeoff::measure(
             stored.page,
             pdf::Ref::new(0, 0),
@@ -68,6 +68,20 @@ pub fn measured(
         rows.push((stored.id.clone(), row, sheet));
     }
     rows
+}
+
+/// The scale a markup is measured with: the `/Measure` it carries, which the
+/// viewer writes on every measurement it makes, else its sheet's own. The
+/// viewer's rule (`takeoff::row::read_document`), so a number fetched over
+/// the API is the number on somebody's screen.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn scale_for(markup: &Markup, sheet: Option<&SheetScale>) -> Option<Measure> {
+    markup
+        .dict
+        .get("Measure")
+        .and_then(|o| o.as_dict())
+        .and_then(Measure::read) // WHAT: the markup's own scale, when it carries one that reads. WHY: a sheet calibrated in the viewer, or scaled by a viewport, measures this way and its sheet here has none
+        .or_else(|| sheet.and_then(|s| s.scale.clone())) // WHAT: else the sheet's named scale. WHY: a markup drawn by a program that writes none
 }
 
 /// Just the measurements, for the things that only want those.
@@ -177,7 +191,7 @@ pub fn to_csv(markups: &[Stored], sheets: &[SheetScale], columns: &[Column]) -> 
         let Some(markup) = read_markup(&stored.dictionary) else {
             continue;
         };
-        let scale = sheets.get(stored.page).and_then(|s| s.scale.clone());
+        let scale = scale_for(&markup, sheets.get(stored.page)); // WHAT: the markup's own scale, else its sheet's. WHY: what the viewer measured it with (takeoff::read_document); a sheet calibrated in the viewer has no scale here, so its markups came back unscaled (Mesa, 2026-11-24)
         rows.push(takeoff::measure(
             stored.page,
             pdf::Ref::new(0, 0),
