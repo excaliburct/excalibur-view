@@ -567,7 +567,7 @@ pub fn door(method: &str, route: &str) -> Door {
         ("GET", "/devices") => Door::Admin, // WHAT: the list. WHY: guard 4
         ("POST", r) if r.starts_with("/devices/") => Door::Admin, // WHAT: approve, refuse, remove, admin. WHY: guard 4
         #[allow(clippy::match_same_arms)] // WHAT: the same door as the wildcard, named on purpose. WHY: the tablet routes decide what shop and field see, so their door is written down, not left to the default
-        ("GET" | "PUT", "/projects/:id/tablet") | ("GET", "/tablet") => Door::Gated, // WHAT: the tablet manifest and job list, held on purpose. WHY: a tablet passes as an approved device, Fabwire as a key; never open, never admin-only
+        ("GET" | "PUT", "/projects/:id/tablet") | ("GET", "/tablet") | ("GET" | "POST", "/projects/:id/crew") => Door::Gated, // WHAT: the tablet manifest and job list, and a job's crew, held on purpose. WHY: a tablet passes as an approved device, Fabwire as a key; never open, never admin-only
         _ => Door::Gated, // WHAT: everything else. WHY: a new route needs a device unless it is put above on purpose
     }
 }
@@ -1413,7 +1413,7 @@ mod tests {
 
     #[test]
     fn the_tablet_routes_are_gated_never_open_nor_admin_only() {
-        for (method, route) in [("GET", "/projects/:id/tablet"), ("PUT", "/projects/:id/tablet"), ("GET", "/tablet"), ("HEAD", "/tablet")] {
+        for (method, route) in [("GET", "/projects/:id/tablet"), ("PUT", "/projects/:id/tablet"), ("GET", "/tablet"), ("HEAD", "/tablet"), ("GET", "/projects/:id/crew"), ("POST", "/projects/:id/crew")] {
             assert_eq!(door(method, route), Door::Gated, "{method} {route}"); // WHAT: held as View's own routes. WHY: a tablet needs an approved device, Fabwire passes as a key (docs/TABLET-MANIFEST.md §2)
         }
     }

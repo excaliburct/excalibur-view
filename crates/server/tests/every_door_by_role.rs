@@ -735,6 +735,18 @@ const TABLE: &[Route] = &[
     }, // WHAT: setting it. WHY: only the program's sync key
     Route {
         method: "GET",
+        path: "/projects/{id}/crew",
+        door: Door::Program,
+        sync: true,
+    }, // WHAT: who is on a job, by sign-in. WHY: only the program's sync key keeps a crew; an administrator uses /people
+    Route {
+        method: "POST",
+        path: "/projects/{id}/crew",
+        door: Door::Program,
+        sync: true,
+    }, // WHAT: a sign-in put on or taken off. WHY: likewise
+    Route {
+        method: "GET",
         path: "/tablet",
         door: Door::Person,
         sync: false,
@@ -1178,6 +1190,7 @@ fn ask(office: &Office, things: &Things, route: &Route, n: usize) -> (String, Bo
         }
         ("POST", "/projects") => Body::Json(json!({"number": unique, "name": "Probe"})),
         ("POST", "/projects/{id}/people" | "/groups/{id}/people") => Body::Json(json!({"person": VIEWER, "on": false})), // WHAT: the viewer taken off. WHY: both routes take a person and on or off
+        ("POST", "/projects/{id}/crew") => Body::Json(json!({"email": "val@example.com", "on": true})), // WHAT: the viewer put on. WHY: a valid change, so the door is what answers
         ("POST", "/projects/{id}/archive") => Body::Json(json!({"archived": false})),
         ("POST", "/projects/{id}/place") => Body::Json(json!({"place": ""})),
         ("POST", "/sets") => form(

@@ -29,6 +29,7 @@ pub mod cellmove; // WHAT: Citadel Server 1.0's data moved into the cell once, b
 pub mod cell; // WHAT: the Citadel cell, started, watched and answered over its pipe. WHY: Citadel runs inside the Office Server (docs/OFFICE-ENROLLMENT.md §6a)
 pub mod citadel; // WHAT: the Citadel cell's port, looked at by its pin. WHY: the Office Server's citadel part, kept blind; the cell is the only way Citadel runs (crate::cell)
 pub mod config;
+pub mod crew; // WHAT: a job's crew, kept by its program by sign-in. WHY: Fabwire sets who sees each job on the iPads (GET and POST /projects/{id}/crew)
 pub mod download; // WHAT: the update download for a computer nobody signed in on: limited and streamed. WHY: security review M2
 pub mod devices; // WHAT: the office's device list and the signed-request gate. WHY: codeless linking (docs/OFFICE-ENROLLMENT.md §3, §4)
 pub mod fleet;

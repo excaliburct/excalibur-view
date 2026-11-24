@@ -113,6 +113,14 @@ A desktop in the shop can use the same screens with **Tablet mode**
 (`tablet_mode` in the settings file); **Desktop** in the top bar goes back.
 The contract is `docs/TABLET-MANIFEST.md`.
 
+Which jobs a person sees in **Your jobs** is the job's crew. Fabwire keeps it
+(a job's **Who sees it on the iPads** card, and Settings' **Field crew**)
+through its own sync key, by each person's sign-in: `GET` and
+`POST /projects/{id}/crew` (`docs/integrating.md`). Only Fabwire's key may,
+only on the jobs it filed, and never down to nobody, since a job with nobody
+named is everybody's. Each change is on the audit log. Each person on a crew
+needs an account here with the same email address as on the crew.
+
 ## Overlay Pages and Compare Documents
 
 Under the Document menu. **Overlay Pages** prints two issues of a sheet over

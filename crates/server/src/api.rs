@@ -293,6 +293,9 @@ pub(crate) fn administrator(server: &Server, headers: &HeaderMap) -> Answer<Who>
 /// - `POST /files` — a file that isn't a drawing put in one of its folders;
 /// - `POST /projects/:id/folders` — its folders made, and who sees each;
 /// - `POST /sets/:id/folder`, `POST /files/:id/folder` — a move followed.
+/// - `PUT`/`GET /projects/:id/tablet` — what its jobs' tablets show;
+/// - `GET`/`POST /projects/:id/crew` — who is on its projects, by sign-in
+///   (Fabwire's key only, never the last person off).
 ///
 /// Every other route refuses a sync key before it runs, whoever made the key.
 /// Adding a route here is giving every sync key in every office a new power,
@@ -315,6 +318,8 @@ pub const SYNC_ROUTES: &[(&str, &str)] = &[
     ("POST", "/signoffs/:id/withdraw"), // WHAT: a line taken back, unsigned. WHY: a station no longer needed.
     ("PUT", "/projects/:id/tablet"), // WHAT: a job's tablet manifest set. WHY: the program decides what its jobs' tablets show; the route refuses anything but a sync key.
     ("GET", "/projects/:id/tablet"), // WHAT: the manifest read back as kept. WHY: the program checks what it sent.
+    ("GET", "/projects/:id/crew"), // WHAT: who is on one of its projects, by sign-in. WHY: the program keeps who sees each job on the iPads (crate::crew); the route refuses anything but Fabwire's key
+    ("POST", "/projects/:id/crew"), // WHAT: a sign-in put on or taken off one of its projects. WHY: likewise; never the last person, so a program only narrows who sees a job
 ];
 
 /// Holds every key to what it was made for, before any route runs. A `sync`
@@ -596,6 +601,7 @@ pub fn router(server: Shared) -> Router {
         .route("/signoffs/:id/sign", post(crate::signoffs::sign)) // WHAT: a person signs a line. WHY: the signature itself.
         .route("/signoffs/:id/withdraw", post(crate::signoffs::withdraw)) // WHAT: a line taken back. WHY: not needed any more.
         .route("/signoffs/:id/signature.png", get(crate::signoffs::picture)) // WHAT: a signature as a picture. WHY: printed on the form.
+        .route("/projects/:id/crew", get(crate::crew::who).post(crate::crew::change)) // WHAT: a job's crew kept by its program. WHY: Fabwire sets who sees each job on the iPads; /people is administrators' and by View's own ids
         .route("/projects/:id/tablet", get(crate::tablet::one).put(crate::tablet::put)) // WHAT: a job's tablet manifest, read by a tablet and set by Fabwire. WHY: shop and field are served only what the office put on their tablets (docs/TABLET-MANIFEST.md)
         .route("/tablet", get(crate::tablet::jobs)) // WHAT: the caller's tablet jobs. WHY: the tablet's job list
         .route("/sets/:id/folder", post(crate::folders::move_set)) // WHAT: a drawing set moved, with its issues. WHY: likewise.
@@ -792,6 +798,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/signoffs/{id}/signature.png"), // WHAT: a signature's picture. WHY: printed on the form.
     ("GET", "/projects/{id}/tablet"), // WHAT: a job's tablet manifest as the caller's tablet shows it. WHY: docs/TABLET-MANIFEST.md
     ("PUT", "/projects/{id}/tablet"), // WHAT: a job's tablet manifest set, by Fabwire's sync key only. WHY: likewise
+    ("GET", "/projects/{id}/crew"), // WHAT: who is on a project, by sign-in, for Fabwire's key. WHY: described, so the openapi and the door tests cover it
+    ("POST", "/projects/{id}/crew"), // WHAT: a sign-in put on or taken off, by Fabwire's key. WHY: likewise
     ("GET", "/tablet"), // WHAT: the caller's tablet jobs. WHY: likewise
 ];
 

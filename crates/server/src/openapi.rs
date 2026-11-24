@@ -261,6 +261,21 @@ fn folder_paths() -> Value {
                 "responses": { "200": { "description": "{project, version, changed}." } }
             }
         },
+        "/projects/{id}/crew": {
+            "get": {
+                "summary": "Who is on one of the program's projects, by sign-in. Fabwire's sync key only, on a project it filed.",
+                "description": "Empty means everybody may see it. Refused 403 program_only for a person or another program's key; 404 for a project the key didn't file.",
+                "parameters": [path_param("id", "The project.")],
+                "responses": ok_list("CrewMember")
+            },
+            "post": {
+                "summary": "Put a sign-in on one of the program's projects, or take it off. Fabwire's sync key only.",
+                "description": "404 no_such_person for a sign-in nobody here has; 409 last_person for the last one taken off, since a project with nobody named is everybody's. The same again changes nothing. Every change is on the audit log as project_person_added or project_person_removed.",
+                "parameters": [path_param("id", "The project.")],
+                "requestBody": body("CrewChange"),
+                "responses": ok_list("CrewMember")
+            }
+        },
         "/tablet": {
             "get": {
                 "summary": "The caller's jobs for the tablet: every job they may see that has a manifest, with what needs doing.",
@@ -281,6 +296,14 @@ fn folder_schemas() -> Value {
             ("made_by", "string", ""),
         ]),
         "NewGroup": object(&[("name", "string", "Shop, Field. At most 60 characters.")]),
+        "CrewMember": object(&[
+            ("email", "string", "Their sign-in."),
+            ("name", "string", "Their name."),
+        ]), // WHAT: one person on a project, as a program reads them. WHY: GET and POST /projects/{id}/crew answer a list of these
+        "CrewChange": object(&[
+            ("email", "string", "The sign-in to put on or take off."),
+            ("on", "boolean", "true puts them on, false takes them off."),
+        ]), // WHAT: the crew route's body. WHY: described, so the API's promise covers it
         "GroupMember": object(&[
             ("person", "string", "The person's id."),
             ("on", "boolean", "false takes them out. Default true."),
@@ -479,7 +502,8 @@ else. `integration` uses this API as you — for another system — and only an 
 administrator can make one. `sync` is narrower still, for a program that keeps its \
 own projects in step: `GET /me`, `POST /projects` (under a reference), \
 `POST /projects/{id}/archive`, `POST /sets`, `GET /projects/{id}/stamp` and \
-`GET /projects/{id}/markuplist`, on projects filed under a reference, and nothing \
+`GET /projects/{id}/markuplist`, on projects filed under a reference (and for \
+Fabwire's own key its jobs' tablets and crews), and nothing \
 else; only an administrator can make one. No key of any purpose can administer the \
 server, whoever made it. `expires_in_days` gives a key an end (1 to 3650); left out, \
 it never runs out. Send it as `Authorization: Bearer <key>`. \

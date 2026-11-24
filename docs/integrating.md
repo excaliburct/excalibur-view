@@ -226,7 +226,10 @@ purposes:
   is `GET /me`, `POST /projects` (with a `reference`), `POST
   /projects/{id}/archive`, `POST /sets`, `GET /projects/{id}/stamp` and `GET
   /projects/{id}/markuplist`, on projects filed under a reference, and nothing
-  else. Every other route refuses it. An administrator makes it, and it acts as
+  else. (Fabwire's own key also sets its jobs' tablet manifests and keeps their
+  crews, by sign-in: `GET`/`POST /projects/{id}/crew` `{"email", "on"}`,
+  answering `[{"email", "name"}]`, `404 no_such_person` for a sign-in nobody
+  has and `409 last_person` rather than leave a project with nobody named.) Every other route refuses it. An administrator makes it, and it acts as
   an estimator. **If your program only does those things, this is the key to
   give it.**
 - **`integration`** — the API as the person who made the key. What another

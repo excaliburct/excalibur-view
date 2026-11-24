@@ -32,6 +32,11 @@ pub const TABLET_BODY: usize = 8 * 1024 * 1024; // WHAT: 8 MiB. WHY: five thousa
 /// What a key's name begins with when Fabwire made it (`Fabwire V2`), lower case.
 const PROGRAM: &str = "fabwire"; // WHAT: the program's name. WHY: the one program whose key may set a manifest, named as Fabwire makes its key
 
+/// Whether a key is the one Fabwire made: its name begins with the program's name.
+pub(crate) fn is_the_program(who: &Who) -> bool {
+    who.key.as_ref().is_some_and(|k| k.name.trim().to_lowercase().starts_with(PROGRAM)) // WHAT: the key's name, read as Fabwire names it. WHY: any administrator can make a sync key; only Fabwire's sets a manifest or keeps a crew (crate::crew)
+}
+
 /// What a tablet account may reach of one job: the sets and files its manifest lets its audience have.
 #[derive(Clone, Debug, Default)]
 pub struct Only {
@@ -111,7 +116,7 @@ pub async fn put(
                 ),
             )); // WHAT: a person or any other key, refused. WHY: only Fabwire's program key sets it (docs/TABLET-MANIFEST.md §2)
         }
-        if !who.key.as_ref().is_some_and(|k| k.name.trim().to_lowercase().starts_with(PROGRAM)) {
+        if !is_the_program(&who) {
             return Err(Denied::new(
                 StatusCode::FORBIDDEN,
                 Problem::new(
