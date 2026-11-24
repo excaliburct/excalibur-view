@@ -988,13 +988,16 @@ fn an_account_dated_near_the_device_list_start_is_not_taken_for_an_old_one() {
 fn a_headless_first_admin_writes_the_device_list_start_before_the_account() {
     let data = folder("l2-headless");
     std::fs::create_dir_all(&data).unwrap();
+    let said = std::fs::File::create(data.join("server-stderr.txt")).unwrap(); // WHAT: where the server's complaints go. WHY: printed below if it never gets there
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_hyperview-server"))
+        .arg("--console") // WHAT: the documented headless way to run it (README). WHY: with no word, Windows takes the double-click's front door and tries to install the service instead of serving
         .env("HYPERVIEW_FIRST_ADMIN", "1") // WHAT: the headless way. WHY: under test
         .env("HYPERVIEW_DATA", &data) // WHAT: its own folder. WHY: never a real server's
         .env("HYPERVIEW_LISTEN", "127.0.0.1:0") // WHAT: any free port. WHY: tests run side by side
         .env("HYPERVIEW_TLS", "off") // WHAT: plain. WHY: nothing to pin here
+        .stdin(std::process::Stdio::null()) // WHAT: nothing to read. WHY: a server that waited on Enter would end at once instead of hanging the test
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(said) // WHAT: its errors kept in a file. WHY: a failure below says why the server stopped
         .spawn()
         .unwrap();
     let config = config(&data);
@@ -1012,7 +1015,9 @@ fn a_headless_first_admin_writes_the_device_list_start_before_the_account() {
     }
     let _ = child.kill(); // WHAT: the test's own server stopped. WHY: it serves until told
     let _ = child.wait(); // WHAT: reaped. WHY: nothing left behind
-    let (began, made) = seen.expect("the headless server made its administrator and noted the start");
+    let Some((began, made)) = seen else {
+        panic!("the headless server made its administrator and noted the start; it said: {}", std::fs::read_to_string(data.join("server-stderr.txt")).unwrap_or_default()); // WHAT: the failure, with the server's own words. WHY: the reason is in the child, not in the test
+    };
     assert!(parsed(&began) <= parsed(&made), "the start ({began}) is written before the account ({made})");
 }
 

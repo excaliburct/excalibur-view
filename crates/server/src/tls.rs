@@ -101,6 +101,7 @@ const USE_HTTPS: &[u8] = b"HTTP/1.1 426 Upgrade Required\r\nUpgrade: TLS/1.3\r\n
 
 /// How long a stopping server lets open requests finish.
 const DRAIN: Duration = Duration::from_secs(10); // WHAT: ten seconds. WHY: a save in flight lands; a held-open socket doesn't keep the service from stopping
+const LINGER: Duration = Duration::from_secs(2); // WHAT: two seconds. WHY: long enough for a refused seat's request to arrive and be thrown away, short enough not to hold a slot
 
 /// Answers `router` on `listener` until `shutdown` finishes, HTTPS and plain
 /// HTTP on the same port: a connection that opens with a TLS handshake is
@@ -174,8 +175,8 @@ pub async fn serve(
     open.abort_all(); // WHAT: any still open, ended. WHY: the service stops on time
 }
 
-/// Tells a plain-HTTP connection to use HTTPS, and closes it. Nothing it sent is read.
-async fn refuse_plain(tcp: tokio::net::TcpStream) {
+/// Tells a plain-HTTP connection to use HTTPS, and closes it. Nothing it sent is parsed; it is drained and discarded.
+async fn refuse_plain(mut tcp: tokio::net::TcpStream) {
     let _ = tokio::time::timeout(HANDSHAKE, async {
         let mut rest = USE_HTTPS; // WHAT: what is still to send. WHY: a socket may take it in pieces
         while !rest.is_empty() {
@@ -191,7 +192,19 @@ async fn refuse_plain(tcp: tokio::net::TcpStream) {
         } // WHAT: the 426 and why. WHY: an old seat shows a reason
     })
     .await; // WHAT: at most ten seconds. WHY: a reader that never reads doesn't hold its slot
-    drop(tcp); // WHAT: closed from this side. WHY: nothing it sent is read
+    let _ = tokio::io::AsyncWriteExt::shutdown(&mut tcp).await; // WHAT: our half closed after the refusal. WHY: the other side reads the whole 426 before the end
+    let _ = tokio::time::timeout(LINGER, async {
+        let mut sink = [0u8; 1024]; // WHAT: a small bin for what it sent. WHY: thrown away, never looked at
+        let mut left: usize = 64 * 1024; // WHAT: at most 64 KB taken in. WHY: a sender that never stops can't keep the slot
+        while left > 0 {
+            match tokio::io::AsyncReadExt::read(&mut tcp, &mut sink).await {
+                Ok(0) | Err(_) => break, // WHAT: it closed, or the socket broke. WHY: nothing left to wait for
+                Ok(n) => left = left.saturating_sub(n), // WHAT: that much discarded. WHY: counted toward the cap
+            }
+        }
+    })
+    .await; // WHAT: unread request bytes drained, discarded, for up to two seconds. WHY: closing with them unread makes Windows reset the connection, and the old seat loses the 426 and its reason
+    drop(tcp); // WHAT: closed from this side. WHY: nothing it sent is parsed or acted on
 }
 
 /// One connection's requests answered by `router`, over whatever it is.
