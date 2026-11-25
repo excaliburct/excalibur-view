@@ -285,6 +285,11 @@ fn a_job(office: &Office) -> Job {
             json!({ "person": person }),
         ); // WHAT: its person put in. WHY: they see its folders.
     }
+    for job in [&project, &other] {
+        for person in ["usr_sam", "usr_eve", FAY, SID, NAN] {
+            office.post(admin, &format!("/projects/{job}/people"), json!({ "person": person })); // WHAT: the office and the three viewers on each job's crew. WHY: a Fabwire job with nobody named is the office's only, so the shop and field see it only once they are on its crew, as Fabwire puts them (the review of 0.8.0)
+        }
+    }
     let fab = "10 SHOP DRAWINGS/10.4 FOR FABRICATION"; // WHAT: where released sheets are. WHY: as Fabwire files them
     let mut ids = Vec::new(); // WHAT: the example ids. WHY: filled below
     for (name, folder) in [

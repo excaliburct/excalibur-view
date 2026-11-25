@@ -134,17 +134,21 @@ pub async fn list(
         .with(|db| {
             // A project with nobody named on it is everybody's, which is how
             // every server worked before this and how most shops want it.
-            // Once one name goes on, it is for the people named on it.
+            // Once one name goes on, it is for the people named on it. A job
+            // Fabwire filed keeps who sees it in Fabwire, so with nobody named
+            // it is the office's only, never the shop's or field's.
             // Administrators see the lot: somebody has to be able to find a
             // job that the only person on it left the company over.
             let mut statement = db.prepare(&format!(
                 "SELECT {PROJECT_COLUMNS} FROM projects p
                  WHERE (?1 OR p.archived IS NULL)
                    AND (?2
-                        OR NOT EXISTS (SELECT 1 FROM project_people m WHERE m.project = p.id)
+                        OR (NOT EXISTS (SELECT 1 FROM project_people m WHERE m.project = p.id)
+                            AND {open})
                         OR EXISTS (SELECT 1 FROM project_people m
                                    WHERE m.project = p.id AND m.person = ?3))
-                 ORDER BY p.number"
+                 ORDER BY p.number",
+                open = crate::store::OPEN_WHEN_EMPTY.replace("?2", "?3") // WHAT: the empty-project rule, with this query's person. WHY: a Fabwire job with nobody named is the office's only here too
             ))?;
             let mut rows = statement
                 .query_map(params![everything.all, everybodys, who.id], project_from_row)?

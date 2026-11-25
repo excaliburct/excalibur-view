@@ -117,9 +117,12 @@ Which jobs a person sees in **Your jobs** is the job's crew. Fabwire keeps it
 (a job's **Who sees it on the iPads** card, and Settings' **Field crew**)
 through its own sync key, by each person's sign-in: `GET` and
 `POST /projects/{id}/crew` (`docs/integrating.md`). Only Fabwire's key may,
-only on the jobs it filed, and never down to nobody, since a job with nobody
-named is everybody's. Each change is on the audit log. Each person on a crew
-needs an account here with the same email address as on the crew.
+only on the jobs it filed, and never down to nobody. A job Fabwire filed with
+nobody named on it (no crew yet, or its last person deleted) is the office's
+only: shop and field accounts see a Fabwire job only once they are on its
+crew. A project made by hand with nobody named is still everybody's. Each
+change is on the audit log. Each person on a crew needs an account here with
+the same email address as on the crew.
 
 ## Overlay Pages and Compare Documents
 

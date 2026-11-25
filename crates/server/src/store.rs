@@ -22,6 +22,14 @@ fn has_table(db: &Connection, name: &str) -> rusqlite::Result<bool> {
     Ok(found > 0) // WHAT: whether there is one. WHY: the caller's question
 }
 
+/// Who may see a project with nobody named on it, as SQL over `p` with `?2`
+/// the person: everybody, as every server has always worked, unless Fabwire
+/// filed it (a `fabwire:` reference), when it is the office's only (anybody
+/// but a viewer): Fabwire keeps who sees its jobs (`crate::crew`), so one left
+/// with nobody named, by a person's removal or never set up, is never the
+/// shop's or the field's. Used by every rule of who sees a project.
+pub const OPEN_WHEN_EMPTY: &str = "(p.reference IS NULL OR p.reference NOT LIKE 'fabwire:%' OR EXISTS (SELECT 1 FROM people u WHERE u.id = ?2 AND u.role <> 'viewer'))"; // WHAT: the rule for an empty project. WHY: one copy, so the list, a direct fetch and the assistant can never disagree
+
 pub struct Store {
     db: std::sync::Mutex<Connection>,
     blobs: PathBuf,
@@ -684,7 +692,7 @@ impl Store {
                 |r| r.get(0),
             )?;
             if named == 0 {
-                return Ok(true);
+                return Ok(db.query_row(&format!("SELECT {OPEN_WHEN_EMPTY} FROM projects p WHERE p.id = ?1"), params![project, person], |r| r.get::<_, bool>(0)).optional()?.unwrap_or(true)); // WHAT: nobody named: everybody's, unless Fabwire filed it, then the office's only. WHY: a Fabwire job with nobody named (its last person removed, or no crew yet) never opens to the shop and field
             }
             let mine: i64 = db.query_row(
                 "SELECT COUNT(*) FROM project_people WHERE project = ?1 AND person = ?2",

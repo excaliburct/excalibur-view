@@ -41,6 +41,7 @@ struct Office {
     admin: String,                     // WHAT: Sam's session, the administrator. WHY: makes the keys and a project by hand.
     fay: String,                       // WHAT: Fay's session, a viewer. WHY: put on the job.
     nan: String,                       // WHAT: Nan's session, a viewer. WHY: never put on it.
+    eve: String,                       // WHAT: Eve's session, an estimator. WHY: the office, who sees a Fabwire job with nobody named.
     fabwire: String,                   // WHAT: Fabwire's sync key. WHY: the only one that keeps a crew.
     other: String,                     // WHAT: a sync key made for another program. WHY: refused.
     integration: String,               // WHAT: an integration key. WHY: refused.
@@ -54,7 +55,7 @@ fn an_office() -> Office {
     let hashed = auth::hash_password(PASSWORD).unwrap(); // WHAT: hashed once. WHY: Argon2 is slow on purpose.
     store
         .with(|db| {
-            for (id, name, email, role) in [("usr_sam", "Sam", "sam@example.com", "admin"), ("usr_fay", "Fay", "fay@example.com", "viewer"), ("usr_sid", "Sid", "sid@example.com", "viewer"), ("usr_nan", "Nan", "nan@example.com", "viewer")] {
+            for (id, name, email, role) in [("usr_sam", "Sam", "sam@example.com", "admin"), ("usr_fay", "Fay", "fay@example.com", "viewer"), ("usr_sid", "Sid", "sid@example.com", "viewer"), ("usr_nan", "Nan", "nan@example.com", "viewer"), ("usr_eve", "Eve", "eve@example.com", "estimator")] {
                 db.execute("INSERT INTO people (id, name, email, password, role, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![id, name, email, hashed, role, "2026-09-01T00:00:00Z"])?; // WHAT: one person, before licensing began. WHY: a founding install, so nothing is paused.
             }
             Ok(())
@@ -77,6 +78,7 @@ fn an_office() -> Office {
         admin: session("sam@example.com"),
         fay: session("fay@example.com"),
         nan: session("nan@example.com"),
+        eve: session("eve@example.com"),
         fabwire: String::new(),
         other: String::new(),
         integration: String::new(),
@@ -134,7 +136,23 @@ impl Office {
 
     /// Fabwire's job 2601, filed under its reference.
     fn job(&self) -> String {
-        self.ok(&self.fabwire, "POST", "/projects", json!({ "number": "2601", "name": "Hotel Stair", "reference": "fabwire:job:2601" }))["id"].as_str().unwrap().to_string() // WHAT: made by Fabwire's key. WHY: a project the program keeps
+        self.job_numbered("2601") // WHAT: job 2601. WHY: most tests need one job
+    }
+
+    /// Fabwire's job `number`, filed under its reference.
+    fn job_numbered(&self, number: &str) -> String {
+        self.ok(&self.fabwire, "POST", "/projects", json!({ "number": number, "name": "Hotel Stair", "reference": format!("fabwire:job:{number}") }))["id"].as_str().unwrap().to_string() // WHAT: made by Fabwire's key. WHY: a project the program keeps
+    }
+
+    /// Whether `token`'s person finds `project` in the project list.
+    fn listed(&self, token: &str, project: &str) -> bool {
+        let (status, said) = self.get_status(token, "/projects"); // WHAT: their list. WHY: a listing and a direct fetch must agree
+        assert_eq!(status, 200, "{said}");
+        said.as_array().unwrap().iter().any(|p| p["id"] == project) // WHAT: whether it is in it. WHY: checked
+    }
+
+    fn get_status(&self, token: &str, path: &str) -> (u16, Value) {
+        self.ask(token, "GET", path, None) // WHAT: a read. WHY: the visibility checks
     }
 }
 
@@ -171,7 +189,8 @@ fn fabwires_key_keeps_a_jobs_crew_by_sign_in() {
 fn the_crew_decides_who_sees_the_job() {
     let office = an_office(); // WHAT: a running office. WHY: the real routes.
     let job = office.job(); // WHAT: Fabwire's job. WHY: under test.
-    assert_eq!(office.ask(&office.nan, "GET", &format!("/projects/{job}"), None).0, 200, "nobody named: everybody sees it"); // WHAT: Nan sees it. WHY: a project with nobody named is everybody's
+    assert_eq!(office.ask(&office.nan, "GET", &format!("/projects/{job}"), None).0, 404, "a Fabwire job with nobody named is the office's only"); // WHAT: Nan doesn't see it. WHY: Fabwire keeps who sees its jobs; with nobody named, never the shop or field
+    assert_eq!(office.ask(&office.eve, "GET", &format!("/projects/{job}"), None).0, 200, "the office does"); // WHAT: Eve sees it. WHY: an estimator is the office
     assert_eq!(office.set(&job, "fay@example.com", true).0, 200); // WHAT: Fay put on. WHY: she alone of the viewers sees it now
     assert_eq!(office.ask(&office.fay, "GET", &format!("/projects/{job}"), None).0, 200, "Fay is on it"); // WHAT: seen. WHY: on the crew
     assert_eq!(office.ask(&office.nan, "GET", &format!("/projects/{job}"), None).0, 404, "Nan is not"); // WHAT: not found. WHY: off the crew, and refused as missing
@@ -199,4 +218,58 @@ fn only_fabwires_key_keeps_a_crew_and_only_on_its_own_projects() {
     let (status, _) = office.ask(&office.fabwire, "POST", &format!("/projects/{by_hand}/crew"), Some(body)); // WHAT: Fabwire's key on it. WHY: refused
     assert_eq!(status, 404, "a project the key didn't file is not found"); // WHAT: not found. WHY: nobody learns a job exists by being refused it
     assert_eq!(office.ask(&office.fabwire, "GET", &format!("/projects/{by_hand}/crew"), None).0, 404); // WHAT: nor read. WHY: likewise
+}
+
+// WHAT: removals sent at the same moment on jobs with three people on them, three at once each: exactly one person stays on every
+//       job and the other two are taken off; never a job left with nobody named.
+// WHY:  the review of 0.8.0 (medium): the count and the delete were two steps, so two removals at once both passed the count and
+//       emptied a two-person job, which a viewer could then see. They are one statement now.
+#[test]
+fn removals_at_the_same_time_never_leave_a_job_with_nobody_named() {
+    let office = Arc::new(an_office()); // WHAT: a running office, shared by the threads. WHY: the requests race for real.
+    let people = ["fay@example.com", "sid@example.com", "nan@example.com"]; // WHAT: three on each job. WHY: three removals race, two may win
+    let jobs: Vec<String> = (0..60).map(|n| office.job_numbered(&format!("R{n}"))).collect(); // WHAT: sixty jobs. WHY: enough tries for the race to show
+    for job in &jobs {
+        for email in people {
+            assert_eq!(office.set(job, email, true).0, 200); // WHAT: each put on. WHY: the start
+        }
+    }
+    for job in &jobs {
+        let start = Arc::new(std::sync::Barrier::new(people.len())); // WHAT: a starting line. WHY: the removals leave together
+        let threads: Vec<_> = people
+            .iter()
+            .map(|email| {
+                let (office, job, start, email) = (Arc::clone(&office), job.clone(), Arc::clone(&start), (*email).to_string()); // WHAT: each thread's own handles. WHY: moved in
+                std::thread::spawn(move || {
+                    start.wait(); // WHAT: waits for the others. WHY: all three at once
+                    office.set(&job, &email, false).0 // WHAT: its removal's status. WHY: counted below
+                })
+            })
+            .collect();
+        let mut statuses: Vec<u16> = threads.into_iter().map(|t| t.join().unwrap()).collect(); // WHAT: every answer. WHY: checked
+        statuses.sort_unstable();
+        assert_eq!(statuses, [200, 200, 409], "two taken off, the last refused, on {job}"); // WHAT: exactly one refusal. WHY: the last person stays
+        assert_eq!(office.crew(job).len(), 1, "one person stays on {job}"); // WHAT: never empty. WHY: an empty Fabwire job would fall to the office alone, an empty hand-made one to everybody
+    }
+}
+
+// WHAT: a Fabwire job whose only person is deleted from the office: nobody named, and then the office's only; shop and field
+//       accounts don't see it, listed or fetched; an estimator and the administrator do. A project made by hand with nobody named is
+//       still everybody's, as it always was.
+// WHY:  the review of 0.8.0 (low): deleting a person cascades off every project they were on, which used to open the job to everybody.
+#[test]
+fn a_fabwire_job_with_nobody_named_is_the_offices_only_never_the_shops_or_fields() {
+    let office = an_office(); // WHAT: a running office. WHY: the real routes.
+    let job = office.job(); // WHAT: Fabwire's job. WHY: under test.
+    assert_eq!(office.set(&job, "fay@example.com", true).0, 200); // WHAT: Fay alone on it. WHY: her removal from the office empties it
+    assert_eq!(office.ask(&office.admin, "POST", "/people/usr_fay/remove", Some(json!({}))).0, 200, "Fay removed from the office"); // WHAT: Fay deleted. WHY: her place on the job goes with her
+    assert!(office.crew(&job).is_empty(), "nobody named now"); // WHAT: empty. WHY: the cascade
+    assert_eq!(office.ask(&office.nan, "GET", &format!("/projects/{job}"), None).0, 404, "a viewer doesn't see it"); // WHAT: not found. WHY: never the shop's or field's
+    assert!(!office.listed(&office.nan, &job), "nor finds it in the list"); // WHAT: not listed. WHY: a list and a fetch agree
+    assert_eq!(office.ask(&office.eve, "GET", &format!("/projects/{job}"), None).0, 200, "an estimator does"); // WHAT: seen. WHY: the office
+    assert!(office.listed(&office.eve, &job), "and finds it in the list"); // WHAT: listed. WHY: likewise
+    assert!(office.listed(&office.admin, &job), "the administrator always does"); // WHAT: listed. WHY: administrators see every job
+    let by_hand = office.ok(&office.admin, "POST", "/projects", json!({ "number": "9002", "name": "Made by hand" }))["id"].as_str().unwrap().to_string(); // WHAT: a project made by hand, nobody named. WHY: unchanged
+    assert_eq!(office.ask(&office.nan, "GET", &format!("/projects/{by_hand}"), None).0, 200, "a hand-made project with nobody named is everybody's, as before"); // WHAT: seen. WHY: today's projects are left as they were
+    assert!(office.listed(&office.nan, &by_hand)); // WHAT: listed. WHY: likewise
 }

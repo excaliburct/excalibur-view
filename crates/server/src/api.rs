@@ -4596,8 +4596,8 @@ fn broke(what: &str, e: impl std::fmt::Display) -> String {
 /// The same rule as `Store::may_see` and the project list, written once for
 /// the listings that filter in the query rather than one project at a time.
 const SEEN_BY: &str = "(?1
-        OR NOT EXISTS (SELECT 1 FROM project_people m WHERE m.project = p.id)
-        OR EXISTS (SELECT 1 FROM project_people m WHERE m.project = p.id AND m.person = ?2))"; // WHAT: everybody's job, or one they are named on, or an administrator. WHY: an assistant sees exactly what its person would.
+        OR (NOT EXISTS (SELECT 1 FROM project_people m WHERE m.project = p.id) AND (p.reference IS NULL OR p.reference NOT LIKE 'fabwire:%' OR EXISTS (SELECT 1 FROM people u WHERE u.id = ?2 AND u.role <> 'viewer')))
+        OR EXISTS (SELECT 1 FROM project_people m WHERE m.project = p.id AND m.person = ?2))"; // WHAT: everybody's job (a Fabwire job the office's only, the same as store::OPEN_WHEN_EMPTY), or one they are named on, or an administrator. WHY: an assistant sees exactly what its person would.
 
 /// Whether the person behind an assistant may read a drawing set; refused in
 /// the same words as a set that does not exist, so nobody learns it does.
