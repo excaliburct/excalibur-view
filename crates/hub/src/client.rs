@@ -211,6 +211,19 @@ pub enum Trouble {
 }
 
 impl Trouble {
+    /// WHAT: Whether the same request may work later unchanged: the server
+    /// couldn't be reached, or had a problem of its own (5xx, busy). WHY: a
+    /// refusal (403, a bad request) never will, and retrying it forever held
+    /// a seat's sync up (review M4).
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+    pub fn may_pass_later(&self) -> bool {
+        match self {
+            Trouble::Unreachable(_) => true, // WHAT: no answer. WHY: the network or the server comes back
+            Trouble::Refused(p) => matches!(p.error.as_str(), "server_error" | "busy"), // WHAT: the server's own trouble. WHY: not the request's
+            _ => false, // WHAT: anything else. WHY: the same request gets the same answer
+        }
+    }
+
     /// The server's short name for why, when it gave one.
     #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
     pub fn code(&self) -> Option<&str> {
@@ -945,6 +958,17 @@ impl Client {
         Self::read(self.get(&format!("/sets/{id}/sheets")).call())
     }
 
+    /// `POST /sets/{id}/scale`: a sheet's scale as a person set it (its
+    /// `/Measure` written as PDF, base64), or cleared with `None`, kept with
+    /// the office's copy. The set's sheets as they are now.
+    ///
+    /// # Errors
+    ///
+    /// Why not, in words: the server refused, or couldn't be reached.
+    pub fn set_sheet_scale(&self, id: &str, page: usize, measure: Option<&str>) -> Answer<Vec<Sheet>> {
+        Self::read(self.post(&format!("/sets/{id}/scale")).send_json(serde_json::json!({ "page": page, "measure": measure }))) // WHAT: the sheet and its scale. WHY: every seat and the takeoff read it from the server
+    }
+
     // ---- folders, who sees them, and files that aren't drawings -----------
 
     /// A project's folders this person may see, the empty ones too, each with
@@ -1166,6 +1190,21 @@ fn multipart(fields: &[(&str, &str)], filename: &str, file: &[u8]) -> (String, V
     body.extend_from_slice(file);
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_server_that_couldnt_answer_is_asked_again_never_a_refusal() {
+        assert!(Trouble::Unreachable("no route".into()).may_pass_later()); // WHAT: no answer. WHY: the network comes back
+        assert!(Trouble::Refused(Problem::new("server_error", "The server had a problem (500).")).may_pass_later()); // WHAT: the server's own trouble. WHY: it recovers
+        assert!(Trouble::Refused(Problem::new("busy", "Busy.")).may_pass_later()); // WHAT: busy. WHY: likewise
+        assert!(!Trouble::Refused(Problem::new("forbidden", "Not allowed.")).may_pass_later()); // WHAT: a 403. WHY: review M4: asked forever, it held the sync up
+        assert!(!Trouble::Refused(Problem::new("bad_request", "That scale can't be measured with.")).may_pass_later()); // WHAT: a 400. WHY: the same request gets the same answer
+        assert!(!Trouble::Unreadable("garbage".into()).may_pass_later()); // WHAT: an answer that didn't read. WHY: likewise
+    }
 }
 
 #[cfg(test)]

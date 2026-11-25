@@ -86,6 +86,9 @@ pub enum Ask {
         since: u64,
         /// Each one as (page, the annotation dictionary base64).
         sending: Vec<(usize, String)>,
+        /// Each sheet's scale set here, as (page, its `/Measure` base64, or
+        /// `None` when cleared).
+        scales: Vec<(usize, Option<String>)>, // WHAT: scales to send. WHY: kept by the office, not one seat
         /// Asked by the clock rather than by somebody: a failure is written
         /// in the log, not put in front of anybody every few seconds.
         quiet: bool,
@@ -338,6 +341,15 @@ pub enum Told {
         markups: Vec<(String, usize, String, bool)>,
         /// Names this machine just sent, so it does not send them again.
         sent: Vec<String>,
+        /// The scale the server keeps on each sheet a person ever set one
+        /// on, as (page, its `/Measure` base64 or `None` when cleared, the
+        /// revision it was set or cleared at).
+        scales: Vec<(usize, Option<String>, u64)>, // WHAT: the office's scales and clears. WHY: applied here, so a scale set or cleared on any seat is on this one
+    },
+    /// Scales that couldn't be sent, to send with the next sync.
+    ScalesUnsent {
+        set: String, // WHAT: the drawing set. WHY: the tab they belong to
+        scales: Vec<(usize, Option<String>)>, // WHAT: what wasn't sent. WHY: tried again, never dropped
     },
     Chests(Vec<Chest>),
     ChestFetched {
@@ -1152,12 +1164,36 @@ pub fn start(repaint: egui::Context) -> Link {
                         set,
                         since,
                         sending,
+                        scales,
                         quiet,
                     } => match connected(&client) {
                         // No server is not a problem. The markups are already
                         // in the file on disk; the sync catches up later.
                         Err(_) => {}
                         Ok(client) => {
+                            let mut unsent = Vec::new(); // WHAT: scales to send again later. WHY: kept for the next sync
+                            let mut refused = Vec::new(); // WHAT: scales the server turned down for good. WHY: said once, never retried
+                            let mut down = false; // WHAT: whether the server couldn't take one for now. WHY: the rest wait too
+                            for (page, measure) in scales {
+                                if down {
+                                    unsent.push((page, measure)); // WHAT: not tried while the server is down. WHY: tried next time
+                                    continue;
+                                }
+                                match client.set_sheet_scale(&set, page, measure.as_deref()) {
+                                    Ok(_) => {} // WHAT: kept by the office. WHY: done
+                                    Err(e) if e.may_pass_later() => {
+                                        down = true; // WHAT: the server can't for now. WHY: no point trying the others
+                                        unsent.push((page, measure)); // WHAT: kept. WHY: tried again
+                                    }
+                                    Err(e) => refused.push(format!("sheet {}: {e}", page + 1)), // WHAT: refused for good. WHY: review M4: a 403 or a bad scale retried forever blocked the sync
+                                }
+                            }
+                            if !unsent.is_empty() {
+                                say(&told, Told::ScalesUnsent { set: set.clone(), scales: unsent }); // WHAT: back to the tab. WHY: tried again, never lost
+                            }
+                            if !refused.is_empty() {
+                                say(&told, Told::Trouble(format!("The office server didn't keep the scale of {}. The markups still sync.", refused.join("; ")))); // WHAT: said plainly, once. WHY: the person knows the scale wasn't kept
+                            }
                             let push: Vec<hub::NewMarkup> = sending
                                 .iter()
                                 .map(|(page, dictionary)| hub::NewMarkup {
@@ -1181,6 +1217,10 @@ pub fn start(repaint: egui::Context) -> Link {
                                     }
                                 }
                             };
+                            let office_scales: Vec<(usize, Option<String>, u64)> = client
+                                .sheets(&set)
+                                .map(|sheets| sheets.into_iter().filter_map(|s| s.measure_at.map(|at| (s.page, s.measure, at))).collect())
+                                .unwrap_or_default(); // WHAT: each sheet's office scale, or its clear, with when; none when they can't be read. WHY: a scale set or cleared on another seat reaches this one (review M5)
                             match client.markups(&set, since) {
                                 Ok(page) => say(
                                     &told,
@@ -1193,6 +1233,7 @@ pub fn start(repaint: egui::Context) -> Link {
                                             .map(|m| (m.id, m.page, m.dictionary, m.removed))
                                             .collect(),
                                         sent,
+                                        scales: office_scales, // WHAT: the office's scales. WHY: applied on this seat
                                     },
                                 ),
                                 Err(e) => {
