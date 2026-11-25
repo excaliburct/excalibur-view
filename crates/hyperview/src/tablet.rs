@@ -3706,7 +3706,7 @@ mod tests {
         assert_eq!(open(true, false), ["loaded_by"]); // WHAT: the shop. WHY: Loaded by only.
         assert_eq!(open(false, true), ["loaded_by", "driver", "received_by"]); // WHAT: the field. WHY: all three.
         assert_eq!(open(true, true), ["loaded_by", "driver", "received_by"]); // WHAT: the office, which is both. WHY: all three.
-        assert!(open(false, false).is_empty()); // WHAT: neither crew. WHY: none.
+        assert_eq!(open(false, false), Vec::<&str>::new()); // WHAT: neither crew. WHY: none.
         assert!(next_box(load, true, Audience { shop: true, field: false }).is_some_and(|b| b.which == "loaded_by")); // WHAT: the shop's big button. WHY: skips the boxes it may not sign.
     }
 }

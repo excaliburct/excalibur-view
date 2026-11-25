@@ -343,15 +343,15 @@ pub(crate) fn make_folder(
 ///
 /// Fails when the database can't be read.
 pub fn listing(db: &Connection, project: &str, sight: &Sight) -> rusqlite::Result<Vec<FolderInfo>> {
-    if sight.is_narrowed() {
-        return Ok(Vec::new()); // WHAT: no folders for a tablet account on a job with a manifest. WHY: its tablet shows sections, never the folder tree (docs/TABLET-MANIFEST.md §5).
-    }
     struct Row {
         path: String,           // WHAT: as first written. WHY: shown so.
         own: Option<See>,       // WHAT: its own rule. WHY: shown, and for the Studio.
         set_in: Option<String>, // WHAT: program or view. WHY: shown.
         set_by: Option<String>, // WHAT: who set it. WHY: shown.
         set_at: Option<String>, // WHAT: when. WHY: shown.
+    }
+    if sight.is_narrowed() {
+        return Ok(Vec::new()); // WHAT: no folders for a tablet account on a job with a manifest. WHY: its tablet shows sections, never the folder tree (docs/TABLET-MANIFEST.md §5).
     }
     let mut found: Vec<(String, Row)> = Vec::new(); // WHAT: each folder by key, in the order found. WHY: one entry per folder.
     let mut statement = db
