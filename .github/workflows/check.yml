@@ -99,4 +99,5 @@ jobs:
       # WHAT: the release channel's own tests, offline. WHY: 0.7.2: a normal release must be a full, stable one, or the desktops can't update without their server.
       - name: The release channel
         if: runner.os == 'Linux'  # WHAT: once, on Linux. WHY: plain Python; one platform is enough.
-        run: python3 -m pip install --disable-pip-version-check --only-binary=:all: "cryptography==46.0.5" && python3 tools/test_release_channel.py  # WHAT: run them, with the one library the signing script needs, pinned as the Windows end-to-end test pins it. WHY: as above.
+        run: |  # WHAT: run them, with the one library the signing script needs, pinned as the Windows end-to-end test pins it. WHY: as above. (a block, so the ": " in --only-binary=:all: is not read as YAML)
+          python3 -m pip install --disable-pip-version-check --only-binary=:all: "cryptography==46.0.5" && python3 tools/test_release_channel.py
