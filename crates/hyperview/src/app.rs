@@ -1126,6 +1126,7 @@ impl App {
             ("View.Rulers", self.prefs.rulers),
             ("View.Crosshair", self.prefs.crosshair),
             ("View.MarkupText", self.prefs.markup_text),
+            ("View.TextOutlines", self.prefs.text_outlines), // WHAT: the outlines switch's tick. WHY: follows the saved setting
             ("View.ShowGrid", self.prefs.grid),
             ("View.SnapToGrid", self.prefs.snap_to_grid),
             ("View.SnapToContent", self.prefs.snap_to_content),

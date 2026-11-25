@@ -807,6 +807,41 @@ pub fn pages_in(library: Option<PathBuf>, path: &std::path::Path) -> Result<usiz
     })
 }
 
+/// The pieces of text and the paragraphs the Edit Text tool reads off one sheet, without the window. // WHAT: the tool's reading of a sheet, from outside. WHY: the alignment tests check its boxes against the sheet as pdfium draws it
+pub fn text_on_sheet( // WHAT: what Edit Text sees on a sheet. WHY: the tests and the probe call it without a window
+    library: Option<PathBuf>, // WHAT: where pdfium is. WHY: the same engine the window uses
+    path: &std::path::Path, // WHAT: the drawing. WHY: read fresh from disk, as the tool does
+    page: u32, // WHAT: which sheet, from 0. WHY: one sheet at a time, as the tool does
+) -> Result<(Vec<crate::textedit::Run>, Vec<crate::textedit::Found>), String> { // WHAT: the pieces and the paragraphs. WHY: a test can look at both
+    let path = path.to_path_buf(); // WHAT: an owned copy. WHY: sent to the pdfium thread
+    with_engine(library, move |engine| { // WHAT: on the one pdfium thread. WHY: pdfium lives there only
+        let one = engine.open_alone(&path)?; // WHAT: the file, on its own. WHY: the tool reads it the same way
+        let handle = unsafe { engine.bindings.FPDF_LoadPage(one.doc, page as i32) }; // WHAT: the sheet. WHY: its objects are read
+        if handle.is_null() { // WHAT: no such sheet. WHY: said, not crashed on
+            engine.close_alone(one); // WHAT: lets the file go. WHY: nothing leaks
+            return Err("that sheet could not be read".into()); // WHAT: why. WHY: the caller says it
+        }
+        let (pieces, rules) = engine.text_and_rules(handle); // WHAT: its text and its rules. WHY: exactly what the tool groups
+        let runs: Vec<crate::textedit::Run> = pieces.into_iter().map(|p| p.run).collect(); // WHAT: the pieces' readings. WHY: grouped
+        unsafe { engine.bindings.FPDF_ClosePage(handle) }; // WHAT: closes the sheet. WHY: done with it
+        engine.close_alone(one); // WHAT: lets the file go. WHY: nothing leaks
+        let found = crate::textedit::paragraphs_ruled(&runs, &rules); // WHAT: the paragraphs. WHY: what the tool outlines and opens
+        Ok((runs, found)) // WHAT: both. WHY: the caller compares them with the drawing
+    })
+}
+
+/// Writes a changed paragraph into a sheet, without the window: the whole file as it would become, and what the window would say. Nothing is written to disk. // WHAT: Edit Text's write, from outside. WHY: the tests prove the written words land where the old ones were, and that held words are refused
+pub fn rewrite_on_sheet( // WHAT: the rewrite. WHY: the same code the window's worker runs
+    library: Option<PathBuf>, // WHAT: where pdfium is. WHY: the same engine
+    path: &std::path::Path, // WHAT: the drawing. WHY: read fresh
+    page: u32, // WHAT: which sheet. WHY: one at a time
+    found: &crate::textedit::Found, // WHAT: the paragraph as read. WHY: found again on the sheet
+    rewrite: &crate::textedit::Rewrite, // WHAT: what it becomes. WHY: written
+) -> Result<(Vec<u8>, String), String> { // WHAT: the new file and the sentence. WHY: what the window gets
+    let (path, found, rewrite) = (path.to_path_buf(), found.clone(), rewrite.clone()); // WHAT: owned copies. WHY: sent to the pdfium thread
+    with_engine(library, move |engine| engine.rewrite_paragraph(&path, page, &found, &rewrite)) // WHAT: the worker's own code. WHY: what is tested is what runs
+}
+
 /// pdfium lives on exactly one thread, for the whole life of the process.
 ///
 /// Not a style choice. `FPDF_InitLibrary` sets up state belonging to the
@@ -6898,116 +6933,233 @@ const INVISIBLE: i32 = 3;
 /// Save only what changed, after the file as it was.
 const FPDF_INCREMENTAL: u32 = 1;
 
+/// Why words inside a form aren't changed. // WHAT: the one sentence. WHY: the window and the worker say the same
+pub const HELD: &str = "These words are inside a stamp, a flattened markup or a block the whole sheet is drawn in, which other sheets can share, so they can't be changed in place. Cover them with a white-filled box and put a text box on top."; // WHAT: the sentence. WHY: says why and what to do instead
+
 /// A piece of text on a page, with the handles to change it by.
 struct Piece {
     run: crate::textedit::Run,
     object: FPDF_PAGEOBJECT,
     font: FPDF_FONT,
     embedded: bool,
+    order: usize, // WHAT: when it was drawn, counting forms' insides. WHY: a picture drawn later may cover it
+    bounds: [f64; 4], // WHAT: its square box on the sheet: left, bottom, right, top. WHY: compared with the pictures
+}
+
+/// The most straight lines read off one sheet for keeping table cells apart. // WHAT: a cap. WHY: a dense plan has hundreds of thousands; tables are drawn early and a cap keeps the read quick
+const MOST_RULES: usize = 200_000; // WHAT: two hundred thousand. WHY: well past any title block and schedule
+
+/// pdfium's number for a picture object. // WHAT: the image kind. WHY: pictures can cover words
+const OBJECT_IMAGE: u32 = 3; // WHAT: FPDF_PAGEOBJ_IMAGE. WHY: as pdfium numbers it
+
+/// A point through the forms above it, or as it is on the sheet itself. // WHAT: form space to the sheet. WHY: every corner found inside a form
+fn place(outer: Option<[f64; 6]>, p: [f64; 2]) -> [f64; 2] {
+    match outer { // WHAT: inside a form or not. WHY: only a form's points are moved
+        Some([a, b, c, d, e, f]) => [p[0] * a + p[1] * c + e, p[0] * b + p[1] * d + f], // WHAT: through the matrix. WHY: PDF's row-vector convention
+        None => p, // WHAT: as it is. WHY: already on the sheet
+    }
+}
+
+/// The square box round some points: left, bottom, right, top. // WHAT: an axis-aligned box. WHY: covering is checked with it
+fn aabb(points: &[[f64; 2]]) -> [f64; 4] {
+    points.iter().fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |e, p| [e[0].min(p[0]), e[1].min(p[1]), e[2].max(p[0]), e[3].max(p[1])]) // WHAT: least and most each way. WHY: the box
+}
+
+/// Whether one box lies wholly inside another, with a point to spare. // WHAT: containment. WHY: a picture covering words covers all of them
+fn inside(small: &[f64; 4], big: &[f64; 4]) -> bool {
+    small[0] >= big[0] - 1.0 && small[1] >= big[1] - 1.0 && small[2] <= big[2] + 1.0 && small[3] <= big[3] + 1.0 // WHAT: every edge within. WHY: a point's slack for rounding
 }
 
 impl Engine {
-    /// Every piece of visible text on a page.
+    /// Every piece of visible text on a page, inside Form XObjects too. // WHAT: the sheet's text, as pieces. WHY: what Edit Text finds again when it writes
     fn pieces(&self, page: FPDF_PAGE) -> Vec<Piece> {
-        let b = &self.bindings;
-        let mut out = Vec::new();
-        let words = unsafe { b.FPDFText_LoadPage(page) };
-        let count = unsafe { b.FPDFPage_CountObjects(page) }.max(0);
-        for i in 0..count {
-            let object = unsafe { b.FPDFPage_GetObject(page, i) };
-            if object.is_null() || unsafe { b.FPDFPageObj_GetType(object) } as u32 != OBJECT_TEXT {
-                continue;
+        self.text_and_rules(page).0 // WHAT: the pieces alone. WHY: writing needs no rules
+    }
+
+    /// The sheet's pieces of text, and the straight lines drawn on it. // WHAT: text and rules together. WHY: a ruled line between two rows of a table keeps them apart
+    fn text_and_rules(&self, page: FPDF_PAGE) -> (Vec<Piece>, Vec<crate::textedit::Rule>) {
+        let b = &self.bindings; // WHAT: pdfium. WHY: every call below
+        let words = unsafe { b.FPDFText_LoadPage(page) }; // WHAT: the sheet's words. WHY: a text object's letters are read through it
+        let count = unsafe { b.FPDFPage_CountObjects(page) }.max(0); // WHAT: how many objects on the sheet. WHY: each is looked at
+        let top: Vec<FPDF_PAGEOBJECT> = (0..count).map(|i| unsafe { b.FPDFPage_GetObject(page, i) }).collect(); // WHAT: the sheet's own objects, in drawing order. WHY: walked below
+        let mut out = Vec::new(); // WHAT: the pieces found. WHY: handed back
+        let mut covers: Vec<(usize, [f64; 4])> = Vec::new(); // WHAT: every picture, with when it was drawn and where. WHY: words a later picture lies over are words nobody sees
+        let mut order = 0usize; // WHAT: a count of every object met, forms' insides included. WHY: what was drawn after what
+        let mut rules = Vec::new(); // WHAT: the straight lines on the sheet. WHY: tables' rulings separate their cells
+        self.walk(&top, None, words, &mut order, &mut out, &mut covers, &mut rules, 0); // WHAT: every object, into forms. WHY: flattened stamps and markups keep their words in Form XObjects
+        if !words.is_null() { // WHAT: the words were loaded. WHY: closed
+            unsafe { b.FPDFText_ClosePage(words) }; // WHAT: closes them. WHY: nothing leaks
+        }
+        // WHAT: drops words a picture drawn later lies wholly over. WHY: OCR that sets visible words under the scan (rather than invisible ones) would otherwise be offered for editing over a picture of the page
+        out.retain(|p| !covers.iter().any(|(when, area)| *when > p.order && inside(&p.bounds, area))); // WHAT: kept unless covered. WHY: the same
+        (out, rules) // WHAT: the pieces and the rules. WHY: grouped by the caller
+    }
+
+    /// One list of objects, and the insides of every form among them. // WHAT: the walk. WHY: a form's words are drawn through the form's matrix and the CTM at its Do
+    #[allow(clippy::too_many_arguments)] // WHAT: eight things carried down. WHY: a recursion; bundling them in a struct only moves the same list
+    fn walk(
+        &self,
+        objects: &[FPDF_PAGEOBJECT], // WHAT: the objects at this level. WHY: walked in drawing order
+        outer: Option<[f64; 6]>, // WHAT: the forms' matrices above, composed, or None on the sheet itself. WHY: an object inside a form is in the form's space
+        words: FPDF_TEXTPAGE, // WHAT: the sheet's words. WHY: letters are read through it
+        order: &mut usize, // WHAT: the drawing-order counter. WHY: shared down the recursion
+        out: &mut Vec<Piece>, // WHAT: the pieces. WHY: added to
+        covers: &mut Vec<(usize, [f64; 4])>, // WHAT: the pictures. WHY: added to
+        rules: &mut Vec<crate::textedit::Rule>, // WHAT: the straight lines. WHY: added to
+        depth: usize, // WHAT: how many forms deep. WHY: a form that draws itself would recurse forever
+    ) {
+        let b = &self.bindings; // WHAT: pdfium. WHY: every call below
+        for &object in objects { // WHAT: each object. WHY: in drawing order
+            *order += 1; // WHAT: one more drawn. WHY: what comes later covers what came before
+            if object.is_null() { // WHAT: nothing there. WHY: skipped
+                continue; // WHAT: next. WHY: the same
             }
-            if unsafe { b.FPDFTextObj_GetTextRenderMode(object) } as i32 == INVISIBLE {
-                continue;
+            let kind = unsafe { b.FPDFPageObj_GetType(object) } as u32; // WHAT: what it is. WHY: text, a picture or a form are each handled
+            if kind == OBJECT_FORM && depth < 8 { // WHAT: a form, not absurdly deep. WHY: its insides hold words too
+                let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 }; // WHAT: room for its matrix. WHY: pdfium fills it
+                unsafe { b.FPDFPageObj_GetMatrix(object, &mut m) }; // WHAT: the form's matrix with the CTM at its Do. WHY: its insides are drawn through it
+                let own = [m.a as f64, m.b as f64, m.c as f64, m.d as f64, m.e as f64, m.f as f64]; // WHAT: as numbers. WHY: composed below
+                let chain = match outer { Some(o) => then(own, o), None => own }; // WHAT: this form inside the ones above. WHY: a form in a form is common in Bluebeam-saved sets
+                let n = unsafe { b.FPDFFormObj_CountObjects(object) }.max(0); // WHAT: how many objects inside. WHY: each walked
+                let inner: Vec<FPDF_PAGEOBJECT> = (0..n as u64).map(|i| unsafe { b.FPDFFormObj_GetObject(object, i as _) }).collect(); // WHAT: the objects inside. WHY: walked
+                self.walk(&inner, Some(chain), words, order, out, covers, rules, depth + 1); // WHAT: walked. WHY: their words found
+                continue; // WHAT: next. WHY: done with the form
+            }
+            if kind == OBJECT_IMAGE { // WHAT: a picture. WHY: it may lie over words
+                let (mut l, mut bo, mut r, mut t) = (0f32, 0f32, 0f32, 0f32); // WHAT: room for its bounds. WHY: pdfium fills them
+                if b.is_true(unsafe { b.FPDFPageObj_GetBounds(object, &mut l, &mut bo, &mut r, &mut t) }) { // WHAT: its bounds. WHY: where it covers
+                    let corners = [[l, bo], [r, bo], [r, t], [l, t]].map(|p| place(outer, [p[0] as f64, p[1] as f64])); // WHAT: its corners on the sheet. WHY: a form's picture is in the form's space
+                    covers.push((*order, aabb(&corners))); // WHAT: kept. WHY: compared with the words later
+                }
+                continue; // WHAT: next. WHY: a picture has no words
+            }
+            if kind == OBJECT_PATH && rules.len() < MOST_RULES { // WHAT: a path, while there is room. WHY: its straight pieces may rule a table
+                let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 }; // WHAT: room for its matrix. WHY: pdfium fills it
+                unsafe { b.FPDFPageObj_GetMatrix(object, &mut m) }; // WHAT: the path's matrix with the CTM. WHY: its points are in its own space
+                let own = [m.a as f64, m.b as f64, m.c as f64, m.d as f64, m.e as f64, m.f as f64]; // WHAT: as numbers. WHY: composed
+                let whole = match outer { Some(o) => then(own, o), None => own }; // WHAT: to the sheet. WHY: through any forms
+                let point = |x: f32, y: f32| place(Some(whole), [x as f64, y as f64]); // WHAT: a path point on the sheet. WHY: rules are compared with text there
+                let n = unsafe { b.FPDFPath_CountSegments(object) }.max(0); // WHAT: how many segments. WHY: each looked at
+                let (mut start, mut at): (Option<[f64; 2]>, Option<[f64; 2]>) = (None, None); // WHAT: the subpath's start and the pen. WHY: lines run from the pen, a close back to the start
+                for i in 0..n { // WHAT: each segment. WHY: straight ones are rules
+                    let segment = unsafe { b.FPDFPath_GetPathSegment(object, i) }; // WHAT: the segment. WHY: read
+                    if segment.is_null() { // WHAT: nothing. WHY: skipped
+                        continue; // WHAT: next. WHY: the same
+                    }
+                    let (mut x, mut y) = (0f32, 0f32); // WHAT: room for its point. WHY: pdfium fills it
+                    unsafe { b.FPDFPathSegment_GetPoint(segment, &mut x, &mut y) }; // WHAT: its point. WHY: where it goes
+                    let p = point(x, y); // WHAT: on the sheet. WHY: compared
+                    match unsafe { b.FPDFPathSegment_GetType(segment) } as u32 { // WHAT: what kind of segment. WHY: only straight ones are rules
+                        SEGMENT_MOVETO => start = Some(p), // WHAT: a new subpath. WHY: a close returns here
+                        SEGMENT_LINETO => { if let Some(a) = at { rules.push([a, p]); } } // WHAT: a straight line. WHY: may rule a table
+                        _ => {} // WHAT: a curve. WHY: curves don't rule tables
+                    }
+                    at = Some(p); // WHAT: the pen moves. WHY: the next line starts here
+                    if unsafe { b.FPDFPathSegment_GetClose(segment) } != 0 { // WHAT: closed back. WHY: a rectangle's last side
+                        if let (Some(a), Some(s0)) = (at, start) { rules.push([a, s0]); } // WHAT: the closing side. WHY: a cell's border
+                        at = start; // WHAT: the pen is back at the start. WHY: as PDF closes
+                    }
+                }
+                continue; // WHAT: next. WHY: a path has no words
+            }
+            if kind != OBJECT_TEXT { // WHAT: not text. WHY: lines and shading aren't words
+                continue; // WHAT: next. WHY: the same
+            }
+            if unsafe { b.FPDFTextObj_GetTextRenderMode(object) } == INVISIBLE { // WHAT: invisible text. WHY: an OCR layer nobody sees
+                continue; // WHAT: next. WHY: the same
             }
             // Its words.
             let text = unsafe {
-                let bytes = b.FPDFTextObj_GetText(object, words, std::ptr::null_mut(), 0) as usize;
-                if bytes < 2 {
-                    continue;
+                let bytes = b.FPDFTextObj_GetText(object, words, std::ptr::null_mut(), 0) as usize; // WHAT: how long its words are. WHY: the buffer's size
+                if bytes < 2 { // WHAT: no words. WHY: nothing to edit
+                    continue; // WHAT: next. WHY: the same
                 }
-                let mut buffer = vec![0u16; bytes / 2];
-                b.FPDFTextObj_GetText(object, words, buffer.as_mut_ptr() as *mut _, bytes as _);
-                while buffer.last() == Some(&0) {
-                    buffer.pop();
+                let mut buffer = vec![0u16; bytes / 2]; // WHAT: room for them. WHY: UTF-16
+                b.FPDFTextObj_GetText(object, words, buffer.as_mut_ptr() as *mut _, bytes as _); // WHAT: the words. WHY: what the piece says
+                while buffer.last() == Some(&0) { // WHAT: the terminator. WHY: not a letter
+                    buffer.pop(); // WHAT: dropped. WHY: the same
                 }
-                String::from_utf16_lossy(&buffer)
+                String::from_utf16_lossy(&buffer) // WHAT: as a string. WHY: compared and shown
             };
-            if text.trim().is_empty() {
-                continue;
+            if text.trim().is_empty() { // WHAT: only spaces. WHY: nothing to edit
+                continue; // WHAT: next. WHY: the same
             }
-            // Where, which way, and how big.
-            let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
-            unsafe { b.FPDFPageObj_GetMatrix(object, &mut m) };
-            let (a, bb, c, d) = (m.a as f64, m.b as f64, m.c as f64, m.d as f64);
-            let across = (a * a + bb * bb).sqrt();
-            let high = (c * c + d * d).sqrt();
+            // Where, which way, and how big: the text matrix with the CTM, then any forms it is inside.
+            let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 }; // WHAT: room for its matrix. WHY: pdfium fills it
+            unsafe { b.FPDFPageObj_GetMatrix(object, &mut m) }; // WHAT: its text matrix with the CTM. WHY: where its first letter starts and which way it runs
+            let own = [m.a as f64, m.b as f64, m.c as f64, m.d as f64, m.e as f64, m.f as f64]; // WHAT: as numbers. WHY: composed with the forms
+            let [a, bb, c, d, e, f] = match outer { Some(o) => then(own, o), None => own }; // WHAT: on the sheet. WHY: a form's words are in the form's space
+            let across = (a * a + bb * bb).sqrt(); // WHAT: how much it is stretched along. WHY: the direction is made a unit
+            let high = (c * c + d * d).sqrt(); // WHAT: how much it is stretched up. WHY: the letters' height
             // Mirrored text, or text squashed flat, is left alone.
-            if across < 1e-6 || high < 1e-6 || a * d - bb * c <= 0.0 {
-                continue;
+            if across < 1e-6 || high < 1e-6 || a * d - bb * c <= 0.0 { // WHAT: flat or mirrored. WHY: can't be set back the same way
+                continue; // WHAT: next. WHY: the same
             }
-            let along = [a / across, bb / across];
-            let mut size = 0f32;
-            unsafe { b.FPDFTextObj_GetFontSize(object, &mut size) };
-            let size = size as f64 * high;
-            if size <= 0.1 {
-                continue;
+            let along = [a / across, bb / across]; // WHAT: the way it runs. WHY: lines are read along it
+            let mut size = 0f32; // WHAT: room for its size. WHY: pdfium fills it
+            unsafe { b.FPDFTextObj_GetFontSize(object, &mut size) }; // WHAT: its Tf size. WHY: scaled by the matrix below
+            let size = size as f64 * high; // WHAT: its letters' height on the sheet. WHY: the matrix and CTM scale Tf
+            if size <= 0.1 { // WHAT: too small to be anything. WHY: noise
+                continue; // WHAT: next. WHY: the same
             }
-            let origin = [m.e as f64, m.f as f64];
-            let (mut l, mut bo, mut r, mut t) = (0f32, 0f32, 0f32, 0f32);
-            unsafe { b.FPDFPageObj_GetBounds(object, &mut l, &mut bo, &mut r, &mut t) };
-            let start = origin[0] * along[0] + origin[1] * along[1];
-            let furthest = [[l, bo], [r, bo], [r, t], [l, t]]
-                .iter()
-                .map(|p| p[0] as f64 * along[0] + p[1] as f64 * along[1])
-                .fold(f64::MIN, f64::max);
-            let (mut cr, mut cg, mut cb, mut ca) = (0u32, 0u32, 0u32, 0u32);
-            unsafe { b.FPDFPageObj_GetFillColor(object, &mut cr, &mut cg, &mut cb, &mut ca) };
+            let origin = [e, f]; // WHAT: where its baseline starts. WHY: lines are found by it
+            // WHAT: its tight box, turned with it, not the square box round a turned box. WHY: a note at 45 degrees measured off its square box ran a third too long
+            let mut quad = FS_QUADPOINTSF { x1: 0.0, y1: 0.0, x2: 0.0, y2: 0.0, x3: 0.0, y3: 0.0, x4: 0.0, y4: 0.0 }; // WHAT: room for it. WHY: pdfium fills it
+            let corners: Vec<[f64; 2]> = if b.is_true(unsafe { b.FPDFPageObj_GetRotatedBounds(object, &mut quad) }) { // WHAT: the turned box, when pdfium has one. WHY: the tight extent
+                [[quad.x1, quad.y1], [quad.x2, quad.y2], [quad.x3, quad.y3], [quad.x4, quad.y4]].iter().map(|p| place(outer, [p[0] as f64, p[1] as f64])).collect() // WHAT: its corners on the sheet. WHY: through the forms above
+            } else {
+                let (mut l, mut bo, mut r, mut t) = (0f32, 0f32, 0f32, 0f32); // WHAT: room for the square box. WHY: the fallback
+                unsafe { b.FPDFPageObj_GetBounds(object, &mut l, &mut bo, &mut r, &mut t) }; // WHAT: the square box. WHY: better than nothing
+                [[l, bo], [r, bo], [r, t], [l, t]].iter().map(|p| place(outer, [p[0] as f64, p[1] as f64])).collect() // WHAT: its corners on the sheet. WHY: the same
+            };
+            let start = origin[0] * along[0] + origin[1] * along[1]; // WHAT: where it starts, along itself. WHY: its run is measured from here
+            let furthest = corners.iter().map(|p| p[0] * along[0] + p[1] * along[1]).fold(f64::MIN, f64::max); // WHAT: how far its ink goes. WHY: its run's end
+            let (mut cr, mut cg, mut cb, mut ca) = (0u32, 0u32, 0u32, 0u32); // WHAT: room for its colour. WHY: pdfium fills it
+            unsafe { b.FPDFPageObj_GetFillColor(object, &mut cr, &mut cg, &mut cb, &mut ca) }; // WHAT: its colour. WHY: new words are set in it
             // Its font.
-            let font = unsafe { b.FPDFTextObj_GetFont(object) };
+            let font = unsafe { b.FPDFTextObj_GetFont(object) }; // WHAT: its font. WHY: kept when it can set the new words
             let name = if font.is_null() {
-                String::new()
+                String::new() // WHAT: no name. WHY: no font
             } else {
                 unsafe {
-                    let n = b.FPDFFont_GetBaseFontName(font, std::ptr::null_mut(), 0);
-                    let mut buffer = vec![0u8; n.max(1)];
-                    b.FPDFFont_GetBaseFontName(font, buffer.as_mut_ptr() as *mut _, n);
-                    while buffer.last() == Some(&0) {
-                        buffer.pop();
+                    let n = b.FPDFFont_GetBaseFontName(font, std::ptr::null_mut(), 0); // WHAT: the name's length. WHY: the buffer's size
+                    let mut buffer = vec![0u8; n.max(1)]; // WHAT: room for it. WHY: pdfium fills it
+                    b.FPDFFont_GetBaseFontName(font, buffer.as_mut_ptr() as *mut _, n); // WHAT: the name. WHY: shown and matched
+                    while buffer.last() == Some(&0) { // WHAT: the terminator. WHY: not part of the name
+                        buffer.pop(); // WHAT: dropped. WHY: the same
                     }
-                    String::from_utf8_lossy(&buffer).to_string()
+                    String::from_utf8_lossy(&buffer).to_string() // WHAT: as a string. WHY: kept
                 }
             };
-            let lower = name.to_lowercase();
-            let weight = if font.is_null() { 400 } else { unsafe { b.FPDFFont_GetWeight(font) } };
-            let mut slant = 0i32;
-            if !font.is_null() {
-                unsafe { b.FPDFFont_GetItalicAngle(font, &mut slant) };
+            let lower = name.to_lowercase(); // WHAT: lower case. WHY: bold and italic are read off the name too
+            let weight = if font.is_null() { 400 } else { unsafe { b.FPDFFont_GetWeight(font) } }; // WHAT: its weight. WHY: bold or not
+            let mut slant = 0i32; // WHAT: room for its slant. WHY: pdfium fills it
+            if !font.is_null() { // WHAT: a font. WHY: asked
+                unsafe { b.FPDFFont_GetItalicAngle(font, &mut slant) }; // WHAT: its slant. WHY: italic or not
             }
-            let embedded = !font.is_null() && unsafe { b.FPDFFont_GetIsEmbedded(font) } == 1;
+            let embedded = !font.is_null() && unsafe { b.FPDFFont_GetIsEmbedded(font) } == 1; // WHAT: whether the file carries it. WHY: a cut-down one can only set its own letters
+            let held = outer.is_some(); // WHAT: inside a form. WHY: shown, never changed in place (a form may be shared by many sheets)
             out.push(Piece {
                 run: crate::textedit::Run {
-                    object: i as usize,
+                    object: *order, // WHAT: its place in drawing order. WHY: the paragraph's pieces in the page's order
                     text,
                     origin,
                     along,
                     size,
-                    advance: (furthest - start).max(0.0),
+                    advance: (furthest - start).max(0.0), // WHAT: how far it runs. WHY: lines are joined by the gap after it
                     colour: [cr.min(255) as u8, cg.min(255) as u8, cb.min(255) as u8],
                     bold: weight >= 600 || lower.contains("bold") || lower.contains("black") || lower.contains("heavy"),
                     italic: slant != 0 || lower.contains("italic") || lower.contains("oblique"),
                     font: name,
+                    held, // WHAT: inside a form or not. WHY: the tool says so rather than changing it
                 },
                 object,
                 font,
                 embedded,
+                order: *order, // WHAT: when it was drawn. WHY: a picture drawn after it covers it
+                bounds: aabb(&corners), // WHAT: its square box on the sheet. WHY: compared with pictures
             });
         }
-        if !words.is_null() {
-            unsafe { b.FPDFText_ClosePage(words) };
-        }
-        out
     }
 
     /// The paragraphs on a sheet of a file, read fresh from disk.
@@ -7018,10 +7170,11 @@ impl Engine {
             self.close_alone(one);
             return Err("that sheet could not be read".into());
         }
-        let runs: Vec<crate::textedit::Run> = self.pieces(handle).into_iter().map(|p| p.run).collect();
+        let (pieces, rules) = self.text_and_rules(handle); // WHAT: the sheet's text and rules. WHY: rules keep table cells apart
+        let runs: Vec<crate::textedit::Run> = pieces.into_iter().map(|p| p.run).collect(); // WHAT: the pieces' readings. WHY: grouped
         unsafe { self.bindings.FPDF_ClosePage(handle) };
         self.close_alone(one);
-        Ok(crate::textedit::paragraphs(&runs))
+        Ok(crate::textedit::paragraphs_ruled(&runs, &rules)) // WHAT: paragraphs that never cross a ruled line. WHY: a table is cells, not columns
     }
 
     /// A page drawn small enough to compare, the same size every time.
@@ -7096,6 +7249,10 @@ impl Engine {
                         return Err("The words on the sheet have changed since they were read. Click them again.".to_string())
                     }
                 }
+            }
+            // WHAT: refuses words inside a form. WHY: a form can be drawn on every sheet of the set; taking an object out of it here would change them all, and pdfium can't take it out of the page anyway
+            if mine.iter().any(|i| pieces[*i].run.held) {
+                return Err(HELD.to_string()); // WHAT: says why. WHY: the window shows it
             }
             let first = &pieces[mine[0]];
 
@@ -7268,7 +7425,7 @@ impl Engine {
                     return Err("the changed sheet would not open again, so nothing was changed".to_string());
                 }
                 let mut left = placed.clone();
-                for p in self.pieces(again) {
+                for p in self.pieces(again).into_iter().filter(|p| !p.run.held) { // WHAT: only the sheet's own pieces. WHY: new words are never put in a form, and one can't be taken off the page
                     if let Some(k) = left.iter().position(|(w, at)| {
                         p.run.text == *w && (p.run.origin[0] - at[0]).abs() < 0.6 && (p.run.origin[1] - at[1]).abs() < 0.6
                     }) {

@@ -219,6 +219,7 @@ pub const VIEW: &[Entry] = &[
     Entry::Item("View.Rulers"),
     Entry::Item("View.Crosshair"),
     Entry::Item("View.MarkupText"),
+    Entry::Item("View.TextOutlines"), // WHAT: Edit Text's outlines, on the View menu. WHY: beside the other things shown over the sheet
     Entry::Item("View.ShowGrid"),
     Entry::Item("View.SnapToGrid"),
     Entry::Item("View.SnapToContent"),

@@ -2014,6 +2014,15 @@ impl App {
                     self.prefs.crosshair = !self.prefs.crosshair;
                     let _ = self.prefs.save();
                 }
+                "View.TextOutlines" => { // WHAT: the Text Outlines switch. WHY: its button, menu item and Ctrl+Shift+B
+                    self.prefs.text_outlines = !self.prefs.text_outlines; // WHAT: flips it. WHY: the button and Ctrl+Shift+B
+                    let _ = self.prefs.save(); // WHAT: kept in this person's settings. WHY: remembered next time
+                    self.status = if self.prefs.text_outlines { // WHAT: says what changed. WHY: a switch with no visible effect outside Edit Text needs words
+                        "Every paragraph Edit Text can change is outlined. Ctrl+Shift+B hides them.".into() // WHAT: on. WHY: and how to undo it
+                    } else {
+                        "Text outlines hidden: Edit Text outlines only the paragraph under the pointer. Ctrl+Shift+B shows them all.".into() // WHAT: off. WHY: and how to undo it
+                    };
+                }
                 "View.MarkupText" => {
                     self.prefs.markup_text = !self.prefs.markup_text;
                     let _ = self.prefs.save();

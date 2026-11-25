@@ -42,6 +42,9 @@ pub struct Run {
     pub font: String,
     pub bold: bool,
     pub italic: bool,
+    /// Inside a Form XObject: a flattened stamp or markup, or a sheet drawn
+    /// as one form. Shown, never changed in place. // WHAT: whether the piece is in a form. WHY: a form can be shared by every sheet in the set, so changing it here would change them all
+    pub held: bool,
 }
 
 /// How a paragraph's lines line up.
@@ -146,6 +149,10 @@ pub struct Found {
     pub bold: bool,
     pub italic: bool,
     pub align: Align,
+    /// Where each line starts and ends along the text, in the text's own space. // WHAT: each line's run. WHY: the editor fits its letters to the widest line so its words sit over the sheet's
+    pub ends: Vec<[f64; 2]>,
+    /// Some of its words are inside a Form XObject. // WHAT: held, as its pieces are. WHY: the tool outlines it but won't change it
+    pub held: bool,
 }
 
 impl Found {
@@ -166,6 +173,11 @@ impl Found {
             out.push_str(line);
         }
         out
+    }
+
+    /// Its words as the sheet breaks them, a line each. // WHAT: the lines joined by line breaks. WHY: drawing notes are broken by hand, so the editor opens with the sheet's own lines and only a line that grows past the width wraps
+    pub fn as_typed(&self) -> String {
+        self.lines.iter().map(|l| l.trim()).collect::<Vec<_>>().join("\n") // WHAT: each line, trimmed, one to a row. WHY: the same
     }
 
     /// A point in the text's own space, in PDF space.
@@ -197,6 +209,112 @@ impl Found {
     }
 }
 
+/// Where the editor's words go on the screen, and in what size and spacing,
+/// so that the words typed sit over the words on the sheet. // WHAT: the editor's placement. WHY: an editor in its own size and wrap, off to one side of the words, is what came up "all screwed up"
+#[derive(Clone, Debug, PartialEq)]
+pub struct Placement {
+    /// The top left of the words themselves, on the screen. // WHAT: the galley's origin. WHY: the frame round it is set back from here
+    pub at: egui::Pos2,
+    /// The letters' size, in screen points. // WHAT: the font size. WHY: the sheet's size at the zoom in view
+    pub size: f32,
+    /// One baseline to the next, in screen points, or the font's own. // WHAT: the line height. WHY: lines stack at the sheet's own spacing
+    pub line_height: Option<f32>,
+    /// Added after each letter, in screen points. // WHAT: letter spacing. WHY: fits the editor's font to the sheet's, line for line
+    pub spacing: f32,
+    /// How wide the words may run before they wrap, in screen points. // WHAT: the wrap width. WHY: the paragraph's own width
+    pub width: f32,
+    /// Over the words on the sheet, or beside them. // WHAT: where it is. WHY: words turned on the screen, or too small to read, are edited in a box beside them instead
+    pub over: bool,
+    /// The paragraph's box on the screen. // WHAT: its four corners. WHY: covered in white while the words are open over it
+    pub cover: Vec<egui::Pos2>,
+}
+
+/// The margin round the editor's words, and the line round that, in screen points. // WHAT: the frame's insets. WHY: the frame is set back by both so the words stay where they are placed
+pub const EDITOR_MARGIN: i8 = 2; // WHAT: the inner margin. WHY: a little room inside the outline
+/// The outline's width. // WHAT: the stroke. WHY: part of the inset
+pub const EDITOR_STROKE: f32 = 1.0; // WHAT: one point. WHY: thin enough not to hide neighbouring lines
+
+/// The words laid out the way the editor shows them. // WHAT: one layout for the editor and its tests. WHY: what is tested is what is drawn
+pub fn job(text: &str, p: &Placement, colour: egui::Color32, wrap: f32) -> egui::text::LayoutJob {
+    let format = egui::TextFormat { // WHAT: how the editor's letters are set. WHY: fitted to the sheet
+        font_id: egui::FontId::proportional(p.size), // WHAT: the size. WHY: the sheet's, at this zoom
+        color: colour, // WHAT: its colour. WHY: the paragraph's own
+        extra_letter_spacing: p.spacing, // WHAT: the fitted spacing. WHY: line for line over the sheet's words
+        line_height: p.line_height, // WHAT: the sheet's line spacing. WHY: line for line over the sheet's words
+        ..Default::default()
+    };
+    let mut job = egui::text::LayoutJob::single_section(text.to_owned(), format); // WHAT: one run of words in one format. WHY: a paragraph is one format here
+    job.wrap.max_width = wrap; // WHAT: where it wraps. WHY: the paragraph's width
+    job.round_output_to_gui = false; // WHAT: letters left where the sums put them, not snapped to whole pixels. WHY: snapping moved a line's end in steps of several pixels, so no spacing could make it meet the sheet's
+    job // WHAT: the job. WHY: laid out by the caller
+}
+
+/// Works out where the editor goes for a paragraph. `to_screen` takes a point
+/// in PDF space to the screen; `layout` lays out words in the window's fonts. // WHAT: the placement sums. WHY: kept apart from the window so a test can check them with real fonts
+pub fn placement(
+    found: &Found,
+    to_screen: &dyn Fn([f64; 2]) -> egui::Pos2,
+    layout: &dyn Fn(egui::text::LayoutJob) -> std::sync::Arc<egui::Galley>,
+) -> Placement {
+    let o = to_screen(found.to_page(found.left, found.top)); // WHAT: the first line's start on the screen. WHY: everything is placed from it
+    let x = to_screen(found.to_page(found.left + 10.0, found.top)); // WHAT: ten points along. WHY: which way the text runs on the screen, and the zoom
+    let y = to_screen(found.to_page(found.left, found.top + 10.0)); // WHAT: ten points up. WHY: whether up on the sheet is up on the screen
+    let along = (x - o) / 10.0; // WHAT: one point along, on the screen. WHY: its length is the zoom
+    let zoom = along.length(); // WHAT: screen points to a PDF point. WHY: sizes scale by it
+    let level = zoom > 0.0 && along.x / zoom > 0.999 && (y - o).y < 0.0; // WHAT: running left to right, upright, on the screen. WHY: only then can a level editor sit over the words
+    let cover: Vec<egui::Pos2> = found.corners().iter().map(|p| to_screen(*p)).collect(); // WHAT: the box on the screen. WHY: covered while open, and the editor goes beside it otherwise
+    let size = (found.size as f32) * zoom; // WHAT: the letters' size on the screen. WHY: matched
+    if !level || size < 7.0 { // WHAT: turned, upside down, or too small to read. WHY: typing over it would be unreadable or crooked
+        let r = egui::Rect::from_points(&cover); // WHAT: the box's square extent. WHY: the editor goes just below it
+        return Placement { // WHAT: the editor beside the words. WHY: as above
+            at: egui::pos2(r.left(), r.bottom() + 8.0), // WHAT: just below the words. WHY: they stay visible while they are retyped
+            size: 14.0, // WHAT: a readable size. WHY: beside the sheet, legibility is what matters
+            line_height: None, // WHAT: the font's own. WHY: the same
+            spacing: 0.0, // WHAT: none. WHY: the same
+            width: ((found.width as f32) * zoom).clamp(240.0, 560.0), // WHAT: a comfortable width. WHY: the same
+            over: false, // WHAT: beside. WHY: as above
+            cover,
+        };
+    }
+    let line_height = if found.lines.len() > 1 { Some((found.spacing as f32) * zoom) } else { None }; // WHAT: the sheet's spacing, for more than one line. WHY: lines stack where the sheet's do
+    // WHAT: the widest line, measured in the window's font at the sheet's size. WHY: the editor's letters are spaced so it runs exactly as far as the sheet's
+    let reach = |words: &str, spacing: f32| { // WHAT: how far a line runs at a spacing: the end of its last letter. WHY: what the sheet's end is compared with
+        let trial = Placement { at: egui::Pos2::ZERO, size, line_height, spacing, width: f32::INFINITY, over: true, cover: Vec::new() }; // WHAT: the line on its own, unwrapped. WHY: measured
+        let galley = layout(job(words, &trial, egui::Color32::BLACK, f32::INFINITY)); // WHAT: laid out. WHY: measured
+        galley.rows.first().and_then(|r| Some((r.row.glyphs.first()?, r.row.glyphs.iter().rev().find(|g| !g.chr.is_whitespace())?))).map(|(first, last)| last.pos.x + last.advance_width - first.pos.x).unwrap_or(0.0) // WHAT: from the first letter's start to the last letter's end. WHY: the line's reach, as the sheet's is measured from its first letter
+    };
+    let widest = (0..found.lines.len().min(found.ends.len())).max_by(|a, b| (found.ends[*a][1] - found.ends[*a][0]).total_cmp(&(found.ends[*b][1] - found.ends[*b][0]))); // WHAT: which line is widest. WHY: fitted to it
+    let mut spacing = 0.0; // WHAT: no extra spacing unless fitted. WHY: the default
+    if let Some(k) = widest { // WHAT: there is a line to fit. WHY: an empty paragraph keeps no spacing
+        let words = found.lines[k].trim(); // WHAT: its words. WHY: measured
+        let letters = words.chars().count().max(1) as f32; // WHAT: how many letters. WHY: the spacing is shared among them
+        let wanted = ((found.ends[k][1] - found.ends[k][0]) as f32) * zoom; // WHAT: how wide the sheet sets it. WHY: the target
+        let (low, high) = (-0.45 * size, 0.8 * size); // WHAT: the bounds on spacing. WHY: an odd line can't make the words unreadable; a half-width CAD style still fits
+        let pairs = (letters - 1.0).max(1.0); // WHAT: how many gaps between letters. WHY: egui adds the spacing once a gap, so the line grows by this much per point of spacing
+        let natural = reach(words, 0.0); // WHAT: how far the window's font sets it. WHY: the starting point
+        let guess = ((wanted - natural) / pairs).clamp(low, high); // WHAT: a first guess. WHY: shared among the gaps
+        // WHAT: the spacing near the guess whose line ends nearest the sheet's, tried in small steps. WHY: egui places letters on its own grid, so a line's end moves in steps as the spacing changes and the best is found by looking, not by sums
+        spacing = (-20..=20)
+            .map(|k| (guess + k as f32 * 0.15 / pairs).clamp(low, high)) // WHAT: forty-one spacings round the guess, a sixth of a pixel of line apart. WHY: enough to step over egui's grid either way
+            .filter(|s| *s != 0.0) // WHAT: never exactly none. WHY: egui lays out unspaced text differently, so it is never compared with the rest
+            .map(|s| (s, (wanted - reach(words, s)).abs())) // WHAT: each with how far off it ends. WHY: compared
+            .min_by(|a, b| a.1.total_cmp(&b.1)) // WHAT: the nearest. WHY: the best fit
+            .map_or(guess, |(s, _)| s); // WHAT: its spacing. WHY: used
+    }
+    let fits = found.lines.iter().map(|l| reach(l.trim(), spacing)).fold(0.0_f32, f32::max); // WHAT: the longest of the sheet's lines as the editor sets them. WHY: the wrap width must hold every one
+    let mut p = Placement { at: egui::Pos2::ZERO, size, line_height, spacing, width: fits + 0.5 * size, over: true, cover }; // WHAT: the placement, still at the origin; it wraps just past the longest line. WHY: the editor breaks its lines where the sheet did, since a next word and its space are always wider than half the size
+
+    let galley = layout(job(&found.as_typed(), &p, egui::Color32::BLACK, p.width)); // WHAT: the editor's words laid out. WHY: where its first baseline and first letter fall
+    let (dx, dy) = galley.rows.first().and_then(|r| r.row.glyphs.first().map(|g| (r.pos.x + g.pos.x, r.pos.y + g.pos.y))).unwrap_or((0.0, size * 0.8)); // WHAT: the first letter's start and baseline in the layout. WHY: put on the sheet's
+    p.at = egui::pos2(o.x - dx, o.y - dy); // WHAT: moved so they coincide. WHY: the editor's first baseline on the sheet's
+    p // WHAT: the placement. WHY: the window uses it
+}
+
+/// Whether a paragraph's outline is drawn: always under the pointer, otherwise only with Text Outlines on. // WHAT: the outline rule. WHY: one place decides, and a test holds it
+pub fn shows_outline(under: bool, every: bool) -> bool {
+    under || every // WHAT: under the pointer, or all asked for. WHY: off by default, so a busy sheet stays readable
+}
+
 /// What the paragraph is to become.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rewrite {
@@ -214,7 +332,7 @@ pub struct Rewrite {
 impl Rewrite {
     pub fn of(found: &Found) -> Rewrite {
         Rewrite {
-            text: found.text(),
+            text: found.as_typed(), // WHAT: the sheet's own lines. WHY: a hand-broken note keeps its breaks unless somebody changes them
             size: found.size,
             colour: found.colour,
             family: Family::Keep,
@@ -245,10 +363,58 @@ struct Line {
     y: f64,
     size: f64,
     text: String,
+    face: (String, bool), // WHAT: its first piece's font and weight. WHY: a bold heading is not part of the notes under it
 }
 
-/// The paragraphs on a page, from its pieces of text.
+/// A straight line drawn on the sheet, from one point to another, in PDF space. // WHAT: a rule. WHY: a table's rulings keep its cells apart
+pub type Rule = [[f64; 2]; 2];
+
+/// The rules lying along or across one text direction, sorted so the ones between two lines are found quickly. // WHAT: rules in the text's own space. WHY: a dense sheet has many; each check looks only near itself
+struct Ruling {
+    across: Vec<(f64, f64, f64)>, // WHAT: rules running along the text: how far up, and from where to where along. WHY: they separate rows, sorted by how far up
+    down: Vec<(f64, f64, f64)>, // WHAT: rules running up the text: how far along, and from where to where up. WHY: they separate columns, sorted by how far along
+}
+
+impl Ruling {
+    /// The rules in one direction's space. // WHAT: projected and sorted. WHY: checked below
+    fn of(rules: &[Rule], along: [f64; 2], up: [f64; 2]) -> Ruling {
+        let (mut across, mut down) = (Vec::new(), Vec::new()); // WHAT: the two kinds. WHY: filled below
+        for [a, b] in rules { // WHAT: each rule. WHY: sorted into a kind
+            let (ax, ay, bx, by) = (dot(*a, along), dot(*a, up), dot(*b, along), dot(*b, up)); // WHAT: its ends in the text's space. WHY: compared there
+            let (dx, dy) = ((bx - ax).abs(), (by - ay).abs()); // WHAT: how far it runs each way. WHY: which kind it is
+            if dx >= 2.0 && dy <= 0.05 * dx { // WHAT: long and level. WHY: a row's rule
+                across.push(((ay + by) * 0.5, ax.min(bx), ax.max(bx))); // WHAT: kept. WHY: separates rows
+            } else if dy >= 2.0 && dx <= 0.05 * dy { // WHAT: long and upright. WHY: a column's rule
+                down.push(((ax + bx) * 0.5, ay.min(by), ay.max(by))); // WHAT: kept. WHY: separates columns
+            }
+        }
+        across.sort_by(|p, q| p.0.total_cmp(&q.0)); // WHAT: by height. WHY: searched by it
+        down.sort_by(|p, q| p.0.total_cmp(&q.0)); // WHAT: by place along. WHY: searched by it
+        Ruling { across, down } // WHAT: both kinds. WHY: searched by the grouping
+    }
+
+    /// Whether a rule runs along the text strictly between two heights, over the stretch from `x0` to `x1`. // WHAT: a row rule between two lines. WHY: they are two cells, not one paragraph
+    fn between_rows(&self, low: f64, high: f64, x0: f64, x1: f64) -> bool {
+        let from = self.across.partition_point(|r| r.0 <= low); // WHAT: the first rule above `low`. WHY: a sorted search
+        self.across[from..].iter().take_while(|r| r.0 < high).any(|r| r.1 < x1 - 0.5 && r.2 > x0 + 0.5) // WHAT: one under `high` that overlaps the stretch. WHY: the rule really is between them
+    }
+
+    /// Whether a rule runs up the text strictly between two places along it, over the height from `y0` to `y1`. // WHAT: a column rule between two pieces. WHY: they are two cells, not one line
+    fn between_columns(&self, left: f64, right: f64, y0: f64, y1: f64) -> bool {
+        let from = self.down.partition_point(|r| r.0 <= left); // WHAT: the first rule past `left`. WHY: a sorted search
+        self.down[from..].iter().take_while(|r| r.0 < right).any(|r| r.1 < y1 && r.2 > y0) // WHAT: one before `right` that spans the letters. WHY: the rule really is between them
+    }
+}
+
+/// The paragraphs on a page, from its pieces of text, with nothing drawn on it. // WHAT: grouping without rules. WHY: the tests of grouping alone
 pub fn paragraphs(runs: &[Run]) -> Vec<Found> {
+    paragraphs_ruled(runs, &[]) // WHAT: no rules. WHY: the same grouping
+}
+
+/// The paragraphs on a page, from its pieces of text and the straight lines
+/// drawn on it: no line or paragraph crosses a ruled line, and a change of
+/// font or weight starts a new paragraph. // WHAT: grouping that respects tables and headings. WHY: a schedule's column, header and all, came up as one paragraph and would be reflowed as one
+pub fn paragraphs_ruled(runs: &[Run], rules: &[Rule]) -> Vec<Found> {
     // Each direction on its own: a sheet can have notes running three ways.
     let mut directions: Vec<([f64; 2], Vec<usize>)> = Vec::new();
     for (i, run) in runs.iter().enumerate() {
@@ -263,6 +429,7 @@ pub fn paragraphs(runs: &[Run]) -> Vec<Found> {
     let mut out = Vec::new();
     for (along, members) in directions {
         let up = [-along[1], along[0]];
+        let ruling = Ruling::of(rules, along, up); // WHAT: the rules in this direction's space. WHY: lines and paragraphs never cross one
         let mut placed: Vec<Placed> = members
             .iter()
             .map(|&i| {
@@ -284,6 +451,7 @@ pub fn paragraphs(runs: &[Run]) -> Vec<Found> {
                     && (r.size / l.size) < 1.25
                     && p.x - l.end < 1.2 * l.size
                     && p.x > l.x - 0.5 * l.size
+                    && !ruling.between_columns(l.end - 0.1 * l.size, p.x + 0.1 * l.size, p.y - 0.2 * r.size, p.y + 0.7 * r.size) // WHAT: no column rule between them. WHY: two cells of a table on one baseline are two pieces of text
             });
             match joined {
                 Some(line) => {
@@ -302,6 +470,7 @@ pub fn paragraphs(runs: &[Run]) -> Vec<Found> {
                     y: p.y,
                     size: r.size,
                     text: r.text.clone(),
+                    face: (r.font.clone(), r.bold), // WHAT: its font and weight. WHY: compared when lines are stacked
                 }),
             }
         }
@@ -330,7 +499,10 @@ pub fn paragraphs(runs: &[Run]) -> Vec<Found> {
                 // The next note in a numbered list is its own paragraph, even
                 // set at the same spacing as the one before it.
                 let next_item = starts_an_item(&line.text) && ends_a_sentence(&last.text);
-                size_ok && spacing_ok && same_spacing && overlaps && lined_up && !next_item
+                let same_face = line.face == last.face; // WHAT: the same font and weight. WHY: a bold heading or a different style is its own paragraph
+                let (x0, x1) = (line.x.max(left), line.end.min(right)); // WHAT: where the line and the paragraph overlap along. WHY: a rule there separates them
+                let ruled = ruling.between_rows(line.y + 0.75 * line.size, last.y - 0.25 * last.size, x0.min(x1), x0.max(x1)); // WHAT: a rule between the paragraph's last line and this one. WHY: ruled rows of a table are cells
+                size_ok && spacing_ok && same_spacing && overlaps && lined_up && !next_item && same_face && !ruled // WHAT: every test passed. WHY: only then is it the same paragraph
             });
             match home {
                 Some(g) => g.push(i),
@@ -384,6 +556,8 @@ pub fn paragraphs(runs: &[Run]) -> Vec<Found> {
                 bold: sample.bold,
                 italic: sample.italic,
                 align,
+                ends: g.iter().map(|k| [lines[*k].x, lines[*k].end]).collect(), // WHAT: each line's start and end. WHY: the editor's letters are fitted to them
+                held: run_order.iter().any(|i| runs[*i].held), // WHAT: any piece in a form. WHY: then the whole paragraph is held
             });
         }
     }
@@ -579,6 +753,10 @@ impl crate::app::App {
         let Some(found) = doc.paragraphs.get(&page).and_then(|f| f.get(index)).cloned() else {
             return;
         };
+        if found.held { // WHAT: words inside a form. WHY: shown so nobody wonders where they went, but not opened for typing
+            self.status = crate::render::HELD.to_string(); // WHAT: says why and what to do instead. WHY: the same sentence the worker gives
+            return; // WHAT: nothing opened. WHY: the same
+        }
         self.rewording = Some(Rewording {
             page,
             rewrite: Rewrite::of(&found),
@@ -590,8 +768,10 @@ impl crate::app::App {
         });
     }
 
-    /// Outlines what can be changed while the tool is in hand: every
-    /// paragraph faintly, the one under the pointer plainly.
+    /// Outlines what can be changed while the tool is in hand: the paragraph
+    /// under the pointer always, and every other one faintly only when Text
+    /// Outlines is on. Words inside a form are outlined grey: seen, not
+    /// changed. // WHAT: Edit Text's boxes. WHY: a box round every note on a busy sheet buried the drawing, so they are off unless asked for
     pub fn paint_paragraphs(&self, painter: &egui::Painter) {
         if self.tool != crate::app::Tool::EditText {
             return;
@@ -599,10 +779,14 @@ impl crate::app::App {
         let Some(doc) = self.doc() else { return };
         let Some(found) = doc.paragraphs.get(&doc.page) else { return };
         let frame = doc.frame();
-        let blue = egui::Color32::from_rgb(90, 170, 255);
+        let every = self.prefs.text_outlines; // WHAT: every box, or only the one under the pointer. WHY: the Text Outlines switch
         for (i, f) in found.iter().enumerate() {
             if self.rewording.as_ref().is_some_and(|r| r.found == *f) {
                 continue;
+            }
+            let under = self.text_under == Some(i); // WHAT: under the pointer. WHY: always outlined
+            if !shows_outline(under, every) { // WHAT: not under the pointer and the outlines are off. WHY: nothing drawn, the drawing stays clear
+                continue; // WHAT: next. WHY: the same
             }
             let points: Vec<egui::Pos2> = f
                 .corners()
@@ -612,11 +796,11 @@ impl crate::app::App {
                     doc.view.to_screen([s[0] as f32, s[1] as f32])
                 })
                 .collect();
-            let under = self.text_under == Some(i);
+            let (r, g, b) = if f.held { (150, 150, 150) } else { (90, 170, 255) }; // WHAT: grey for words in a form, blue for words that can change. WHY: the box says which before the click does
             if under {
                 painter.add(egui::Shape::convex_polygon(
                     points.clone(),
-                    egui::Color32::from_rgba_unmultiplied(90, 170, 255, 28),
+                    egui::Color32::from_rgba_unmultiplied(r, g, b, 28), // WHAT: a faint fill in the outline's colour. WHY: marks the one a click opens
                     egui::Stroke::NONE,
                 ));
             }
@@ -624,7 +808,7 @@ impl crate::app::App {
                 points,
                 egui::Stroke::new(
                     if under { 1.6_f32 } else { 0.8_f32 }, // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
-                    if under { blue } else { egui::Color32::from_rgba_unmultiplied(90, 170, 255, 110) },
+                    egui::Color32::from_rgba_unmultiplied(r, g, b, if under { 255 } else { 110 }), // WHAT: plain under the pointer, faint otherwise. WHY: the one about to open stands out
                 ),
             ));
         }
@@ -641,21 +825,16 @@ impl crate::app::App {
             return;
         }
         let frame = doc.frame();
-        let zoom = doc.view.zoom;
-        let corners: Vec<egui::Pos2> = r
-            .found
-            .corners()
-            .iter()
-            .map(|p| {
-                let s = frame.to_sheet(*p);
-                doc.view.to_screen([s[0] as f32, s[1] as f32])
-            })
-            .collect();
-        let mut area = egui::Rect::from_points(&corners);
-        // Room for more than was there: a paragraph can grow downwards.
-        let width = (r.rewrite.width as f32 * zoom).max(80.0);
-        area.set_width(area.width().max(width));
-        let size = (r.rewrite.size as f32 * zoom).clamp(6.0, 96.0);
+        let to_screen = |p: [f64; 2]| { let s = frame.to_sheet(p); doc.view.to_screen([s[0] as f32, s[1] as f32]) }; // WHAT: PDF space to the screen. WHY: the editor is placed over the words as they are shown
+        let mut place = placement(&r.found, &to_screen, &|j| ctx.fonts(|f| f.layout_job(j))); // WHAT: where the editor goes and how its words are set. WHY: so the typed words sit over the sheet's
+        if place.over { // WHAT: over the words. WHY: a size typed in the strip scales the editor with it
+            let k = (r.rewrite.size / r.found.size.max(0.1)) as f32; // WHAT: how much bigger it is now. WHY: the editor follows the size being set
+            place.size *= k; // WHAT: the letters. WHY: the same
+            place.spacing *= k; // WHAT: the spacing. WHY: the same
+            place.line_height = place.line_height.map(|h| h * k); // WHAT: the lines. WHY: the same
+        }
+        let area = egui::Rect::from_points(&place.cover); // WHAT: the box's square extent on the screen. WHY: the settings strip goes above it
+        let inset = f32::from(EDITOR_MARGIN) + EDITOR_STROKE; // WHAT: how far the frame stands out from the words. WHY: the frame is set back so the words stay where placed
         let ink = egui::Color32::from_rgb(r.rewrite.colour[0], r.rewrite.colour[1], r.rewrite.colour[2]);
         let mut done = false;
         let mut cancel = false;
@@ -738,22 +917,26 @@ impl crate::app::App {
             });
 
         // The words, where they are, over a sheet of paper that hides the old.
+        if place.over { // WHAT: typed over the words. WHY: the old words under the box are hidden, all of them, even where the editor is narrower
+            ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new(("reword-cover", r.page)))).add(egui::Shape::convex_polygon(place.cover.clone(), egui::Color32::WHITE, egui::Stroke::NONE)); // WHAT: white over the paragraph's own box. WHY: the old words don't show through beside the new
+        }
+        let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| ui.fonts(|f| f.layout_job(job(text.as_str(), &place, ink, wrap))); // WHAT: the editor's words in the placed size and spacing. WHY: line for line over the sheet's
         egui::Area::new(egui::Id::new(("reword-words", r.page)))
             .order(egui::Order::Foreground)
-            .fixed_pos(area.left_top())
+            .fixed_pos(place.at - egui::vec2(inset, inset)) // WHAT: the frame, set back from the words. WHY: the words land on the sheet's
             .show(ctx, |ui| {
                 egui::Frame::new()
                     .fill(egui::Color32::WHITE)
-                    .stroke(egui::Stroke::new(1.5_f32, theme.accent)) // WHAT: the line width written as f32. WHY: a bare float there leans on the f32 fallback the compiler is retiring (float_literal_f32_fallback).
-                    .inner_margin(egui::Margin::same(2))
+                    .stroke(egui::Stroke::new(EDITOR_STROKE, theme.accent)) // WHAT: a thin outline. WHY: part of the inset the words are placed by
+                    .inner_margin(egui::Margin::same(EDITOR_MARGIN)) // WHAT: the inner margin. WHY: part of the inset
                     .show(ui, |ui| {
                         let typed = ui.add_enabled(
                             !r.running,
                             egui::TextEdit::multiline(&mut r.rewrite.text)
                                 .frame(false)
-                                .font(egui::FontId::proportional(size))
-                                .text_color(ink)
-                                .desired_width(width)
+                                .margin(egui::Margin::ZERO) // WHAT: no margin of its own. WHY: its words start exactly where placed
+                                .layouter(&mut layouter) // WHAT: the placed size and spacing. WHY: the same
+                                .desired_width(place.width) // WHAT: the paragraph's width. WHY: wraps where the sheet's lines did
                                 .desired_rows(r.found.lines.len().max(1)),
                         );
                         if !r.running {
@@ -875,7 +1058,18 @@ mod tests {
             font: "Helvetica".into(),
             bold: false,
             italic: false,
+            held: false, // WHAT: on the sheet itself. WHY: the usual case
         }
+    }
+
+    #[test]
+    fn outlines_are_off_unless_somebody_asks_for_them() { // WHAT: the outlines switch and its default. WHY: the boxes stay away unless asked for
+        assert!(!crate::prefs::Prefs::default().text_outlines, "a new seat outlines only under the pointer"); // WHAT: off by default. WHY: what Arc Valley asked for
+        let older: crate::prefs::Prefs = serde_json::from_str("{}").expect("an empty settings file reads"); // WHAT: settings from before the switch. WHY: they must not turn the boxes on
+        assert!(!older.text_outlines, "settings written before the switch outline everything"); // WHAT: still off. WHY: the same
+        assert!(shows_outline(true, false), "the paragraph under the pointer is always outlined"); // WHAT: hover shows. WHY: you see what a click opens
+        assert!(!shows_outline(false, false), "with outlines off, other paragraphs are outlined"); // WHAT: nothing else. WHY: the drawing stays clear
+        assert!(shows_outline(false, true), "with outlines on, other paragraphs aren't outlined"); // WHAT: all on request. WHY: the switch works
     }
 
     #[test]
@@ -966,6 +1160,50 @@ mod tests {
         let found = paragraphs(&runs);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].text(), "W12X26 BEAM");
+    }
+
+    #[test]
+    fn a_ruled_table_is_read_cell_by_cell() { // WHAT: row rules split a table into cells. WHY: the sample set's schedules read as columns
+        // WHAT: a two-column schedule, rows 12 points apart with a rule between each, the way a sheet index is drawn. WHY: it came up as one paragraph per column, header and all
+        let mut runs = vec![run(0, "SHEET", 100.0, 512.0, 6.0), run(1, "TITLE", 150.0, 512.0, 6.0)]; // WHAT: the header row. WHY: bold in real sets; plain here, the rules alone must separate it
+        let mut rules: Vec<Rule> = vec![[[95.0, 520.0], [300.0, 520.0]]]; // WHAT: the table's top. WHY: drawn above the header
+        for (i, (sheet, title)) in [("S-001", "GENERAL NOTES"), ("S-101", "FOUNDATION PLAN"), ("S-201", "FRAMING PLAN")].iter().enumerate() { // WHAT: each row. WHY: three cells down each column
+            let y = 500.0 - 12.0 * i as f64; // WHAT: its baseline. WHY: 12 points a row
+            runs.push(run(2 + 2 * i, sheet, 100.0, y, 6.0)); // WHAT: the sheet number. WHY: the first column
+            runs.push(run(3 + 2 * i, title, 150.0, y, 6.0)); // WHAT: the title. WHY: the second column
+            rules.push([[95.0, y + 9.0], [300.0, y + 9.0]]); // WHAT: the rule above the row. WHY: what separates the cells
+        }
+        rules.push([[145.0, 520.0], [145.0, 470.0]]); // WHAT: the rule between the columns. WHY: as drawn
+        assert_eq!(paragraphs(&runs).len(), 2, "without the rules the columns run together"); // WHAT: the old reading. WHY: shows what the rules change
+        let found = paragraphs_ruled(&runs, &rules); // WHAT: read with the rules. WHY: the fix
+        assert_eq!(found.len(), 8, "{:?}", found.iter().map(|f| f.text()).collect::<Vec<_>>()); // WHAT: one paragraph a cell. WHY: a cell is what somebody means to change
+        assert!(found.iter().any(|f| f.text() == "FOUNDATION PLAN")); // WHAT: a cell on its own. WHY: the same
+    }
+
+    #[test]
+    fn the_editor_opens_with_the_sheets_own_line_breaks() { // WHAT: hand-broken lines kept. WHY: reflowing moved words nobody touched
+        let found = paragraphs(&[run(0, "VERIFY ALL", 100.0, 500.0, 10.0), run(1, "DIMENSIONS IN FIELD", 100.0, 488.0, 10.0)]).remove(0); // WHAT: a note broken by hand, its first line short. WHY: CAD notes are broken where the drafter chose
+        assert_eq!(Rewrite::of(&found).text, "VERIFY ALL\nDIMENSIONS IN FIELD"); // WHAT: the sheet's lines, one to a row. WHY: reflowing by width moved words between lines nobody touched
+        let measure = |s: &str| s.chars().count() as f64 * 5.0; // WHAT: five points a letter. WHY: a simple font for the sum
+        assert_eq!(wrap(&Rewrite::of(&found).text, found.width, &measure), vec!["VERIFY ALL", "DIMENSIONS IN FIELD"]); // WHAT: written back as it was. WHY: an unchanged note is set back line for line
+    }
+
+    #[test]
+    fn a_column_rule_keeps_two_close_cells_apart() { // WHAT: column rules split a line. WHY: close cells on one baseline read as one line
+        let runs = vec![run(0, "S-001", 100.0, 500.0, 6.0), run(1, "GENERAL NOTES", 118.0, 500.0, 6.0)]; // WHAT: two cells three points apart on one baseline. WHY: close enough to read as one line
+        assert_eq!(paragraphs(&runs).len(), 1, "without the rule they are one line"); // WHAT: the old reading. WHY: shows what the rule changes
+        let rule: Vec<Rule> = vec![[[116.5, 495.0], [116.5, 510.0]]]; // WHAT: the column's rule between them. WHY: as a schedule draws it
+        assert_eq!(paragraphs_ruled(&runs, &rule).len(), 2, "a column rule between two cells didn't keep them apart"); // WHAT: two cells. WHY: the guard
+    }
+
+    #[test]
+    fn a_bold_heading_is_not_part_of_the_notes_under_it() { // WHAT: a font change splits paragraphs. WHY: a heading must not reflow with its notes
+        let mut heading = run(0, "GENERAL NOTES", 100.0, 512.0, 10.0); // WHAT: a heading. WHY: bold, close above its notes
+        heading.bold = true; // WHAT: bold. WHY: the difference that separates it
+        heading.font = "Helvetica-Bold".into(); // WHAT: its font. WHY: the same
+        let runs = vec![heading, run(1, "1. ALL STEEL SHALL BE A992.", 100.0, 500.0, 10.0), run(2, "2. ALL BOLTS A325.", 100.0, 488.0, 10.0)]; // WHAT: the heading and two notes. WHY: at one spacing
+        let found = paragraphs(&runs); // WHAT: read. WHY: checked
+        assert!(found.iter().any(|f| f.text() == "GENERAL NOTES"), "{:?}", found.iter().map(|f| f.text()).collect::<Vec<_>>()); // WHAT: the heading alone. WHY: a change to a note must never reflow its heading
     }
 
     #[test]

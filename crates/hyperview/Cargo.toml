@@ -145,3 +145,6 @@ toml = "0.8"
 # Hand-written plugins for the sandbox's tests, in WebAssembly's text form.
 wat = "1"
 ed25519-dalek = "2"
+# WHAT: a real TrueType font and a reader for it, both already built into the program through egui. WHY: the Edit Text alignment tests embed it as a subset CID font, the way spec books carry theirs, with no new crate in the build
+epaint_default_fonts = "0.32"
+ttf-parser = "0.25"

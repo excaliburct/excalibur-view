@@ -1033,7 +1033,7 @@ pub fn flow<'a>(row: &[&'a chest::ToolBar], room: f32) -> Vec<Vec<&'a chest::Too
 pub fn standard_toolbars() -> Vec<chest::ToolBar> {
     const BARS: &[(&str, i32, i32, &[&str])] = &[
         ("toolStripFile", 0, 3, &["Document.New", "File.CreatePDF", "File.CombinePDFs", "File.Open", "Document.Save", "Document.Print", "Split.Email", "Document.NewPackage", "Search", "SpellCheck"]),
-        ("toolStripAdvancedText", 0, 383, &["Edit.Text", "|", "Markup.ReviewText", "|", "Markup.Underline", "Markup.Squiggly", "Markup.Strikethrough"]),
+        ("toolStripAdvancedText", 0, 383, &["Edit.Text", "View.TextOutlines", "|", "Markup.ReviewText", "|", "Markup.Underline", "Markup.Squiggly", "Markup.Strikethrough"]), // WHAT: Advanced Text, with Text Outlines beside Edit Text. WHY: the switch sits next to the tool it serves
         ("toolStripMeasure", 0, 586, &["Measure.Tool", "Measure.Calibrate", "|", "Measure.Length", "Measure.Polylength", "Measure.Area", "Measure.Perimeter", "Measure.Diameter", "Measure.Angle", "Measure.Radius", "Measure.Volume", "Measure.Count", "|", "Measure.AreaCutout", "Measure.AreaEllipseCutout", "Measure.DynamicFill"]),
         ("toolStripText", 0, 1113, &["Markup.TextBox", "Markup.Typewriter", "Markup.Note", "Markup.Callout", "Markup.Flag", "|", "Markup.Highlight", "Markup.Pen", "Eraser", "|", "Markup.Cloud9", "Markup.Cloud", "Markup.CloudPlus", "Button.Stamp", "Markup.Signature", "Markup.Image", "Snapshot"]),
         ("toolStripLine", 0, 1457, &["Markup.Line", "Markup.Arrow", "Markup.Arc", "Markup.Polyline", "Markup.Dimension", "Markup.Rectangle", "Markup.Ellipse", "Markup.Polygon"]),
