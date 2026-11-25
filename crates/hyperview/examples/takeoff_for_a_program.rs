@@ -7,6 +7,11 @@
 //! account, and makes a sync key named `Fabwire V2` from the Office page's
 //! "Make a sync key": it prints `{"key": "…"}`.
 //!
+//! `computer <url> <pin> <secret> <email> <password>` asks to be let in as
+//! this computer (the first to ask on a fresh server is approved as its admin
+//! computer) and signs in with an account the server already has, as a
+//! headless server's `HYPERVIEW_FIRST_ADMIN` one: it prints `{"approved": true}`.
+//!
 //! `takeoff <url> <pin> <secret> <email> <password> <project>` signs in on
 //! the same computer and draws on every current drawing of the project with
 //! the viewer's own tools (`sheet::Draft`, as a click on the sheet makes one),
@@ -20,7 +25,8 @@
 //! tool from the Tool Chest and clicking on the sheet does: it prints
 //! `{"pushed": n, "tools": [[set, subject, kind], …]}`.
 //!
-//! `<secret>` is 64 hex digits: this computer's device key, so the second
+//! `<pin>` is the server's certificate pin, or `none` for a server on plain
+//! HTTP. `<secret>` is 64 hex digits: this computer's device key, so the second
 //! command is the same computer as the first.
 
 use std::sync::Arc;
@@ -32,8 +38,9 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect(); // WHAT: the words after the program's name. WHY: the command and its values
     let result = match args.first().map(String::as_str) {
         Some("office") if args.len() == 6 => office(&args[1], &args[2], &args[3], &args[4], &args[5]), // WHAT: a fresh server claimed and Fabwire's key made. WHY: what an owner does once
+        Some("computer") if args.len() == 6 => let_in(&args[1], &args[2], &args[3], &args[4], &args[5]), // WHAT: this computer let in and signed in. WHY: a server set up headless already has its admin
         Some("takeoff") if args.len() == 7 || args.len() == 8 => takeoff(&args[1], &args[2], &args[3], &args[4], &args[5], &args[6], args.get(7).map(String::as_str)), // WHAT: a takeoff drawn, with the standard tools or a chest's. WHY: what an estimator does on each bid
-        _ => Err("use: office URL PIN SECRET EMAIL PASSWORD, or takeoff URL PIN SECRET EMAIL PASSWORD PROJECT [CHEST]".to_string()), // WHAT: how to use it. WHY: said, never guessed
+        _ => Err("use: office URL PIN SECRET EMAIL PASSWORD, computer URL PIN SECRET EMAIL PASSWORD, or takeoff URL PIN SECRET EMAIL PASSWORD PROJECT [CHEST]".to_string()), // WHAT: how to use it. WHY: said, never guessed
     };
     match result {
         Ok(said) => println!("{said}"), // WHAT: the answer, one line of JSON. WHY: the test reads it
@@ -55,7 +62,19 @@ fn computer(url: &str, pin: &str, secret: &str) -> Result<hub::Client, String> {
     let mut seed = [0u8; 32]; // WHAT: room for the key. WHY: DeviceKey takes an array
     seed.copy_from_slice(&bytes); // WHAT: the bytes in place. WHY: as above
     let signer = Arc::new(hub::device::Signer::new(hub::device::DeviceKey::from_secret(&seed))); // WHAT: this computer's device. WHY: every request after joining is signed by it
-    Ok(hub::Client::pinned(url, pin).map_err(|e| e.to_string())?.with_device(signer)) // WHAT: the client, pinned and signing. WHY: as a 0.7 seat connects
+    let client = if pin == "none" { hub::Client::new(url) } else { hub::Client::pinned(url, pin).map_err(|e| e.to_string())? }; // WHAT: plain HTTP, or held to the pin. WHY: a test's server may run either way
+    Ok(client.with_device(signer)) // WHAT: the client, signing. WHY: as a 0.7 seat connects
+}
+
+/// Lets this computer in and signs in with an account the server has.
+fn let_in(url: &str, pin: &str, secret: &str, email: &str, password: &str) -> Result<String, String> {
+    let mut client = computer(url, pin, secret)?; // WHAT: this computer. WHY: the first to ask is approved
+    let answer = client.ask_to_be_let_in("view", "Estimator").map_err(|e| e.to_string())?.ok_or("the server has no device list")?; // WHAT: asked to be let in. WHY: as above
+    if answer.state != "approved" {
+        return Err(format!("this computer wasn't approved: {}", answer.state)); // WHAT: said. WHY: nothing else works until it is
+    }
+    client.sign_in(email, password).map_err(|e| e.to_string())?; // WHAT: signed in. WHY: proves the account works from this computer
+    Ok(serde_json::json!({ "approved": true }).to_string()) // WHAT: done. WHY: the test reads it
 }
 
 /// Claims the server and makes Fabwire's sync key.
