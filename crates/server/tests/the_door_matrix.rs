@@ -254,6 +254,11 @@ const TABLE: &[(&str, &str, Door)] = &[
     ("POST", "/signoffs/{id}/sign", Door::Gated),
     ("POST", "/signoffs/{id}/withdraw", Door::Gated),
     ("GET", "/signoffs/{id}/signature.png", Door::Gated),
+    ("GET", "/projects/{id}/tablet", Door::Gated), // WHAT: a job's tablet manifest. WHY: a tablet is an approved device; Fabwire passes as its key
+    ("PUT", "/projects/{id}/tablet", Door::Gated), // WHAT: setting it. WHY: through the gate as a key; the route itself takes only a sync key
+    ("GET", "/tablet", Door::Gated), // WHAT: the caller's tablet jobs. WHY: an approved device
+    ("GET", "/projects/{id}/crew", Door::Gated), // WHAT: a job's crew read by its program. WHY: Fabwire passes as its key; never open
+    ("POST", "/projects/{id}/crew", Door::Gated), // WHAT: a sign-in put on or taken off by its program. WHY: likewise
 ];
 
 /// Fleet's own routes and the assistant's, outside `/api/v1`.

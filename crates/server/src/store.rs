@@ -22,6 +22,14 @@ fn has_table(db: &Connection, name: &str) -> rusqlite::Result<bool> {
     Ok(found > 0) // WHAT: whether there is one. WHY: the caller's question
 }
 
+/// Who may see a project with nobody named on it, as SQL over `p` with `?2`
+/// the person: everybody, as every server has always worked, unless Fabwire
+/// filed it (a `fabwire:` reference), when it is the office's only (anybody
+/// but a viewer): Fabwire keeps who sees its jobs (`crate::crew`), so one left
+/// with nobody named, by a person's removal or never set up, is never the
+/// shop's or the field's. Used by every rule of who sees a project.
+pub const OPEN_WHEN_EMPTY: &str = "(p.reference IS NULL OR p.reference NOT LIKE 'fabwire:%' OR EXISTS (SELECT 1 FROM people u WHERE u.id = ?2 AND u.role <> 'viewer'))"; // WHAT: the rule for an empty project. WHY: one copy, so the list, a direct fetch and the assistant can never disagree
+
 pub struct Store {
     db: std::sync::Mutex<Connection>,
     blobs: PathBuf,
@@ -307,6 +315,7 @@ CREATE TABLE IF NOT EXISTS signoffs (
     label       TEXT NOT NULL,
     grp         TEXT NOT NULL DEFAULT '',
     ref         TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT '',
     page        INTEGER,
     asked_by    TEXT NOT NULL,
     asked       TEXT NOT NULL,
@@ -349,6 +358,29 @@ CREATE TABLE IF NOT EXISTS devices (
     scope       TEXT NOT NULL DEFAULT 'all'
 );
 CREATE INDEX IF NOT EXISTS devices_by_state ON devices(state, asked);
+
+-- The tablet manifest (docs/TABLET-MANIFEST.md): one per job, set only by a
+-- program's sync key (Fabwire). `body` is the manifest in the server's own
+-- canonical JSON and `digest` its SHA-256, so the same push again changes
+-- nothing; `version` counts the changes. `tablet_items` is what it lets the
+-- shop and the field reach, worked out once when it is set, so every request
+-- of a tablet account reads a short list instead of the whole manifest.
+CREATE TABLE IF NOT EXISTS tablet_manifests (
+    project     TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    body        TEXT NOT NULL,
+    digest      TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    updated     TEXT NOT NULL,
+    updated_by  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tablet_items (
+    project     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,
+    id          TEXT NOT NULL,
+    shop        INTEGER NOT NULL,
+    field       INTEGER NOT NULL,
+    PRIMARY KEY (project, kind, id)
+);
 "#;
 
 /// An invitation as it is written down.
@@ -660,7 +692,7 @@ impl Store {
                 |r| r.get(0),
             )?;
             if named == 0 {
-                return Ok(true);
+                return Ok(db.query_row(&format!("SELECT {OPEN_WHEN_EMPTY} FROM projects p WHERE p.id = ?1"), params![project, person], |r| r.get::<_, bool>(0)).optional()?.unwrap_or(true)); // WHAT: nobody named: everybody's, unless Fabwire filed it, then the office's only. WHY: a Fabwire job with nobody named (its last person removed, or no crew yet) never opens to the shop and field
             }
             let mine: i64 = db.query_row(
                 "SELECT COUNT(*) FROM project_people WHERE project = ?1 AND person = ?2",
@@ -812,6 +844,7 @@ fn upgrade(db: &Connection) -> Result<()> {
     add_column(db, "sets", "folder", "TEXT")?;
     // When a key stops working, for a key given an end. None is never, which
     // is every key made before keys could end, so none of them is broken.
+    add_column(db, "signoffs", "kind", "TEXT NOT NULL DEFAULT ''")?; // WHAT: which ticket box a line is (loaded_by, driver, received_by), empty for any other. WHY: only some accounts may sign some boxes
     add_column(db, "keys", "expires", "TEXT")?; // WHAT: the optional end of a key. WHY: a key for a program can be made to run out on its own.
     add_column(db, "keys", "device", "TEXT")?; // WHAT: the computer a key was made from. WHY: removing the computer takes its keys back (security review L5)
     add_column(db, "sessions", "migrated_device", "TEXT")?; // WHAT: the device a session carried over, once. WHY: a session from before 0.7.0 carries exactly one seat over (security review H2a)

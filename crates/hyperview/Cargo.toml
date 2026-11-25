@@ -59,6 +59,8 @@ view3d = { path = "../view3d" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 pdfium-render = { version = "0.9", default-features = false, features = ["pdfium_latest", "thread_safe"] }
 crossbeam-channel = "0.5"
+# WHAT: the tablet's own clock and time zone, the same chrono the server crate already builds. WHY: the signature pad shows the date and time set by the tablet; no new crate in the build
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

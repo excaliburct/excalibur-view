@@ -97,6 +97,33 @@ down the right of each person's most-used tools (View → Choose Quick Tools),
 kept in that device's settings; the office server keeps no per-person
 settings to carry them between devices.
 
+## The shop and field tablets (0.8.0)
+
+On an iPad, an Android tablet, a phone, or for any **shop or field account**
+(a viewer in the Shop or Field group), Excalibur View opens on the tablet's own
+screens instead of the office's folder tree: **Your jobs** (only the jobs the
+office assigned), then a job's home (a "do this now" banner and big tiles),
+then the thing itself: the **released sheets** by number with a NEW badge,
+the **loads** and their tickets with the signing pad (the receiver types their
+own name; the date comes from the tablet), and the documents the office
+pinned. Fabwire decides what each job's tablets show (its **Tablets** tab) and
+sends it as the job's tablet manifest; the server serves shop and field
+accounts only what is in it, released sheets only, on top of the folder rules.
+A desktop in the shop can use the same screens with **Tablet mode**
+(`tablet_mode` in the settings file); **Desktop** in the top bar goes back.
+The contract is `docs/TABLET-MANIFEST.md`.
+
+Which jobs a person sees in **Your jobs** is the job's crew. Fabwire keeps it
+(a job's **Who sees it on the iPads** card, and Settings' **Field crew**)
+through its own sync key, by each person's sign-in: `GET` and
+`POST /projects/{id}/crew` (`docs/integrating.md`). Only Fabwire's key may,
+only on the jobs it filed, and never down to nobody. A job Fabwire filed with
+nobody named on it (no crew yet, or its last person deleted) is the office's
+only: shop and field accounts see a Fabwire job only once they are on its
+crew. A project made by hand with nobody named is still everybody's. Each
+change is on the audit log. Each person on a crew needs an account here with
+the same email address as on the crew.
+
 ## Overlay Pages and Compare Documents
 
 Under the Document menu. **Overlay Pages** prints two issues of a sheet over
@@ -523,6 +550,8 @@ Under the Document menu, and all built on the same rule as everything else:
 - `docs/RELEASING.md` — signing a build, and what an install checks before it
   will run one.
 - `docs/plugins.md` — writing, signing and handing out a plugin.
+- `docs/TABLET-MANIFEST.md` — the tablet manifest Fabwire sends, and what the
+  server serves a shop or field tablet because of it.
 
 ## The rule the whole thing is built on
 

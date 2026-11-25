@@ -107,6 +107,7 @@ pub struct Sight {
     everything: bool, // WHAT: true for the office. WHY: the office sees every folder, and nothing need be read.
     groups: Vec<String>, // WHAT: the person's groups, lower case. WHY: a folder given to one of them is theirs to see.
     rules: HashMap<String, See>, // WHAT: the project's folder rules. WHY: each folder's own, by key.
+    only: Option<crate::tablet::Only>, // WHAT: what the job's tablet manifest lets this tablet account reach, when the job has one. WHY: the manifest narrows the folder rules, never widens them (docs/TABLET-MANIFEST.md §5).
 }
 
 impl Sight {
@@ -117,6 +118,7 @@ impl Sight {
             everything: true,
             groups: Vec::new(),
             rules: HashMap::new(),
+            only: None, // WHAT: never narrowed. WHY: the office isn't a tablet account.
         } // WHAT: no rules needed. WHY: none would take anything away.
     }
 
@@ -139,6 +141,39 @@ impl Sight {
             }
         }
         rule
+    }
+
+    /// Whether a tablet manifest narrows this sight: then only its items are
+    /// seen, and no folder is listed.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+    pub fn is_narrowed(&self) -> bool {
+        self.only.is_some() // WHAT: a manifest applies. WHY: listings of folders come back empty.
+    }
+
+    /// Whether this person may reach the drawing set `id` in `folder`: its
+    /// folder's rule, never a folder put out of use, and, on a job with a
+    /// tablet manifest, only the manifest's current sets.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+    pub fn sees_set(&self, folder: Option<&str>, id: &str, superseded: bool) -> bool {
+        if self.everything {
+            return true; // WHAT: the office. WHY: sees every set.
+        }
+        if !self.sees(folder) || crate::tablet::out_of_use(folder) {
+            return false; // WHAT: the folder rules, and never an out-of-use folder. WHY: the manifest only ever narrows these; a superseded sheet's folder is refused whatever any manifest says.
+        }
+        self.only.as_ref().is_none_or(|only| !superseded && only.sets.contains(id)) // WHAT: no manifest, or a current set it names for them. WHY: the tablet is served released sheets only, enforced here, not just hidden.
+    }
+
+    /// The same for a file that isn't a drawing.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+    pub fn sees_file(&self, folder: Option<&str>, id: &str, replaced: bool) -> bool {
+        if self.everything {
+            return true; // WHAT: the office. WHY: sees every file.
+        }
+        if !self.sees(folder) || crate::tablet::out_of_use(folder) {
+            return false; // WHAT: the folder rules first. WHY: as for sets.
+        }
+        self.only.as_ref().is_none_or(|only| !replaced && only.files.contains(id)) // WHAT: no manifest, or a current file pinned for them. WHY: as for sets.
     }
 
     /// Whether this person sees what is in `folder`.
@@ -164,6 +199,7 @@ pub(crate) fn everybodys(db: &Connection, project: &str, folder: &str) -> rusqli
         everything: false,
         groups: Vec::new(),
         rules: rules_of(db, project)?,
+        only: None, // WHAT: no narrowing. WHY: only the rule matters here.
     }; // WHAT: the project's rules, as nobody in particular. WHY: only the rule matters, not who asks.
     Ok(matches!(rules.rule(Some(folder)), See::Everyone)) // WHAT: everybody's or not. WHY: a drawing outside every folder may only be replaced by one everybody sees too.
 }
@@ -179,6 +215,7 @@ pub fn sight_of(db: &Connection, project: &str, who: &Who) -> rusqlite::Result<S
             everything: true,
             groups: Vec::new(),
             rules: rules_of(db, project)?,
+            only: None, // WHAT: never narrowed. WHY: the office isn't a tablet account.
         }); // WHAT: the office, with the project's rules. WHY: it sees everything, and a listing still shows it who else sees each folder.
     }
     let mut statement = db.prepare(
@@ -188,11 +225,13 @@ pub fn sight_of(db: &Connection, project: &str, who: &Who) -> rusqlite::Result<S
         .query_map(params![who.id], |r| r.get::<_, String>(0))?
         .map(|g| g.map(|g| g.to_lowercase())) // WHAT: lower case. WHY: names compare whatever their case.
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let only = crate::tablet::only_for(db, project, &groups)?; // WHAT: what the job's tablet manifest lets them reach, if it has one. WHY: read fresh, so a new manifest counts at once.
     Ok(Sight {
         everything: false,
         groups,
         rules: rules_of(db, project)?,
-    }) // WHAT: their groups and the project's rules. WHY: all `sees` needs.
+        only,
+    }) // WHAT: their groups, the project's rules and the manifest's narrowing. WHY: all `sees_set` and `sees_file` need.
 }
 
 /// The same, through the server's store, refused as a server error when the
@@ -240,11 +279,11 @@ pub fn may_see_folder(
 /// Fails when the database can't be read.
 pub fn current_sets_seen(db: &Connection, project: &str, sight: &Sight) -> rusqlite::Result<usize> {
     let mut statement =
-        db.prepare("SELECT folder FROM sets WHERE project = ?1 AND superseded_by IS NULL")?; // WHAT: each current set's folder. WHY: counted by who sees it.
+        db.prepare("SELECT folder, id FROM sets WHERE project = ?1 AND superseded_by IS NULL")?; // WHAT: each current set's folder and id. WHY: counted by who sees it.
     let folders = statement
-        .query_map(params![project], |r| r.get::<_, Option<String>>(0))?
+        .query_map(params![project], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(folders.iter().filter(|f| sight.sees(f.as_deref())).count()) // WHAT: only the ones they see. WHY: a count is part of what a folder holds.
+    Ok(folders.iter().filter(|(f, id)| sight.sees_set(f.as_deref(), id, false)).count()) // WHAT: only the ones they see, the manifest counted. WHY: a count is part of what a folder holds.
 }
 
 /// Makes `path` and every folder above it where they aren't already written
@@ -310,6 +349,9 @@ pub fn listing(db: &Connection, project: &str, sight: &Sight) -> rusqlite::Resul
         set_in: Option<String>, // WHAT: program or view. WHY: shown.
         set_by: Option<String>, // WHAT: who set it. WHY: shown.
         set_at: Option<String>, // WHAT: when. WHY: shown.
+    }
+    if sight.is_narrowed() {
+        return Ok(Vec::new()); // WHAT: no folders for a tablet account on a job with a manifest. WHY: its tablet shows sections, never the folder tree (docs/TABLET-MANIFEST.md §5).
     }
     let mut found: Vec<(String, Row)> = Vec::new(); // WHAT: each folder by key, in the order found. WHY: one entry per folder.
     let mut statement = db
@@ -732,6 +774,7 @@ fn folders_made(
         everything: false,
         groups: Vec::new(),
         rules,
+        only: None, // WHAT: no narrowing. WHY: only the rules are read here
     }; // WHAT: the rules, for working out each parent's. WHY: to say when a folder was asked to be wider than its parent.
     let mut notes: Vec<String> = Vec::new(); // WHAT: what the caller should know. WHY: said, rather than silently changed.
     for one in &asked {
@@ -827,7 +870,9 @@ fn may_reach_file(server: &Server, who: &Who, id: &str) -> Answer<ProjectFile> {
         .map_err(|e| Denied::broke("find that file", e))?
         .ok_or_else(|| Denied::missing("file"))?; // WHAT: the file, if there is one. WHY: not found otherwise.
     may_reach_project(server, who, &file.project).map_err(|_| Denied::missing("file"))?; // WHAT: the project's gate. WHY: refused in the file's words, so nothing says the file exists.
-    may_see_folder(server, who, &file.project, file.folder.as_deref(), "file")?; // WHAT: the folder's gate. WHY: a file in a folder they can't see is not there for them.
+    if !sight(server, &file.project, who)?.sees_file(file.folder.as_deref(), &file.id, file.replaced_by.is_some()) {
+        return Err(Denied::missing("file")); // WHAT: the folder's gate and the tablet manifest's. WHY: a file in a folder they can't see, or not pinned for their tablet, is not there for them.
+    }
     Ok(file)
 }
 
@@ -1020,7 +1065,7 @@ pub async fn files_of(
         .map_err(|e| Denied::broke("list that project's files", e))?;
     Ok(Json(
         list.into_iter()
-            .filter(|f| sight.sees(f.folder.as_deref()))
+            .filter(|f| sight.sees_file(f.folder.as_deref(), &f.id, f.replaced_by.is_some()))
             .collect(),
     )) // WHAT: only what they may see. WHY: a hidden folder's files are not there for them.
 }
@@ -1232,6 +1277,7 @@ mod tests {
             everything: false,
             groups: groups.iter().map(|g| g.to_lowercase()).collect(),
             rules: rules.iter().map(|(k, s)| (key_of(k), s.clone())).collect(),
+            only: None, // WHAT: no manifest. WHY: the folder rules alone, as these tests are about
         } // WHAT: a field hand's sight of one project. WHY: the rule tested without a server.
     }
 

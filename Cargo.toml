@@ -8,12 +8,13 @@ members = ["crates/annot", "crates/chest", "crates/pdf", "crates/hub", "crates/h
 exclude = ["plugins", "private"]
 
 [workspace.package]
-# WHAT: the version every crate in the program carries. WHY: 0.7.0 is a new
+# WHAT: the version every crate in the program carries. WHY: 0.8.0 adds the shop-and-field
+# tablet layout and the tablet manifest the server enforces (docs/TABLET-MANIFEST.md). 0.7.0 was a new
 # build, the Excalibur Office Server: one program and one service carrying View,
 # CAD and Archetype as licensed parts and watching Citadel, HTTPS on the same
 # port 8714 with seats pinning its certificate; two builds never share a
 # version, because an install refuses to put a version over itself.
-version = "0.7.3"
+version = "0.8.0"
 edition = "2021"
 # WHAT: the oldest Rust that builds it. WHY: 1.89 gives File::try_lock, the system-held lock the off-site
 # backup takes so a crashed run never blocks the next one; every build uses the newest stable.

@@ -134,17 +134,21 @@ pub async fn list(
         .with(|db| {
             // A project with nobody named on it is everybody's, which is how
             // every server worked before this and how most shops want it.
-            // Once one name goes on, it is for the people named on it.
+            // Once one name goes on, it is for the people named on it. A job
+            // Fabwire filed keeps who sees it in Fabwire, so with nobody named
+            // it is the office's only, never the shop's or field's.
             // Administrators see the lot: somebody has to be able to find a
             // job that the only person on it left the company over.
             let mut statement = db.prepare(&format!(
                 "SELECT {PROJECT_COLUMNS} FROM projects p
                  WHERE (?1 OR p.archived IS NULL)
                    AND (?2
-                        OR NOT EXISTS (SELECT 1 FROM project_people m WHERE m.project = p.id)
+                        OR (NOT EXISTS (SELECT 1 FROM project_people m WHERE m.project = p.id)
+                            AND {open})
                         OR EXISTS (SELECT 1 FROM project_people m
                                    WHERE m.project = p.id AND m.person = ?3))
-                 ORDER BY p.number"
+                 ORDER BY p.number",
+                open = crate::store::OPEN_WHEN_EMPTY.replace("?2", "?3") // WHAT: the empty-project rule, with this query's person. WHY: a Fabwire job with nobody named is the office's only here too
             ))?;
             let mut rows = statement
                 .query_map(params![everything.all, everybodys, who.id], project_from_row)?
@@ -495,7 +499,7 @@ pub(crate) fn stamp_seen(db: &Connection, id: &str, sight: &crate::folders::Sigh
         .query_map(params![id], |r| Ok(((r.get(0)?, r.get(1)?, r.get(2)?), r.get::<_, Option<String>>(3)?)))?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .filter(|(_, folder)| sight.sees(folder.as_deref())) // WHAT: only the sets this sight sees. WHY: a hidden folder must not show in a count or a change.
+        .filter(|(set, folder): &((String, i64, bool), Option<String>)| sight.sees_set(folder.as_deref(), &set.0, set.2)) // WHAT: only the sets this sight sees, the tablet manifest counted. WHY: a hidden folder must not show in a count or a change.
         .map(|(set, _)| set)
         .collect();
     let current: Vec<&(String, i64, bool)> = sets.iter().filter(|s| !s.2).collect();

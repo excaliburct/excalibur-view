@@ -144,14 +144,17 @@ fn the_office_checks_archetype_jobs_out_and_in_and_never_hands_out_view_s_files(
     assert_eq!(serde_json::from_str::<Value>(&said).unwrap()["revision"], 1);
     assert_eq!(ask(&office, "POST", &format!("/archetype/jobs/{id}/checkin"), &office.eve, Some(checkin.as_bytes())).0, 409, "given back after a check-in, so not again");
 
-    assert_eq!(ask(&office, "GET", &format!("/archetype/files/{}", sha(&model)), &office.val, None).1.as_bytes(), model.as_slice(), "everyone reads a job's files");
-    let (_, listed) = ask(&office, "GET", &format!("/archetype/jobs/{id}/files"), &office.val, None);
+    assert_eq!(ask(&office, "GET", &format!("/archetype/files/{}", sha(&model)), &office.eve, None).1.as_bytes(), model.as_slice(), "the office reads a job's files");
+    let (_, listed) = ask(&office, "GET", &format!("/archetype/jobs/{id}/files"), &office.eve, None);
     assert_eq!(serde_json::from_str::<Value>(&listed).unwrap()["files"].as_array().unwrap().len(), 2);
+    for path in ["/archetype/jobs".to_string(), format!("/archetype/jobs/{id}"), format!("/archetype/jobs/{id}/files"), format!("/archetype/jobs/{id}/history"), format!("/archetype/files/{}", sha(&model))] {
+        assert_eq!(ask(&office, "GET", &path, &office.val, None).0, 403, "a viewer (shop or field) reads none of the office's jobs: {path}"); // WHAT: each Archetype read refused to a viewer. WHY: no manifest or folder rule narrows them, so they are the office's alone
+    }
     assert_eq!(ask(&office, "POST", &format!("/archetype/jobs/{id}/checkout"), &office.val, Some(br#"{"machine":"VAL-PC"}"#)).0, 403, "a viewer opens read-only, refused before anything is read");
     assert_eq!(ask(&office, "POST", &format!("/archetype/jobs/{id}/checkout"), &office.sam, Some(br#"{"machine":"SAM-PC"}"#)).0, 200);
     assert_eq!(ask(&office, "POST", &format!("/archetype/jobs/{id}/takeback"), &office.eve, None).0, 403, "taking back is an administrator's");
     assert_eq!(ask(&office, "POST", &format!("/archetype/jobs/{id}/takeback"), &office.sam, None).0, 200);
-    let (_, history) = ask(&office, "GET", &format!("/archetype/jobs/{id}/history"), &office.val, None);
+    let (_, history) = ask(&office, "GET", &format!("/archetype/jobs/{id}/history"), &office.eve, None);
     let whats: Vec<String> = serde_json::from_str::<Vec<Value>>(&history).unwrap().iter().map(|h| h["what"].as_str().unwrap().to_string()).collect();
     assert_eq!(whats, ["took it back", "checked out", "checked in", "put on the server"], "newest first");
 

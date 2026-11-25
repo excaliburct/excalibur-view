@@ -56,6 +56,8 @@ pub struct Ask {
     pub reference: String, // WHAT: the asker's own name for the box. WHY: how the signature finds its way back; never shown.
     #[serde(default)]
     pub page: Option<u32>, // WHAT: the page it's on, if the asker knows. WHY: View can open there.
+    #[serde(default)]
+    pub role: String, // WHAT: which ticket box it is (loaded_by, driver, received_by), or none. WHY: only some accounts may sign some boxes
 }
 
 /// A sign-off line as the wire gives it.
@@ -69,6 +71,8 @@ pub struct SignOff {
     pub reference: String, // WHAT: the asker's reference. WHY: read back with the signature.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page: Option<u32>, // WHAT: its page, if known. WHY: View opens there.
+    #[serde(rename = "role", skip_serializing_if = "String::is_empty")]
+    pub kind: String, // WHAT: which ticket box it is, if it is one. WHY: the tablet shows only the Sign buttons its account may use
     pub status: &'static str, // WHAT: "open", "signed" or "withdrawn". WHY: one word says where it stands.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signer: Option<String>, // WHAT: the name written when signing. WHY: printed on the form.
@@ -101,7 +105,7 @@ pub struct Since {
 
 /// The columns a sign-off is read with, in `row`'s order.
 const COLUMNS: &str =
-    "id, set_id, label, grp, ref, page, signer, signed_by, signed, withdrawn, seq"; // WHAT: one list. WHY: every query reads a line the same way.
+    "id, set_id, label, grp, ref, page, signer, signed_by, signed, withdrawn, seq, kind"; // WHAT: one list. WHY: every query reads a line the same way.
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<SignOff> {
     let signed: Option<String> = r.get(8)?; // WHAT: when it was signed, if it was. WHY: decides its status.
@@ -122,6 +126,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<SignOff> {
         signed_by: r.get(7)?,
         signed,
         seq: r.get(10)?,
+        kind: r.get(11)?, // WHAT: the ticket box it is, or empty. WHY: read with the line
     })
 }
 
@@ -186,6 +191,11 @@ fn asked_for(
             } // WHAT: refused. WHY: no set has that many pages.
             p => p, // WHAT: as given. WHY: fine.
         };
+        if !one.role.is_empty() && !hub::tablet::BOXES.contains(&one.role.as_str()) {
+            return Err(Denied::wrong(
+                "A sign-off's role must be loaded_by, driver or received_by, or left out.",
+            )); // WHAT: refused. WHY: only a ticket's three boxes have a role; anything else would be a line nobody may sign
+        }
         ready.push((
             plain("label", &one.label, 200)?, // WHAT: what it says. WHY: shown to the signer.
             if one.group.trim().is_empty() {
@@ -195,6 +205,7 @@ fn asked_for(
             }, // WHAT: its heading, which may be none. WHY: optional.
             plain("ref", &one.reference, 200)?, // WHAT: the asker's reference. WHY: how it comes back.
             page,
+            one.role.clone(), // WHAT: its role, checked above. WHY: kept with the line
         ));
     }
     let now = crate::api::now(); // WHAT: the time, once. WHY: every line asked together has the same time.
@@ -202,7 +213,7 @@ fn asked_for(
         .store
         .with(|db| {
             let tx = db.unchecked_transaction()?; // WHAT: all or nothing. WHY: a list half saved would be asked for twice.
-            for (label, group, reference, page) in &ready {
+            for (label, group, reference, page, role) in &ready {
                 let there: Option<String> = tx
                     .query_row(
                         "SELECT id FROM signoffs WHERE set_id = ?1 AND ref = ?2 AND asked_by = ?3 AND withdrawn = 0",
@@ -211,14 +222,18 @@ fn asked_for(
                     )
                     .optional()?; // WHAT: the same reference already asked for by the same asker. WHY: asking again changes nothing; another's line with the same reference is never handed back as this asker's.
                 if there.is_some() {
+                    tx.execute(
+                        "UPDATE signoffs SET kind = ?1 WHERE id = ?2 AND kind = ''",
+                        params![role, there],
+                    )?; // WHAT: a line asked before roles gets its role, once. WHY: it is held to the rule from now on; a role already kept is never changed
                     continue; // WHAT: left as it is. WHY: open stays open, signed stays signed.
                 }
                 let seq = next_seq(&tx)?; // WHAT: its change number. WHY: the asker sees it in its changes.
                 let id = format!("so_{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>()); // WHAT: a random id. WHY: nobody can guess another line's id.
                 tx.execute(
-                    "INSERT INTO signoffs (id, set_id, label, grp, ref, page, asked_by, asked, withdrawn, seq)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)",
-                    params![id, set, label, group, reference, page.map(i64::from), who.id, now, seq], // WHAT: the line's values, the page widened. WHY: a u32 always fits SQLite's 64 bits
+                    "INSERT INTO signoffs (id, set_id, label, grp, ref, page, asked_by, asked, withdrawn, seq, kind)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10)",
+                    params![id, set, label, group, reference, page.map(i64::from), who.id, now, seq, role], // WHAT: the line's values, the page widened. WHY: a u32 always fits SQLite's 64 bits
                 )?; // WHAT: the line. WHY: open until signed.
             }
             tx.commit()?; // WHAT: kept. WHY: all at once.
@@ -282,6 +297,19 @@ fn set_of(server: &Shared, id: &str) -> Answer<String> {
         .ok_or_else(|| Denied::missing("sign-off")) // WHAT: no such line. WHY: refused like a line they may not see.
 }
 
+/// The ticket box a line is (`loaded_by`, `driver`, `received_by`), or empty for any other line.
+fn role_of(server: &Shared, id: &str) -> Answer<String> {
+    server
+        .store
+        .with(|db| {
+            Ok(db
+                .query_row("SELECT kind FROM signoffs WHERE id = ?1", params![id], |r| r.get(0))
+                .optional()?)
+        })
+        .map_err(|e| Denied::broke("find that sign-off", e))?
+        .ok_or_else(|| Denied::missing("sign-off")) // WHAT: no such line. WHY: refused like a line they may not see
+}
+
 /// `POST /signoffs/:id/sign`: a person signs a line.
 pub async fn sign(
     State(server): State<Shared>,
@@ -298,6 +326,15 @@ pub async fn sign(
         sharing(&server)?; // WHAT: the office's sharing is on. WHY: signing is new work, held to the license like any.
         let set = set_of(&server, &id)?; // WHAT: the set it's on. WHY: its rules decide.
         may_reach_set(&server, &who, &set)?; // WHAT: may they see that set. WHY: seeing the set is signing it; a line elsewhere is not there for them.
+        let role = role_of(&server, &id)?; // WHAT: which ticket box the line is, if it is one. WHY: some boxes are for some accounts only
+        let audience = if crate::folders::is_office(&who) {
+            hub::tablet::Audience { shop: true, field: true } // WHAT: the office is every audience. WHY: it may sign any box
+        } else {
+            hub::tablet::Audience::of(&crate::tablet::groups_of(&server, &who)?) // WHAT: the shop, the field, both or neither. WHY: their groups decide
+        };
+        if !hub::tablet::may_sign(&role, audience) {
+            return Err(Denied::forbidden("sign that line: Received by and Driver are signed by the field or the office, Loaded by by the shop, the field or the office")); // WHAT: refused. WHY: the owner's rule for who signs which box of a shipping ticket
+        }
         Ok(who)
     }); // WHAT: every gate before the body. WHY: a stranger's strokes are never read.
     let who = match gate {
