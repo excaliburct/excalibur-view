@@ -23,6 +23,7 @@ pub mod sealed;
 pub mod model;
 pub mod plugin;
 pub mod update;
+pub mod tablet; // WHAT: the tablet manifest's shapes, checks and reach rule. WHY: the server enforces and the app draws one definition (docs/TABLET-MANIFEST.md)
 
 #[cfg(feature = "client")]
 pub mod client;

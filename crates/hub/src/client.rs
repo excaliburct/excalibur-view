@@ -936,6 +936,24 @@ impl Client {
         ) // WHAT: POST the signature. WHY: the server keeps it, final.
     }
 
+    /// The jobs on this person's tablet (`GET /tablet`, Excalibur View 0.8.0 and later).
+    ///
+    /// # Errors
+    ///
+    /// The server's refusal, or no connection.
+    pub fn tablet_jobs(&self) -> Answer<Vec<crate::tablet::TabletJob>> {
+        Self::read(self.get("/tablet").call()) // WHAT: GET the job list. WHY: the tablet's first screen.
+    }
+
+    /// One job's manifest as this person's tablet shows it (`GET /projects/{id}/tablet`).
+    ///
+    /// # Errors
+    ///
+    /// The server's refusal (not found when the job has no manifest), or no connection.
+    pub fn tablet(&self, project: &str) -> Answer<crate::tablet::TabletView> {
+        Self::read(self.get(&format!("/projects/{project}/tablet")).call()) // WHAT: GET the job's manifest. WHY: everything the tablet draws for it.
+    }
+
     pub fn sheets(&self, id: &str) -> Answer<Vec<Sheet>> {
         Self::read(self.get(&format!("/sets/{id}/sheets")).call())
     }

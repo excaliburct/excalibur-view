@@ -220,6 +220,17 @@ pub enum Ask {
         change: ComputerChange, // WHAT: what to do. WHY: one ask for each button
         name: String, // WHAT: how it is named. WHY: the sentence afterwards
     },
+    /// The jobs on this person's tablet.
+    TabletJobs, // WHAT: GET /tablet. WHY: the tablet's job list
+    /// One job's manifest, as this person's tablet shows it.
+    Tablet(String), // WHAT: GET /projects/{id}/tablet. WHY: the job home and its sections
+    /// A ticket box signed on the tablet; the job's manifest is read again after.
+    TabletSign {
+        project: String, // WHAT: the job. WHY: its manifest comes back with the box signed
+        id: String, // WHAT: the sign-off line. WHY: what's signed: the existing line Fabwire asked for
+        name: String, // WHAT: the name the signer typed. WHY: printed in the box
+        strokes: Vec<Vec<[f64; 2]>>, // WHAT: the signature, in the pad's units. WHY: kept by the server
+    },
     /// A person signs a line; the set's lines are read again after.
     Sign {
         set: String, // WHAT: the set the line is on. WHY: its lines come back.
@@ -394,6 +405,18 @@ pub enum Told {
     },
     /// Signing didn't go through, and why.
     SignFailed(String),
+    /// The jobs on this person's tablet.
+    TabletJobs(Vec<hub::tablet::TabletJob>), // WHAT: the list. WHY: the job list screen
+    /// This server has no tablet routes (older than 0.8.0).
+    TabletUnsupported, // WHAT: GET /tablet not found. WHY: the desktop layout is kept rather than an empty tablet
+    /// One job's manifest.
+    TabletJob(Box<hub::tablet::TabletView>), // WHAT: the job as their tablet shows it. WHY: the job home and sections
+    /// Asking about the tablet didn't work, in words.
+    TabletTrouble(String), // WHAT: why. WHY: said plainly, never failing quietly
+    /// A box signed on the tablet, and the job read again.
+    TabletSigned(Box<hub::tablet::TabletView>), // WHAT: the job after signing. WHY: the Delivered screen shows what the server has
+    /// Signing on the tablet didn't go through, and why.
+    TabletSignFailed(String), // WHAT: why. WHY: the pad stays open to try again
     /// The answer to somebody pressing "Check for Updates" when there is
     /// nothing to install: up to date, held, still coming, or unreachable.
     UpdateNote(String),
@@ -1694,6 +1717,31 @@ pub fn start(repaint: egui::Context) -> Link {
                             }
                         }
                     }
+                    Ask::TabletJobs => match connected(&client) {
+                        Err(message) => say(&told, Told::TabletTrouble(message)), // WHAT: not signed in. WHY: said
+                        Ok(client) => match client.tablet_jobs() {
+                            Ok(jobs) => say(&told, Told::TabletJobs(jobs)), // WHAT: the list. WHY: drawn
+                            Err(e) if e.code() == Some("not_found") => say(&told, Told::TabletUnsupported), // WHAT: an office server before 0.8.0. WHY: the desktop layout stays
+                            Err(e) => say(&told, Told::TabletTrouble(crate::tablet::trouble_words(&e))), // WHAT: no connection or a refusal. WHY: said plainly
+                        },
+                    },
+                    Ask::Tablet(project) => match connected(&client) {
+                        Err(message) => say(&told, Told::TabletTrouble(message)), // WHAT: not signed in. WHY: said
+                        Ok(client) => match client.tablet(&project) {
+                            Ok(view) => say(&told, Told::TabletJob(Box::new(view))), // WHAT: the job. WHY: drawn
+                            Err(e) => say(&told, Told::TabletTrouble(crate::tablet::trouble_words(&e))), // WHAT: why not. WHY: said plainly
+                        },
+                    },
+                    Ask::TabletSign { project, id, name, strokes } => match connected(&client) {
+                        Err(message) => say(&told, Told::TabletSignFailed(message)), // WHAT: not signed in. WHY: the pad stays open
+                        Ok(client) => match client.sign_off(&id, &name, &strokes) {
+                            Ok(_) => match client.tablet(&project) {
+                                Ok(view) => say(&told, Told::TabletSigned(Box::new(view))), // WHAT: signed, and the job as it is now. WHY: the Delivered screen
+                                Err(e) => say(&told, Told::TabletSignFailed(format!("Signed, but the ticket couldn't be read again: {}", crate::tablet::trouble_words(&e)))), // WHAT: signed, not refreshed. WHY: said truthfully
+                            },
+                            Err(e) => say(&told, Told::TabletSignFailed(crate::tablet::trouble_words(&e))), // WHAT: not signed. WHY: no connection, or already signed, in plain words
+                        },
+                    },
                     Ask::Sign { set, id, name, strokes } => match connected(&client) {
                         Err(message) => say(&told, Told::SignFailed(message)), // WHAT: not connected. WHY: said; the pad stays open.
                         Ok(client) => match client.sign_off(&id, &name, &strokes) {

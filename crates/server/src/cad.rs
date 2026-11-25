@@ -580,7 +580,7 @@ async fn blocking<T: Send + 'static>(server: &Shared, job: impl FnOnce(&mut Stor
 
 pub(crate) async fn list(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<Vec<Drawing>>> {
     on(&server)?;
-    crate::api::caller(&server, &headers)?; // WHAT: anybody signed in. WHY: everyone in the office may open the office's drawings
+    crate::api::office(&server, &headers)?; // WHAT: someone in the office. WHY: a viewer (shop or field) has no manifest or folder rule here, so reads are the office's alone
     blocking(&server, |s| Ok(s.drawings())).await.map(Json)
 }
 
@@ -614,7 +614,7 @@ pub(crate) async fn create(State(server): State<Shared>, headers: HeaderMap, uri
 
 pub(crate) async fn one(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<Drawing>> {
     on(&server)?;
-    crate::api::caller(&server, &headers)?;
+    crate::api::office(&server, &headers)?; // WHAT: someone in the office. WHY: a viewer (shop or field) has no manifest or folder rule here, so reads are the office's alone
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known
     blocking(&server, move |s| s.drawing(id).ok_or(Refused::NotFound)).await.map(Json)
 }
@@ -626,7 +626,7 @@ pub struct Which {
 
 pub(crate) async fn file(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, uri: Uri) -> Answer<Response> {
     on(&server)?;
-    crate::api::caller(&server, &headers)?;
+    crate::api::office(&server, &headers)?; // WHAT: someone in the office. WHY: a viewer (shop or field) has no manifest or folder rule here, so reads are the office's alone
     let which: Which = values(&uri)?;
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known
     let (version, bytes) = blocking(&server, move |s| s.file(id, which.version)).await?;
@@ -693,7 +693,7 @@ pub(crate) async fn unlock(State(server): State<Shared>, headers: HeaderMap, Url
 
 pub(crate) async fn versions(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<Vec<Version>>> {
     on(&server)?;
-    crate::api::caller(&server, &headers)?;
+    crate::api::office(&server, &headers)?; // WHAT: someone in the office. WHY: a viewer (shop or field) has no manifest or folder rule here, so reads are the office's alone
     let id = drawing_id(&id)?; // WHAT: the drawing's number. WHY: read once the caller is known
     blocking(&server, move |s| s.versions(id)).await.map(Json)
 }

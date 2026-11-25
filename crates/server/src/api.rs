@@ -253,6 +253,15 @@ pub(crate) fn writer(server: &Server, headers: &HeaderMap) -> Answer<Who> {
     Ok(who)
 }
 
+/// Someone in the office, for reading what only the office's detailers use (CAD's and Archetype's drawings and jobs).
+pub(crate) fn office(server: &Server, headers: &HeaderMap) -> Answer<Who> {
+    let who = caller(server, headers)?; // WHAT: whoever is signed in, or a program's key. WHY: asked first, so a stranger is told 401
+    if !crate::folders::is_office(&who) {
+        return Err(Denied::forbidden("open the office's drawings")); // WHAT: a viewer (shop or field) turned away. WHY: CAD and Archetype are the office's tools, with no manifest or folder rule to narrow them
+    }
+    Ok(who) // WHAT: the office's person. WHY: they may read
+}
+
 /// New work can be shared through the server: always, unless an Office trial
 /// has ended with no license. Reading and exporting are never behind this.
 pub(crate) fn sharing(server: &Server) -> Answer<()> {
@@ -284,6 +293,9 @@ pub(crate) fn administrator(server: &Server, headers: &HeaderMap) -> Answer<Who>
 /// - `POST /files` — a file that isn't a drawing put in one of its folders;
 /// - `POST /projects/:id/folders` — its folders made, and who sees each;
 /// - `POST /sets/:id/folder`, `POST /files/:id/folder` — a move followed.
+/// - `PUT`/`GET /projects/:id/tablet` — what its jobs' tablets show;
+/// - `GET`/`POST /projects/:id/crew` — who is on its projects, by sign-in
+///   (Fabwire's key only, never the last person off).
 ///
 /// Every other route refuses a sync key before it runs, whoever made the key.
 /// Adding a route here is giving every sync key in every office a new power,
@@ -304,6 +316,10 @@ pub const SYNC_ROUTES: &[(&str, &str)] = &[
     ("GET", "/signoffs"), // WHAT: sign-offs changed since it last looked, on its own sets. WHY: the signatures read back. (Signing is never on this list: only a person signs.)
     ("GET", "/signoffs/:id/signature.png"), // WHAT: a signature's picture. WHY: printed on the program's own form.
     ("POST", "/signoffs/:id/withdraw"), // WHAT: a line taken back, unsigned. WHY: a station no longer needed.
+    ("PUT", "/projects/:id/tablet"), // WHAT: a job's tablet manifest set. WHY: the program decides what its jobs' tablets show; the route refuses anything but a sync key.
+    ("GET", "/projects/:id/tablet"), // WHAT: the manifest read back as kept. WHY: the program checks what it sent.
+    ("GET", "/projects/:id/crew"), // WHAT: who is on one of its projects, by sign-in. WHY: the program keeps who sees each job on the iPads (crate::crew); the route refuses anything but Fabwire's key
+    ("POST", "/projects/:id/crew"), // WHAT: a sign-in put on or taken off one of its projects. WHY: likewise; never the last person, so a program only narrows who sees a job
 ];
 
 /// Holds every key to what it was made for, before any route runs. A `sync`
@@ -586,6 +602,9 @@ pub fn router(server: Shared) -> Router {
         .route("/signoffs/:id/sign", post(crate::signoffs::sign)) // WHAT: a person signs a line. WHY: the signature itself.
         .route("/signoffs/:id/withdraw", post(crate::signoffs::withdraw)) // WHAT: a line taken back. WHY: not needed any more.
         .route("/signoffs/:id/signature.png", get(crate::signoffs::picture)) // WHAT: a signature as a picture. WHY: printed on the form.
+        .route("/projects/:id/crew", get(crate::crew::who).post(crate::crew::change)) // WHAT: a job's crew kept by its program. WHY: Fabwire sets who sees each job on the iPads; /people is administrators' and by View's own ids
+        .route("/projects/:id/tablet", get(crate::tablet::one).put(crate::tablet::put)) // WHAT: a job's tablet manifest, read by a tablet and set by Fabwire. WHY: shop and field are served only what the office put on their tablets (docs/TABLET-MANIFEST.md)
+        .route("/tablet", get(crate::tablet::jobs)) // WHAT: the caller's tablet jobs. WHY: the tablet's job list
         .route("/sets/:id/folder", post(crate::folders::move_set)) // WHAT: a drawing set moved, with its issues. WHY: likewise.
         // WHAT: every matched route first checks that a key keeps to its purpose. WHY: one gate in front of all of them, so a new route is closed to sync keys unless it is put on SYNC_ROUTES on purpose.
         .route_layer(axum::middleware::from_fn_with_state(server.clone(), crate::devices::gate)) // WHAT: every matched route held to its door: an approved device's signature, before View's own checks. WHY: §4 and §5; inside the key check, so a sync key off its list is refused as before
@@ -779,6 +798,11 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/signoffs/{id}/sign"), // WHAT: a person signs. WHY: the signature itself.
     ("POST", "/signoffs/{id}/withdraw"), // WHAT: a line taken back. WHY: no longer needed.
     ("GET", "/signoffs/{id}/signature.png"), // WHAT: a signature's picture. WHY: printed on the form.
+    ("GET", "/projects/{id}/tablet"), // WHAT: a job's tablet manifest as the caller's tablet shows it. WHY: docs/TABLET-MANIFEST.md
+    ("PUT", "/projects/{id}/tablet"), // WHAT: a job's tablet manifest set, by Fabwire's sync key only. WHY: likewise
+    ("GET", "/projects/{id}/crew"), // WHAT: who is on a project, by sign-in, for Fabwire's key. WHY: described, so the openapi and the door tests cover it
+    ("POST", "/projects/{id}/crew"), // WHAT: a sign-in put on or taken off, by Fabwire's key. WHY: likewise
+    ("GET", "/tablet"), // WHAT: the caller's tablet jobs. WHY: likewise
 ];
 
 // ---- is it there ----------------------------------------------------------
@@ -1433,9 +1457,9 @@ pub(crate) fn may_reach_set(server: &Server, who: &Who, set: &str) -> Answer<()>
         .with(|db| {
             Ok(db
                 .query_row(
-                    "SELECT project, folder FROM sets WHERE id = ?1", // WHAT: the set's project and its folder. WHY: both decide who may reach it.
+                    "SELECT project, folder, superseded_by IS NOT NULL FROM sets WHERE id = ?1", // WHAT: the set's project, its folder and whether it was replaced. WHY: all three decide who may reach it.
                     params![set],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, bool>(2)?)),
                 )
                 .optional()?)
         })
@@ -1444,9 +1468,9 @@ pub(crate) fn may_reach_set(server: &Server, who: &Who, set: &str) -> Answer<()>
         // A set nobody can find is refused the same way as one somebody may
         // not have, so the two are indistinguishable from outside.
         None => Err(Denied::missing("drawing set")),
-        Some((project, folder)) => {
+        Some((project, folder, superseded)) => {
             may_reach_project(server, who, &project)?; // WHAT: the project's gate, as before. WHY: a job they are not on is not there for them.
-            crate::folders::may_see_folder(server, who, &project, folder.as_deref(), "drawing set") // WHAT: the folder's gate. WHY: every route that reads a set (its file, sheets, markups, takeoff, markup list, copy, the assistant's tools) comes through here, so a folder they may not see hides its sets everywhere.
+            if crate::folders::sight(server, &project, who)?.sees_set(folder.as_deref(), set, superseded) { Ok(()) } else { Err(Denied::missing("drawing set")) } // WHAT: the folder's gate and the job's tablet manifest. WHY: a tablet account is served only the manifest's current sets, on top of the folder rules (docs/TABLET-MANIFEST.md §5).
         }
     }
 }
@@ -1493,7 +1517,7 @@ async fn sets_of(
         })
         .map_err(|e| Denied::broke("list the drawing sets", e))?;
     let sight = crate::folders::sight(&server, &project, &who)?; // WHAT: which of the project's folders this person sees. WHY: a set in a folder they may not see is left off the list.
-    Ok(Json(list.into_iter().filter(|s| sight.sees(s.folder.as_deref())).collect())) // WHAT: only the sets they may see. WHY: the list and a direct fetch must agree.
+    Ok(Json(list.into_iter().filter(|s| sight.sees_set(s.folder.as_deref(), &s.id, s.superseded_by.is_some())).collect())) // WHAT: only the sets they may see, the tablet manifest counted. WHY: the list and a direct fetch must agree.
 }
 
 async fn one_set(
@@ -2672,7 +2696,7 @@ async fn project_markuplist(
                     Ok(((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?), r.get::<_, Option<String>>(4)?))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
-            let rows: Vec<Listed> = rows.into_iter().filter(|(_, folder)| sight.sees(folder.as_deref())).map(|(row, _)| row).collect(); // WHAT: only the sets they may see. WHY: a takeoff pulled by a person, or a program acting for one, never carries a folder hidden from them.
+            let rows: Vec<Listed> = rows.into_iter().filter(|(row, folder): &(Listed, Option<String>)| sight.sees_set(folder.as_deref(), &row.0, row.2.is_some())).map(|(row, _)| row).collect(); // WHAT: only the sets they may see. WHY: a takeoff pulled by a person, or a program acting for one, never carries a folder hidden from them.
             Ok((rows, crate::projects::stamp_seen(db, &project, &sight)?)) // WHAT: the stamp of what they see. WHY: a change in a hidden folder must not show as a change.
         })
         .map_err(|e| Denied::broke("list that project's drawing sets", e))?;
@@ -4796,7 +4820,7 @@ pub fn mcp_sets(server: &Server, who: &Who, project: Option<&str>) -> Result<Str
             let sight = crate::folders::sight(server, &on, who).map_err(|_| broke("read the drawing sets", "the folders could not be read"))?; // WHAT: their sight of that job. WHY: refused rather than shown when it can't be read.
             sights.insert(on.clone(), sight); // WHAT: kept. WHY: once per job.
         }
-        if sights.get(&on).is_some_and(|s| s.sees(folder.as_deref())) {
+        if sights.get(&on).is_some_and(|s| s.sees_set(folder.as_deref(), &row.0, row.6.is_some())) { // WHAT: the folder rules and the tablet manifest. WHY: the assistant lists only what the person may open
             list.push(row); // WHAT: kept. WHY: theirs to see.
         }
     }

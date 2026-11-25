@@ -1,0 +1,3416 @@
+{
+  "contract": "docs/TABLET-MANIFEST.md, schema 1",
+  "valid": [
+    {
+      "name": "steel-job",
+      "manifest": {
+        "schema": 1,
+        "job": {
+          "number": "2601",
+          "name": "TCU Campus 2",
+          "town": "Fort Worth",
+          "gc": "Ridgeline Builders",
+          "site": "Gate 3, laydown yard",
+          "office": "Jordan (PM) · ext. 214"
+        },
+        "sections": {
+          "shop": [
+            "drawings",
+            "shipping",
+            "traveler",
+            "loading",
+            "documents"
+          ],
+          "field": [
+            "drawings",
+            "shipping",
+            "documents"
+          ]
+        },
+        "sheets": [
+          {
+            "set": "set_e101",
+            "sheet": "E-101",
+            "title": "Erection plan, level 2",
+            "rev": "1",
+            "released": "2026-11-18",
+            "discipline": "erection",
+            "marks": []
+          },
+          {
+            "set": "set_s101",
+            "sheet": "S-101",
+            "title": "Framing plan, level 2",
+            "rev": "3",
+            "released": "2026-11-20",
+            "discipline": "structural",
+            "marks": [
+              "B12",
+              "B10"
+            ]
+          },
+          {
+            "set": "set_s102",
+            "sheet": "S-102",
+            "title": "Column schedule",
+            "rev": "2",
+            "released": "2026-11-14",
+            "discipline": "structural",
+            "marks": [
+              "C4",
+              "C5"
+            ]
+          },
+          {
+            "set": "set_a001",
+            "sheet": "AB-1",
+            "title": "Anchor bolt plan",
+            "rev": "0",
+            "released": "2026-11-02",
+            "discipline": "anchor_bolts",
+            "marks": []
+          }
+        ],
+        "documents": [
+          {
+            "kind": "file",
+            "id": "file_logistics",
+            "name": "Site logistics plan",
+            "for": [
+              "shop",
+              "field"
+            ]
+          },
+          {
+            "kind": "set",
+            "id": "set_asi04",
+            "name": "ASI 04",
+            "for": [
+              "field"
+            ]
+          },
+          {
+            "kind": "file",
+            "id": "file_boltform",
+            "name": "Bolt verification form",
+            "for": [
+              "shop"
+            ]
+          }
+        ],
+        "loads": [
+          {
+            "number": 2,
+            "ticket": "2601-02",
+            "set": "set_ticket2",
+            "status": "in_transit",
+            "ships": "2026-11-23",
+            "weight_lb": 18450,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "B12",
+                "qty": 3,
+                "description": "W12x26 beam, Grid B",
+                "length": "24'-6\"",
+                "weight_lb": 1911
+              },
+              {
+                "mark": "C4",
+                "qty": 2,
+                "description": "W10x49 column w/ base plate",
+                "length": "14'-0\"",
+                "weight_lb": 1452
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "",
+                "signer": "Luis Ramos",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "driver",
+                "ref": "",
+                "signer": "Ben Novak",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:2:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "ticket": "2601-03",
+            "set": "set_ticket3",
+            "status": "loading",
+            "ships": "2026-11-26",
+            "weight_lb": 22100,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "J3",
+                "qty": 18,
+                "description": "W10x12 filler beam",
+                "length": "18'-9\"",
+                "weight_lb": 4050
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:LoadedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "driver",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:Driver",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          }
+        ],
+        "traveler": {
+          "set": "set_traveler",
+          "pieces": 86,
+          "complete": 61,
+          "open_stations": 18
+        },
+        "loading": {
+          "set": "set_loadlog",
+          "load": 3,
+          "weight_lb": 22100,
+          "capacity_lb": 48000,
+          "ready_pieces": 9
+        },
+        "todo": [
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          }
+        ]
+      }
+    },
+    {
+      "name": "erection-only",
+      "manifest": {
+        "schema": 1,
+        "job": {
+          "number": "2614",
+          "name": "Pueblo Metro Admin",
+          "town": "Pueblo",
+          "gc": "",
+          "site": "",
+          "office": ""
+        },
+        "sections": {
+          "shop": [],
+          "field": [
+            "shipping",
+            "documents"
+          ]
+        },
+        "sheets": [
+          {
+            "set": "set_e201",
+            "sheet": "E-201",
+            "title": "Erection plan",
+            "rev": "0",
+            "released": "2026-11-21",
+            "discipline": "erection",
+            "marks": [
+              "B1"
+            ]
+          }
+        ],
+        "documents": [],
+        "loads": [],
+        "traveler": null,
+        "loading": null,
+        "todo": []
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "newer-schema",
+      "code": "schema",
+      "manifest": {
+        "schema": 2,
+        "job": {
+          "number": "2601",
+          "name": "TCU Campus 2",
+          "town": "Fort Worth",
+          "gc": "Ridgeline Builders",
+          "site": "Gate 3, laydown yard",
+          "office": "Jordan (PM) · ext. 214"
+        },
+        "sections": {
+          "shop": [
+            "drawings",
+            "shipping",
+            "traveler",
+            "loading",
+            "documents"
+          ],
+          "field": [
+            "drawings",
+            "shipping",
+            "documents"
+          ]
+        },
+        "sheets": [
+          {
+            "set": "set_e101",
+            "sheet": "E-101",
+            "title": "Erection plan, level 2",
+            "rev": "1",
+            "released": "2026-11-18",
+            "discipline": "erection",
+            "marks": []
+          },
+          {
+            "set": "set_s101",
+            "sheet": "S-101",
+            "title": "Framing plan, level 2",
+            "rev": "3",
+            "released": "2026-11-20",
+            "discipline": "structural",
+            "marks": [
+              "B12",
+              "B10"
+            ]
+          },
+          {
+            "set": "set_s102",
+            "sheet": "S-102",
+            "title": "Column schedule",
+            "rev": "2",
+            "released": "2026-11-14",
+            "discipline": "structural",
+            "marks": [
+              "C4",
+              "C5"
+            ]
+          },
+          {
+            "set": "set_a001",
+            "sheet": "AB-1",
+            "title": "Anchor bolt plan",
+            "rev": "0",
+            "released": "2026-11-02",
+            "discipline": "anchor_bolts",
+            "marks": []
+          }
+        ],
+        "documents": [
+          {
+            "kind": "file",
+            "id": "file_logistics",
+            "name": "Site logistics plan",
+            "for": [
+              "shop",
+              "field"
+            ]
+          },
+          {
+            "kind": "set",
+            "id": "set_asi04",
+            "name": "ASI 04",
+            "for": [
+              "field"
+            ]
+          },
+          {
+            "kind": "file",
+            "id": "file_boltform",
+            "name": "Bolt verification form",
+            "for": [
+              "shop"
+            ]
+          }
+        ],
+        "loads": [
+          {
+            "number": 2,
+            "ticket": "2601-02",
+            "set": "set_ticket2",
+            "status": "in_transit",
+            "ships": "2026-11-23",
+            "weight_lb": 18450,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "B12",
+                "qty": 3,
+                "description": "W12x26 beam, Grid B",
+                "length": "24'-6\"",
+                "weight_lb": 1911
+              },
+              {
+                "mark": "C4",
+                "qty": 2,
+                "description": "W10x49 column w/ base plate",
+                "length": "14'-0\"",
+                "weight_lb": 1452
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "",
+                "signer": "Luis Ramos",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "driver",
+                "ref": "",
+                "signer": "Ben Novak",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:2:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "ticket": "2601-03",
+            "set": "set_ticket3",
+            "status": "loading",
+            "ships": "2026-11-26",
+            "weight_lb": 22100,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "J3",
+                "qty": 18,
+                "description": "W10x12 filler beam",
+                "length": "18'-9\"",
+                "weight_lb": 4050
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:LoadedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "driver",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:Driver",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          }
+        ],
+        "traveler": {
+          "set": "set_traveler",
+          "pieces": 86,
+          "complete": 61,
+          "open_stations": 18
+        },
+        "loading": {
+          "set": "set_loadlog",
+          "load": 3,
+          "weight_lb": 22100,
+          "capacity_lb": 48000,
+          "ready_pieces": 9
+        },
+        "todo": [
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown-field",
+      "code": "unknown_field",
+      "manifest": {
+        "schema": 1,
+        "job": {
+          "number": "2601",
+          "name": "TCU Campus 2",
+          "town": "Fort Worth",
+          "gc": "Ridgeline Builders",
+          "site": "Gate 3, laydown yard",
+          "office": "Jordan (PM) · ext. 214"
+        },
+        "sections": {
+          "shop": [
+            "drawings",
+            "shipping",
+            "traveler",
+            "loading",
+            "documents"
+          ],
+          "field": [
+            "drawings",
+            "shipping",
+            "documents"
+          ]
+        },
+        "sheets": [
+          {
+            "set": "set_e101",
+            "sheet": "E-101",
+            "title": "Erection plan, level 2",
+            "rev": "1",
+            "released": "2026-11-18",
+            "discipline": "erection",
+            "marks": []
+          },
+          {
+            "set": "set_s101",
+            "sheet": "S-101",
+            "title": "Framing plan, level 2",
+            "rev": "3",
+            "released": "2026-11-20",
+            "discipline": "structural",
+            "marks": [
+              "B12",
+              "B10"
+            ]
+          },
+          {
+            "set": "set_s102",
+            "sheet": "S-102",
+            "title": "Column schedule",
+            "rev": "2",
+            "released": "2026-11-14",
+            "discipline": "structural",
+            "marks": [
+              "C4",
+              "C5"
+            ]
+          },
+          {
+            "set": "set_a001",
+            "sheet": "AB-1",
+            "title": "Anchor bolt plan",
+            "rev": "0",
+            "released": "2026-11-02",
+            "discipline": "anchor_bolts",
+            "marks": []
+          }
+        ],
+        "documents": [
+          {
+            "kind": "file",
+            "id": "file_logistics",
+            "name": "Site logistics plan",
+            "for": [
+              "shop",
+              "field"
+            ]
+          },
+          {
+            "kind": "set",
+            "id": "set_asi04",
+            "name": "ASI 04",
+            "for": [
+              "field"
+            ]
+          },
+          {
+            "kind": "file",
+            "id": "file_boltform",
+            "name": "Bolt verification form",
+            "for": [
+              "shop"
+            ]
+          }
+        ],
+        "loads": [
+          {
+            "number": 2,
+            "ticket": "2601-02",
+            "set": "set_ticket2",
+            "status": "in_transit",
+            "ships": "2026-11-23",
+            "weight_lb": 18450,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "B12",
+                "qty": 3,
+                "description": "W12x26 beam, Grid B",
+                "length": "24'-6\"",
+                "weight_lb": 1911
+              },
+              {
+                "mark": "C4",
+                "qty": 2,
+                "description": "W10x49 column w/ base plate",
+                "length": "14'-0\"",
+                "weight_lb": 1452
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "",
+                "signer": "Luis Ramos",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "driver",
+                "ref": "",
+                "signer": "Ben Novak",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:2:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "ticket": "2601-03",
+            "set": "set_ticket3",
+            "status": "loading",
+            "ships": "2026-11-26",
+            "weight_lb": 22100,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "J3",
+                "qty": 18,
+                "description": "W10x12 filler beam",
+                "length": "18'-9\"",
+                "weight_lb": 4050
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:LoadedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "driver",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:Driver",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          }
+        ],
+        "traveler": {
+          "set": "set_traveler",
+          "pieces": 86,
+          "complete": 61,
+          "open_stations": 18
+        },
+        "loading": {
+          "set": "set_loadlog",
+          "load": 3,
+          "weight_lb": 22100,
+          "capacity_lb": 48000,
+          "ready_pieces": 9
+        },
+        "todo": [
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          }
+        ],
+        "extra": true
+      }
+    },
+    {
+      "name": "unknown-section",
+      "code": "bad_section",
+      "manifest": {
+        "schema": 1,
+        "job": {
+          "number": "2601",
+          "name": "TCU Campus 2",
+          "town": "Fort Worth",
+          "gc": "Ridgeline Builders",
+          "site": "Gate 3, laydown yard",
+          "office": "Jordan (PM) · ext. 214"
+        },
+        "sections": {
+          "shop": [
+            "drawings",
+            "shipping",
+            "traveler",
+            "loading",
+            "documents"
+          ],
+          "field": [
+            "drawings",
+            "shipping",
+            "documents",
+            "money"
+          ]
+        },
+        "sheets": [
+          {
+            "set": "set_e101",
+            "sheet": "E-101",
+            "title": "Erection plan, level 2",
+            "rev": "1",
+            "released": "2026-11-18",
+            "discipline": "erection",
+            "marks": []
+          },
+          {
+            "set": "set_s101",
+            "sheet": "S-101",
+            "title": "Framing plan, level 2",
+            "rev": "3",
+            "released": "2026-11-20",
+            "discipline": "structural",
+            "marks": [
+              "B12",
+              "B10"
+            ]
+          },
+          {
+            "set": "set_s102",
+            "sheet": "S-102",
+            "title": "Column schedule",
+            "rev": "2",
+            "released": "2026-11-14",
+            "discipline": "structural",
+            "marks": [
+              "C4",
+              "C5"
+            ]
+          },
+          {
+            "set": "set_a001",
+            "sheet": "AB-1",
+            "title": "Anchor bolt plan",
+            "rev": "0",
+            "released": "2026-11-02",
+            "discipline": "anchor_bolts",
+            "marks": []
+          }
+        ],
+        "documents": [
+          {
+            "kind": "file",
+            "id": "file_logistics",
+            "name": "Site logistics plan",
+            "for": [
+              "shop",
+              "field"
+            ]
+          },
+          {
+            "kind": "set",
+            "id": "set_asi04",
+            "name": "ASI 04",
+            "for": [
+              "field"
+            ]
+          },
+          {
+            "kind": "file",
+            "id": "file_boltform",
+            "name": "Bolt verification form",
+            "for": [
+              "shop"
+            ]
+          }
+        ],
+        "loads": [
+          {
+            "number": 2,
+            "ticket": "2601-02",
+            "set": "set_ticket2",
+            "status": "in_transit",
+            "ships": "2026-11-23",
+            "weight_lb": 18450,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "B12",
+                "qty": 3,
+                "description": "W12x26 beam, Grid B",
+                "length": "24'-6\"",
+                "weight_lb": 1911
+              },
+              {
+                "mark": "C4",
+                "qty": 2,
+                "description": "W10x49 column w/ base plate",
+                "length": "14'-0\"",
+                "weight_lb": 1452
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "",
+                "signer": "Luis Ramos",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "driver",
+                "ref": "",
+                "signer": "Ben Novak",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:2:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "ticket": "2601-03",
+            "set": "set_ticket3",
+            "status": "loading",
+            "ships": "2026-11-26",
+            "weight_lb": 22100,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "J3",
+                "qty": 18,
+                "description": "W10x12 filler beam",
+                "length": "18'-9\"",
+                "weight_lb": 4050
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:LoadedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "driver",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:Driver",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          }
+        ],
+        "traveler": {
+          "set": "set_traveler",
+          "pieces": 86,
+          "complete": 61,
+          "open_stations": 18
+        },
+        "loading": {
+          "set": "set_loadlog",
+          "load": 3,
+          "weight_lb": 22100,
+          "capacity_lb": 48000,
+          "ready_pieces": 9
+        },
+        "todo": [
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          }
+        ]
+      }
+    },
+    {
+      "name": "sheet-not-released",
+      "code": "not_released",
+      "manifest": {
+        "schema": 1,
+        "job": {
+          "number": "2601",
+          "name": "TCU Campus 2",
+          "town": "Fort Worth",
+          "gc": "Ridgeline Builders",
+          "site": "Gate 3, laydown yard",
+          "office": "Jordan (PM) · ext. 214"
+        },
+        "sections": {
+          "shop": [
+            "drawings",
+            "shipping",
+            "traveler",
+            "loading",
+            "documents"
+          ],
+          "field": [
+            "drawings",
+            "shipping",
+            "documents"
+          ]
+        },
+        "sheets": [
+          {
+            "set": "set_e101",
+            "sheet": "E-101",
+            "title": "Erection plan, level 2",
+            "rev": "1",
+            "released": "2026-11-18",
+            "discipline": "erection",
+            "marks": []
+          },
+          {
+            "set": "set_s101",
+            "sheet": "S-101",
+            "title": "Framing plan, level 2",
+            "rev": "3",
+            "released": "",
+            "discipline": "structural",
+            "marks": [
+              "B12",
+              "B10"
+            ]
+          },
+          {
+            "set": "set_s102",
+            "sheet": "S-102",
+            "title": "Column schedule",
+            "rev": "2",
+            "released": "2026-11-14",
+            "discipline": "structural",
+            "marks": [
+              "C4",
+              "C5"
+            ]
+          },
+          {
+            "set": "set_a001",
+            "sheet": "AB-1",
+            "title": "Anchor bolt plan",
+            "rev": "0",
+            "released": "2026-11-02",
+            "discipline": "anchor_bolts",
+            "marks": []
+          }
+        ],
+        "documents": [
+          {
+            "kind": "file",
+            "id": "file_logistics",
+            "name": "Site logistics plan",
+            "for": [
+              "shop",
+              "field"
+            ]
+          },
+          {
+            "kind": "set",
+            "id": "set_asi04",
+            "name": "ASI 04",
+            "for": [
+              "field"
+            ]
+          },
+          {
+            "kind": "file",
+            "id": "file_boltform",
+            "name": "Bolt verification form",
+            "for": [
+              "shop"
+            ]
+          }
+        ],
+        "loads": [
+          {
+            "number": 2,
+            "ticket": "2601-02",
+            "set": "set_ticket2",
+            "status": "in_transit",
+            "ships": "2026-11-23",
+            "weight_lb": 18450,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "B12",
+                "qty": 3,
+                "description": "W12x26 beam, Grid B",
+                "length": "24'-6\"",
+                "weight_lb": 1911
+              },
+              {
+                "mark": "C4",
+                "qty": 2,
+                "description": "W10x49 column w/ base plate",
+                "length": "14'-0\"",
+                "weight_lb": 1452
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "",
+                "signer": "Luis Ramos",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "driver",
+                "ref": "",
+                "signer": "Ben Novak",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:2:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "ticket": "2601-03",
+            "set": "set_ticket3",
+            "status": "loading",
+            "ships": "2026-11-26",
+            "weight_lb": 22100,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "J3",
+                "qty": 18,
+                "description": "W10x12 filler beam",
+                "length": "18'-9\"",
+                "weight_lb": 4050
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:LoadedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "driver",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:Driver",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          }
+        ],
+        "traveler": {
+          "set": "set_traveler",
+          "pieces": 86,
+          "complete": 61,
+          "open_stations": 18
+        },
+        "loading": {
+          "set": "set_loadlog",
+          "load": 3,
+          "weight_lb": 22100,
+          "capacity_lb": 48000,
+          "ready_pieces": 9
+        },
+        "todo": [
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          }
+        ]
+      }
+    },
+    {
+      "name": "release-date-not-a-day",
+      "code": "not_released",
+      "manifest": {
+        "schema": 1,
+        "job": {
+          "number": "2601",
+          "name": "TCU Campus 2",
+          "town": "Fort Worth",
+          "gc": "Ridgeline Builders",
+          "site": "Gate 3, laydown yard",
+          "office": "Jordan (PM) · ext. 214"
+        },
+        "sections": {
+          "shop": [
+            "drawings",
+            "shipping",
+            "traveler",
+            "loading",
+            "documents"
+          ],
+          "field": [
+            "drawings",
+            "shipping",
+            "documents"
+          ]
+        },
+        "sheets": [
+          {
+            "set": "set_e101",
+            "sheet": "E-101",
+            "title": "Erection plan, level 2",
+            "rev": "1",
+            "released": "2026-11-18",
+            "discipline": "erection",
+            "marks": []
+          },
+          {
+            "set": "set_s101",
+            "sheet": "S-101",
+            "title": "Framing plan, level 2",
+            "rev": "3",
+            "released": "11/20/2026",
+            "discipline": "structural",
+            "marks": [
+              "B12",
+              "B10"
+            ]
+          },
+          {
+            "set": "set_s102",
+            "sheet": "S-102",
+            "title": "Column schedule",
+            "rev": "2",
+            "released": "2026-11-14",
+            "discipline": "structural",
+            "marks": [
+              "C4",
+              "C5"
+            ]
+          },
+          {
+            "set": "set_a001",
+            "sheet": "AB-1",
+            "title": "Anchor bolt plan",
+            "rev": "0",
+            "released": "2026-11-02",
+            "discipline": "anchor_bolts",
+            "marks": []
+          }
+        ],
+        "documents": [
+          {
+            "kind": "file",
+            "id": "file_logistics",
+            "name": "Site logistics plan",
+            "for": [
+              "shop",
+              "field"
+            ]
+          },
+          {
+            "kind": "set",
+            "id": "set_asi04",
+            "name": "ASI 04",
+            "for": [
+              "field"
+            ]
+          },
+          {
+            "kind": "file",
+            "id": "file_boltform",
+            "name": "Bolt verification form",
+            "for": [
+              "shop"
+            ]
+          }
+        ],
+        "loads": [
+          {
+            "number": 2,
+            "ticket": "2601-02",
+            "set": "set_ticket2",
+            "status": "in_transit",
+            "ships": "2026-11-23",
+            "weight_lb": 18450,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "B12",
+                "qty": 3,
+                "description": "W12x26 beam, Grid B",
+                "length": "24'-6\"",
+                "weight_lb": 1911
+              },
+              {
+                "mark": "C4",
+                "qty": 2,
+                "description": "W10x49 column w/ base plate",
+                "length": "14'-0\"",
+                "weight_lb": 1452
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "",
+                "signer": "Luis Ramos",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "driver",
+                "ref": "",
+                "signer": "Ben Novak",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:2:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "ticket": "2601-03",
+            "set": "set_ticket3",
+            "status": "loading",
+            "ships": "2026-11-26",
+            "weight_lb": 22100,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "J3",
+                "qty": 18,
+                "description": "W10x12 filler beam",
+                "length": "18'-9\"",
+                "weight_lb": 4050
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:LoadedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "driver",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:Driver",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          }
+        ],
+        "traveler": {
+          "set": "set_traveler",
+          "pieces": 86,
+          "complete": 61,
+          "open_stations": 18
+        },
+        "loading": {
+          "set": "set_loadlog",
+          "load": 3,
+          "weight_lb": 22100,
+          "capacity_lb": 48000,
+          "ready_pieces": 9
+        },
+        "todo": [
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown-discipline",
+      "code": "bad_discipline",
+      "manifest": {
+        "schema": 1,
+        "job": {
+          "number": "2601",
+          "name": "TCU Campus 2",
+          "town": "Fort Worth",
+          "gc": "Ridgeline Builders",
+          "site": "Gate 3, laydown yard",
+          "office": "Jordan (PM) · ext. 214"
+        },
+        "sections": {
+          "shop": [
+            "drawings",
+            "shipping",
+            "traveler",
+            "loading",
+            "documents"
+          ],
+          "field": [
+            "drawings",
+            "shipping",
+            "documents"
+          ]
+        },
+        "sheets": [
+          {
+            "set": "set_e101",
+            "sheet": "E-101",
+            "title": "Erection plan, level 2",
+            "rev": "1",
+            "released": "2026-11-18",
+            "discipline": "architectural",
+            "marks": []
+          },
+          {
+            "set": "set_s101",
+            "sheet": "S-101",
+            "title": "Framing plan, level 2",
+            "rev": "3",
+            "released": "2026-11-20",
+            "discipline": "structural",
+            "marks": [
+              "B12",
+              "B10"
+            ]
+          },
+          {
+            "set": "set_s102",
+            "sheet": "S-102",
+            "title": "Column schedule",
+            "rev": "2",
+            "released": "2026-11-14",
+            "discipline": "structural",
+            "marks": [
+              "C4",
+              "C5"
+            ]
+          },
+          {
+            "set": "set_a001",
+            "sheet": "AB-1",
+            "title": "Anchor bolt plan",
+            "rev": "0",
+            "released": "2026-11-02",
+            "discipline": "anchor_bolts",
+            "marks": []
+          }
+        ],
+        "documents": [
+          {
+            "kind": "file",
+            "id": "file_logistics",
+            "name": "Site logistics plan",
+            "for": [
+              "shop",
+              "field"
+            ]
+          },
+          {
+            "kind": "set",
+            "id": "set_asi04",
+            "name": "ASI 04",
+            "for": [
+              "field"
+            ]
+          },
+          {
+            "kind": "file",
+            "id": "file_boltform",
+            "name": "Bolt verification form",
+            "for": [
+              "shop"
+            ]
+          }
+        ],
+        "loads": [
+          {
+            "number": 2,
+            "ticket": "2601-02",
+            "set": "set_ticket2",
+            "status": "in_transit",
+            "ships": "2026-11-23",
+            "weight_lb": 18450,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "B12",
+                "qty": 3,
+                "description": "W12x26 beam, Grid B",
+                "length": "24'-6\"",
+                "weight_lb": 1911
+              },
+              {
+                "mark": "C4",
+                "qty": 2,
+                "description": "W10x49 column w/ base plate",
+                "length": "14'-0\"",
+                "weight_lb": 1452
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "",
+                "signer": "Luis Ramos",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "driver",
+                "ref": "",
+                "signer": "Ben Novak",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:2:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "ticket": "2601-03",
+            "set": "set_ticket3",
+            "status": "loading",
+            "ships": "2026-11-26",
+            "weight_lb": 22100,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "J3",
+                "qty": 18,
+                "description": "W10x12 filler beam",
+                "length": "18'-9\"",
+                "weight_lb": 4050
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:LoadedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "driver",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:Driver",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          }
+        ],
+        "traveler": {
+          "set": "set_traveler",
+          "pieces": 86,
+          "complete": 61,
+          "open_stations": 18
+        },
+        "loading": {
+          "set": "set_loadlog",
+          "load": 3,
+          "weight_lb": 22100,
+          "capacity_lb": 48000,
+          "ready_pieces": 9
+        },
+        "todo": [
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown-box",
+      "code": "bad_box",
+      "manifest": {
+        "schema": 1,
+        "job": {
+          "number": "2601",
+          "name": "TCU Campus 2",
+          "town": "Fort Worth",
+          "gc": "Ridgeline Builders",
+          "site": "Gate 3, laydown yard",
+          "office": "Jordan (PM) · ext. 214"
+        },
+        "sections": {
+          "shop": [
+            "drawings",
+            "shipping",
+            "traveler",
+            "loading",
+            "documents"
+          ],
+          "field": [
+            "drawings",
+            "shipping",
+            "documents"
+          ]
+        },
+        "sheets": [
+          {
+            "set": "set_e101",
+            "sheet": "E-101",
+            "title": "Erection plan, level 2",
+            "rev": "1",
+            "released": "2026-11-18",
+            "discipline": "erection",
+            "marks": []
+          },
+          {
+            "set": "set_s101",
+            "sheet": "S-101",
+            "title": "Framing plan, level 2",
+            "rev": "3",
+            "released": "2026-11-20",
+            "discipline": "structural",
+            "marks": [
+              "B12",
+              "B10"
+            ]
+          },
+          {
+            "set": "set_s102",
+            "sheet": "S-102",
+            "title": "Column schedule",
+            "rev": "2",
+            "released": "2026-11-14",
+            "discipline": "structural",
+            "marks": [
+              "C4",
+              "C5"
+            ]
+          },
+          {
+            "set": "set_a001",
+            "sheet": "AB-1",
+            "title": "Anchor bolt plan",
+            "rev": "0",
+            "released": "2026-11-02",
+            "discipline": "anchor_bolts",
+            "marks": []
+          }
+        ],
+        "documents": [
+          {
+            "kind": "file",
+            "id": "file_logistics",
+            "name": "Site logistics plan",
+            "for": [
+              "shop",
+              "field"
+            ]
+          },
+          {
+            "kind": "set",
+            "id": "set_asi04",
+            "name": "ASI 04",
+            "for": [
+              "field"
+            ]
+          },
+          {
+            "kind": "file",
+            "id": "file_boltform",
+            "name": "Bolt verification form",
+            "for": [
+              "shop"
+            ]
+          }
+        ],
+        "loads": [
+          {
+            "number": 2,
+            "ticket": "2601-02",
+            "set": "set_ticket2",
+            "status": "in_transit",
+            "ships": "2026-11-23",
+            "weight_lb": 18450,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "B12",
+                "qty": 3,
+                "description": "W12x26 beam, Grid B",
+                "length": "24'-6\"",
+                "weight_lb": 1911
+              },
+              {
+                "mark": "C4",
+                "qty": 2,
+                "description": "W10x49 column w/ base plate",
+                "length": "14'-0\"",
+                "weight_lb": 1452
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "",
+                "signer": "Luis Ramos",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "driver",
+                "ref": "",
+                "signer": "Ben Novak",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:2:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "inspector",
+                "ref": "",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "ticket": "2601-03",
+            "set": "set_ticket3",
+            "status": "loading",
+            "ships": "2026-11-26",
+            "weight_lb": 22100,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "J3",
+                "qty": 18,
+                "description": "W10x12 filler beam",
+                "length": "18'-9\"",
+                "weight_lb": 4050
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:LoadedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "driver",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:Driver",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          }
+        ],
+        "traveler": {
+          "set": "set_traveler",
+          "pieces": 86,
+          "complete": 61,
+          "open_stations": 18
+        },
+        "loading": {
+          "set": "set_loadlog",
+          "load": 3,
+          "weight_lb": 22100,
+          "capacity_lb": 48000,
+          "ready_pieces": 9
+        },
+        "todo": [
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          }
+        ]
+      }
+    },
+    {
+      "name": "box-twice",
+      "code": "bad_box",
+      "manifest": {
+        "schema": 1,
+        "job": {
+          "number": "2601",
+          "name": "TCU Campus 2",
+          "town": "Fort Worth",
+          "gc": "Ridgeline Builders",
+          "site": "Gate 3, laydown yard",
+          "office": "Jordan (PM) · ext. 214"
+        },
+        "sections": {
+          "shop": [
+            "drawings",
+            "shipping",
+            "traveler",
+            "loading",
+            "documents"
+          ],
+          "field": [
+            "drawings",
+            "shipping",
+            "documents"
+          ]
+        },
+        "sheets": [
+          {
+            "set": "set_e101",
+            "sheet": "E-101",
+            "title": "Erection plan, level 2",
+            "rev": "1",
+            "released": "2026-11-18",
+            "discipline": "erection",
+            "marks": []
+          },
+          {
+            "set": "set_s101",
+            "sheet": "S-101",
+            "title": "Framing plan, level 2",
+            "rev": "3",
+            "released": "2026-11-20",
+            "discipline": "structural",
+            "marks": [
+              "B12",
+              "B10"
+            ]
+          },
+          {
+            "set": "set_s102",
+            "sheet": "S-102",
+            "title": "Column schedule",
+            "rev": "2",
+            "released": "2026-11-14",
+            "discipline": "structural",
+            "marks": [
+              "C4",
+              "C5"
+            ]
+          },
+          {
+            "set": "set_a001",
+            "sheet": "AB-1",
+            "title": "Anchor bolt plan",
+            "rev": "0",
+            "released": "2026-11-02",
+            "discipline": "anchor_bolts",
+            "marks": []
+          }
+        ],
+        "documents": [
+          {
+            "kind": "file",
+            "id": "file_logistics",
+            "name": "Site logistics plan",
+            "for": [
+              "shop",
+              "field"
+            ]
+          },
+          {
+            "kind": "set",
+            "id": "set_asi04",
+            "name": "ASI 04",
+            "for": [
+              "field"
+            ]
+          },
+          {
+            "kind": "file",
+            "id": "file_boltform",
+            "name": "Bolt verification form",
+            "for": [
+              "shop"
+            ]
+          }
+        ],
+        "loads": [
+          {
+            "number": 2,
+            "ticket": "2601-02",
+            "set": "set_ticket2",
+            "status": "in_transit",
+            "ships": "2026-11-23",
+            "weight_lb": 18450,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "B12",
+                "qty": 3,
+                "description": "W12x26 beam, Grid B",
+                "length": "24'-6\"",
+                "weight_lb": 1911
+              },
+              {
+                "mark": "C4",
+                "qty": 2,
+                "description": "W10x49 column w/ base plate",
+                "length": "14'-0\"",
+                "weight_lb": 1452
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "",
+                "signer": "Luis Ramos",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "driver",
+                "ref": "",
+                "signer": "Ben Novak",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:2:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "driver",
+                "ref": "",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "ticket": "2601-03",
+            "set": "set_ticket3",
+            "status": "loading",
+            "ships": "2026-11-26",
+            "weight_lb": 22100,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "J3",
+                "qty": 18,
+                "description": "W10x12 filler beam",
+                "length": "18'-9\"",
+                "weight_lb": 4050
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:LoadedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "driver",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:Driver",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          }
+        ],
+        "traveler": {
+          "set": "set_traveler",
+          "pieces": 86,
+          "complete": 61,
+          "open_stations": 18
+        },
+        "loading": {
+          "set": "set_loadlog",
+          "load": 3,
+          "weight_lb": 22100,
+          "capacity_lb": 48000,
+          "ready_pieces": 9
+        },
+        "todo": [
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown-status",
+      "code": "bad_status",
+      "manifest": {
+        "schema": 1,
+        "job": {
+          "number": "2601",
+          "name": "TCU Campus 2",
+          "town": "Fort Worth",
+          "gc": "Ridgeline Builders",
+          "site": "Gate 3, laydown yard",
+          "office": "Jordan (PM) · ext. 214"
+        },
+        "sections": {
+          "shop": [
+            "drawings",
+            "shipping",
+            "traveler",
+            "loading",
+            "documents"
+          ],
+          "field": [
+            "drawings",
+            "shipping",
+            "documents"
+          ]
+        },
+        "sheets": [
+          {
+            "set": "set_e101",
+            "sheet": "E-101",
+            "title": "Erection plan, level 2",
+            "rev": "1",
+            "released": "2026-11-18",
+            "discipline": "erection",
+            "marks": []
+          },
+          {
+            "set": "set_s101",
+            "sheet": "S-101",
+            "title": "Framing plan, level 2",
+            "rev": "3",
+            "released": "2026-11-20",
+            "discipline": "structural",
+            "marks": [
+              "B12",
+              "B10"
+            ]
+          },
+          {
+            "set": "set_s102",
+            "sheet": "S-102",
+            "title": "Column schedule",
+            "rev": "2",
+            "released": "2026-11-14",
+            "discipline": "structural",
+            "marks": [
+              "C4",
+              "C5"
+            ]
+          },
+          {
+            "set": "set_a001",
+            "sheet": "AB-1",
+            "title": "Anchor bolt plan",
+            "rev": "0",
+            "released": "2026-11-02",
+            "discipline": "anchor_bolts",
+            "marks": []
+          }
+        ],
+        "documents": [
+          {
+            "kind": "file",
+            "id": "file_logistics",
+            "name": "Site logistics plan",
+            "for": [
+              "shop",
+              "field"
+            ]
+          },
+          {
+            "kind": "set",
+            "id": "set_asi04",
+            "name": "ASI 04",
+            "for": [
+              "field"
+            ]
+          },
+          {
+            "kind": "file",
+            "id": "file_boltform",
+            "name": "Bolt verification form",
+            "for": [
+              "shop"
+            ]
+          }
+        ],
+        "loads": [
+          {
+            "number": 2,
+            "ticket": "2601-02",
+            "set": "set_ticket2",
+            "status": "lost",
+            "ships": "2026-11-23",
+            "weight_lb": 18450,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "B12",
+                "qty": 3,
+                "description": "W12x26 beam, Grid B",
+                "length": "24'-6\"",
+                "weight_lb": 1911
+              },
+              {
+                "mark": "C4",
+                "qty": 2,
+                "description": "W10x49 column w/ base plate",
+                "length": "14'-0\"",
+                "weight_lb": 1452
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "",
+                "signer": "Luis Ramos",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "driver",
+                "ref": "",
+                "signer": "Ben Novak",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:2:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "ticket": "2601-03",
+            "set": "set_ticket3",
+            "status": "loading",
+            "ships": "2026-11-26",
+            "weight_lb": 22100,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "J3",
+                "qty": 18,
+                "description": "W10x12 filler beam",
+                "length": "18'-9\"",
+                "weight_lb": 4050
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:LoadedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "driver",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:Driver",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          }
+        ],
+        "traveler": {
+          "set": "set_traveler",
+          "pieces": 86,
+          "complete": 61,
+          "open_stations": 18
+        },
+        "loading": {
+          "set": "set_loadlog",
+          "load": 3,
+          "weight_lb": 22100,
+          "capacity_lb": 48000,
+          "ready_pieces": 9
+        },
+        "todo": [
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          }
+        ]
+      }
+    },
+    {
+      "name": "pin-for-nobody",
+      "code": "bad_audience",
+      "manifest": {
+        "schema": 1,
+        "job": {
+          "number": "2601",
+          "name": "TCU Campus 2",
+          "town": "Fort Worth",
+          "gc": "Ridgeline Builders",
+          "site": "Gate 3, laydown yard",
+          "office": "Jordan (PM) · ext. 214"
+        },
+        "sections": {
+          "shop": [
+            "drawings",
+            "shipping",
+            "traveler",
+            "loading",
+            "documents"
+          ],
+          "field": [
+            "drawings",
+            "shipping",
+            "documents"
+          ]
+        },
+        "sheets": [
+          {
+            "set": "set_e101",
+            "sheet": "E-101",
+            "title": "Erection plan, level 2",
+            "rev": "1",
+            "released": "2026-11-18",
+            "discipline": "erection",
+            "marks": []
+          },
+          {
+            "set": "set_s101",
+            "sheet": "S-101",
+            "title": "Framing plan, level 2",
+            "rev": "3",
+            "released": "2026-11-20",
+            "discipline": "structural",
+            "marks": [
+              "B12",
+              "B10"
+            ]
+          },
+          {
+            "set": "set_s102",
+            "sheet": "S-102",
+            "title": "Column schedule",
+            "rev": "2",
+            "released": "2026-11-14",
+            "discipline": "structural",
+            "marks": [
+              "C4",
+              "C5"
+            ]
+          },
+          {
+            "set": "set_a001",
+            "sheet": "AB-1",
+            "title": "Anchor bolt plan",
+            "rev": "0",
+            "released": "2026-11-02",
+            "discipline": "anchor_bolts",
+            "marks": []
+          }
+        ],
+        "documents": [
+          {
+            "kind": "file",
+            "id": "file_logistics",
+            "name": "Site logistics plan",
+            "for": []
+          },
+          {
+            "kind": "set",
+            "id": "set_asi04",
+            "name": "ASI 04",
+            "for": [
+              "field"
+            ]
+          },
+          {
+            "kind": "file",
+            "id": "file_boltform",
+            "name": "Bolt verification form",
+            "for": [
+              "shop"
+            ]
+          }
+        ],
+        "loads": [
+          {
+            "number": 2,
+            "ticket": "2601-02",
+            "set": "set_ticket2",
+            "status": "in_transit",
+            "ships": "2026-11-23",
+            "weight_lb": 18450,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "B12",
+                "qty": 3,
+                "description": "W12x26 beam, Grid B",
+                "length": "24'-6\"",
+                "weight_lb": 1911
+              },
+              {
+                "mark": "C4",
+                "qty": 2,
+                "description": "W10x49 column w/ base plate",
+                "length": "14'-0\"",
+                "weight_lb": 1452
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "",
+                "signer": "Luis Ramos",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "driver",
+                "ref": "",
+                "signer": "Ben Novak",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:2:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "ticket": "2601-03",
+            "set": "set_ticket3",
+            "status": "loading",
+            "ships": "2026-11-26",
+            "weight_lb": 22100,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "J3",
+                "qty": 18,
+                "description": "W10x12 filler beam",
+                "length": "18'-9\"",
+                "weight_lb": 4050
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:LoadedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "driver",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:Driver",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          }
+        ],
+        "traveler": {
+          "set": "set_traveler",
+          "pieces": 86,
+          "complete": 61,
+          "open_stations": 18
+        },
+        "loading": {
+          "set": "set_loadlog",
+          "load": 3,
+          "weight_lb": 22100,
+          "capacity_lb": 48000,
+          "ready_pieces": 9
+        },
+        "todo": [
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          }
+        ]
+      }
+    },
+    {
+      "name": "pin-for-office",
+      "code": "bad_audience",
+      "manifest": {
+        "schema": 1,
+        "job": {
+          "number": "2601",
+          "name": "TCU Campus 2",
+          "town": "Fort Worth",
+          "gc": "Ridgeline Builders",
+          "site": "Gate 3, laydown yard",
+          "office": "Jordan (PM) · ext. 214"
+        },
+        "sections": {
+          "shop": [
+            "drawings",
+            "shipping",
+            "traveler",
+            "loading",
+            "documents"
+          ],
+          "field": [
+            "drawings",
+            "shipping",
+            "documents"
+          ]
+        },
+        "sheets": [
+          {
+            "set": "set_e101",
+            "sheet": "E-101",
+            "title": "Erection plan, level 2",
+            "rev": "1",
+            "released": "2026-11-18",
+            "discipline": "erection",
+            "marks": []
+          },
+          {
+            "set": "set_s101",
+            "sheet": "S-101",
+            "title": "Framing plan, level 2",
+            "rev": "3",
+            "released": "2026-11-20",
+            "discipline": "structural",
+            "marks": [
+              "B12",
+              "B10"
+            ]
+          },
+          {
+            "set": "set_s102",
+            "sheet": "S-102",
+            "title": "Column schedule",
+            "rev": "2",
+            "released": "2026-11-14",
+            "discipline": "structural",
+            "marks": [
+              "C4",
+              "C5"
+            ]
+          },
+          {
+            "set": "set_a001",
+            "sheet": "AB-1",
+            "title": "Anchor bolt plan",
+            "rev": "0",
+            "released": "2026-11-02",
+            "discipline": "anchor_bolts",
+            "marks": []
+          }
+        ],
+        "documents": [
+          {
+            "kind": "file",
+            "id": "file_logistics",
+            "name": "Site logistics plan",
+            "for": [
+              "office"
+            ]
+          },
+          {
+            "kind": "set",
+            "id": "set_asi04",
+            "name": "ASI 04",
+            "for": [
+              "field"
+            ]
+          },
+          {
+            "kind": "file",
+            "id": "file_boltform",
+            "name": "Bolt verification form",
+            "for": [
+              "shop"
+            ]
+          }
+        ],
+        "loads": [
+          {
+            "number": 2,
+            "ticket": "2601-02",
+            "set": "set_ticket2",
+            "status": "in_transit",
+            "ships": "2026-11-23",
+            "weight_lb": 18450,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "B12",
+                "qty": 3,
+                "description": "W12x26 beam, Grid B",
+                "length": "24'-6\"",
+                "weight_lb": 1911
+              },
+              {
+                "mark": "C4",
+                "qty": 2,
+                "description": "W10x49 column w/ base plate",
+                "length": "14'-0\"",
+                "weight_lb": 1452
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "",
+                "signer": "Luis Ramos",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "driver",
+                "ref": "",
+                "signer": "Ben Novak",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:2:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "ticket": "2601-03",
+            "set": "set_ticket3",
+            "status": "loading",
+            "ships": "2026-11-26",
+            "weight_lb": 22100,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "J3",
+                "qty": 18,
+                "description": "W10x12 filler beam",
+                "length": "18'-9\"",
+                "weight_lb": 4050
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:LoadedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "driver",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:Driver",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          }
+        ],
+        "traveler": {
+          "set": "set_traveler",
+          "pieces": 86,
+          "complete": 61,
+          "open_stations": 18
+        },
+        "loading": {
+          "set": "set_loadlog",
+          "load": 3,
+          "weight_lb": 22100,
+          "capacity_lb": 48000,
+          "ready_pieces": 9
+        },
+        "todo": [
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          }
+        ]
+      }
+    },
+    {
+      "name": "title-too-long",
+      "code": "too_long",
+      "manifest": {
+        "schema": 1,
+        "job": {
+          "number": "2601",
+          "name": "TCU Campus 2",
+          "town": "Fort Worth",
+          "gc": "Ridgeline Builders",
+          "site": "Gate 3, laydown yard",
+          "office": "Jordan (PM) · ext. 214"
+        },
+        "sections": {
+          "shop": [
+            "drawings",
+            "shipping",
+            "traveler",
+            "loading",
+            "documents"
+          ],
+          "field": [
+            "drawings",
+            "shipping",
+            "documents"
+          ]
+        },
+        "sheets": [
+          {
+            "set": "set_e101",
+            "sheet": "E-101",
+            "title": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "rev": "1",
+            "released": "2026-11-18",
+            "discipline": "erection",
+            "marks": []
+          },
+          {
+            "set": "set_s101",
+            "sheet": "S-101",
+            "title": "Framing plan, level 2",
+            "rev": "3",
+            "released": "2026-11-20",
+            "discipline": "structural",
+            "marks": [
+              "B12",
+              "B10"
+            ]
+          },
+          {
+            "set": "set_s102",
+            "sheet": "S-102",
+            "title": "Column schedule",
+            "rev": "2",
+            "released": "2026-11-14",
+            "discipline": "structural",
+            "marks": [
+              "C4",
+              "C5"
+            ]
+          },
+          {
+            "set": "set_a001",
+            "sheet": "AB-1",
+            "title": "Anchor bolt plan",
+            "rev": "0",
+            "released": "2026-11-02",
+            "discipline": "anchor_bolts",
+            "marks": []
+          }
+        ],
+        "documents": [
+          {
+            "kind": "file",
+            "id": "file_logistics",
+            "name": "Site logistics plan",
+            "for": [
+              "shop",
+              "field"
+            ]
+          },
+          {
+            "kind": "set",
+            "id": "set_asi04",
+            "name": "ASI 04",
+            "for": [
+              "field"
+            ]
+          },
+          {
+            "kind": "file",
+            "id": "file_boltform",
+            "name": "Bolt verification form",
+            "for": [
+              "shop"
+            ]
+          }
+        ],
+        "loads": [
+          {
+            "number": 2,
+            "ticket": "2601-02",
+            "set": "set_ticket2",
+            "status": "in_transit",
+            "ships": "2026-11-23",
+            "weight_lb": 18450,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "B12",
+                "qty": 3,
+                "description": "W12x26 beam, Grid B",
+                "length": "24'-6\"",
+                "weight_lb": 1911
+              },
+              {
+                "mark": "C4",
+                "qty": 2,
+                "description": "W10x49 column w/ base plate",
+                "length": "14'-0\"",
+                "weight_lb": 1452
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "",
+                "signer": "Luis Ramos",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "driver",
+                "ref": "",
+                "signer": "Ben Novak",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:2:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "ticket": "2601-03",
+            "set": "set_ticket3",
+            "status": "loading",
+            "ships": "2026-11-26",
+            "weight_lb": 22100,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "J3",
+                "qty": 18,
+                "description": "W10x12 filler beam",
+                "length": "18'-9\"",
+                "weight_lb": 4050
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:LoadedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "driver",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:Driver",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          }
+        ],
+        "traveler": {
+          "set": "set_traveler",
+          "pieces": 86,
+          "complete": 61,
+          "open_stations": 18
+        },
+        "loading": {
+          "set": "set_loadlog",
+          "load": 3,
+          "weight_lb": 22100,
+          "capacity_lb": 48000,
+          "ready_pieces": 9
+        },
+        "todo": [
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          }
+        ]
+      }
+    },
+    {
+      "name": "control-character",
+      "code": "too_long",
+      "manifest": {
+        "schema": 1,
+        "job": {
+          "number": "2601",
+          "name": "TCU\u0007",
+          "town": "Fort Worth",
+          "gc": "Ridgeline Builders",
+          "site": "Gate 3, laydown yard",
+          "office": "Jordan (PM) · ext. 214"
+        },
+        "sections": {
+          "shop": [
+            "drawings",
+            "shipping",
+            "traveler",
+            "loading",
+            "documents"
+          ],
+          "field": [
+            "drawings",
+            "shipping",
+            "documents"
+          ]
+        },
+        "sheets": [
+          {
+            "set": "set_e101",
+            "sheet": "E-101",
+            "title": "Erection plan, level 2",
+            "rev": "1",
+            "released": "2026-11-18",
+            "discipline": "erection",
+            "marks": []
+          },
+          {
+            "set": "set_s101",
+            "sheet": "S-101",
+            "title": "Framing plan, level 2",
+            "rev": "3",
+            "released": "2026-11-20",
+            "discipline": "structural",
+            "marks": [
+              "B12",
+              "B10"
+            ]
+          },
+          {
+            "set": "set_s102",
+            "sheet": "S-102",
+            "title": "Column schedule",
+            "rev": "2",
+            "released": "2026-11-14",
+            "discipline": "structural",
+            "marks": [
+              "C4",
+              "C5"
+            ]
+          },
+          {
+            "set": "set_a001",
+            "sheet": "AB-1",
+            "title": "Anchor bolt plan",
+            "rev": "0",
+            "released": "2026-11-02",
+            "discipline": "anchor_bolts",
+            "marks": []
+          }
+        ],
+        "documents": [
+          {
+            "kind": "file",
+            "id": "file_logistics",
+            "name": "Site logistics plan",
+            "for": [
+              "shop",
+              "field"
+            ]
+          },
+          {
+            "kind": "set",
+            "id": "set_asi04",
+            "name": "ASI 04",
+            "for": [
+              "field"
+            ]
+          },
+          {
+            "kind": "file",
+            "id": "file_boltform",
+            "name": "Bolt verification form",
+            "for": [
+              "shop"
+            ]
+          }
+        ],
+        "loads": [
+          {
+            "number": 2,
+            "ticket": "2601-02",
+            "set": "set_ticket2",
+            "status": "in_transit",
+            "ships": "2026-11-23",
+            "weight_lb": 18450,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "B12",
+                "qty": 3,
+                "description": "W12x26 beam, Grid B",
+                "length": "24'-6\"",
+                "weight_lb": 1911
+              },
+              {
+                "mark": "C4",
+                "qty": 2,
+                "description": "W10x49 column w/ base plate",
+                "length": "14'-0\"",
+                "weight_lb": 1452
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "",
+                "signer": "Luis Ramos",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "driver",
+                "ref": "",
+                "signer": "Ben Novak",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:2:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "ticket": "2601-03",
+            "set": "set_ticket3",
+            "status": "loading",
+            "ships": "2026-11-26",
+            "weight_lb": 22100,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "J3",
+                "qty": 18,
+                "description": "W10x12 filler beam",
+                "length": "18'-9\"",
+                "weight_lb": 4050
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:LoadedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "driver",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:Driver",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          }
+        ],
+        "traveler": {
+          "set": "set_traveler",
+          "pieces": 86,
+          "complete": 61,
+          "open_stations": 18
+        },
+        "loading": {
+          "set": "set_loadlog",
+          "load": 3,
+          "weight_lb": 22100,
+          "capacity_lb": 48000,
+          "ready_pieces": 9
+        },
+        "todo": [
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          }
+        ]
+      }
+    },
+    {
+      "name": "too-many-todo",
+      "code": "too_many",
+      "manifest": {
+        "schema": 1,
+        "job": {
+          "number": "2601",
+          "name": "TCU Campus 2",
+          "town": "Fort Worth",
+          "gc": "Ridgeline Builders",
+          "site": "Gate 3, laydown yard",
+          "office": "Jordan (PM) · ext. 214"
+        },
+        "sections": {
+          "shop": [
+            "drawings",
+            "shipping",
+            "traveler",
+            "loading",
+            "documents"
+          ],
+          "field": [
+            "drawings",
+            "shipping",
+            "documents"
+          ]
+        },
+        "sheets": [
+          {
+            "set": "set_e101",
+            "sheet": "E-101",
+            "title": "Erection plan, level 2",
+            "rev": "1",
+            "released": "2026-11-18",
+            "discipline": "erection",
+            "marks": []
+          },
+          {
+            "set": "set_s101",
+            "sheet": "S-101",
+            "title": "Framing plan, level 2",
+            "rev": "3",
+            "released": "2026-11-20",
+            "discipline": "structural",
+            "marks": [
+              "B12",
+              "B10"
+            ]
+          },
+          {
+            "set": "set_s102",
+            "sheet": "S-102",
+            "title": "Column schedule",
+            "rev": "2",
+            "released": "2026-11-14",
+            "discipline": "structural",
+            "marks": [
+              "C4",
+              "C5"
+            ]
+          },
+          {
+            "set": "set_a001",
+            "sheet": "AB-1",
+            "title": "Anchor bolt plan",
+            "rev": "0",
+            "released": "2026-11-02",
+            "discipline": "anchor_bolts",
+            "marks": []
+          }
+        ],
+        "documents": [
+          {
+            "kind": "file",
+            "id": "file_logistics",
+            "name": "Site logistics plan",
+            "for": [
+              "shop",
+              "field"
+            ]
+          },
+          {
+            "kind": "set",
+            "id": "set_asi04",
+            "name": "ASI 04",
+            "for": [
+              "field"
+            ]
+          },
+          {
+            "kind": "file",
+            "id": "file_boltform",
+            "name": "Bolt verification form",
+            "for": [
+              "shop"
+            ]
+          }
+        ],
+        "loads": [
+          {
+            "number": 2,
+            "ticket": "2601-02",
+            "set": "set_ticket2",
+            "status": "in_transit",
+            "ships": "2026-11-23",
+            "weight_lb": 18450,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "B12",
+                "qty": 3,
+                "description": "W12x26 beam, Grid B",
+                "length": "24'-6\"",
+                "weight_lb": 1911
+              },
+              {
+                "mark": "C4",
+                "qty": 2,
+                "description": "W10x49 column w/ base plate",
+                "length": "14'-0\"",
+                "weight_lb": 1452
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "",
+                "signer": "Luis Ramos",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "driver",
+                "ref": "",
+                "signer": "Ben Novak",
+                "signed": "2026-11-23"
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:2:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "ticket": "2601-03",
+            "set": "set_ticket3",
+            "status": "loading",
+            "ships": "2026-11-26",
+            "weight_lb": 22100,
+            "capacity_lb": 48000,
+            "trailer": "Flatbed 48'",
+            "destination": "Gate 3, laydown yard",
+            "pieces": [
+              {
+                "mark": "J3",
+                "qty": 18,
+                "description": "W10x12 filler beam",
+                "length": "18'-9\"",
+                "weight_lb": 4050
+              }
+            ],
+            "boxes": [
+              {
+                "box": "loaded_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:LoadedBy",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "driver",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:Driver",
+                "signer": "",
+                "signed": ""
+              },
+              {
+                "box": "received_by",
+                "ref": "ship:3f9c1a2b4d5e6f708192a3b4c5d6e7f8:3:ReceivedBy",
+                "signer": "",
+                "signed": ""
+              }
+            ]
+          }
+        ],
+        "traveler": {
+          "set": "set_traveler",
+          "pieces": 86,
+          "complete": 61,
+          "open_stations": 18
+        },
+        "loading": {
+          "set": "set_loadlog",
+          "load": 3,
+          "weight_lb": 22100,
+          "capacity_lb": 48000,
+          "ready_pieces": 9
+        },
+        "todo": [
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          },
+          {
+            "section": "shipping",
+            "load": 2,
+            "words": "Load 2 is on site: sign the ticket",
+            "detail": "Received by is still blank"
+          }
+        ]
+      }
+    }
+  ],
+  "reaches": [
+    {
+      "manifest": "steel-job",
+      "audience": "shop",
+      "sets": [
+        "set_a001",
+        "set_e101",
+        "set_loadlog",
+        "set_s101",
+        "set_s102",
+        "set_ticket2",
+        "set_ticket3",
+        "set_traveler"
+      ],
+      "files": [
+        "file_boltform",
+        "file_logistics"
+      ]
+    },
+    {
+      "manifest": "steel-job",
+      "audience": "field",
+      "sets": [
+        "set_a001",
+        "set_asi04",
+        "set_e101",
+        "set_s101",
+        "set_s102",
+        "set_ticket2",
+        "set_ticket3"
+      ],
+      "files": [
+        "file_logistics"
+      ]
+    },
+    {
+      "manifest": "steel-job",
+      "audience": "both",
+      "sets": [
+        "set_a001",
+        "set_asi04",
+        "set_e101",
+        "set_loadlog",
+        "set_s101",
+        "set_s102",
+        "set_ticket2",
+        "set_ticket3",
+        "set_traveler"
+      ],
+      "files": [
+        "file_boltform",
+        "file_logistics"
+      ]
+    },
+    {
+      "manifest": "steel-job",
+      "audience": "none",
+      "sets": [],
+      "files": []
+    },
+    {
+      "manifest": "erection-only",
+      "audience": "shop",
+      "sets": [
+        "set_e201"
+      ],
+      "files": []
+    },
+    {
+      "manifest": "erection-only",
+      "audience": "field",
+      "sets": [
+        "set_e201"
+      ],
+      "files": []
+    },
+    {
+      "manifest": "erection-only",
+      "audience": "both",
+      "sets": [
+        "set_e201"
+      ],
+      "files": []
+    },
+    {
+      "manifest": "erection-only",
+      "audience": "none",
+      "sets": [],
+      "files": []
+    }
+  ]
+}

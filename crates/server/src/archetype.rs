@@ -495,7 +495,7 @@ const MOST_LIST: usize = 10 * 1024 * 1024; // WHAT: 10 MB of JSON. WHY: twenty t
 
 pub(crate) async fn list_jobs(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<Vec<JobInfo>>> {
     on(&server)?;
-    crate::api::caller(&server, &headers)?; // WHAT: anybody signed in. WHY: everyone opens any job read-only
+    crate::api::office(&server, &headers)?; // WHAT: someone in the office. WHY: a viewer (shop or field) has no manifest or folder rule here, so reads are the office's alone
     Ok(Json(server.store.with(|db| Ok(list(db)?)).map_err(|e| Denied::broke("list the jobs", e))?))
 }
 
@@ -505,7 +505,7 @@ fn the_job(server: &crate::api::Server, id: &str) -> Answer<JobInfo> {
 
 pub(crate) async fn one_job(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<JobInfo>> {
     on(&server)?;
-    crate::api::caller(&server, &headers)?;
+    crate::api::office(&server, &headers)?; // WHAT: someone in the office. WHY: a viewer (shop or field) has no manifest or folder rule here, so reads are the office's alone
     Ok(Json(the_job(&server, &id)?))
 }
 
@@ -546,7 +546,7 @@ struct Which {
 
 pub(crate) async fn job_files(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>, uri: Uri) -> Answer<Json<JobFiles>> {
     on(&server)?;
-    crate::api::caller(&server, &headers)?;
+    crate::api::office(&server, &headers)?; // WHAT: someone in the office. WHY: a viewer (shop or field) has no manifest or folder rule here, so reads are the office's alone
     let which: Which = axum::extract::Query::try_from_uri(&uri).map(|q| q.0).map_err(|e| Denied::wrong(format!("Those values don't read: {e}")))?; // WHAT: the revision asked for, read after the checks. WHY: a stranger is answered 401/404 whatever they put there
     let job = the_job(&server, &id)?;
     let revision = which.revision.unwrap_or(job.revision);
@@ -557,7 +557,7 @@ pub(crate) async fn job_files(State(server): State<Shared>, headers: HeaderMap, 
 
 pub(crate) async fn job_history(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<Vec<HistoryEntry>>> {
     on(&server)?;
-    crate::api::caller(&server, &headers)?;
+    crate::api::office(&server, &headers)?; // WHAT: someone in the office. WHY: a viewer (shop or field) has no manifest or folder rule here, so reads are the office's alone
     the_job(&server, &id)?;
     Ok(Json(server.store.with(|db| history(db, &id)).map_err(|e| Denied::broke("read that job's history", e))?))
 }
@@ -628,7 +628,7 @@ pub(crate) async fn check_in(State(server): State<Shared>, headers: HeaderMap, U
 
 pub(crate) async fn release(State(server): State<Shared>, headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Answer<Json<JobInfo>> {
     on(&server)?;
-    let who = crate::api::caller(&server, &headers)?;
+    let who = crate::api::office(&server, &headers)?; // WHAT: someone in the office. WHY: only the office holds a job, so only it gives one back; a viewer is turned away first
     let at = now();
     let outcome = server
         .store
@@ -719,7 +719,7 @@ pub(crate) async fn put_file(State(server): State<Shared>, headers: HeaderMap, U
 
 pub(crate) async fn get_file(State(server): State<Shared>, headers: HeaderMap, UrlPath(digest): UrlPath<String>) -> Answer<Response> {
     on(&server)?;
-    crate::api::caller(&server, &headers)?;
+    crate::api::office(&server, &headers)?; // WHAT: someone in the office. WHY: a viewer (shop or field) has no manifest or folder rule here, so reads are the office's alone
     if !is_digest(&digest) || !server.store.with(|db| Ok(sent(db, &digest))).unwrap_or(false) {
         return Err(Denied::missing("file")); // WHAT: not one sent to Archetype. WHY: a View drawing's fingerprint opens nothing here
     }

@@ -307,6 +307,7 @@ CREATE TABLE IF NOT EXISTS signoffs (
     label       TEXT NOT NULL,
     grp         TEXT NOT NULL DEFAULT '',
     ref         TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT '',
     page        INTEGER,
     asked_by    TEXT NOT NULL,
     asked       TEXT NOT NULL,
@@ -349,6 +350,29 @@ CREATE TABLE IF NOT EXISTS devices (
     scope       TEXT NOT NULL DEFAULT 'all'
 );
 CREATE INDEX IF NOT EXISTS devices_by_state ON devices(state, asked);
+
+-- The tablet manifest (docs/TABLET-MANIFEST.md): one per job, set only by a
+-- program's sync key (Fabwire). `body` is the manifest in the server's own
+-- canonical JSON and `digest` its SHA-256, so the same push again changes
+-- nothing; `version` counts the changes. `tablet_items` is what it lets the
+-- shop and the field reach, worked out once when it is set, so every request
+-- of a tablet account reads a short list instead of the whole manifest.
+CREATE TABLE IF NOT EXISTS tablet_manifests (
+    project     TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    body        TEXT NOT NULL,
+    digest      TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    updated     TEXT NOT NULL,
+    updated_by  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tablet_items (
+    project     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,
+    id          TEXT NOT NULL,
+    shop        INTEGER NOT NULL,
+    field       INTEGER NOT NULL,
+    PRIMARY KEY (project, kind, id)
+);
 "#;
 
 /// An invitation as it is written down.
@@ -812,6 +836,7 @@ fn upgrade(db: &Connection) -> Result<()> {
     add_column(db, "sets", "folder", "TEXT")?;
     // When a key stops working, for a key given an end. None is never, which
     // is every key made before keys could end, so none of them is broken.
+    add_column(db, "signoffs", "kind", "TEXT NOT NULL DEFAULT ''")?; // WHAT: which ticket box a line is (loaded_by, driver, received_by), empty for any other. WHY: only some accounts may sign some boxes
     add_column(db, "keys", "expires", "TEXT")?; // WHAT: the optional end of a key. WHY: a key for a program can be made to run out on its own.
     add_column(db, "keys", "device", "TEXT")?; // WHAT: the computer a key was made from. WHY: removing the computer takes its keys back (security review L5)
     add_column(db, "sessions", "migrated_device", "TEXT")?; // WHAT: the device a session carried over, once. WHY: a session from before 0.7.0 carries exactly one seat over (security review H2a)

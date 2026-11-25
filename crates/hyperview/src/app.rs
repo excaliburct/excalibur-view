@@ -727,6 +727,7 @@ pub struct App {
     pub ink_pressure: Vec<f32>, // WHAT: the pressures of the stroke so far. WHY: decides the stroke's width when it is put down.
     /// The quick tools down the side, and whether it is being set up.
     pub signoffs: crate::signoffs::SignOffs, // WHAT: the open drawing's sign-offs, and the pad. WHY: the shop signs on View.
+    pub tablet: crate::tablet::Tablet, // WHAT: the tablet's screens and what they hold. WHY: shop and field get jobs and sections, not the folder tree
     pub quick: crate::quicktools::Quick, // WHAT: the side bar of each person's own tools. WHY: the few tools somebody uses all day, one tap away.
     /// A grip on the selected markup, while it is being dragged.
     pub gripping: Option<crate::grips::Gripping>,
@@ -995,6 +996,7 @@ impl App {
             fingers: false, // WHAT: a mouse until a touch says otherwise. WHY: the first touch event sets it.
             ink_pressure: Vec::new(), // WHAT: no stroke yet. WHY: filled while one is drawn.
             signoffs: Default::default(), // WHAT: none until an office drawing opens. WHY: asked for then.
+            tablet: crate::tablet::Tablet::default(), // WHAT: nothing read yet. WHY: asked for once signed in
             quick: Default::default(), // WHAT: the side bar, read from the settings below. WHY: set once the settings are loaded.
             asking_depth: None,
             shop: Default::default(),
@@ -1128,6 +1130,7 @@ impl App {
             ("View.SnapToGrid", self.prefs.snap_to_grid),
             ("View.SnapToContent", self.prefs.snap_to_content),
             ("View.SnapToMarkup", self.prefs.snap_to_markup),
+            ("View.TabletMode", self.prefs.tablet_mode), // WHAT: Tablet mode's tick. WHY: follows the setting
             ("View.SimpleMode", self.simple_mode()), // WHAT: simple mode's tick. WHY: follows the setting, including a tablet's first-run default.
             ("View.QuickTools", self.prefs.quick_tools_shown), // WHAT: the quick tools bar's tick. WHY: the same.
         ];
@@ -2067,25 +2070,50 @@ impl eframe::App for App {
             return;
         }
 
-        self.menus(ctx);
-        crate::bench::mark(&mut marks, "menus");
-        self.update_box(ctx);
-        self.tool_bars(ctx);
-        crate::bench::mark(&mut marks, "toolbars");
-        self.tabs(ctx);
-        self.fill_bar(ctx);
-        self.navigation(ctx);
-        crate::bench::mark(&mut marks, "tabs and navigation");
-        self.side_panels(ctx);
-        self.quick_tools_bar(ctx); // WHAT: the person's own tools down the right. WHY: before the sheet, which takes whatever room is left.
+        let tablet = self.tablet_mode(); // WHAT: the shop-and-field layout here. WHY: a tablet, a shop or field account, or Tablet mode
+        let tablet_viewer = tablet && self.tablet_viewing(); // WHAT: a sheet the tablet opened is in front. WHY: its own bar and toolbar over View's viewer
+        if tablet && !tablet_viewer {
+            self.tablet_screens(ctx); // WHAT: jobs, a job's home and its sections. WHY: no folders, two taps to anything
+            self.sign_in_dialog(ctx); // WHAT: the sign-in, if it is asked for. WHY: a session can run out on a tablet too
+            self.approval_window(ctx); // WHAT: waiting for approval, if so. WHY: §3
+            if let Some(error) = self.error.take() {
+                self.tablet.trouble(error); // WHAT: anything that went wrong, said in the tablet's band. WHY: never failing quietly
+            }
+            if self.standing.busy.is_some() {
+                ctx.request_repaint_after(std::time::Duration::from_secs(1)); // WHAT: woken while something is fetched. WHY: the sheet opens as soon as it arrives
+            }
+            self.autosave(); // WHAT: as every frame. WHY: nothing is ever lost
+            return; // WHAT: the tablet's screens are the whole window. WHY: the office's chrome is not drawn under them
+        }
+
+        if tablet_viewer {
+            self.tablet_viewer(ctx); // WHAT: the sheet's bar, the flip buttons and the minimal toolbar. WHY: mockup d
+        }
+        if !tablet_viewer || self.tablet.more {
+            self.menus(ctx);
+            crate::bench::mark(&mut marks, "menus");
+            self.update_box(ctx);
+            self.tool_bars(ctx);
+            crate::bench::mark(&mut marks, "toolbars");
+        }
+        if !tablet_viewer {
+            self.tabs(ctx);
+            self.fill_bar(ctx);
+            self.navigation(ctx);
+            crate::bench::mark(&mut marks, "tabs and navigation");
+            self.side_panels(ctx);
+            self.quick_tools_bar(ctx); // WHAT: the person's own tools down the right. WHY: before the sheet, which takes whatever room is left.
+        }
         self.signoffs_follow(); // WHAT: the open drawing's sign-offs, asked for when it changes. WHY: the button shows if any are waiting.
         self.signoffs_panel(ctx); // WHAT: the list down the right, when out. WHY: before the sheet, like the other side panels.
         crate::bench::mark(&mut marks, "side panels");
-        // The markups list's bar is always there; open, it is the list.
-        self.markups_bar(ctx);
-        crate::bench::mark(&mut marks, "markups list");
-        self.status_bar(ctx);
-        crate::bench::mark(&mut marks, "status bar");
+        if !tablet_viewer {
+            // The markups list's bar is always there; open, it is the list.
+            self.markups_bar(ctx);
+            crate::bench::mark(&mut marks, "markups list");
+            self.status_bar(ctx);
+            crate::bench::mark(&mut marks, "status bar");
+        }
         self.canvas(ctx);
         crate::bench::mark(&mut marks, "sheet");
         self.run_commands(ctx);

@@ -544,6 +544,12 @@ impl App {
                 Told::SyncFailed(_) => self.sync_asked = None,
                 Told::SignOffs { set, lines } => self.take_signoffs(set, lines), // WHAT: a set's lines. WHY: the list and the button.
                 Told::SignFailed(why) => self.signoff_failed(why), // WHAT: not signed. WHY: said, pad left open.
+                Told::TabletJobs(jobs) => self.tablet.take_jobs(jobs), // WHAT: the tablet's jobs. WHY: the job list
+                Told::TabletUnsupported => self.tablet.unsupported = true, // WHAT: an office server before 0.8.0. WHY: the desktop layout is kept
+                Told::TabletJob(view) => self.tablet.take_job(*view), // WHAT: one job as their tablet shows it. WHY: the job home and sections
+                Told::TabletTrouble(why) => self.tablet.trouble(why), // WHAT: no connection or a refusal. WHY: said plainly
+                Told::TabletSigned(view) => self.tablet.signed(*view), // WHAT: a box signed, the job read again. WHY: the Delivered screen
+                Told::TabletSignFailed(why) => self.tablet.sign_failed(why), // WHAT: not signed. WHY: the pad stays open
                 Told::NoticeMade(made) => {
                     self.office.notice_url.clear();
                     self.office.notice_note = None;
