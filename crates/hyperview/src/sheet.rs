@@ -562,6 +562,8 @@ pub struct Doc {
     /// Scales the user has set on a drawing from the office server, not yet
     /// sent to it. `None` means cleared.
     pub scales_to_send: BTreeMap<u32, Option<Measure>>, // WHAT: each sheet's scale waiting to go up. WHY: a scale kept only in this seat's downloaded copy was lost on the next open, and the takeoff on the server never had it (Mesa, 2026-11-24)
+    /// The office's revision of each sheet's scale this tab last took.
+    pub server_scales_at: BTreeMap<u32, u64>, // WHAT: how far each sheet's office scale is known. WHY: a clear is taken once, and an older answer never undoes a newer one (review M5)
     pub draft: Option<Draft>,
     pub selected: Option<usize>,
     /// The rest of the selection, when more than one markup is held at once.
@@ -714,6 +716,7 @@ impl Doc {
             marks: Vec::new(),
             scales: Default::default(),
             scales_to_send: BTreeMap::default(), // WHAT: nothing waiting. WHY: a drawing just opened has sent nothing
+            server_scales_at: BTreeMap::default(), // WHAT: nothing taken yet. WHY: the first sync brings them
             draft: None,
             selected: None,
             also: Vec::new(),
@@ -869,21 +872,36 @@ impl Doc {
     }
 
     /// Takes the scale the office server keeps for `page` (a `/Measure`
-    /// written as PDF, base64), unless this seat has one of its own still to
-    /// send, or the sheet already reads the same. True when it changed.
-    pub fn take_server_scale(&mut self, page: u32, measure: &str) -> bool {
+    /// written as PDF, base64), or its clear (`None`), as of the office's
+    /// revision `at`: unless this seat has one of its own still to send, has
+    /// already taken that revision, or the sheet already reads the same.
+    /// True when the sheet's scale changed.
+    pub fn take_server_scale(&mut self, page: u32, measure: Option<&str>, at: u64) -> bool {
         use base64::Engine;
         if self.scales_to_send.contains_key(&page) || page as usize >= self.pages.len() {
             return false; // WHAT: this seat's own scale wins, and a page it hasn't got is no page. WHY: a scale just set here is sent, never overwritten by the one it replaces
         }
+        if self.server_scales_at.get(&page).is_some_and(|known| *known >= at) {
+            return false; // WHAT: already taken. WHY: a clear is taken once, and an older answer never undoes a newer one
+        }
+        let Some(text) = measure else {
+            self.server_scales_at.insert(page, at); // WHAT: this clear taken. WHY: not again
+            let had = self.scale_of(page).is_some(); // WHAT: whether it had a scale. WHY: only then does anything change
+            if had {
+                self.scales.insert(page, None); // WHAT: cleared, as if cleared here. WHY: review M5: another seat cleared it, and this one kept stamping the old calibration
+            }
+            return had;
+        };
         let Some(theirs) = base64::engine::general_purpose::STANDARD
-            .decode(measure.as_bytes())
+            .decode(text.as_bytes())
             .ok()
             .and_then(|bytes| pdf::Reader::new(&bytes).object().ok())
             .and_then(|o| o.as_dict().and_then(Measure::read))
+            .filter(|m| m.trusted().is_ok())
         else {
-            return false; // WHAT: one that doesn't read. WHY: nothing to apply
+            return false; // WHAT: one that doesn't read, or can't be trusted. WHY: nothing to apply
         };
+        self.server_scales_at.insert(page, at); // WHAT: this revision taken. WHY: not again
         let written = |m: &Measure| {
             let mut out = Vec::new();
             pdf::write::write_object(&pdf::Object::Dict(m.write()), &mut out);
@@ -1936,7 +1954,7 @@ mod tests {
         ours.set_scale(0, Some(quarter())); // WHAT: the scale set, as Set Scale... does. WHY: the step that was lost
         assert!(ours.scales_to_send.get(&0).is_some_and(Option::is_some), "waiting to go to the office"); // WHAT: queued. WHY: the next sync sends it
         let other = imperial(96.0, "1/8\" = 1'-0\"", 16); // WHAT: another seat's scale. WHY: must not overwrite one set here
-        assert!(!ours.take_server_scale(0, &written(&other)), "this seat's own scale wins until it is sent"); // WHAT: not taken. WHY: it would undo what was just set
+        assert!(!ours.take_server_scale(0, Some(&written(&other)), 5), "this seat's own scale wins until it is sent"); // WHAT: not taken. WHY: it would undo what was just set
 
         let mut loose = a_tab("loose"); // WHAT: a drawing on this computer only. WHY: nothing to send
         loose.set_scale(0, Some(quarter())); // WHAT: a scale set. WHY: kept in the file at the next save, as always
@@ -1945,12 +1963,20 @@ mod tests {
         let mut theirs = a_tab("theirs"); // WHAT: the same drawing opened again, or on a second seat. WHY: the scale must be there
         theirs.attached = Some(crate::sync::Attached { set: "set_1".into(), revision: 0, sent: HashSet::default() }); // WHAT: attached. WHY: as above
         assert!(theirs.scale_of(0).is_none(), "the downloaded copy names no scale"); // WHAT: none in the file. WHY: the server's PDF is as uploaded
-        assert!(theirs.take_server_scale(0, &written(&quarter())), "the office's scale taken"); // WHAT: taken. WHY: the fix
+        assert!(theirs.take_server_scale(0, Some(&written(&quarter())), 3), "the office's scale taken"); // WHAT: taken. WHY: the fix
         assert_eq!(theirs.scale_of(0).map(|m| m.ratio), Some("1/4\" = 1'-0\"".to_string()), "and measured with"); // WHAT: in force. WHY: measuring uses it
-        assert!(!theirs.take_server_scale(0, &written(&quarter())), "the same scale again changes nothing"); // WHAT: not again. WHY: nothing to redraw
+        assert!(!theirs.take_server_scale(0, Some(&written(&quarter())), 4), "the same scale again changes nothing"); // WHAT: not again. WHY: nothing to redraw
         assert!(theirs.scales_to_send.is_empty(), "the office's own scale isn't sent back"); // WHAT: not queued. WHY: it came from there
-        assert!(!theirs.take_server_scale(0, "not base64!"), "nothing that doesn't read"); // WHAT: refused. WHY: never a broken scale
-        assert!(!theirs.take_server_scale(9, &written(&quarter())), "no page it hasn't got"); // WHAT: refused. WHY: no such sheet
+        assert!(!theirs.take_server_scale(0, None, 2), "an older clear never undoes a newer scale"); // WHAT: refused. WHY: answers can cross
+        assert!(theirs.scale_of(0).is_some(), "still scaled"); // WHAT: kept. WHY: as above
+        assert!(theirs.take_server_scale(0, None, 6), "a clear made on another seat reaches this one"); // WHAT: cleared. WHY: review M5
+        assert!(theirs.scale_of(0).is_none(), "and nothing measures with the old calibration"); // WHAT: no scale. WHY: as above
+        assert!(!theirs.take_server_scale(0, None, 6), "a clear is taken once"); // WHAT: not again. WHY: nothing changes
+        let mut broken = imperial(48.0, "calibrated", 16); // WHAT: a scale that can't be trusted. WHY: never applied
+        broken.x[0].conversion = 0.0; // WHAT: zero. WHY: as above
+        assert!(!theirs.take_server_scale(0, Some(&written(&broken)), 7), "a scale that can't be measured with is never applied"); // WHAT: refused. WHY: review M1
+        assert!(!theirs.take_server_scale(0, Some("not base64!"), 8), "nothing that doesn't read"); // WHAT: refused. WHY: never a broken scale
+        assert!(!theirs.take_server_scale(9, Some(&written(&quarter())), 9), "no page it hasn't got"); // WHAT: refused. WHY: no such sheet
     }
 
     #[test]

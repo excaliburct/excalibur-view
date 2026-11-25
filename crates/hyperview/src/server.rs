@@ -330,9 +330,10 @@ pub enum Told {
         markups: Vec<(String, usize, String, bool)>,
         /// Names this machine just sent, so it does not send them again.
         sent: Vec<String>,
-        /// The scale the server keeps on each sheet that has one, as (page,
-        /// its `/Measure` base64).
-        scales: Vec<(usize, String)>, // WHAT: the office's scales. WHY: applied here, so a scale set on any seat is on this one
+        /// The scale the server keeps on each sheet a person ever set one
+        /// on, as (page, its `/Measure` base64 or `None` when cleared, the
+        /// revision it was set or cleared at).
+        scales: Vec<(usize, Option<String>, u64)>, // WHAT: the office's scales and clears. WHY: applied here, so a scale set or cleared on any seat is on this one
     },
     /// Scales that couldn't be sent, to send with the next sync.
     ScalesUnsent {
@@ -1147,24 +1148,28 @@ pub fn start(repaint: egui::Context) -> Link {
                         // in the file on disk; the sync catches up later.
                         Err(_) => {}
                         Ok(client) => {
-                            let mut unsent = Vec::new(); // WHAT: scales the server didn't take. WHY: kept for the next sync
-                            let mut failed = None; // WHAT: why the first one failed. WHY: said once
+                            let mut unsent = Vec::new(); // WHAT: scales to send again later. WHY: kept for the next sync
+                            let mut refused = Vec::new(); // WHAT: scales the server turned down for good. WHY: said once, never retried
+                            let mut down = false; // WHAT: whether the server couldn't take one for now. WHY: the rest wait too
                             for (page, measure) in scales {
-                                if failed.is_some() {
-                                    unsent.push((page, measure)); // WHAT: not tried after a failure. WHY: the server is likely down; tried next time
+                                if down {
+                                    unsent.push((page, measure)); // WHAT: not tried while the server is down. WHY: tried next time
                                     continue;
                                 }
-                                if let Err(e) = client.set_sheet_scale(&set, page, measure.as_deref()) {
-                                    failed = Some(e.to_string()); // WHAT: why. WHY: said below
-                                    unsent.push((page, measure)); // WHAT: kept. WHY: tried again
+                                match client.set_sheet_scale(&set, page, measure.as_deref()) {
+                                    Ok(_) => {} // WHAT: kept by the office. WHY: done
+                                    Err(e) if e.may_pass_later() => {
+                                        down = true; // WHAT: the server can't for now. WHY: no point trying the others
+                                        unsent.push((page, measure)); // WHAT: kept. WHY: tried again
+                                    }
+                                    Err(e) => refused.push(format!("sheet {}: {e}", page + 1)), // WHAT: refused for good. WHY: review M4: a 403 or a bad scale retried forever blocked the sync
                                 }
                             }
                             if !unsent.is_empty() {
-                                say(&told, Told::ScalesUnsent { set: set.clone(), scales: unsent }); // WHAT: back to the tab. WHY: never lost
+                                say(&told, Told::ScalesUnsent { set: set.clone(), scales: unsent }); // WHAT: back to the tab. WHY: tried again, never lost
                             }
-                            if let Some(why) = failed {
-                                say(&told, sync_failed(&set, quiet, why)); // WHAT: said as a sync that failed. WHY: the same words as markups that didn't go
-                                continue;
+                            if !refused.is_empty() {
+                                say(&told, Told::Trouble(format!("The office server didn't keep the scale of {}. The markups still sync.", refused.join("; ")))); // WHAT: said plainly, once. WHY: the person knows the scale wasn't kept
                             }
                             let push: Vec<hub::NewMarkup> = sending
                                 .iter()
@@ -1189,10 +1194,10 @@ pub fn start(repaint: egui::Context) -> Link {
                                     }
                                 }
                             };
-                            let office_scales: Vec<(usize, String)> = client
+                            let office_scales: Vec<(usize, Option<String>, u64)> = client
                                 .sheets(&set)
-                                .map(|sheets| sheets.into_iter().filter_map(|s| s.measure.map(|m| (s.page, m))).collect())
-                                .unwrap_or_default(); // WHAT: the office's scales; none when they can't be read. WHY: a scale set on another seat is applied here
+                                .map(|sheets| sheets.into_iter().filter_map(|s| s.measure_at.map(|at| (s.page, s.measure, at))).collect())
+                                .unwrap_or_default(); // WHAT: each sheet's office scale, or its clear, with when; none when they can't be read. WHY: a scale set or cleared on another seat reaches this one (review M5)
                             match client.markups(&set, since) {
                                 Ok(page) => say(
                                     &told,

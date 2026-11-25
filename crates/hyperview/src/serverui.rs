@@ -701,19 +701,19 @@ impl App {
 
     /// Takes what the server had and puts it into the file.
     /// The scales the office server keeps, applied to the tab of `set`.
-    fn take_server_scales(&mut self, set: &str, scales: &[(usize, String)]) {
+    fn take_server_scales(&mut self, set: &str, scales: &[(usize, Option<String>, u64)]) {
         let Some(doc) = self.docs.iter_mut().find(|d| d.attached.as_ref().is_some_and(|a| a.set == set)) else {
             return; // WHAT: no tab for it. WHY: closed meanwhile
         };
         let mut taken = 0usize; // WHAT: sheets whose scale came over. WHY: said once
-        for (page, measure) in scales {
+        for (page, measure, at) in scales {
             if let Ok(page) = u32::try_from(*page) {
-                taken += usize::from(doc.take_server_scale(page, measure)); // WHAT: applied unless this seat has its own. WHY: Doc::take_server_scale
+                taken += usize::from(doc.take_server_scale(page, measure.as_deref(), *at)); // WHAT: applied, or cleared, unless this seat has its own waiting. WHY: Doc::take_server_scale
             }
         }
         if taken > 0 {
             doc.redraw.extend(0..u32::try_from(doc.pages.len()).unwrap_or(u32::MAX)); // WHAT: every sheet drawn again. WHY: the scale shows in the status and the measurements
-            self.status = format!("The office's scale is set on {taken} sheet(s) of this drawing."); // WHAT: said. WHY: a scale that appears should say where it came from
+            self.status = format!("The office's scale changed on {taken} sheet(s) of this drawing."); // WHAT: said. WHY: a scale that appears or goes should say where it came from
         }
     }
 

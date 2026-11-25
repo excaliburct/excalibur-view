@@ -279,6 +279,7 @@
     "Setup.password": "string",
     "Sheet.height": "number",
     "Sheet.measure": "string",
+    "Sheet.measure_at": "integer",
     "Sheet.number": "string",
     "Sheet.page": "integer",
     "Sheet.rotation": "integer",

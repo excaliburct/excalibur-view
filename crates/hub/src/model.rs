@@ -174,6 +174,10 @@ pub struct Sheet {
     /// Absent when nobody has set one on the office's copy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measure: Option<String>, // WHAT: the sheet's scale as the viewer set it. WHY: it lived only in one seat's downloaded copy, and the next open downloaded the drawing again without it (Mesa, 2026-11-24)
+    /// The set's revision when that scale was last set or cleared; absent
+    /// when nobody ever has. A clear is `measure` absent with this present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measure_at: Option<u64>, // WHAT: when the person's scale was last set or cleared. WHY: a seat drops a scale the office cleared (review M5)
 }
 
 // ---- markups -------------------------------------------------------------

@@ -394,6 +394,107 @@ impl Measure {
         }
         primary_units / per
     }
+
+    /// WHAT: The scale as real inches of building to an inch of paper (48 at
+    /// 1/4" = 1'-0", 100 at 1:100), when its unit is a length this knows.
+    /// WHY: one number to check a scale by, whatever unit it is written in.
+    #[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+    pub fn paper_ratio(&self) -> Option<f64> {
+        self.feet_per_unit().map(|feet| self.per_point() * feet * 12.0 * 72.0) // WHAT: units a point, in feet, in inches, an inch of paper. WHY: as above
+    }
+
+    /// WHAT: Whether this scale can be measured with: every conversion a
+    /// number above zero and short of a billion, the scale between
+    /// `LEAST_SCALE` and `MOST_SCALE` when its unit is known, and its words
+    /// saying the same scale as its numbers where they can be read. The
+    /// reason when it can't. WHY: a scale is sent by any program or seat;
+    /// one of zero, below zero, infinite or a million times too big made
+    /// every length on the takeoff nothing, negative or absurd (review M1).
+    ///
+    /// # Errors
+    ///
+    /// Why the scale can't be trusted, in words.
+    pub fn trusted(&self) -> Result<(), String> {
+        let every = self.x.iter().chain(&self.distance).chain(&self.area).chain(&self.volume); // WHAT: every number format that converts a measurement. WHY: each is multiplied into a quantity
+        if let Some(bad) = every.map(|f| f.conversion).find(|c| !c.is_finite() || *c <= 0.0 || *c >= 1e9) {
+            return Err(format!("its conversion {bad} isn't a number above zero and short of a billion")); // WHAT: refused, saying which. WHY: as above
+        }
+        if let Some(ratio) = self.paper_ratio() {
+            if !(LEAST_SCALE..=MOST_SCALE).contains(&ratio) {
+                return Err(format!("it is 1:{ratio:.4}, outside the scales a drawing is drawn at (1:{LEAST_SCALE} to 1:{MOST_SCALE})")); // WHAT: refused. WHY: no sheet is drawn at that
+            }
+            if let Some(said) = said_ratio(&self.ratio) {
+                if (ratio / said - 1.0).abs() > 0.02 {
+                    return Err(format!("its words say {} (1:{said:.4}) but its numbers are 1:{ratio:.4}", self.ratio)); // WHAT: refused. WHY: a label that lies would be shown beside wrong numbers
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// WHAT: The largest a drawing is drawn, as real inches to an inch of paper:
+/// a detail a hundred times full size. WHY: the floor `Measure::trusted` holds a scale to.
+pub const LEAST_SCALE: f64 = 0.01; // WHAT: 1:0.01. WHY: larger than any detail on a shop drawing
+
+/// WHAT: The smallest a drawing is drawn: a site map at 1:1,000,000. WHY: the
+/// ceiling `Measure::trusted` holds a scale to.
+pub const MOST_SCALE: f64 = 1_000_000.0; // WHAT: 1:1,000,000. WHY: smaller than any map a fabricator is sent
+
+/// WHAT: The scale a scale's words say, as real inches to an inch of paper,
+/// when they read as one: `1/4" = 1'-0"`, `0.25 in = 1 ft' in"`, `1" = 10'`,
+/// `1:100`, or any of those after "calibrated, ". `None` when they don't
+/// read (a bare "calibrated", or one that says how far off it is). WHY: the
+/// words are checked against the numbers only where they can be read.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn said_ratio(words: &str) -> Option<f64> {
+    let text = words.trim(); // WHAT: the words. WHY: read below
+    let text = text.strip_prefix("calibrated,").map_or(text, str::trim); // WHAT: a calibration that landed on a named scale says it after a comma. WHY: that name is checked
+    if let Some((paper, real)) = text.split_once('=') {
+        let (paper, real) = (inches_in(paper)?, inches_in(real)?); // WHAT: both sides in inches. WHY: their ratio is the scale
+        return (paper > 0.0).then(|| real / paper); // WHAT: real to paper. WHY: as `paper_ratio`
+    }
+    let (paper, real) = text.split_once(':')?; // WHAT: a metric ratio, 1:100. WHY: the other way scales are written
+    let (paper, real) = (number(paper.trim())?, number(real.trim())?); // WHAT: its two numbers. WHY: their ratio is the scale
+    (paper > 0.0).then(|| real / paper)
+}
+
+/// WHAT: A length written in feet and inches as inches: `1/4"`, `1'-0"`,
+/// `1 1/2"`, `0.25 in`, `1 ft' in"`, `10'`. `None` for anything else, a
+/// number with no unit after it included. WHY: `said_ratio` reads both sides of a scale.
+fn inches_in(text: &str) -> Option<f64> {
+    let (mut total, mut pending, mut any, mut waiting) = (0.0, 0.0, false, false); // WHAT: inches so far, a number waiting for its unit, whether a unit was seen, and whether a number waits. WHY: "1 1/2\"" is two numbers then a unit
+    for token in text.split(|c: char| c.is_whitespace() || c == '-').filter(|t| !t.is_empty()) {
+        let at = token.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '/')).unwrap_or(token.len()); // WHAT: where the number ends. WHY: the rest is its unit
+        let (digits, unit) = token.split_at(at); // WHAT: the number and its unit. WHY: read apart
+        if !digits.is_empty() {
+            pending += number(digits)?; // WHAT: added to what waits for a unit. WHY: "1" then "1/2\""
+            waiting = true; // WHAT: a number waits. WHY: one with no unit after it says nothing
+        }
+        let per = if unit.is_empty() {
+            continue; // WHAT: a number alone. WHY: its unit comes next
+        } else if unit.starts_with("ft") || unit.starts_with('\'') {
+            12.0 // WHAT: feet. WHY: twelve inches each
+        } else if unit.starts_with("in") || unit.starts_with('"') {
+            1.0 // WHAT: inches. WHY: as they are
+        } else {
+            return None; // WHAT: a unit not read. WHY: never guessed
+        };
+        total += pending * per; // WHAT: counted in. WHY: its unit is known
+        (pending, any, waiting) = (0.0, true, false); // WHAT: nothing waiting, a unit seen. WHY: the next number starts afresh
+    }
+    (any && !waiting).then_some(total) // WHAT: the inches, when every number had its unit. WHY: "1 = 10" says nothing
+}
+
+/// WHAT: A number as a scale writes it: `48`, `0.25`, `1/4`. WHY: `inches_in` and `said_ratio` read them.
+fn number(text: &str) -> Option<f64> {
+    match text.split_once('/') {
+        Some((top, bottom)) => {
+            let (top, bottom): (f64, f64) = (top.parse().ok()?, bottom.parse().ok()?); // WHAT: the fraction's two numbers. WHY: divided
+            (bottom.abs() > 0.0).then(|| top / bottom) // WHAT: the fraction, never over zero. WHY: a broken one is no number
+        }
+        None => text.parse::<f64>().ok().filter(|n| n.is_finite()), // WHAT: a plain number. WHY: as written
+    }
 }
 
 /// Walks a chain of formats: feet, then inches, then sixteenths.
@@ -569,6 +670,40 @@ pub fn feet_in(unit: &str) -> Option<f64> {
     };
     // WHAT: the feet. WHY: the caller converts with it.
     Some(feet)
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::*;
+
+    #[test]
+    fn a_scale_is_trusted_only_with_real_numbers_in_range_and_words_that_agree() {
+        assert_eq!(imperial(48.0, "1/4\" = 1'-0\"", 16).trusted(), Ok(())); // WHAT: quarter inch. WHY: the everyday scale
+        assert_eq!(imperial(48.0, "calibrated, 1/4\" = 1'-0\"", 16).trusted(), Ok(())); // WHAT: a calibration on a named scale. WHY: the viewer's words
+        assert_eq!(imperial(47.1, "calibrated (1.9% off 1/4\" = 1'-0\")", 16).trusted(), Ok(())); // WHAT: a calibration a little off. WHY: its words aren't a scale to check
+        assert_eq!(imperial(120.0, "1\" = 10'", 16).trusted(), Ok(())); // WHAT: an engineer's scale. WHY: feet alone
+        assert_eq!(imperial(48.0, "0.25 in = 1 ft' in\"", 16).trusted(), Ok(())); // WHAT: Bluebeam's way of writing it. WHY: read too
+        assert_eq!(metric(100.0, "1:100").trusted(), Ok(())); // WHAT: metric. WHY: read too
+        assert!(imperial(96.0, "1/4\" = 1'-0\"", 16).trusted().unwrap_err().contains("its words say")); // WHAT: words that lie. WHY: refused
+        assert!(metric(50.0, "1:100").trusted().is_err()); // WHAT: likewise in metric. WHY: refused
+        for bad in [0.0, -48.0 / 864.0, f64::INFINITY, f64::NAN, 1e12] {
+            let mut m = imperial(48.0, "calibrated", 16); // WHAT: a scale with no words to check. WHY: only the number is under test
+            m.x[0].conversion = bad; // WHAT: the bad feet a point. WHY: each refused
+            assert!(m.trusted().is_err(), "{bad} taken"); // WHAT: refused. WHY: nothing, negative, infinite or absurd
+        }
+        for bad in [0.0, -12.0, f64::INFINITY] {
+            let mut m = imperial(48.0, "1/4\" = 1'-0\"", 16); // WHAT: a good scale. WHY: only its inches format is broken
+            m.distance[1].conversion = bad; // WHAT: the inches a foot, broken. WHY: multiplied into every length it shows
+            assert!(m.trusted().unwrap_err().contains("isn't a number above zero"), "{bad} inches a foot taken"); // WHAT: refused. WHY: review M1: every conversion is checked, not only the first
+        }
+        let mut tiny = imperial(48.0, "calibrated", 16); // WHAT: a scale a hundred thousand times full size. WHY: outside the range
+        tiny.x[0].conversion = 1e-9; // WHAT: tiny. WHY: refused
+        assert!(tiny.trusted().unwrap_err().contains("outside the scales")); // WHAT: refused. WHY: as above
+        assert_eq!(said_ratio("calibrated"), None); // WHAT: nothing to read. WHY: not checked
+        assert_eq!(said_ratio("1 = 10"), None); // WHAT: no units. WHY: never guessed
+        assert!(said_ratio("1 1/2\" = 1'-0\"").is_some_and(|r| (r - 8.0).abs() < 1e-9)); // WHAT: a mixed number. WHY: read whole
+        assert_eq!(said_ratio("1/0\" = 1'"), None); // WHAT: over zero. WHY: no number
+    }
 }
 
 #[cfg(test)]

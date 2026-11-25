@@ -7,12 +7,23 @@ opens, on every computer, and the office server measures the takeoff with it.
 Before, it lived only in the copy on the computer it was set on, and was gone
 the next time the drawing opened.
 
+A SCALE CLEARED ON ONE COMPUTER IS CLEARED ON EVERY ONE
+
+Taking a sheet's scale off reaches every computer that has the drawing open,
+and the drawing's own scale, if it names one, applies again. A scale the
+office server won't keep (it isn't a real scale) is said once, and the
+markups keep syncing.
+
 A TAKEOFF PULLED BY FABWIRE IS MEASURED AS THE VIEWER MEASURES IT
 
 Each measurement is worked out with the scale it was drawn with, the one the
 viewer writes on every measurement, and the sheet's own scale only for a
 markup that carries none. Measurements drawn on a calibrated sheet no longer
-come back to Fabwire as "their sheet has no scale".
+come back to Fabwire as "their sheet has no scale". A markup measured at a
+different scale than its sheet, or carrying a scale that can't be measured
+with, is marked so Fabwire says it. A scale of nothing, below nothing, or
+absurdly large is never measured with, and one whose words say another scale
+than its numbers is refused.
 
 FOR PROGRAMS
 
