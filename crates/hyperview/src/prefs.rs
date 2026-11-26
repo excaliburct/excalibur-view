@@ -52,6 +52,9 @@ pub struct Prefs {
     /// needs spread across the sheet. A selected markup always shows its own.
     #[serde(default)]
     pub markup_text: bool,
+    /// Outline every paragraph Edit Text can change, all at once. Off unless somebody turns it on: a drawing sheet has hundreds of notes, and a box round each one buries the drawing. Off, only the paragraph under the pointer and the one open are outlined. // WHAT: the text outlines switch. WHY: Arc Valley asked for the boxes round text to be able to go away
+    #[serde(default)]
+    pub text_outlines: bool, // WHAT: every paragraph outlined, or only the one under the pointer. WHY: remembered in this person's settings, off by default
     /// Draw a grid over the sheet.
     #[serde(default)]
     pub grid: bool,
@@ -178,6 +181,7 @@ impl Default for Prefs {
             rulers: false,
             crosshair: false,
             markup_text: false,
+            text_outlines: false, // WHAT: outlines only under the pointer. WHY: a sheet full of boxes is what people called the editor "screwed up"
             snap_to_content: true,
             snap_to_markup: true,
             grid: false,

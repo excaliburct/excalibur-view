@@ -8,13 +8,15 @@ members = ["crates/annot", "crates/chest", "crates/pdf", "crates/hub", "crates/h
 exclude = ["plugins", "private"]
 
 [workspace.package]
-# WHAT: the version every crate in the program carries. WHY: 0.8.0 adds the shop-and-field
+# WHAT: the version every crate in the program carries. WHY: 0.8.2 makes Edit Text usable on real
+# drawings (outlines off unless asked for, tables read cell by cell, words in forms found, the editor
+# on its words; docs/EDIT-TEXT.md), after 0.8.1's sheet scales kept by the office server. 0.8.0 adds the shop-and-field
 # tablet layout and the tablet manifest the server enforces (docs/TABLET-MANIFEST.md). 0.7.0 was a new
 # build, the Excalibur Office Server: one program and one service carrying View,
 # CAD and Archetype as licensed parts and watching Citadel, HTTPS on the same
 # port 8714 with seats pinning its certificate; two builds never share a
 # version, because an install refuses to put a version over itself.
-version = "0.8.1"
+version = "0.8.2"
 edition = "2021"
 # WHAT: the oldest Rust that builds it. WHY: 1.89 gives File::try_lock, the system-held lock the off-site
 # backup takes so a crashed run never blocks the next one; every build uses the newest stable.
