@@ -641,9 +641,14 @@ pub fn can_set(words: &str, had: &std::collections::HashSet<char>) -> bool {
 
 /// The fonts on a sheet that are in the file whole, by the name pdfium gives
 /// them. One cut down to the letters the drawing used has a tag in front of
-/// its name, on it or on the font inside it, and isn't among these.
+/// its name, on it or on the font inside it, and isn't among these. pdfium
+/// gives a cut-down font's name without its tag, so a name that is on the
+/// sheet both whole and cut down (a whole Arial put in by an earlier edit next
+/// to the drawing's own cut-down ArialMT) can't be told apart by name, and is
+/// left out too: a cut-down font is never trusted with letters it lacks.
 pub fn whole_fonts(file: &pdf::Document, page: u32) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
+    let mut cut: Vec<String> = Vec::new(); // WHAT: the cut-down fonts' names without their tags. WHY: the same name whole is not trusted
     let Some(dict) = file.page(page as usize) else { return out };
     let resources = file.page_attr(&dict, "Resources");
     let Some(resources) = resources.as_dict() else { return out };
@@ -663,7 +668,12 @@ pub fn whole_fonts(file: &pdf::Document, page: u32) -> std::collections::HashSet
             .is_some_and(|n| is_subset(&n));
         if !is_subset(&name) && !inner_cut {
             out.insert(name);
+        } else {
+            cut.push(crate::fontshelf::untagged(&name).to_string()); // WHAT: its name as pdfium gives it. WHY: removed from the trusted below
         }
+    }
+    for name in &cut { // WHAT: each cut-down font's name. WHY: a whole font of the same name can't be told from it by name
+        out.remove(name); // WHAT: not trusted. WHY: the same
     }
     out
 }
@@ -903,13 +913,7 @@ impl crate::app::App {
                             }
                         });
                     });
-                    // Bold or italic in a font that isn't a standard one means
-                    // a standard one.
-                    if (r.rewrite.bold != r.found.bold || r.rewrite.italic != r.found.italic)
-                        && r.rewrite.family == Family::Keep
-                    {
-                        r.rewrite.family = Family::nearest(&r.found.font);
-                    }
+                    // WHAT: bold or italic changed with "Its own font" kept. WHY: the writer looks for the same family's bold or italic on this computer first, and only then a standard font, saying which it used
                     if let Some(why) = &r.error {
                         ui.colored_label(egui::Color32::from_rgb(235, 120, 120), why);
                     }
@@ -1139,8 +1143,12 @@ mod tests {
         file.extend_from_slice(
             format!("trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{table}\n%%EOF\n", bodies.len() + 1).as_bytes(),
         );
-        let whole = whole_fonts(&pdf::Document::from_bytes(file), 0);
+        let whole = whole_fonts(&pdf::Document::from_bytes(file.clone()), 0);
         assert_eq!(whole.into_iter().collect::<Vec<_>>(), vec!["Arial".to_string()]);
+        // WHAT: the same sheet with a cut-down Arial beside the whole one. WHY: pdfium names both "Arial", so neither is trusted
+        let text = String::from_utf8_lossy(&file).replace("/BaseFont/ABCDEF+Calibri", "/BaseFont/ABCDEF+Arial  "); // WHAT: Calibri's slot made a cut-down Arial, the same length. WHY: the xref offsets stay right
+        let whole = whole_fonts(&pdf::Document::from_bytes(text.into_bytes()), 0); // WHAT: read again. WHY: checked
+        assert!(whole.is_empty(), "a name both whole and cut down was trusted: {whole:?}"); // WHAT: nothing trusted. WHY: the guard
     }
 
     #[test]

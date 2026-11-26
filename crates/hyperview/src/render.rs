@@ -839,7 +839,21 @@ pub fn rewrite_on_sheet( // WHAT: the rewrite. WHY: the same code the window's w
     rewrite: &crate::textedit::Rewrite, // WHAT: what it becomes. WHY: written
 ) -> Result<(Vec<u8>, String), String> { // WHAT: the new file and the sentence. WHY: what the window gets
     let (path, found, rewrite) = (path.to_path_buf(), found.clone(), rewrite.clone()); // WHAT: owned copies. WHY: sent to the pdfium thread
-    with_engine(library, move |engine| engine.rewrite_paragraph(&path, page, &found, &rewrite)) // WHAT: the worker's own code. WHY: what is tested is what runs
+    with_engine(library, move |engine| engine.rewrite_paragraph(&path, page, &found, &rewrite, &crate::fontshelf::Source::System)) // WHAT: the worker's own code. WHY: what is tested is what runs
+}
+
+/// The same write, with the whole fonts taken from these folders instead of the computer's. Nothing is written to disk. // WHAT: Edit Text's write with given fonts. WHY: the tests prove a missing letter keeps its family without depending on what the build machine has installed
+pub fn rewrite_on_sheet_with_fonts( // WHAT: the rewrite. WHY: the same code, other fonts
+    library: Option<PathBuf>, // WHAT: where pdfium is. WHY: the same engine
+    path: &std::path::Path, // WHAT: the drawing. WHY: read fresh
+    page: u32, // WHAT: which sheet. WHY: one at a time
+    found: &crate::textedit::Found, // WHAT: the paragraph as read. WHY: found again on the sheet
+    rewrite: &crate::textedit::Rewrite, // WHAT: what it becomes. WHY: written
+    folders: Vec<PathBuf>, // WHAT: the font folders. WHY: the only fonts it may use
+) -> Result<(Vec<u8>, String), String> { // WHAT: the new file and the sentence. WHY: what the window gets
+    let (path, found, rewrite) = (path.to_path_buf(), found.clone(), rewrite.clone()); // WHAT: owned copies. WHY: sent to the pdfium thread
+    let fonts = crate::fontshelf::Source::Folders(folders); // WHAT: those folders. WHY: in place of the system's
+    with_engine(library, move |engine| engine.rewrite_paragraph(&path, page, &found, &rewrite, &fonts)) // WHAT: the worker's own code. WHY: what is tested is what runs
 }
 
 /// pdfium lives on exactly one thread, for the whole life of the process.
@@ -1389,7 +1403,7 @@ impl Queue {
             }
             ToWorker::Rewrite { doc, job, page, found, rewrite } => {
                 let result = match engine.path_of(doc) {
-                    Some(path) => engine.rewrite_paragraph(&path, page, &found, &rewrite),
+                    Some(path) => engine.rewrite_paragraph(&path, page, &found, &rewrite, &crate::fontshelf::Source::System), // WHAT: written with this computer's fonts to hand. WHY: a letter the drawing's font lacks is set in the same family
                     None => Err("that drawing is not open".into()),
                 };
                 let _ = tx.send(FromWorker::Rewritten { doc, job, page, result });
@@ -7196,6 +7210,7 @@ impl Engine {
         page: u32,
         found: &crate::textedit::Found,
         rewrite: &crate::textedit::Rewrite,
+        fonts: &crate::fontshelf::Source, // WHAT: where whole fonts come from. WHY: the computer's, or a test's folder
     ) -> Result<(Vec<u8>, String), String> {
         // Which of the sheet's fonts are in the file whole. pdfium gives a
         // font's name without the tag that says it was cut down, so that is
@@ -7204,7 +7219,7 @@ impl Engine {
             .map(|bytes| crate::textedit::whole_fonts(&pdf::Document::from_bytes(bytes), page))
             .unwrap_or_default();
         let one = self.open_alone(path)?;
-        let result = self.rewrite_in(&one, page, found, rewrite, &whole);
+        let result = self.rewrite_in(&one, page, found, rewrite, &whole, fonts); // WHAT: the write. WHY: with the fonts to hand
         self.close_alone(one);
         result
     }
@@ -7216,8 +7231,10 @@ impl Engine {
         found: &crate::textedit::Found,
         rewrite: &crate::textedit::Rewrite,
         whole: &std::collections::HashSet<String>,
+        fonts: &crate::fontshelf::Source, // WHAT: where whole fonts come from. WHY: a letter the cut-down font lacks
     ) -> Result<(Vec<u8>, String), String> {
         use crate::textedit::{self as te, Family};
+        let mut loaded: Option<FPDF_FONT> = None; // WHAT: a whole font loaded into the file here. WHY: let go of once the words are written, whatever happens
         let page = unsafe { self.bindings.FPDF_LoadPage(one.doc, page_index as i32) };
         if page.is_null() {
             return Err("that sheet could not be read".into());
@@ -7256,62 +7273,109 @@ impl Engine {
             }
             let first = &pieces[mine[0]];
 
-            // The font. Its own, when it can set every letter; otherwise the
-            // standard one nearest it, and a sentence saying so.
-            let letters: String = rewrite.text.chars().filter(|c| !c.is_whitespace()).collect();
-            let mut note = String::new();
-            let own = if rewrite.family == Family::Keep && !first.font.is_null() {
+            // The font. Its own, when it can set every letter in the weight and
+            // slant it had; otherwise the same family's whole font from this
+            // computer, or one that spaces its letters the same, and only
+            // then the standard one nearest it. The whole paragraph is set in
+            // the one font, so nothing in it mixes widths.
+            let letters: String = rewrite.text.chars().filter(|c| !c.is_whitespace()).collect(); // WHAT: what has to be set. WHY: spaces are measured apart
+            let mut note = String::new(); // WHAT: the sentence about the font, if any. WHY: the person is told when it changed
+            let restyled = rewrite.bold != found.bold || rewrite.italic != found.italic; // WHAT: bold or italic changed. WHY: its own font has only the weight and slant it had
+            let mut missing: Vec<char> = Vec::new(); // WHAT: the letters its own font lacks. WHY: the reason a whole font is wanted
+            let own = if rewrite.family == Family::Keep && !first.font.is_null() && !restyled { // WHAT: its own font, unchanged. WHY: the existing glyphs are kept whenever they can set every letter
                 let had: std::collections::HashSet<char> = pieces
                     .iter()
-                    .filter(|p| p.run.font == first.run.font)
+                    .filter(|p| p.font == first.font) // WHAT: the same font, not just the same name. WHY: a whole Arial put in by an earlier edit has the cut-down one's name, and its letters aren't the subset's
                     .flat_map(|p| p.run.text.chars())
-                    .collect();
+                    .collect(); // WHAT: every letter the sheet sets in it. WHY: all a cut-down font can be trusted with
                 // An embedded font is only trusted with letters it hasn't set
                 // yet when the file shows it was put in whole.
-                let cut_down = first.embedded && !whole.contains(&first.run.font);
+                let cut_down = first.embedded && !whole.contains(&first.run.font); // WHAT: a subset. WHY: it has only the letters it set
                 let settable = |c: char| {
-                    let mut w = 0f32;
+                    let mut w = 0f32; // WHAT: room for a width. WHY: pdfium fills it
                     let known = b.is_true(unsafe {
                         b.FPDFFont_GetGlyphWidth(first.font, c as u32, rewrite.size as f32, &mut w)
-                    });
-                    known && (!cut_down || had.contains(&c))
+                    }); // WHAT: whether pdfium can set it. WHY: a letter with no width can't be set
+                    known && (!cut_down || had.contains(&c)) // WHAT: settable and, in a subset, already set. WHY: a subset's other codes have no outlines
                 };
-                let missing: Vec<char> = letters.chars().filter(|c| !settable(*c)).collect();
-                if missing.is_empty() {
-                    Some(first.font)
-                } else {
-                    let shown: String = {
-                        let mut seen = Vec::new();
-                        for c in missing {
-                            if !seen.contains(&c) {
-                                seen.push(c);
-                            }
-                        }
-                        seen.into_iter().take(4).collect()
-                    };
-                    note = format!(
-                        " Set in {}: its own font here has no \"{shown}\".",
-                        Family::nearest(&first.run.font).name()
-                    );
-                    None
+                for c in letters.chars().filter(|c| !settable(*c)) { // WHAT: each letter it can't set. WHY: named in the sentence
+                    if !missing.contains(&c) { // WHAT: once each. WHY: tidy
+                        missing.push(c); // WHAT: kept. WHY: the same
+                    }
                 }
+                if missing.is_empty() { Some(first.font) } else { None } // WHAT: its own when it can, else none. WHY: only reach for a whole font when needed
             } else {
-                None
+                None // WHAT: not its own. WHY: another family was asked for, or another weight or slant
             };
             let font = match own {
-                Some(f) => f,
+                Some(f) => f, // WHAT: its own. WHY: the glyphs on the sheet stay as they are
                 None => {
-                    let family = if rewrite.family == Family::Keep {
-                        Family::nearest(&first.run.font)
-                    } else {
-                        rewrite.family
-                    };
-                    let name = family.standard(rewrite.bold, rewrite.italic);
-                    let f = unsafe { b.FPDFText_LoadStandardFont(one.doc, name) };
-                    if f.is_null() {
-                        return Err(format!("{name} could not be loaded"));
+                    let family = if rewrite.family == Family::Keep { Family::nearest(&first.run.font) } else { rewrite.family }; // WHAT: the standard family nearest. WHY: the last resort
+                    let mut whole_font: Option<FPDF_FONT> = None; // WHAT: a whole font found for it. WHY: tried before the standard one
+                    if rewrite.family == Family::Keep && !first.run.font.is_empty() { // WHAT: its own family wanted. WHY: a family the person picked is a standard one by choice
+                        let shelf = fonts.shelf(); // WHAT: the whole fonts to hand. WHY: listed only now, when one is wanted
+                        let choice = shelf.choose(&first.run.font, rewrite.bold, rewrite.italic, &letters); // WHAT: the best that fits. WHY: same family, then a metric twin
+                        let because = if restyled {
+                            format!("the drawing's font has no {} letters", if rewrite.bold && rewrite.italic { "bold italic" } else if rewrite.bold { "bold" } else if rewrite.italic { "italic" } else { "plain" })
+                        } else {
+                            "the drawing's font didn't include those letters".to_string()
+                        }; // WHAT: why another font was needed. WHY: said plainly
+                        if let Some(pick) = &choice.pick {
+                            // A copy of this font already put in the file whole
+                            // (by an earlier change on this sheet) is used again
+                            // rather than putting in another.
+                            let again = pieces.iter().find(|p| {
+                                !p.run.held && p.embedded && !p.font.is_null() && {
+                                    let mut length: usize = 0; // WHAT: room for its size. WHY: pdfium fills it
+                                    let sized = b.is_true(unsafe { b.FPDFFont_GetFontData(p.font, std::ptr::null_mut(), 0, &mut length) }); // WHAT: how big its font program is. WHY: only one the same size can be the same file
+                                    sized && length == pick.bytes.len() && {
+                                        let mut data = vec![0u8; length]; // WHAT: room for it. WHY: compared
+                                        let read = b.is_true(unsafe { b.FPDFFont_GetFontData(p.font, data.as_mut_ptr(), length, &mut length) }); // WHAT: its font program. WHY: compared byte for byte
+                                        read && data == pick.bytes // WHAT: the very file chosen. WHY: then it can set every letter the file can
+                                    }
+                                }
+                            }); // WHAT: the same whole font already in the file. WHY: a sheet edited ten times doesn't carry ten copies of Arial
+                            let f = match again {
+                                Some(p) => p.font, // WHAT: that copy. WHY: the same
+                                None => {
+                                    let f = unsafe {
+                                        b.FPDFText_LoadFont(one.doc, pick.bytes.as_ptr(), pick.bytes.len() as std::os::raw::c_uint, TRUETYPE, 1)
+                                    }; // WHAT: the whole font loaded into the file as a CID font. WHY: every letter in it can be set, not just Latin ones
+                                    if !f.is_null() {
+                                        loaded = Some(f); // WHAT: remembered. WHY: let go of at the end
+                                    }
+                                    f
+                                }
+                            };
+                            if !f.is_null() {
+                                whole_font = Some(f); // WHAT: found. WHY: used
+                                note = if pick.stand_in {
+                                    format!(" Typed in {}, the closest font on this computer, because {because}.", pick.face.family)
+                                } else {
+                                    format!(" Typed in {} because {because}.", pick.face.family)
+                                }; // WHAT: what was used. WHY: the owner's notice, in one sentence
+                            }
+                        }
+                        if whole_font.is_none() {
+                            note = format!(" Typed in {} because {because} and no matching font is on this computer.", family.name()); // WHAT: the standard one, said. WHY: the person knows it is not the sheet's font
+                        }
+                        match choice.refused.as_slice() {
+                            [] => {} // WHAT: nothing refused. WHY: nothing to say
+                            [one_font] => note.push_str(&format!(" {one_font}'s licence doesn't allow it to be saved inside a drawing, so it wasn't used.")), // WHAT: one refused. WHY: the owner's rule: say so in one plain sentence
+                            many => note.push_str(&format!(" The licences of {} don't allow them to be saved inside a drawing, so they weren't used.", many.join(" and "))), // WHAT: several refused. WHY: the same
+                        }
                     }
-                    f
+                    match whole_font {
+                        Some(f) => f, // WHAT: the whole font. WHY: keeps the family
+                        None => {
+                            let name = family.standard(rewrite.bold, rewrite.italic); // WHAT: the standard font. WHY: every reader has it
+                            let f = unsafe { b.FPDFText_LoadStandardFont(one.doc, name) };
+                            if f.is_null() {
+                                return Err(format!("{name} could not be loaded"));
+                            }
+                            f
+                        }
+                    }
                 }
             };
             let size = rewrite.size.max(1.0);
@@ -7471,6 +7535,9 @@ impl Engine {
             Ok((bytes, said))
         })();
         unsafe { self.bindings.FPDF_ClosePage(page) };
+        if let Some(f) = loaded { // WHAT: a whole font loaded here. WHY: the file keeps its own hold on it
+            unsafe { self.bindings.FPDFFont_Close(f) }; // WHAT: let go of. WHY: nothing leaks
+        }
         result
     }
 
@@ -7505,6 +7572,9 @@ impl Engine {
         Ok(out)
     }
 }
+
+/// pdfium's number for a TrueType font file. // WHAT: FPDF_FONT_TRUETYPE. WHY: every whole font used is TrueType
+const TRUETYPE: std::os::raw::c_int = 2; // WHAT: the value in fpdf_edit.h. WHY: the same
 
 /// Whether two drawings of a sheet are the same to the eye: a handful of
 /// pixels may differ where anti-aliasing lands differently, and nothing more.
@@ -7606,3 +7676,4 @@ mod tests {
         assert_eq!(bucket_for_zoom(1.5), 1);
     }
 }
+

@@ -69,13 +69,8 @@ were already right: every box sits on its ink within 1.5 px at 2 px/pt.
 
 ## What remains, and the recommended engine
 
-1. **Font fidelity (biggest).** Nearly every real drawing embeds *subset*
-   fonts. Typing a letter the subset lacks switches the whole paragraph to
-   Helvetica, Times or Courier. Fix: when the subset's family is installed
-   (Arial, Romans/simplex TTF, Calibri...), load the whole system font with
-   `FPDFText_LoadFont` (already in pdfium-render) and set the paragraph in it.
-   No new crate: font folders are read with `std::fs`. About 300 lines and a
-   day, with tests on an embedded subset fixture.
+1. **Font fidelity.** Done in 0.8.3 (branch `view-edit-fonts-20261126`); see
+   "Whole fonts" below.
 2. **Character-level grouping.** pdfium objects are one per show operator, so
    a TJ holding two title-block cells is one piece. Grouping from pdfium's
    per-character API (`FPDFText_GetCharBox`, `GetCharOrigin`, `GetMatrix`) would
@@ -93,3 +88,32 @@ works and would keep the rest of the stream byte-identical, but it needs a
 subsetting crate that is not in Cargo.lock (for example `subsetter`, MIT or
 Apache-2.0) and is two to four weeks. pdfium's reading is proven right by
 the tests here, so the work is better spent on 1 to 3.
+
+## Whole fonts (0.8.3)
+
+`fontshelf.rs` lists this computer's TrueType fonts (Windows `%WINDIR%\Fonts`
+and the per-person folder; macOS and iPad `/System/Library/Fonts`,
+`/Library/Fonts`, `~/Library/Fonts`; Android `/system/fonts`; Linux
+fontconfig's standard folders), reading only each file's header, `name` and
+`OS/2` tables, once, the first time a letter is missing. `rewrite_in` then:
+
+- keeps the paragraph's own font whenever it can set every letter in the
+  weight and slant it had (the sheet's glyphs untouched);
+- otherwise picks, in this weight and slant, the face with the same
+  PostScript name, then the same family (`ArialMT` and `Arial-BoldMT` are
+  Arial), then a metric twin (`STAND_INS`: Liberation Sans or Arimo for Arial,
+  Liberation Serif or Tinos for Times New Roman, Carlito for Calibri...), and
+  only then the standard font nearest it;
+- never uses a face whose fsType forbids an editable embed: restricted (2
+  alone), preview-and-print only (4), or bitmaps only (0x0200). Those are
+  named in one sentence;
+- loads the chosen file whole with `FPDFText_LoadFont` as a CID TrueType font,
+  sets the whole paragraph in it (one font a paragraph, measured with its own
+  widths), and reuses a copy already in the file rather than adding another;
+- says what it used: "Typed in Arial because the drawing's font didn't
+  include those letters."
+
+`.ttc` collections and CFF `.otf` fonts are skipped: pdfium embeds as
+TrueType. Tests: `tests/edit_text_alignment.rs` (a real subset made by
+emptying glyph outlines, fonts renamed and licence-flagged in a test folder
+via `render::rewrite_on_sheet_with_fonts`) and `fontshelf.rs`'s own.

@@ -1,0 +1,26 @@
+NEW LETTERS MATCH THE DRAWING
+
+Most drawings only carry the letters they already use. Before, typing a
+letter that wasn't one of them turned the whole note into Helvetica. Now
+View uses the same font from your computer, for example Arial or Arial
+Bold, so the note still matches the sheet. A small note at the bottom says
+when it did: "Typed in Arial because the drawing's font didn't include
+those letters." Turning on Bold or Italic works the same way.
+
+IF THE FONT ISN'T ON YOUR COMPUTER
+
+View uses the closest font that spaces its letters the same way, such as
+Liberation Sans for Arial, and says which. Helvetica is used only when
+nothing else fits.
+
+FONT LICENCES ARE RESPECTED
+
+Some fonts don't allow themselves to be saved inside a file. View never
+puts one of those in a drawing. It uses the next one that is allowed, and
+tells you in one sentence.
+
+YOUR NOTES STAY PUT
+
+If every letter you type is already in the drawing, nothing about the font
+changes. A changed note keeps its place, size and alignment, and a sheet
+only carries one copy of a font however many notes you change.
