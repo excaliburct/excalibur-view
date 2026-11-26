@@ -752,6 +752,8 @@ mod tests {
             height: h,
             rotation: r,
             scale: None,
+            measure: None, // WHAT: no scale set. WHY: not what is compared
+            measure_at: None, // WHAT: never set. WHY: likewise
         };
         assert!(same_paper(&sheet(2592.0, 1728.0, 0), &sheet(2592.4, 1727.8, 0)));
         assert!(!same_paper(&sheet(2592.0, 1728.0, 0), &sheet(3024.0, 2160.0, 0)));

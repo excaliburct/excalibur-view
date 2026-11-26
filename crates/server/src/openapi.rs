@@ -699,6 +699,21 @@ another drawing.",
                 "responses": ok_list("Sheet")
             }
         },
+        "/sets/{id}/scale": {
+            "post": {
+                "summary": "Set or clear a sheet's scale.",
+                "description": "`{\"page\": 0, \"measure\": \"<base64>\"}`: the sheet's /Measure dictionary, \
+                                written as PDF and base64, as a person set it (picked, calibrated or put on every \
+                                sheet); `null` clears it, and the drawing's own scale, if it names one, applies again. \
+                                Refused unless its conversions are numbers above zero, the scale is between 1:0.01 and \
+                                1:1,000,000, and its words say the same scale where they can be read. Every seat applies \
+                                it, or its clear, on its next sync; the takeoff measures with it each markup that carries \
+                                no scale of its own, and marks `ScaleNote` on one measured at another. The set's revision \
+                                moves. The answer is the set's sheets.",
+                "parameters": [path_param("id", "The drawing set.")],
+                "responses": ok_list("Sheet")
+            }
+        },
         "/sets/{id}/markups": {
             "get": {
                 "summary": "Markups, since a revision you have already seen.",
@@ -1488,6 +1503,8 @@ fn schemas() -> Value {
             ("height", "number", "Points."),
             ("rotation", "integer", ""),
             ("scale", "string", "How the sheet reads. Null means no scale is set, which is never the same as a scale of zero."),
+            ("measure", "string", "The scale a person set on the sheet in Excalibur View: its /Measure dictionary, written as PDF, base64. Absent when none is set."),
+            ("measure_at", "integer", "The set's revision when that scale was last set or cleared: present with `measure` absent means it was cleared. Absent when nobody ever set one."),
         ]),
         "Markup": object(&[
             ("id", "string", ""),

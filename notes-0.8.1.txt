@@ -1,0 +1,15 @@
+YOUR SCALE STAYS PUT
+
+A scale you set on a sheet is now kept by the office server, so it is still
+there the next time you open the drawing, and every computer measures with
+it. Before, it was kept only on the computer that set it.
+
+TAKEOFFS COME THROUGH WHOLE
+
+Measurements sent to Fabwire use the same scale you see on screen, so a
+takeoff no longer comes back with its lengths left out.
+
+SCALES ARE CHECKED
+
+A scale that can't be right is refused, and a measurement taken at a
+different scale than its sheet is flagged so it gets a second look.

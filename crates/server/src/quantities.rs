@@ -55,7 +55,7 @@ pub fn measured(
             // than counted as nothing.
             continue;
         };
-        let scale = sheets.get(stored.page).and_then(|s| s.scale.clone());
+        let scale = scale_for(&markup, sheets.get(stored.page)); // WHAT: the markup's own scale, else its sheet's. WHY: what the viewer measured it with (takeoff::read_document); a sheet calibrated in the viewer has no scale here, so its markups came back unscaled (Mesa, 2026-11-24)
         let row = takeoff::measure(
             stored.page,
             pdf::Ref::new(0, 0),
@@ -68,6 +68,60 @@ pub fn measured(
         rows.push((stored.id.clone(), row, sheet));
     }
     rows
+}
+
+/// The scale a markup is measured with: the `/Measure` it carries, which the
+/// viewer writes on every measurement it makes, when it can be trusted
+/// (`Measure::trusted`), else its sheet's own. The viewer's rule
+/// (`takeoff::row::read_document`), so a number fetched over the API is the
+/// number on somebody's screen; `judged` says when it needs a look.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn scale_for(markup: &Markup, sheet: Option<&SheetScale>) -> Option<Measure> {
+    judged(markup, sheet).0 // WHAT: the scale alone. WHY: the totals need nothing more
+}
+
+/// WHAT: The scale a markup is measured with, and why it needs a look when
+/// it does: its own scale can't be trusted (the sheet's is used, or nothing),
+/// or it differs from its sheet's by more than one percent. WHY: a markup's
+/// own scale wins, so a markup drawn at another scale, or sent with a broken
+/// one, is said beside its numbers, never silently believed (review M2).
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn judged(markup: &Markup, sheet: Option<&SheetScale>) -> (Option<Measure>, Option<String>) {
+    let sheets = sheet.and_then(|s| s.scale.clone()); // WHAT: the sheet's scale, if it has one. WHY: the fallback and the comparison
+    let Some(own) = markup.dict.get("Measure").and_then(|o| o.as_dict()).and_then(Measure::read) else {
+        return (sheets, None); // WHAT: no scale of its own. WHY: measured by the sheet's, nothing to say
+    };
+    if let Err(why) = own.trusted() {
+        let then = if sheets.is_some() { "its sheet's is used" } else { "it is left out" }; // WHAT: what happens instead. WHY: said with why
+        return (sheets, Some(format!("its own scale can't be measured with ({why}), so {then}"))); // WHAT: the sheet's, or none, said. WHY: never a zero, negative or absurd length
+    }
+    let note = sheets.as_ref().and_then(|theirs| {
+        let (a, b) = (own.paper_ratio()?, theirs.paper_ratio()?); // WHAT: both scales as one number. WHY: compared
+        ((a / b - 1.0).abs() > 0.01).then(|| format!("measured at a different scale than its sheet ({}; the sheet is {})", words(&own), words(theirs))) // WHAT: said when they differ. WHY: a calibration that disagrees with the drawing is looked at
+    });
+    (Some(own), note) // WHAT: its own scale, and the note if any. WHY: what the viewer measured it with
+}
+
+/// WHAT: A scale in words: its own, else "1:N". WHY: said in a note.
+fn words(m: &Measure) -> String {
+    if m.ratio.trim().is_empty() {
+        m.paper_ratio().map_or_else(|| "a scale with no name".to_string(), |r| format!("1:{r:.0}")) // WHAT: its number. WHY: it has no words
+    } else {
+        m.ratio.clone() // WHAT: its own words. WHY: as the viewer shows them
+    }
+}
+
+/// WHAT: Each stored markup's note on its scale, by its id, only for those
+/// that have one (`judged`). WHY: the markup list says it beside each.
+#[must_use] // WHAT: the answer is the point of calling it. WHY: dropping it is always a mistake
+pub fn scale_notes(markups: &[Stored], sheets: &[SheetScale]) -> std::collections::HashMap<String, String> {
+    markups
+        .iter()
+        .filter_map(|stored| {
+            let markup = read_markup(&stored.dictionary)?; // WHAT: the markup. WHY: its scale is read
+            judged(&markup, sheets.get(stored.page)).1.map(|note| (stored.id.clone(), note)) // WHAT: its note, if any. WHY: only those are listed
+        })
+        .collect()
 }
 
 /// Just the measurements, for the things that only want those.
@@ -177,7 +231,7 @@ pub fn to_csv(markups: &[Stored], sheets: &[SheetScale], columns: &[Column]) -> 
         let Some(markup) = read_markup(&stored.dictionary) else {
             continue;
         };
-        let scale = sheets.get(stored.page).and_then(|s| s.scale.clone());
+        let scale = scale_for(&markup, sheets.get(stored.page)); // WHAT: the markup's own scale, else its sheet's. WHY: what the viewer measured it with (takeoff::read_document); a sheet calibrated in the viewer has no scale here, so its markups came back unscaled (Mesa, 2026-11-24)
         rows.push(takeoff::measure(
             stored.page,
             pdf::Ref::new(0, 0),

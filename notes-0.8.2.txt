@@ -1,0 +1,23 @@
+NO MORE BOXES ALL OVER THE SHEET
+
+Edit Text no longer draws a box around every note on the sheet. Only the
+words under your pointer are outlined. To see every box, turn on Text
+Outlines, next to Edit Text or on the View menu, or press Ctrl+Shift+B. It
+starts off, and your choice is remembered.
+
+TABLES AND HEADINGS STAY APART
+
+A sheet index or schedule is read one cell at a time, not one whole column.
+A bold heading is no longer lumped in with the notes under it.
+
+THE EDIT BOX SITS ON THE WORDS
+
+The box you type in opens right on top of the words, the same size and
+spacing, with the lines broken where the drawing breaks them. Words turned
+sideways or at an angle open in a box just below them.
+
+STAMPS ARE FOUND BUT PROTECTED
+
+Words inside a flattened stamp or markup now show, outlined in grey. They
+can't be changed in place, because the same stamp can be on every sheet,
+and View says what to do instead.

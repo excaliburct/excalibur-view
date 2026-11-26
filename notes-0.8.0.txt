@@ -1,0 +1,27 @@
+A SIMPLE SCREEN FOR THE SHOP AND THE FIELD
+
+Shop and field accounts on an iPad or Android tablet now get a simple
+layout: a list of their jobs, then big buttons for Drawings, Shipping and
+Documents. No folder tree, no clutter. The office keeps the full layout on
+its computers.
+
+ONLY RELEASED DRAWINGS
+
+The shop and field see released sheets only. A new revision shows a NEW
+badge, and sheets that were replaced or never released stay out of sight.
+
+SHIPPING SIGNED ON THE TABLET
+
+Shipping tickets are signed right on the tablet. Received By, Loaded By and
+Driver each show only for the people allowed to sign them.
+
+THE OFFICE DECIDES WHAT EACH TABLET SHOWS
+
+From Fabwire, the office picks what the shop and the field see on each job,
+pins documents like a site plan or bolt form, and names the crew. A job
+shows on a tablet once it has a crew.
+
+FIXES
+
+A computer turned away by an office that takes secure connections only now
+always sees why. Small fixes to how the office server starts up.

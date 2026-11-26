@@ -435,7 +435,12 @@ impl App {
                     revision,
                     markups,
                     sent,
-                } => self.take_sync(set, revision, markups, sent),
+                    scales,
+                } => {
+                    self.take_server_scales(&set, &scales); // WHAT: the office's scales applied first. WHY: the markups that come with them are measured with them
+                    self.take_sync(set, revision, markups, sent);
+                }
+                Told::ScalesUnsent { set, scales } => self.put_back_scales(&set, scales), // WHAT: scales the server didn't take. WHY: sent with the next sync
                 Told::Pushed { set, sent } => self.take_push(set, sent),
                 Told::RemoteIs(remote) => {
                     self.office.remote_note = None;
@@ -701,6 +706,40 @@ impl App {
     }
 
     /// Takes what the server had and puts it into the file.
+    /// The scales the office server keeps, applied to the tab of `set`.
+    fn take_server_scales(&mut self, set: &str, scales: &[(usize, Option<String>, u64)]) {
+        let Some(doc) = self.docs.iter_mut().find(|d| d.attached.as_ref().is_some_and(|a| a.set == set)) else {
+            return; // WHAT: no tab for it. WHY: closed meanwhile
+        };
+        let mut taken = 0usize; // WHAT: sheets whose scale came over. WHY: said once
+        for (page, measure, at) in scales {
+            if let Ok(page) = u32::try_from(*page) {
+                taken += usize::from(doc.take_server_scale(page, measure.as_deref(), *at)); // WHAT: applied, or cleared, unless this seat has its own waiting. WHY: Doc::take_server_scale
+            }
+        }
+        if taken > 0 {
+            doc.redraw.extend(0..u32::try_from(doc.pages.len()).unwrap_or(u32::MAX)); // WHAT: every sheet drawn again. WHY: the scale shows in the status and the measurements
+            self.status = format!("The office's scale changed on {taken} sheet(s) of this drawing."); // WHAT: said. WHY: a scale that appears or goes should say where it came from
+        }
+    }
+
+    /// Scales that weren't sent, waiting again on the tab of `set`, unless
+    /// one has been set there since.
+    fn put_back_scales(&mut self, set: &str, scales: Vec<(usize, Option<String>)>) {
+        let Some(doc) = self.docs.iter_mut().find(|d| d.attached.as_ref().is_some_and(|a| a.set == set)) else {
+            return; // WHAT: no tab for it. WHY: closed meanwhile
+        };
+        for (page, measure) in scales {
+            let Ok(page) = u32::try_from(page) else { continue }; // WHAT: the page. WHY: a page that can't be one is no page
+            let read = measure.as_deref().and_then(|m| {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD.decode(m.as_bytes()).ok()?;
+                pdf::Reader::new(&bytes).object().ok()?.as_dict().and_then(annot::measure::Measure::read)
+            }); // WHAT: the scale read back. WHY: kept as a scale, not bytes
+            doc.scales_to_send.entry(page).or_insert(read); // WHAT: waiting again, unless a newer one is. WHY: the newer one is sent instead
+        }
+    }
+
     fn take_sync(
         &mut self,
         set: String,
