@@ -531,3 +531,301 @@ fn a_ruled_schedule_is_read_cell_by_cell() {
         assert!(texts.iter().any(|t| t == "FOUNDATION PLAN"), "[{sheet_name}] {texts:?}"); // WHAT: a cell alone. WHY: the same
     }
 }
+
+// ---------------------------------------------------------------------------
+// Whole fonts for letters a cut-down font lacks.
+// ---------------------------------------------------------------------------
+
+/// A name table naming a font: family, style, full name and PostScript name, in Windows Unicode. // WHAT: a font's names, written fresh. WHY: the fixtures' fonts pose as Arial and Liberation Sans
+fn name_table(family: &str, postscript: &str) -> Vec<u8> {
+    let names: [(u16, &str); 4] = [(1, family), (2, "Regular"), (4, family), (6, postscript)]; // WHAT: family, style, full name, PostScript name. WHY: what the font shelf reads
+    let strings: Vec<Vec<u8>> = names.iter().map(|(_, s)| s.encode_utf16().flat_map(|u| u.to_be_bytes()).collect()).collect(); // WHAT: each in UTF-16BE. WHY: Windows Unicode names are
+    let mut out = Vec::new(); // WHAT: the table. WHY: filled below
+    out.extend_from_slice(&0u16.to_be_bytes()); // WHAT: format 0. WHY: the plain one
+    out.extend_from_slice(&(names.len() as u16).to_be_bytes()); // WHAT: how many names. WHY: the header
+    out.extend_from_slice(&(6 + 12 * names.len() as u16).to_be_bytes()); // WHAT: where the strings start. WHY: after the records
+    let mut offset = 0u16; // WHAT: where each string starts. WHY: its record says
+    for ((id, _), bytes) in names.iter().zip(&strings) { // WHAT: each name. WHY: one record each
+        for v in [3u16, 1, 0x0409, *id, bytes.len() as u16, offset] { // WHAT: Windows, Unicode, US English, its number, length, offset. WHY: the record
+            out.extend_from_slice(&v.to_be_bytes()); // WHAT: written. WHY: the same
+        }
+        offset += bytes.len() as u16; // WHAT: the next one's start. WHY: they follow each other
+    }
+    for bytes in &strings { // WHAT: the strings. WHY: after the records
+        out.extend_from_slice(bytes); // WHAT: written. WHY: the same
+    }
+    out // WHAT: the table. WHY: put in the font
+}
+
+/// A TrueType font rebuilt from another: its own names and licence flags, and, when asked, outlines for only some letters, the way a PDF writer cuts a font down. // WHAT: a fixture font. WHY: real subset fonts and fonts of known names and licences, with no font from anybody's computer
+fn rebuilt_font(base: &[u8], family: &str, postscript: &str, fs_type: u16, keep: Option<&str>) -> Vec<u8> {
+    let be16 = |b: &[u8], at: usize| u16::from_be_bytes([b[at], b[at + 1]]); // WHAT: a 16-bit number. WHY: TrueType is big-endian
+    let be32 = |b: &[u8], at: usize| u32::from_be_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]); // WHAT: a 32-bit number. WHY: the same
+    let count = be16(base, 4) as usize; // WHAT: how many tables. WHY: the directory
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = (0..count).map(|i| { // WHAT: every table. WHY: changed and written back
+        let e = 12 + 16 * i; // WHAT: its directory entry. WHY: where it is
+        let (offset, length) = (be32(base, e + 8) as usize, be32(base, e + 12) as usize); // WHAT: where and how long. WHY: copied
+        ([base[e], base[e + 1], base[e + 2], base[e + 3]], base[offset..offset + length].to_vec()) // WHAT: its tag and bytes. WHY: kept
+    }).collect();
+    let find = |tables: &[([u8; 4], Vec<u8>)], tag: &[u8; 4]| tables.iter().position(|(t, _)| t == tag).expect("the table"); // WHAT: a table by tag. WHY: changed below
+    let n = find(&tables, b"name"); // WHAT: the names. WHY: replaced
+    tables[n].1 = name_table(family, postscript); // WHAT: the fixture's names. WHY: it poses as that font
+    let o = find(&tables, b"OS/2"); // WHAT: the OS/2 table. WHY: its licence flags
+    tables[o].1[8..10].copy_from_slice(&fs_type.to_be_bytes()); // WHAT: fsType set. WHY: installable, editable or restricted as the test needs
+    if let Some(keep) = keep { // WHAT: a cut-down font. WHY: as PDF writers embed one
+        let face = ttf_parser::Face::parse(base, 0).expect("the font parses"); // WHAT: read. WHY: its glyph numbers
+        let mut kept: Vec<u16> = vec![0]; // WHAT: the glyphs kept, .notdef always. WHY: a font needs it
+        kept.extend(keep.chars().filter_map(|c| face.glyph_index(c)).map(|g| g.0)); // WHAT: each kept letter's glyph. WHY: only those keep outlines
+        let h = find(&tables, b"head"); // WHAT: the head. WHY: says how loca is written
+        let long = be16(&tables[h].1, 50) == 1; // WHAT: long or short loca. WHY: read the old one
+        let glyphs = be16(&tables[find(&tables, b"maxp")].1, 4) as usize; // WHAT: how many glyphs. WHY: every one keeps its number
+        let loca = tables[find(&tables, b"loca")].1.clone(); // WHAT: the old loca. WHY: where each glyph's outline was
+        let at = |g: usize| if long { be32(&loca, g * 4) as usize } else { be16(&loca, g * 2) as usize * 2 }; // WHAT: a glyph's start. WHY: in either form
+        let glyf = tables[find(&tables, b"glyf")].1.clone(); // WHAT: the old outlines. WHY: the kept ones copied
+        let (mut new_glyf, mut new_loca) = (Vec::new(), Vec::new()); // WHAT: the cut-down tables. WHY: built below
+        for g in 0..glyphs { // WHAT: every glyph number. WHY: numbers stay, outlines go
+            new_loca.extend_from_slice(&(new_glyf.len() as u32).to_be_bytes()); // WHAT: where it starts now. WHY: long loca
+            if kept.contains(&(g as u16)) { // WHAT: a kept one. WHY: its outline copied
+                let outline = &glyf[at(g)..at(g + 1)]; // WHAT: its outline. WHY: copied
+                assert!(outline.len() < 2 || be16(outline, 0) as i16 >= 0, "glyph {g} is built from others; pick simple letters"); // WHAT: a simple glyph. WHY: a composite one would need its parts kept
+                new_glyf.extend_from_slice(outline); // WHAT: copied. WHY: kept
+                while new_glyf.len() % 4 != 0 { // WHAT: to four bytes. WHY: tidy alignment
+                    new_glyf.push(0); // WHAT: padding. WHY: the same
+                }
+            }
+        }
+        new_loca.extend_from_slice(&(new_glyf.len() as u32).to_be_bytes()); // WHAT: the end. WHY: loca has one more entry than glyphs
+        let gi = find(&tables, b"glyf"); // WHAT: the outlines. WHY: replaced
+        tables[gi].1 = new_glyf; // WHAT: only the kept ones. WHY: cut down
+        let li = find(&tables, b"loca"); // WHAT: the index. WHY: replaced
+        tables[li].1 = new_loca; // WHAT: long form. WHY: simplest
+        tables[h].1[50..52].copy_from_slice(&1u16.to_be_bytes()); // WHAT: loca is long now. WHY: the head says so
+    }
+    let mut out = base[..12].to_vec(); // WHAT: the sfnt header. WHY: the same tables count
+    let mut offset = 12 + 16 * tables.len(); // WHAT: where the first table goes. WHY: after the directory
+    let mut body = Vec::new(); // WHAT: the tables' bytes. WHY: after the directory
+    for (tag, bytes) in &tables { // WHAT: each table. WHY: an entry each
+        out.extend_from_slice(tag); // WHAT: its tag. WHY: the entry
+        out.extend_from_slice(&0u32.to_be_bytes()); // WHAT: no checksum. WHY: nothing reading fixtures checks it
+        out.extend_from_slice(&(offset as u32).to_be_bytes()); // WHAT: where it is. WHY: the entry
+        out.extend_from_slice(&(bytes.len() as u32).to_be_bytes()); // WHAT: how long. WHY: the entry
+        body.extend_from_slice(bytes); // WHAT: its bytes. WHY: written after
+        while body.len() % 4 != 0 { // WHAT: to four bytes. WHY: tables start on four
+            body.push(0); // WHAT: padding. WHY: the same
+        }
+        offset = 12 + 16 * tables.len() + body.len(); // WHAT: the next one's start. WHY: the same
+    }
+    out.extend_from_slice(&body); // WHAT: the tables. WHY: the font
+    out // WHAT: the font file. WHY: embedded or put in a font folder
+}
+
+/// The letters the fixture drawing's cut-down font has. // WHAT: what the subset can set. WHY: anything else typed needs a whole font
+const SUBSET: &str = "BEAM 12"; // WHAT: two notes' letters. WHY: short and simple glyphs
+
+/// A sheet with two notes, "BEAM 1" and "BEAM 2", in a cut-down TrueType font named ABCDEF+ArialMT, the way AutoCAD and Revit plot Arial. // WHAT: the subset fixture. WHY: the drawings people edit
+fn subset_sheet(rotate: i32, crop: Option<[f64; 4]>) -> (Vec<u8>, usize) {
+    let base = epaint_default_fonts::UBUNTU_LIGHT; // WHAT: a real TrueType font. WHY: posing as Arial, cut down
+    let face = ttf_parser::Face::parse(base, 0).expect("the font parses"); // WHAT: read. WHY: widths
+    let program = rebuilt_font(base, "Arial", "ArialMT", 0x0008, Some(SUBSET)); // WHAT: Arial cut down to two notes' letters. WHY: the subset
+    let upem = f64::from(face.units_per_em()); // WHAT: units to the em. WHY: widths in thousandths
+    let widths: String = (32u8..=126).map(|c| { // WHAT: every code's width. WHY: the Widths array
+        let ch = c as char; // WHAT: the letter. WHY: looked up
+        if SUBSET.contains(ch) { format!("{} ", (f64::from(face.glyph_index(ch).and_then(|g| face.glyph_hor_advance(g)).unwrap_or(500)) * 1000.0 / upem).round()) } else { "0 ".into() } // WHAT: its width if kept, else none. WHY: as a subset writes it
+    }).collect();
+    let mut pdf = Pdf::new(); // WHAT: a new file. WHY: the fixture
+    let file = pdf.stream(&format!("/Length1 {}", program.len()), &program); // WHAT: the cut-down font program. WHY: embedded
+    let descriptor = pdf.add(&format!("<</Type/FontDescriptor/FontName/ABCDEF+ArialMT/Flags 32/FontBBox[-200 -250 1200 1000]/ItalicAngle 0/Ascent 932/Descent -189/CapHeight 693/StemV 60/FontFile2 {file} 0 R>>")); // WHAT: its descriptor. WHY: points at the program
+    let font = pdf.add(&format!("<</Type/Font/Subtype/TrueType/BaseFont/ABCDEF+ArialMT/FirstChar 32/LastChar 126/Widths[{widths}]/Encoding/WinAnsiEncoding/FontDescriptor {descriptor} 0 R>>")); // WHAT: the font. WHY: a simple TrueType subset, as plotted
+    let content = "BT /F1 12 Tf 1 0 0 1 100 400 Tm (BEAM 1) Tj ET\nBT /F1 12 Tf 1 0 0 1 100 200 Tm (BEAM 2) Tj ET\n"; // WHAT: two notes far apart. WHY: two paragraphs in the one font
+    let stream = pdf.stream("", content.as_bytes()); // WHAT: the content. WHY: the page draws it
+    let crop = crop.map(|c| format!("/CropBox[{} {} {} {}]", c[0], c[1], c[2], c[3])).unwrap_or_default(); // WHAT: a crop box, if asked. WHY: the same as the other fixtures
+    let page = pdf.add(&format!("<</Type/Page/Parent {} 0 R/MediaBox[0 0 792 612]{crop}/Rotate {rotate}/Resources<</Font<</F1 {font} 0 R>>>>/Contents {stream} 0 R>>", pdf.bodies.len() + 2)); // WHAT: the page. WHY: one sheet
+    let pages = pdf.add(&format!("<</Type/Pages/Kids[{page} 0 R]/Count 1>>")); // WHAT: the page tree. WHY: the syntax
+    let root = pdf.add(&format!("<</Type/Catalog/Pages {pages} 0 R>>")); // WHAT: the catalog. WHY: where reading starts
+    (pdf.finish(root), program.len()) // WHAT: the file, and how big its font is. WHY: growth is compared with it
+}
+
+/// A font folder holding these fonts, rebuilt from the shared one: (file name, family, PostScript name, fsType). // WHAT: a test's "computer's fonts". WHY: never what the build machine has installed
+fn font_folder(scratch: &Scratch, name: &str, fonts: &[(&str, &str, &str, u16)]) -> PathBuf {
+    let folder = scratch.0.join(name); // WHAT: the folder. WHY: one per case
+    std::fs::create_dir_all(folder.join("truetype")).expect("the font folder"); // WHAT: with a sub-folder. WHY: Linux keeps fonts a folder down, and the walk must find them
+    for (file, family, postscript, fs_type) in fonts { // WHAT: each font. WHY: written
+        let bytes = rebuilt_font(epaint_default_fonts::UBUNTU_LIGHT, family, postscript, *fs_type, None); // WHAT: a whole font of that name and licence. WHY: posing as it
+        std::fs::write(folder.join("truetype").join(file), bytes).expect("the font writes"); // WHAT: written. WHY: found by the walk
+    }
+    folder // WHAT: the folder. WHY: given to the rewrite
+}
+
+/// The whole of a font rebuilt for the tests, in bytes. // WHAT: how big a whole font is. WHY: a file that grew less than this didn't take a copy of it
+fn whole_font_size() -> usize {
+    rebuilt_font(epaint_default_fonts::UBUNTU_LIGHT, "Arial", "ArialMT", 0, None).len() // WHAT: its size. WHY: the same
+}
+
+/// One note on the subset sheet rewritten with the given fonts: the new file, what was said, the note as read before and after. // WHAT: one edit. WHY: every font test does it
+fn edit_note(scratch: &Scratch, path: &Path, which: &str, text: &str, align: Option<hyperview::textedit::Align>, fonts: Vec<PathBuf>) -> Result<(PathBuf, String, hyperview::textedit::Found, hyperview::textedit::Found), String> {
+    let (_, found) = hyperview::render::text_on_sheet(library(), path, 0).expect("the sheet reads"); // WHAT: its paragraphs. WHY: one is rewritten
+    let before = found.iter().find(|f| f.text() == which).unwrap_or_else(|| panic!("{which:?} among {:?}", found.iter().map(|f| f.text()).collect::<Vec<_>>())).clone(); // WHAT: the note. WHY: rewritten
+    let mut rewrite = hyperview::textedit::Rewrite::of(&before); // WHAT: as it is. WHY: changed below
+    rewrite.text = text.into(); // WHAT: the new words. WHY: typed
+    if let Some(a) = align { // WHAT: an alignment asked for. WHY: the right-aligned case
+        rewrite.align = a; // WHAT: set. WHY: the line is placed by its width
+    }
+    let (bytes, said) = hyperview::render::rewrite_on_sheet_with_fonts(library(), path, 0, &before, &rewrite, fonts)?; // WHAT: written. WHY: the code under test
+    let out = scratch.0.join(format!("{}-{}.pdf", path.file_stem().and_then(|s| s.to_str()).unwrap_or("out"), letters(text))); // WHAT: where the result goes. WHY: read back
+    std::fs::write(&out, bytes).expect("written"); // WHAT: saved. WHY: read back by pdfium
+    let (_, again) = hyperview::render::text_on_sheet(library(), &out, 0).expect("reads again"); // WHAT: its paragraphs now. WHY: the new note found
+    let after = again.iter().find(|f| f.text() == text).unwrap_or_else(|| panic!("{text:?} among {:?}", again.iter().map(|f| f.text()).collect::<Vec<_>>())).clone(); // WHAT: the new note. WHY: checked
+    Ok((out, said, before, after)) // WHAT: all of it. WHY: the test checks what it needs
+}
+
+/// A typed letter the drawing's cut-down font lacks is set in the same family's whole font, on every turn, where the old words were, and its ink sits in its box. // WHAT: the full-font fix. WHY: the edited note used to come out in Helvetica
+#[test]
+fn a_letter_the_subset_lacks_is_typed_in_the_same_family() {
+    let scratch = Scratch::new("font-family"); // WHAT: a folder. WHY: fixtures
+    let fonts = font_folder(&scratch, "fonts", &[("arial.ttf", "Arial", "ArialMT", 0x0008), ("LiberationSans-Regular.ttf", "Liberation Sans", "LiberationSans", 0)]); // WHAT: Arial and its metric twin installed. WHY: Arial must win
+    for (sheet_name, rotate, crop) in SHEETS { // WHAT: every turn. WHY: the new font's matrix follows the text
+        let path = scratch.0.join(format!("subset-{sheet_name}.pdf")); // WHAT: the fixture. WHY: one each
+        std::fs::write(&path, subset_sheet(*rotate, *crop).0).expect("the fixture writes"); // WHAT: written. WHY: pdfium reads files
+        let (out, said, before, after) = edit_note(&scratch, &path, "BEAM 1", "BEAM 1X", None, vec![fonts.clone()]).expect("rewritten"); // WHAT: an X typed, which the subset lacks. WHY: the case
+        assert!(said.contains("Typed in Arial because the drawing's font didn't include those letters."), "[{sheet_name}] {said}"); // WHAT: the notice. WHY: the owner's wording
+        assert!(!after.font.to_lowercase().contains("helvetica"), "[{sheet_name}] set in {}", after.font); // WHAT: not Helvetica. WHY: the bug
+        assert!(after.font.to_lowercase().contains("arial"), "[{sheet_name}] set in {}", after.font); // WHAT: Arial's whole font. WHY: the same family
+        let (a, b) = (before.to_page(before.left, before.top), after.to_page(after.left, after.top)); // WHAT: where each starts. WHY: compared
+        assert!((a[0] - b[0]).abs() < SLACK && (a[1] - b[1]).abs() < SLACK, "[{sheet_name}] started at {a:?}, now {b:?}"); // WHAT: the same start. WHY: within a pixel and a half
+        assert!((before.size - after.size).abs() < 0.05, "[{sheet_name}] size {} now {}", before.size, after.size); // WHAT: the same size. WHY: the same
+        let case = Case { name: "subset-typed", content: String::new(), expect: Some("BEAM 1X") }; // WHAT: the new note as a case. WHY: the alignment checks measure it
+        let (_, all) = hyperview::render::text_on_sheet(library(), &out, 0).expect("reads again"); // WHAT: every paragraph. WHY: only the new one is measured
+        let picture = draw(&out, &scratch); // WHAT: the new sheet drawn. WHY: its ink
+        let mut alone = all.clone(); // WHAT: the new note alone. WHY: the other note's ink is masked below
+        alone.retain(|f| f.text() == "BEAM 1X"); // WHAT: the one. WHY: measured
+        let frame = frame_of(&out); // WHAT: its frame. WHY: boxes to pixels
+        let other = all.iter().find(|f| f.text() == "BEAM 2").expect("the other note is untouched"); // WHAT: the other note. WHY: left as it was, and kept out of the measure
+        let masked = mask(picture, &frame, other); // WHAT: the other note's ink painted out. WHY: ink_extent measures all ink
+        let wrong = check(&case, &alone, &masked, &frame); // WHAT: ink against box. WHY: the existing tolerances
+        assert!(wrong.is_empty(), "[{sheet_name}] {wrong:?}"); // WHAT: none off. WHY: the bar
+    }
+}
+
+/// Paints a paragraph's box white, so another paragraph's ink can be measured alone. // WHAT: a mask. WHY: the subset sheet has two notes
+fn mask(mut picture: image::RgbaImage, frame: &annot::Frame, f: &hyperview::textedit::Found) -> image::RgbaImage {
+    let e = box_extent(f); // WHAT: its box along and up. WHY: everything in it, and a little round it, is painted out
+    let (w, h) = (picture.width(), picture.height()); // WHAT: the picture's size. WHY: every pixel looked at
+    for y in 0..h { // WHAT: each row. WHY: every pixel
+        for x in 0..w { // WHAT: each pixel. WHY: the same
+            let at = frame.to_pdf([(f64::from(x) + 0.5) / SCALE, (f64::from(y) + 0.5) / SCALE]); // WHAT: in PDF space. WHY: the box is
+            let (a, u) = (at[0] * f.along[0] + at[1] * f.along[1], at[0] * f.up[0] + at[1] * f.up[1]); // WHAT: along and up. WHY: its own space
+            if a > e[0] - 3.0 && a < e[1] + 3.0 && u > e[2] - 3.0 && u < e[3] + 3.0 { // WHAT: in or near it. WHY: anti-aliasing round the edge
+                picture.put_pixel(x, y, image::Rgba([255, 255, 255, 255])); // WHAT: white. WHY: not ink
+            }
+        }
+    }
+    picture // WHAT: masked. WHY: measured
+}
+
+/// With no Arial installed, its metric twin (Liberation Sans) is used, and said, before Helvetica. // WHAT: the stand-in. WHY: the owner's order
+#[test]
+fn a_metric_twin_comes_before_helvetica() {
+    let scratch = Scratch::new("font-twin"); // WHAT: a folder. WHY: fixtures
+    let fonts = font_folder(&scratch, "fonts", &[("LiberationSans-Regular.ttf", "Liberation Sans", "LiberationSans", 0)]); // WHAT: only the twin. WHY: no Arial
+    let path = scratch.0.join("subset.pdf"); // WHAT: the fixture. WHY: one
+    std::fs::write(&path, subset_sheet(0, None).0).expect("the fixture writes"); // WHAT: written. WHY: read
+    let (_, said, _, after) = edit_note(&scratch, &path, "BEAM 1", "BEAM 1X", None, vec![fonts]).expect("rewritten"); // WHAT: an X typed. WHY: the case
+    assert!(said.contains("Typed in Liberation Sans, the closest font on this computer, because"), "{said}"); // WHAT: the notice. WHY: says it is a stand-in
+    assert!(after.font.to_lowercase().contains("liberation"), "set in {}", after.font); // WHAT: the twin. WHY: not Helvetica
+}
+
+/// With nothing that fits installed, Helvetica, and the sentence says why. // WHAT: the last resort. WHY: still works, and says so
+#[test]
+fn helvetica_only_when_nothing_else_fits() {
+    let scratch = Scratch::new("font-none"); // WHAT: a folder. WHY: fixtures
+    let fonts = font_folder(&scratch, "fonts", &[("ubuntu.ttf", "Ubuntu", "Ubuntu-Light", 0)]); // WHAT: an unrelated font only. WHY: nothing of Arial's widths
+    let path = scratch.0.join("subset.pdf"); // WHAT: the fixture. WHY: one
+    std::fs::write(&path, subset_sheet(0, None).0).expect("the fixture writes"); // WHAT: written. WHY: read
+    let (_, said, _, after) = edit_note(&scratch, &path, "BEAM 1", "BEAM 1X", None, vec![fonts]).expect("rewritten"); // WHAT: an X typed. WHY: the case
+    assert!(said.contains("Typed in Helvetica because the drawing's font didn't include those letters and no matching font is on this computer."), "{said}"); // WHAT: said. WHY: plain
+    assert!(after.font.to_lowercase().contains("helvetica"), "set in {}", after.font); // WHAT: Helvetica. WHY: nothing else fits
+}
+
+/// Letters the cut-down font already has keep its own glyphs: no whole font is reached for. // WHAT: the existing glyphs kept. WHY: the owner's rule: only when needed
+#[test]
+fn letters_the_subset_has_keep_its_own_glyphs() {
+    let scratch = Scratch::new("font-own"); // WHAT: a folder. WHY: fixtures
+    let fonts = font_folder(&scratch, "fonts", &[("arial.ttf", "Arial", "ArialMT", 0x0008)]); // WHAT: Arial installed. WHY: available but not wanted
+    let path = scratch.0.join("subset.pdf"); // WHAT: the fixture. WHY: one
+    let (file, _) = subset_sheet(0, None); // WHAT: the sheet. WHY: its size compared
+    std::fs::write(&path, &file).expect("the fixture writes"); // WHAT: written. WHY: read
+    let (out, said, before, after) = edit_note(&scratch, &path, "BEAM 1", "MAE 21", None, vec![fonts]).expect("rewritten"); // WHAT: only letters it has. WHY: the case
+    assert!(!said.contains("Typed in"), "{said}"); // WHAT: no notice. WHY: nothing was substituted
+    assert_eq!(after.font, before.font, "its own font was replaced"); // WHAT: the same font. WHY: its glyphs kept
+    let grew = std::fs::metadata(&out).expect("the result").len() as usize - file.len(); // WHAT: how much the file grew. WHY: a whole font would add its size
+    assert!(grew < whole_font_size() / 2, "grew by {grew} bytes: a whole font went in"); // WHAT: no font added. WHY: the same
+}
+
+/// A font whose licence forbids embedding is never put in the file: the next permitted one is used, and the person is told in one sentence. // WHAT: the fsType rule. WHY: the owner's rule
+#[test]
+fn a_font_that_forbids_embedding_is_not_embedded() {
+    let scratch = Scratch::new("font-licence"); // WHAT: a folder. WHY: fixtures
+    let path = scratch.0.join("subset.pdf"); // WHAT: the fixture. WHY: one
+    let (file, _) = subset_sheet(0, None); // WHAT: the sheet. WHY: its size compared
+    std::fs::write(&path, &file).expect("the fixture writes"); // WHAT: written. WHY: read
+    // Arial restricted, Liberation Sans allowed: Liberation Sans, and said.
+    let fonts = font_folder(&scratch, "twin", &[("arial.ttf", "Arial", "ArialMT", 0x0002), ("LiberationSans-Regular.ttf", "Liberation Sans", "LiberationSans", 0)]); // WHAT: a restricted Arial and a free twin. WHY: the twin must be used
+    let (_, said, _, after) = edit_note(&scratch, &path, "BEAM 1", "BEAM 1X", None, vec![fonts]).expect("rewritten"); // WHAT: an X typed. WHY: the case
+    assert!(after.font.to_lowercase().contains("liberation"), "set in {}", after.font); // WHAT: the permitted one. WHY: Arial forbids embedding
+    assert!(said.contains("Arial's licence doesn't allow it to be saved inside a drawing, so it wasn't used."), "{said}"); // WHAT: told. WHY: one plain sentence
+    // Only a restricted Arial, and one that allows preview and print only: Helvetica, nothing embedded.
+    let fonts = font_folder(&scratch, "restricted", &[("arial.ttf", "Arial", "ArialMT", 0x0002), ("LiberationSans-Regular.ttf", "Liberation Sans", "LiberationSans", 0x0004)]); // WHAT: neither allows an editable file. WHY: nothing may go in
+    let (out, said, _, after) = edit_note(&scratch, &path, "BEAM 1", "BEAM 1X", None, vec![fonts]).expect("rewritten"); // WHAT: the same edit. WHY: the case
+    assert!(after.font.to_lowercase().contains("helvetica"), "set in {}", after.font); // WHAT: Helvetica. WHY: nothing permitted fits
+    assert!(said.contains("The licences of Arial and Liberation Sans don't allow them to be saved inside a drawing"), "{said}"); // WHAT: told. WHY: the same
+    let grew = std::fs::metadata(&out).expect("the result").len() as usize - file.len(); // WHAT: how much the file grew. WHY: an embedded font would add its size
+    assert!(grew < whole_font_size() / 2, "grew by {grew} bytes: a restricted font went in"); // WHAT: no font added. WHY: the rule
+    assert_eq!(whole_fonts_named(&out, "arial") + whole_fonts_named(&out, "liberation"), 0, "a font that forbids embedding is in the sheet"); // WHAT: neither is named by the sheet. WHY: the same rule, read from the file
+}
+
+/// A right-aligned note set in the whole font ends where the old one did: its line is laid out with the new font's widths. // WHAT: re-layout with the new widths. WHY: widths from the cut-down font would misplace it
+#[test]
+fn a_note_set_in_the_whole_font_is_laid_out_with_its_widths() {
+    let scratch = Scratch::new("font-widths"); // WHAT: a folder. WHY: fixtures
+    let fonts = font_folder(&scratch, "fonts", &[("arial.ttf", "Arial", "ArialMT", 0x0008)]); // WHAT: Arial installed. WHY: used
+    for (sheet_name, rotate, crop) in SHEETS { // WHAT: every turn. WHY: the same
+        let path = scratch.0.join(format!("subset-{sheet_name}.pdf")); // WHAT: the fixture. WHY: one each
+        std::fs::write(&path, subset_sheet(*rotate, *crop).0).expect("the fixture writes"); // WHAT: written. WHY: read
+        let (_, _, before, after) = edit_note(&scratch, &path, "BEAM 1", "XBEAM 1", Some(hyperview::textedit::Align::Right), vec![fonts.clone()]).expect("rewritten"); // WHAT: an X in front, set right-aligned. WHY: its start depends on every letter's width
+        let (old, new) = (box_extent(&before), box_extent(&after)); // WHAT: both boxes. WHY: their right ends compared
+        assert!((old[1] - new[1]).abs() < 0.15 * before.size + SLACK, "[{sheet_name}] ended at {:.2}, now {:.2}", old[1], new[1]); // WHAT: the same right end. WHY: within the alignment test's own slack
+    }
+}
+
+/// The whole fonts a sheet's resources name, by name, without counting cut-down ones. // WHAT: the live whole fonts on a sheet. WHY: pdfium's incremental save writes every object it read again, so file size can't tell one copy from two
+fn whole_fonts_named(path: &Path, family: &str) -> usize {
+    let file = pdf::Document::from_bytes(std::fs::read(path).expect("the file")); // WHAT: the file. WHY: its latest objects
+    let page = file.page(0).expect("its sheet"); // WHAT: the sheet. WHY: one
+    let resources = file.page_attr(&page, "Resources"); // WHAT: its resources. WHY: its fonts are named there
+    let fonts = file.at(resources.as_dict().expect("resources"), "Font"); // WHAT: its fonts. WHY: counted
+    let mut seen = std::collections::HashSet::new(); // WHAT: font objects already counted. WHY: two names for one object are one font
+    for (_, value) in fonts.as_dict().expect("fonts").iter() { // WHAT: each font named. WHY: counted
+        let font = file.follow(value); // WHAT: the font. WHY: its name
+        let Some(dict) = font.as_dict() else { continue }; // WHAT: a dictionary. WHY: anything else is not a font
+        let name = dict.get("BaseFont").and_then(|o| o.as_name()).map(|n| n.as_str().to_string()).unwrap_or_default(); // WHAT: its name. WHY: matched
+        if !hyperview::textedit::is_subset(&name) && name.to_lowercase().contains(family) { // WHAT: a whole one of that family. WHY: counted
+            seen.insert(format!("{value:?}")); // WHAT: by its reference. WHY: the same object once
+        }
+    }
+    seen.len() // WHAT: how many. WHY: one is right
+}
+
+/// A second note on the same sheet set in the same whole font uses the copy already in the file. // WHAT: no second copy. WHY: a sheet edited ten times doesn't carry ten copies of Arial
+#[test]
+fn a_whole_font_goes_into_a_file_once() {
+    let scratch = Scratch::new("font-once"); // WHAT: a folder. WHY: fixtures
+    let fonts = font_folder(&scratch, "fonts", &[("arial.ttf", "Arial", "ArialMT", 0x0008)]); // WHAT: Arial installed. WHY: used
+    let path = scratch.0.join("subset.pdf"); // WHAT: the fixture. WHY: one
+    std::fs::write(&path, subset_sheet(0, None).0).expect("the fixture writes"); // WHAT: written. WHY: read
+    let (first, _, _, _) = edit_note(&scratch, &path, "BEAM 1", "BEAM 1X", None, vec![fonts.clone()]).expect("the first edit"); // WHAT: the first note, Arial put in. WHY: the copy
+    assert_eq!(whole_fonts_named(&first, "arial"), 1, "the first edit put in no whole Arial"); // WHAT: one copy. WHY: the fixture is right
+    let (second, said, _, after) = edit_note(&scratch, &first, "BEAM 2", "BEAM 2X", None, vec![fonts]).expect("the second edit"); // WHAT: the other note, also needing Arial. WHY: the copy should be used again
+    assert!(after.font.to_lowercase().contains("arial"), "set in {}", after.font); // WHAT: Arial. WHY: the same family
+    assert!(said.contains("Typed in Arial"), "{said}"); // WHAT: said. WHY: the same
+    assert_eq!(whole_fonts_named(&second, "arial"), 1, "Arial went into the sheet twice"); // WHAT: still one copy. WHY: the guard
+}

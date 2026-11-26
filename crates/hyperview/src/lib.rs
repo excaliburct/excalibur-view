@@ -20,6 +20,7 @@ pub mod edition;
 pub mod files;
 pub mod dynamicfill;
 pub mod find;
+pub mod fontshelf; // WHAT: the whole fonts on this computer. WHY: Edit Text sets a letter a drawing's cut-down font lacks in the same family's whole font
 pub mod grips;
 pub mod groups;
 pub mod fleetlink;
